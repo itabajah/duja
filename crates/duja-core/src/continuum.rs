@@ -21,24 +21,24 @@ pub const MAX_ALPHA: f32 = 0.88;
 /// Per-display configuration for the brightness continuum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContinuumConfig {
-    /// The lowest hardware brightness percentage Duja will drive; below it,
-    /// software dimming takes over. Ignored when `has_hardware` is `false`.
-    pub hw_floor_pct: u8,
+    /// The hardware brightness floor, or `None` for a software-only display.
+    ///
+    /// `Some(floor)`: the lowest hardware percentage Duja will drive; below it,
+    /// software dimming takes over. `None`: the display has no hardware
+    /// brightness range at all, so [`ContinuumOutput::hardware_pct`] is always
+    /// `None` and software dimming spans the whole slider.
+    pub hardware_floor: Option<u8>,
     /// How sub-floor dimming is realised.
     pub mode: DimMode,
-    /// Whether the display has a real hardware brightness range. `false` is the
-    /// software-only (overlay-only) case, where `hardware_pct` is always `None`.
-    pub has_hardware: bool,
 }
 
 impl ContinuumConfig {
     /// A hardware-backed display with the given floor and dim mode.
     #[must_use]
-    pub fn hardware(hw_floor_pct: u8, mode: DimMode) -> Self {
+    pub fn hardware(floor_pct: u8, mode: DimMode) -> Self {
         ContinuumConfig {
-            hw_floor_pct,
+            hardware_floor: Some(floor_pct),
             mode,
-            has_hardware: true,
         }
     }
 
@@ -46,9 +46,8 @@ impl ContinuumConfig {
     #[must_use]
     pub fn software_only(mode: DimMode) -> Self {
         ContinuumConfig {
-            hw_floor_pct: 100,
+            hardware_floor: None,
             mode,
-            has_hardware: false,
         }
     }
 }
@@ -88,15 +87,16 @@ pub struct ContinuumOutput {
 #[must_use]
 pub fn map_user_level(user_pct: u8, cfg: &ContinuumConfig) -> ContinuumOutput {
     let user_u8 = user_pct.min(100);
-    let floor_u8 = cfg.hw_floor_pct.min(100);
     let user = f32::from(user_u8);
-    let floor = f32::from(floor_u8);
 
-    if !cfg.has_hardware {
-        // Overlay/gamma spans the whole range; hardware is never touched.
+    let Some(floor_pct) = cfg.hardware_floor else {
+        // Software-only: overlay/gamma spans the whole range; hardware is
+        // never touched.
         let alpha_full = MAX_ALPHA * (100.0 - user) / 100.0;
         return finish(None, alpha_full, cfg.mode);
-    }
+    };
+    let floor_u8 = floor_pct.min(100);
+    let floor = f32::from(floor_u8);
 
     if user_u8 >= floor_u8 {
         // Pure hardware: the user level maps straight onto the hardware value.
@@ -142,9 +142,12 @@ fn finish(hardware_pct: Option<u8>, alpha_full: f32, mode: DimMode) -> Continuum
 /// identity there. A reading below the floor (something else drove the panel
 /// under Duja's software floor) is reported as the floor — the lowest level
 /// Duja represents with pure hardware.
+///
+/// On a software-only display (`hardware_floor == None`) there is no hardware
+/// channel to reflect; the reading is passed through clamped to `0..=100`.
 #[must_use]
 pub fn reverse_map(hw_pct: u8, cfg: &ContinuumConfig) -> u8 {
-    let floor = cfg.hw_floor_pct.min(100);
+    let floor = cfg.hardware_floor.unwrap_or(0).min(100);
     hw_pct.clamp(floor, 100)
 }
 
@@ -179,11 +182,10 @@ mod tests {
     }
 
     fn any_cfg() -> impl Strategy<Value = ContinuumConfig> {
-        (0u8..=100u8, any_mode(), any::<bool>()).prop_map(|(hw_floor_pct, mode, has_hardware)| {
+        (proptest::option::of(0u8..=100u8), any_mode()).prop_map(|(hardware_floor, mode)| {
             ContinuumConfig {
-                hw_floor_pct,
+                hardware_floor,
                 mode,
-                has_hardware,
             }
         })
     }
@@ -292,6 +294,14 @@ mod tests {
     }
 
     #[test]
+    fn reverse_map_passes_through_on_software_only() {
+        let cfg = ContinuumConfig::software_only(DimMode::Overlay);
+        assert_eq!(reverse_map(0, &cfg), 0);
+        assert_eq!(reverse_map(42, &cfg), 42);
+        assert_eq!(reverse_map(255, &cfg), 100);
+    }
+
+    #[test]
     fn out_of_range_user_is_clamped() {
         let out = map_user_level(200, &ContinuumConfig::hardware(50, DimMode::Overlay));
         assert_eq!(out.hardware_pct, Some(100));
@@ -331,7 +341,7 @@ mod tests {
             let out = map_user_level(100, &cfg);
             prop_assert!(out.overlay_alpha.abs() <= f32::EPSILON);
             prop_assert!((perceived(&out) - 1.0).abs() < 1e-4);
-            if cfg.has_hardware {
+            if cfg.hardware_floor.is_some() {
                 prop_assert_eq!(out.hardware_pct, Some(100));
             } else {
                 prop_assert_eq!(out.hardware_pct, None);
