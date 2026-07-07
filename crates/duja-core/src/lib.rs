@@ -14,10 +14,12 @@
 //!   backend implements, and [`controller::ControlError`]
 //! - [`continuum`] — one user slider mapped onto hardware + software dimming
 //! - [`debounce`] — pure debounce / coalesce state machines
+//! - [`sync`] — multi-monitor sync groups with per-member offsets
+//!   ([`sync::SyncGroups`])
 //! - `testing` (feature `test-support`) — fakes + the controller contract suite
 //!
 //! Planned (later waves): `manager` (enumeration diffing, state, restore),
-//! `sync` (multi-monitor groups), `config`, `quirks`, `caps` (MCCS parser).
+//! `config`, `quirks`, `caps` (MCCS parser).
 //!
 //! # Example
 //!
@@ -46,6 +48,7 @@ pub mod controller;
 pub mod debounce;
 pub mod id;
 pub mod model;
+pub mod sync;
 
 /// Deterministic fakes and the reusable controller contract suite.
 ///
