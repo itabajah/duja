@@ -62,48 +62,59 @@ impl SyncGroups {
     /// If `id` already belonged to another group it is moved: a display is only
     /// ever in one group, so the previous membership is replaced.
     pub fn add(&mut self, group: &str, id: StableDisplayId, offset: i8) {
-        let _ = (group, id, offset);
+        self.members.insert(
+            id,
+            Membership {
+                group: group.to_owned(),
+                offset,
+            },
+        );
     }
 
     /// Remove `id` from whatever group it is in. Returns `true` if it was a
     /// member of some group.
     pub fn remove(&mut self, id: &StableDisplayId) -> bool {
-        let _ = id;
-        false
+        self.members.remove(id).is_some()
     }
 
     /// Update the offset for `id`, if it belongs to a group. Returns `true` if
     /// the display was found and updated, `false` if it is not in any group.
     pub fn set_offset(&mut self, id: &StableDisplayId, offset: i8) -> bool {
-        let _ = (id, offset);
-        false
+        match self.members.get_mut(id) {
+            Some(m) => {
+                m.offset = offset;
+                true
+            }
+            None => false,
+        }
     }
 
     /// The offset of `id`, if it belongs to a group.
     #[must_use]
     pub fn offset_of(&self, id: &StableDisplayId) -> Option<i8> {
-        let _ = id;
-        None
+        self.members.get(id).map(|m| m.offset)
     }
 
     /// The name of the group `id` belongs to, if any.
     #[must_use]
     pub fn group_of(&self, id: &StableDisplayId) -> Option<&str> {
-        let _ = id;
-        None
+        self.members.get(id).map(|m| m.group.as_str())
     }
 
     /// The members of `group` with their offsets, sorted by display id.
     #[must_use]
     pub fn members(&self, group: &str) -> Vec<(StableDisplayId, i8)> {
-        let _ = group;
-        Vec::new()
+        self.members
+            .iter()
+            .filter(|(_, m)| m.group == group)
+            .map(|(id, m)| (id.clone(), m.offset))
+            .collect()
     }
 
     /// The set of distinct group names currently in use, sorted.
     #[must_use]
     pub fn group_names(&self) -> BTreeSet<&str> {
-        BTreeSet::new()
+        self.members.values().map(|m| m.group.as_str()).collect()
     }
 
     /// Iterate every `(display, group, offset)` triple, ordered by display id.
@@ -116,16 +127,55 @@ impl SyncGroups {
 
     /// Fan a `master_pct` value out to every member of `group`.
     ///
-    /// Each member's target is `clamp(master_pct + offset, 0, 100)`. Because the
-    /// result depends only on the master and the offset (never on the member's
-    /// previous value), repeated calls with the same master are idempotent — no
-    /// drift accumulates at the clamp bounds. Returns `(id, target)` pairs sorted
-    /// by display id; an unknown group yields an empty vector.
+    /// Each member's target is `clamp(master_pct + offset, 0, 100)` (a master
+    /// above 100 is treated as 100 first). Because the result depends only on
+    /// the master and the offset (never on the member's previous value),
+    /// repeated calls with the same master are idempotent — no drift
+    /// accumulates at the clamp bounds. Returns `(id, target)` pairs sorted by
+    /// display id; an unknown group yields an empty vector. The list includes
+    /// **every** member — the caller decides whether to echo a write back to
+    /// the display the master value came from.
+    ///
+    /// # Examples
+    /// ```
+    /// # fn edid_id(serial: u32) -> duja_core::id::StableDisplayId {
+    /// #     let mut e = vec![0x00u8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x04, 0x21, 0, 0];
+    /// #     e.extend_from_slice(&serial.to_le_bytes());
+    /// #     e.resize(127, 0);
+    /// #     let sum: u8 = e.iter().copied().fold(0u8, u8::wrapping_add);
+    /// #     e.push(sum.wrapping_neg());
+    /// #     duja_core::id::StableDisplayId::from_edid(&e).unwrap()
+    /// # }
+    /// use duja_core::sync::SyncGroups;
+    ///
+    /// let (main, side) = (edid_id(1), edid_id(2));
+    /// let mut groups = SyncGroups::new();
+    /// groups.add("desk", main.clone(), 0);
+    /// groups.add("desk", side.clone(), -10);
+    ///
+    /// // The side monitor trails the master by 10 points, clamped at 0.
+    /// assert_eq!(groups.fan_out("desk", 80), vec![(main, 80), (side, 70)]);
+    /// ```
     #[must_use]
     pub fn fan_out(&self, group: &str, master_pct: u8) -> Vec<(StableDisplayId, u8)> {
-        let _ = (group, master_pct);
-        Vec::new()
+        self.members
+            .iter()
+            .filter(|(_, m)| m.group == group)
+            .map(|(id, m)| (id.clone(), apply_offset(master_pct, m.offset)))
+            .collect()
     }
+}
+
+/// Clamp `master + offset` into a valid `0..=100` percentage.
+///
+/// Pure and total: computed in `i16` (where `100 + 127` cannot overflow), then
+/// clamped, so the result always fits a `u8`.
+fn apply_offset(master_pct: u8, offset: i8) -> u8 {
+    let base = i16::from(master_pct.min(100));
+    // The checked_add fallback is unreachable (max 100 + 127 < i16::MAX) but
+    // keeps the arithmetic explicitly total.
+    let shifted = base.checked_add(i16::from(offset)).unwrap_or(base);
+    u8::try_from(shifted.clamp(0, 100)).unwrap_or(100)
 }
 
 /// Iterator over every sync-group member as a `(display, group, offset)`
@@ -393,7 +443,7 @@ mod tests {
                 let name = group_names.get(usize::from(gsel)).copied().unwrap_or("a");
                 g.add(name, pool_id(serial), offset);
             }
-            for (id, grp, _) in g.iter() {
+            for (id, grp, _) in &g {
                 // The id resolves to exactly the group iter reported...
                 prop_assert_eq!(g.group_of(id), Some(grp));
                 // ...and appears in no other group's member list.
