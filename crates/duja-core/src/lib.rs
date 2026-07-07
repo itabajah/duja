@@ -22,6 +22,7 @@
 
 pub mod continuum;
 pub mod controller;
+pub mod debounce;
 pub mod id;
 pub mod model;
 
