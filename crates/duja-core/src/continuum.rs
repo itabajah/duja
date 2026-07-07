@@ -273,13 +273,22 @@ mod tests {
 
     #[test]
     fn reverse_map_is_identity_above_floor() {
-        assert_eq!(reverse_map(70, &ContinuumConfig::hardware(50, DimMode::Overlay)), 70);
-        assert_eq!(reverse_map(100, &ContinuumConfig::hardware(50, DimMode::Overlay)), 100);
+        assert_eq!(
+            reverse_map(70, &ContinuumConfig::hardware(50, DimMode::Overlay)),
+            70
+        );
+        assert_eq!(
+            reverse_map(100, &ContinuumConfig::hardware(50, DimMode::Overlay)),
+            100
+        );
     }
 
     #[test]
     fn reverse_map_clamps_below_floor_to_floor() {
-        assert_eq!(reverse_map(30, &ContinuumConfig::hardware(50, DimMode::Overlay)), 50);
+        assert_eq!(
+            reverse_map(30, &ContinuumConfig::hardware(50, DimMode::Overlay)),
+            50
+        );
     }
 
     #[test]

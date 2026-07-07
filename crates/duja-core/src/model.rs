@@ -147,7 +147,13 @@ mod tests {
         };
         assert_eq!(r.current, 40);
         assert_eq!(r.max, 100);
-        assert_eq!(r, FeatureRange { current: 40, max: 100 });
+        assert_eq!(
+            r,
+            FeatureRange {
+                current: 40,
+                max: 100
+            }
+        );
     }
 
     #[test]

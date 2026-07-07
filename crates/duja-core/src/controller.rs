@@ -91,7 +91,10 @@ mod tests {
             ControlError::Unsupported.to_string(),
             "feature is not supported by this display"
         );
-        assert_eq!(ControlError::Timeout.to_string(), "control operation timed out");
+        assert_eq!(
+            ControlError::Timeout.to_string(),
+            "control operation timed out"
+        );
     }
 
     #[test]

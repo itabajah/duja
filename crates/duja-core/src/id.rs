@@ -388,11 +388,7 @@ mod tests {
         if let Some(byte) = other.get_mut(10) {
             *byte = byte.wrapping_add(1);
         }
-        let sum: u8 = other
-            .iter()
-            .take(127)
-            .copied()
-            .fold(0u8, u8::wrapping_add);
+        let sum: u8 = other.iter().take(127).copied().fold(0u8, u8::wrapping_add);
         if let Some(cksum) = other.get_mut(127) {
             *cksum = sum.wrapping_neg();
         }
@@ -422,12 +418,7 @@ mod tests {
             "GSM",
             0x5B09,
             0,
-            [
-                descriptor(0xFF, "AB CD-12"),
-                filler(),
-                filler(),
-                filler(),
-            ],
+            [descriptor(0xFF, "AB CD-12"), filler(), filler(), filler()],
         );
         let info = EdidInfo::parse(&edid).unwrap();
         assert_eq!(info.serial_string.as_deref(), Some("AB CD-12"));

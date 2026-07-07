@@ -40,7 +40,9 @@ impl FakeController {
     #[must_use]
     pub fn new() -> Self {
         let caps = Capabilities {
-            features: [Feature::Brightness, Feature::Contrast].into_iter().collect(),
+            features: [Feature::Brightness, Feature::Contrast]
+                .into_iter()
+                .collect(),
             hardware_range: true,
             raw_capabilities: None,
         };
@@ -54,7 +56,15 @@ impl FakeController {
         let values = caps
             .features
             .iter()
-            .map(|&f| (f, FeatureRange { current: 50, max: 100 }))
+            .map(|&f| {
+                (
+                    f,
+                    FeatureRange {
+                        current: 50,
+                        max: 100,
+                    },
+                )
+            })
             .collect();
         FakeController {
             caps,
@@ -153,11 +163,10 @@ impl BrightnessController for FakeController {
         if !self.caps.supports(feature) {
             return Err(ControlError::Unsupported);
         }
-        Ok(self
-            .values
-            .get(&feature)
-            .copied()
-            .unwrap_or(FeatureRange { current: 0, max: 100 }))
+        Ok(self.values.get(&feature).copied().unwrap_or(FeatureRange {
+            current: 0,
+            max: 100,
+        }))
     }
 
     fn set(&mut self, feature: Feature, value: u16) -> Result<(), ControlError> {
@@ -219,7 +228,10 @@ mod tests {
     fn injected_error_is_consumed_once_then_recovers() {
         let mut c = FakeController::new();
         c.push_error(ControlError::Timeout);
-        assert!(matches!(c.get(Feature::Brightness), Err(ControlError::Timeout)));
+        assert!(matches!(
+            c.get(Feature::Brightness),
+            Err(ControlError::Timeout)
+        ));
         assert!(c.get(Feature::Brightness).is_ok());
     }
 

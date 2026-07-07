@@ -4,17 +4,38 @@
 //! unit-testable and platform-independent. OS backends implement the traits
 //! defined here; the UI consumes the models defined here.
 //!
-//! Module map (built test-first in phase P2 — see the project plan):
-//! - `id` — stable EDID-derived display identity
-//! - `model` — `Display`, capabilities, features
-//! - `controller` — the `BrightnessController` trait every backend implements
-//! - `manager` — `DisplayManager`: enumeration diffing, state, restore
-//! - `continuum` — one user slider mapped onto hardware + software dimming
-//! - `debounce` — pure debounce/coalesce state machines
-//! - `sync` — multi-monitor sync groups
-//! - `config` — versioned, migratable, atomically-persisted configuration
-//! - `quirks` — per-monitor quirk database and matching
-//! - `caps` — MCCS capability-string parser
+//! # Module map
+//!
+//! Implemented (first wave, built test-first in phase P2):
+//! - [`id`] — stable EDID-derived display identity ([`id::StableDisplayId`])
+//! - [`model`] — features, capabilities, and the UI-facing
+//!   [`model::DisplaySnapshot`]
+//! - [`controller`] — the [`controller::BrightnessController`] trait every
+//!   backend implements, and [`controller::ControlError`]
+//! - [`continuum`] — one user slider mapped onto hardware + software dimming
+//! - [`debounce`] — pure debounce / coalesce state machines
+//! - `testing` (feature `test-support`) — fakes + the controller contract suite
+//!
+//! Planned (later waves): `manager` (enumeration diffing, state, restore),
+//! `sync` (multi-monitor groups), `config`, `quirks`, `caps` (MCCS parser).
+//!
+//! # Example
+//!
+//! ```
+//! use duja_core::continuum::{map_user_level, ContinuumConfig};
+//! use duja_core::model::DimMode;
+//!
+//! // A display that dims via overlay below a 30% hardware floor.
+//! let cfg = ContinuumConfig::hardware(30, DimMode::Overlay);
+//!
+//! // Above the floor, the slider drives the hardware directly.
+//! assert_eq!(map_user_level(70, &cfg).hardware_pct, Some(70));
+//!
+//! // Below it, hardware pins at the floor and the overlay engages.
+//! let dim = map_user_level(15, &cfg);
+//! assert_eq!(dim.hardware_pct, Some(30));
+//! assert!(dim.overlay_alpha > 0.0);
+//! ```
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
