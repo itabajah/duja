@@ -16,6 +16,8 @@ test-support = []
 
 [dependencies]
 thiserror = { workspace = true }
+serde = { workspace = true }
+toml_edit = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

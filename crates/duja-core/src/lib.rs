@@ -15,10 +15,11 @@
 //! - [`continuum`] — one user slider mapped onto hardware + software dimming
 //! - [`debounce`] — pure debounce / coalesce state machines
 //! - [`caps`] — total MCCS capability-string parser ([`caps::ParsedCaps`])
+//! - [`quirks`] — quirk database + stable-id matcher ([`quirks::QuirkDb`])
 //! - `testing` (feature `test-support`) — fakes + the controller contract suite
 //!
 //! Planned (later waves): `manager` (enumeration diffing, state, restore),
-//! `sync` (multi-monitor groups), `config`, `quirks` (quirk database).
+//! `sync` (multi-monitor groups), `config`.
 //!
 //! # Example
 //!
@@ -48,6 +49,7 @@ pub mod controller;
 pub mod debounce;
 pub mod id;
 pub mod model;
+pub mod quirks;
 
 /// Deterministic fakes and the reusable controller contract suite.
 ///

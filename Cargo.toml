@@ -39,6 +39,12 @@ duja-ui = { path = "crates/duja-ui" }
 # `workspace = true`) at the phase where they are first used.
 # Runtime: typed error enums per the error policy (§5). Runtime, no_std-free.
 thiserror = "2"
+# Serde derive for the typed quirk-database schema (and, later, config).
+serde = { version = "1", features = ["derive"] }
+# TOML parsing for the quirk DB. `toml_edit` (not `toml`) is the shared choice
+# so the config layer can round-trip comments/unknown keys over the same crate;
+# the `serde` feature adds `toml_edit::de` for typed deserialisation.
+toml_edit = { version = "0.25", features = ["serde"] }
 # Dev-only: property-based testing for the pure-TDD kernel (continuum, EDID).
 proptest = "1"
 
