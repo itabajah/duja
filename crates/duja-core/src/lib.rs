@@ -20,6 +20,7 @@
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod continuum;
 pub mod controller;
 pub mod id;
 pub mod model;
