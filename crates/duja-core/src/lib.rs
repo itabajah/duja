@@ -14,10 +14,11 @@
 //!   backend implements, and [`controller::ControlError`]
 //! - [`continuum`] — one user slider mapped onto hardware + software dimming
 //! - [`debounce`] — pure debounce / coalesce state machines
+//! - [`caps`] — total MCCS capability-string parser ([`caps::ParsedCaps`])
 //! - `testing` (feature `test-support`) — fakes + the controller contract suite
 //!
 //! Planned (later waves): `manager` (enumeration diffing, state, restore),
-//! `sync` (multi-monitor groups), `config`, `quirks`, `caps` (MCCS parser).
+//! `sync` (multi-monitor groups), `config`, `quirks` (quirk database).
 //!
 //! # Example
 //!
@@ -41,6 +42,7 @@
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod caps;
 pub mod continuum;
 pub mod controller;
 pub mod debounce;
