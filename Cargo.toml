@@ -37,6 +37,10 @@ duja-ipc = { path = "crates/duja-ipc" }
 duja-ui = { path = "crates/duja-ui" }
 # External deps are added here (version-pinned once, referenced with
 # `workspace = true`) at the phase where they are first used.
+# Runtime: typed error enums per the error policy (§5). Runtime, no_std-free.
+thiserror = "2"
+# Dev-only: property-based testing for the pure-TDD kernel (continuum, EDID).
+proptest = "1"
 
 # ---------------------------------------------------------------------------
 # Lint wall (ADR: bulletproof-production policy).
