@@ -4,7 +4,115 @@
 //! method. This keeps the thread harness a thin shell and makes the timing
 //! logic exhaustively unit-testable with a fake clock.
 
-// ---- specs first (TDD); implementation follows in the next commit ----
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+/// What a debounce/coalesce state machine wants the caller to do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Nothing pending; park until the next event.
+    Wait,
+    /// Something is pending; the caller should wake no later than this instant.
+    FireAt(Instant),
+    /// Fire now.
+    Fire,
+}
+
+/// A trailing-edge debouncer: coalesces a burst of events into one fire once a
+/// quiet period of `delay` has elapsed since the last event.
+#[derive(Debug, Clone)]
+pub struct Debouncer {
+    delay: Duration,
+    deadline: Option<Instant>,
+}
+
+impl Debouncer {
+    /// Create a debouncer with the given trailing quiet period.
+    #[must_use]
+    pub fn new(delay: Duration) -> Self {
+        Debouncer {
+            delay,
+            deadline: None,
+        }
+    }
+
+    /// Record an event at `now`, (re)arming the deadline to `now + delay`.
+    ///
+    /// Returns [`Action::FireAt`] with the new deadline so the caller can set
+    /// its wakeup.
+    pub fn on_event(&mut self, now: Instant) -> Action {
+        let deadline = now.checked_add(self.delay).unwrap_or(now);
+        self.deadline = Some(deadline);
+        Action::FireAt(deadline)
+    }
+
+    /// Evaluate the debouncer at `now`.
+    ///
+    /// Returns [`Action::Fire`] (and disarms) once the deadline has passed,
+    /// [`Action::FireAt`] while still waiting for the quiet period, or
+    /// [`Action::Wait`] when nothing is pending.
+    pub fn poll(&mut self, now: Instant) -> Action {
+        match self.deadline {
+            Some(deadline) if now >= deadline => {
+                self.deadline = None;
+                Action::Fire
+            }
+            Some(deadline) => Action::FireAt(deadline),
+            None => Action::Wait,
+        }
+    }
+}
+
+/// A per-key, latest-value coalescer with a minimum gap between emissions of
+/// the same key.
+///
+/// Pushing a key stores its newest value; [`next_ready`](Self::next_ready)
+/// hands back one eligible `(key, value)` at a time. A brand-new key is
+/// eligible immediately; after a key is emitted it is suppressed until
+/// `min_gap` has elapsed. Distinct keys never coalesce into one another.
+#[derive(Debug, Clone)]
+pub struct Coalescer<K, V> {
+    min_gap: Duration,
+    pending: BTreeMap<K, V>,
+    ready_at: BTreeMap<K, Instant>,
+}
+
+impl<K: Ord + Clone, V> Coalescer<K, V> {
+    /// Create a coalescer that emits any given key at most once per `min_gap`.
+    #[must_use]
+    pub fn new(min_gap: Duration) -> Self {
+        Coalescer {
+            min_gap,
+            pending: BTreeMap::new(),
+            ready_at: BTreeMap::new(),
+        }
+    }
+
+    /// Store the latest `value` for `key`. A never-seen key becomes eligible
+    /// at `now`; a previously-emitted key keeps its existing gap deadline.
+    pub fn push(&mut self, key: K, value: V, now: Instant) {
+        self.ready_at.entry(key.clone()).or_insert(now);
+        self.pending.insert(key, value);
+    }
+
+    /// Return the next `(key, value)` whose gap has elapsed at `now`, removing
+    /// it from the pending set and re-arming its gap. Returns `None` if nothing
+    /// is currently eligible.
+    pub fn next_ready(&mut self, now: Instant) -> Option<(K, V)> {
+        let key = self.pending.iter().find_map(|(k, _)| {
+            let eligible = match self.ready_at.get(k) {
+                Some(ready) => now >= *ready,
+                None => true,
+            };
+            eligible.then(|| k.clone())
+        })?;
+
+        let value = self.pending.remove(&key)?;
+        let next = now.checked_add(self.min_gap).unwrap_or(now);
+        self.ready_at.insert(key.clone(), next);
+        Some((key, value))
+    }
+}
 
 #[cfg(test)]
 mod tests {
