@@ -1,8 +1,10 @@
 //! Duja core domain logic.
 //!
-//! This crate is **pure**: no OS APIs, no I/O, no `unsafe`. Everything here is
-//! unit-testable and platform-independent. OS backends implement the traits
-//! defined here; the UI consumes the models defined here.
+//! This crate is **pure**: no OS-specific APIs and no `unsafe`. The only
+//! filesystem I/O lives in [`config::persist`], the crash-safe reader/writer
+//! behind the config and state files. Everything else is unit-testable and
+//! platform-independent. OS backends implement the traits defined here; the UI
+//! consumes the models defined here.
 //!
 //! # Module map
 //!
@@ -18,9 +20,11 @@
 //!   restore ([`manager::DisplayManager`])
 //! - [`sync`] — multi-monitor sync groups with per-member offsets
 //!   ([`sync::SyncGroups`])
+//! - [`config`] — typed config schema, format-preserving TOML document,
+//!   chained migrations, and crash-safe atomic persistence (the only I/O)
 //! - `testing` (feature `test-support`) — fakes + the controller contract suite
 //!
-//! Planned (later waves): `config`, `quirks`, `caps` (MCCS parser).
+//! Planned (later waves): `quirks`, `caps` (MCCS parser).
 //!
 //! # Example
 //!
@@ -44,6 +48,7 @@
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod config;
 pub mod continuum;
 pub mod controller;
 pub mod debounce;

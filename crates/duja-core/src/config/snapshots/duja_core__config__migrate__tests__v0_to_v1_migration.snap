@@ -1,0 +1,21 @@
+---
+source: crates/duja-core/src/config/migrate.rs
+expression: out
+---
+schema_version = 1
+# Duja config written by a hypothetical v0 build (no schema_version).
+[general]
+autostart = true
+
+# Left monitor — note the old key name `min_gap_ms`.
+[monitors."GSM-5B09-312NTAB1C234"]
+name = "Left LG"
+hw_floor_pct = 10
+min_write_gap_ms = 120
+
+[monitors."DEL-A131-s12345"]
+name = "Right Dell"
+min_write_gap_ms = 100
+
+[future_section]
+experimental = true
