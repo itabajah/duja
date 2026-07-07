@@ -4,7 +4,230 @@
 //! changes; its EDID does not. [`StableDisplayId`] derives a durable key from
 //! the 128-byte EDID base block so per-monitor settings survive hot-plug.
 
-// ---- specs first (TDD); implementation follows in the next commit ----
+use std::fmt;
+
+/// Length of the EDID base block, in bytes.
+const BASE_BLOCK_LEN: usize = 128;
+
+/// The fixed 8-byte EDID base-block header (`00 FF FF FF FF FF FF 00`).
+const HEADER_MAGIC: [u8; 8] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+
+/// The 26 uppercase letters, indexed by PNP value minus one.
+const ALPHABET: &[u8; 26] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/// An error encountered while parsing an EDID base block.
+///
+/// Parsing is total: every malformed input yields one of these variants rather
+/// than panicking (the parser is a fuzz target).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EdidError {
+    /// Fewer than 128 bytes were supplied; the wrapped value is the actual len.
+    #[error("EDID too short: need at least 128 bytes, got {0}")]
+    TooShort(usize),
+    /// The 8-byte header did not match the standard `00 FF..FF 00` magic.
+    #[error("EDID base-block header is not the standard 00 FF..FF 00 magic")]
+    BadHeader,
+    /// The base block's bytes did not sum to zero modulo 256.
+    #[error("EDID base-block checksum does not sum to zero mod 256")]
+    BadChecksum,
+    /// Bytes 8..=9 did not encode three A–Z letters.
+    #[error("EDID manufacturer id is not three A–Z letters")]
+    InvalidManufacturer,
+}
+
+/// Structured fields extracted from an EDID base block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdidInfo {
+    /// Three-letter PNP manufacturer id (e.g. `"GSM"` for LG).
+    pub manufacturer: String,
+    /// Product code (bytes 10..=11, little-endian).
+    pub product_code: u16,
+    /// Numeric serial (bytes 12..=15, little-endian); `0` when unset.
+    pub serial_number: u32,
+    /// Serial-number string from the 0xFF display descriptor, if present.
+    pub serial_string: Option<String>,
+    /// Monitor-name string from the 0xFC display descriptor, if present.
+    pub monitor_name: Option<String>,
+}
+
+impl EdidInfo {
+    /// Parse the 128-byte EDID base block.
+    ///
+    /// Inputs longer than 128 bytes (base block + extensions) are accepted;
+    /// only the base block is read. Every access is bounds-checked, so this
+    /// never panics on malformed input.
+    ///
+    /// # Errors
+    /// - [`EdidError::TooShort`] if fewer than 128 bytes are supplied.
+    /// - [`EdidError::BadHeader`] if the 8-byte magic is wrong.
+    /// - [`EdidError::BadChecksum`] if the base block does not sum to 0 mod 256.
+    /// - [`EdidError::InvalidManufacturer`] if bytes 8..=9 do not encode three
+    ///   A–Z letters.
+    pub fn parse(edid: &[u8]) -> Result<Self, EdidError> {
+        let base = edid
+            .get(..BASE_BLOCK_LEN)
+            .ok_or(EdidError::TooShort(edid.len()))?;
+
+        if base.get(..8) != Some(&HEADER_MAGIC[..]) {
+            return Err(EdidError::BadHeader);
+        }
+
+        let checksum = base.iter().copied().fold(0u8, u8::wrapping_add);
+        if checksum != 0 {
+            return Err(EdidError::BadChecksum);
+        }
+
+        let b8 = base.get(8).copied().unwrap_or(0);
+        let b9 = base.get(9).copied().unwrap_or(0);
+        let manufacturer = parse_manufacturer(b8, b9)?;
+
+        let b10 = base.get(10).copied().unwrap_or(0);
+        let b11 = base.get(11).copied().unwrap_or(0);
+        let product_code = u16::from_le_bytes([b10, b11]);
+
+        let serial_number = match base.get(12..16) {
+            Some([a, b, c, d]) => u32::from_le_bytes([*a, *b, *c, *d]),
+            _ => 0,
+        };
+
+        let (serial_string, monitor_name) = parse_descriptors(base);
+
+        Ok(EdidInfo {
+            manufacturer,
+            product_code,
+            serial_number,
+            serial_string,
+            monitor_name,
+        })
+    }
+}
+
+/// Decode the big-endian bit-packed manufacturer id from bytes 8..=9.
+fn parse_manufacturer(b8: u8, b9: u8) -> Result<String, EdidError> {
+    let packed = u16::from_be_bytes([b8, b9]);
+    let groups = [(packed >> 10) & 0x1F, (packed >> 5) & 0x1F, packed & 0x1F];
+    let mut mfg = String::with_capacity(3);
+    for g in groups {
+        mfg.push(pnp_letter(g).ok_or(EdidError::InvalidManufacturer)?);
+    }
+    Ok(mfg)
+}
+
+/// Map a 5-bit PNP group (1..=26) to `A`..=`Z`, or `None` if out of range.
+fn pnp_letter(value: u16) -> Option<char> {
+    if value == 0 || value > 26 {
+        return None;
+    }
+    let idx = value.wrapping_sub(1);
+    ALPHABET.get(usize::from(idx)).copied().map(char::from)
+}
+
+/// Scan the four 18-byte descriptors for the serial (0xFF) and name (0xFC).
+fn parse_descriptors(base: &[u8]) -> (Option<String>, Option<String>) {
+    let mut serial = None;
+    let mut name = None;
+    let Some(region) = base.get(54..126) else {
+        return (serial, name);
+    };
+    for chunk in region.chunks_exact(18) {
+        // A display descriptor is flagged by three leading zero bytes;
+        // anything else is a detailed-timing descriptor we skip.
+        if chunk.get(..3) != Some(&[0x00, 0x00, 0x00][..]) {
+            continue;
+        }
+        let tag = chunk.get(3).copied().unwrap_or(0);
+        let text = chunk.get(5..18).and_then(parse_descriptor_text);
+        match tag {
+            0xFF if serial.is_none() => serial = text,
+            0xFC if name.is_none() => name = text,
+            _ => {}
+        }
+    }
+    (serial, name)
+}
+
+/// Decode a descriptor text field: printable ASCII up to an 0x0A terminator,
+/// with trailing padding trimmed. Returns `None` if nothing remains.
+fn parse_descriptor_text(raw: &[u8]) -> Option<String> {
+    let mut text = String::with_capacity(raw.len());
+    for &b in raw {
+        if b == 0x0A {
+            break;
+        }
+        if (0x20..=0x7E).contains(&b) {
+            text.push(char::from(b));
+        }
+    }
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+/// A durable, EDID-derived identity for a display.
+///
+/// Format is `MFG-PROD-SERIAL` when the EDID carries a serial string (e.g.
+/// `"GSM-5B09-312NTAB1C234"`), otherwise `MFG-PROD-#hXXXXXXXX` where the suffix
+/// is an FNV-1a hash of the full EDID. [`with_slot`](Self::with_slot)
+/// disambiguates identical twin monitors that share an EDID.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct StableDisplayId(String);
+
+impl StableDisplayId {
+    /// Derive an identity straight from a raw EDID blob.
+    ///
+    /// # Errors
+    /// Propagates any [`EdidError`] from [`EdidInfo::parse`].
+    pub fn from_edid(edid: &[u8]) -> Result<Self, EdidError> {
+        let info = EdidInfo::parse(edid)?;
+        let base = format!("{}-{:04X}", info.manufacturer, info.product_code);
+        let serial_key = info
+            .serial_string
+            .as_deref()
+            .map(sanitize)
+            .filter(|s| !s.is_empty());
+        let id = match serial_key {
+            Some(serial) => format!("{base}-{serial}"),
+            None => format!("{base}-#h{}", fnv1a_hex(edid)),
+        };
+        Ok(StableDisplayId(id))
+    }
+
+    /// Borrow the id as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Return a new id with a `-slot<n>` disambiguator appended.
+    #[must_use]
+    pub fn with_slot(&self, slot: u32) -> Self {
+        StableDisplayId(format!("{}-slot{slot}", self.0))
+    }
+}
+
+impl fmt::Display for StableDisplayId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Keep only `[A-Za-z0-9]` from a serial string so ids stay in the id charset.
+fn sanitize(s: &str) -> String {
+    s.chars().filter(char::is_ascii_alphanumeric).collect()
+}
+
+/// FNV-1a (32-bit) of `bytes`, formatted as eight lowercase hex digits.
+fn fnv1a_hex(bytes: &[u8]) -> String {
+    let mut hash: u32 = 0x811c_9dc5;
+    for &b in bytes {
+        hash ^= u32::from(b);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    format!("{hash:08x}")
+}
 
 #[cfg(test)]
 mod tests {
