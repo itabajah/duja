@@ -483,6 +483,8 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+
         /// Arbitrary bytes must never panic — this is a fuzz target later.
         #[test]
         fn parse_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..=300)) {

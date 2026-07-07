@@ -292,6 +292,8 @@ mod tests {
     // --- property tests (plan §4.2) ---
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10_000))]
+
         /// Perceived output never decreases as the user level rises.
         #[test]
         fn continuum_monotonic_over_full_range(cfg in any_cfg()) {
