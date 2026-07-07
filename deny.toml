@@ -27,6 +27,9 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Internal path-only deps (duja-core etc.) carry no version — that's fine;
+# the wildcard ban is aimed at registry deps.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
