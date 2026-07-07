@@ -1,0 +1,29 @@
+# Standalone spike — detached from the parent Duja workspace on purpose.
+# The empty [workspace] table makes this its own workspace root so the parent's
+# lint wall and member list do not apply. THROWAWAY CODE: unwrap freely.
+[workspace]
+
+[package]
+name = "eventloop-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+slint = { version = "1.17.1", default-features = false, features = ["compat-1-2", "backend-winit", "std"] }
+tray-icon = "0.24.1"
+global-hotkey = "0.8.0"
+
+[features]
+# Renderer bake-off switches. Exactly one renderer feature should be active.
+default = ["femtovg"]
+femtovg = ["slint/renderer-femtovg"]
+skia = ["slint/renderer-skia"]
+software = ["slint/renderer-software"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+opt-level = 3
+panic = "unwind"
