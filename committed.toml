@@ -1,6 +1,8 @@
 # Conventional-commit enforcement (crate-ci/committed, runs in CI).
 style = "conventional"
 subject_length = 72
+# Conventional style: lowercase subject after the type prefix.
+subject_capitalized = false
 allowed_types = [
   "feat",
   "fix",
