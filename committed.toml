@@ -1,8 +1,14 @@
 # Conventional-commit enforcement (crate-ci/committed, runs in CI).
+#
+# We squash-merge: branch commit BODIES never reach main (only PR titles do),
+# so body line length is unchecked; subjects keep type/lowercase/length rules.
+# TDD spec commits ("test(core): debounce specs") are noun phrases by
+# convention, so the imperative-mood heuristic is off.
 style = "conventional"
 subject_length = 72
-# Conventional style: lowercase subject after the type prefix.
 subject_capitalized = false
+imperative_subject = false
+line_length = 0
 allowed_types = [
   "feat",
   "fix",
