@@ -26,6 +26,13 @@ pub mod debounce;
 pub mod id;
 pub mod model;
 
+/// Deterministic fakes and the reusable controller contract suite.
+///
+/// Available for this crate's own tests, and for downstream crates via the
+/// `test-support` feature. Never part of a release build.
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
+
 /// The crate version, as compiled in.
 #[must_use]
 pub fn version() -> &'static str {
