@@ -140,8 +140,13 @@ fn finish(hardware_pct: Option<u8>, alpha_full: f32, mode: DimMode) -> Continuum
 ///
 /// Above the floor the user slider maps 1:1 onto hardware, so this is the
 /// identity there. A reading below the floor (something else drove the panel
-/// under Duja's software floor) is reported as the floor — the lowest level
-/// Duja represents with pure hardware.
+/// under Duja's software floor) is **clamped up to the floor**, deliberately:
+/// slider positions below the floor semantically mean "hardware pinned at the
+/// floor plus overlay engaged", so a sub-floor hardware reading has no honest
+/// slider position to map to. Reporting the floor position is deterministic
+/// (the same reading always yields the same slider) and self-correcting — the
+/// next write through [`map_user_level`] drives the hardware back up to the
+/// floor Duja maintains.
 ///
 /// On a software-only display (`hardware_floor == None`) there is no hardware
 /// channel to reflect; the reading is passed through clamped to `0..=100`.
