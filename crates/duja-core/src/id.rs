@@ -168,10 +168,16 @@ fn parse_descriptor_text(raw: &[u8]) -> Option<String> {
 
 /// A durable, EDID-derived identity for a display.
 ///
-/// Format is `MFG-PROD-SERIAL` when the EDID carries a serial string (e.g.
-/// `"GSM-5B09-312NTAB1C234"`), otherwise `MFG-PROD-#hXXXXXXXX` where the suffix
-/// is an FNV-1a hash of the full EDID. [`with_slot`](Self::with_slot)
-/// disambiguates identical twin monitors that share an EDID.
+/// The serial component is chosen by rank:
+/// 1. the 0xFF-descriptor serial *string* (e.g. `"GSM-5B09-312NTAB1C234"`),
+/// 2. else a **non-zero** numeric serial from bytes 12..=15, as
+///    `MFG-PROD-s<decimal>` — it survives EDID byte changes (e.g. firmware
+///    updates) that would shift a content hash,
+/// 3. else `MFG-PROD-#hXXXXXXXX`, an FNV-1a hash of the full EDID (a zero
+///    numeric serial is unset, which is common, and must not collide).
+///
+/// [`with_slot`](Self::with_slot) disambiguates identical twin monitors that
+/// share an EDID.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StableDisplayId(String);
 
@@ -190,6 +196,7 @@ impl StableDisplayId {
             .filter(|s| !s.is_empty());
         let id = match serial_key {
             Some(serial) => format!("{base}-{serial}"),
+            None if info.serial_number != 0 => format!("{base}-s{}", info.serial_number),
             None => format!("{base}-#h{}", fnv1a_hex(edid)),
         };
         Ok(StableDisplayId(id))
