@@ -21,6 +21,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod id;
+pub mod model;
 
 /// The crate version, as compiled in.
 #[must_use]
