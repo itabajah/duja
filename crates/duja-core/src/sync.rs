@@ -153,7 +153,7 @@ impl SyncGroups {
     /// groups.add("desk", main.clone(), 0);
     /// groups.add("desk", side.clone(), -10);
     ///
-    /// // The side monitor trails the master by 10 points, clamped at 0.
+    /// // The side monitor trails the master by 10 percentage points.
     /// assert_eq!(groups.fan_out("desk", 80), vec![(main, 80), (side, 70)]);
     /// ```
     #[must_use]
