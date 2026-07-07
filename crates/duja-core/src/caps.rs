@@ -400,7 +400,10 @@ mod tests {
 
         // A non-continuous code carries its parenthesised value list...
         assert_eq!(caps.allowed_values(0x60), Some(&[0x11, 0x12, 0x0F][..]));
-        assert_eq!(caps.allowed_values(0x14), Some(&[0x05, 0x06, 0x08, 0x0B][..]));
+        assert_eq!(
+            caps.allowed_values(0x14),
+            Some(&[0x05, 0x06, 0x08, 0x0B][..])
+        );
         assert_eq!(caps.allowed_values(0xD6), Some(&[0x01, 0x04][..]));
         assert_eq!(caps.allowed_values(0x8D), Some(&[0x01, 0x02][..]));
 
@@ -441,21 +444,29 @@ mod tests {
     #[test]
     fn caps_parser_parses_mccs_version_variants() {
         assert_eq!(
-            ParsedCaps::parse("(mccs_ver(2.1))").expect("parses").mccs_version,
+            ParsedCaps::parse("(mccs_ver(2.1))")
+                .expect("parses")
+                .mccs_version,
             Some((2, 1))
         );
         assert_eq!(
-            ParsedCaps::parse("(mccs_ver(2.0))").expect("parses").mccs_version,
+            ParsedCaps::parse("(mccs_ver(2.0))")
+                .expect("parses")
+                .mccs_version,
             Some((2, 0))
         );
         // A bare major number defaults minor to zero.
         assert_eq!(
-            ParsedCaps::parse("(mccs_ver(3))").expect("parses").mccs_version,
+            ParsedCaps::parse("(mccs_ver(3))")
+                .expect("parses")
+                .mccs_version,
             Some((3, 0))
         );
         // Garbage version is dropped, not fatal.
         assert_eq!(
-            ParsedCaps::parse("(mccs_ver(x.y))").expect("parses").mccs_version,
+            ParsedCaps::parse("(mccs_ver(x.y))")
+                .expect("parses")
+                .mccs_version,
             None
         );
     }
@@ -482,7 +493,10 @@ mod tests {
     #[test]
     fn caps_parser_rejects_unbalanced_parens() {
         assert_eq!(ParsedCaps::parse("(vcp(10"), Err(CapsError::Unbalanced));
-        assert_eq!(ParsedCaps::parse("(prot(monitor)"), Err(CapsError::Unbalanced));
+        assert_eq!(
+            ParsedCaps::parse("(prot(monitor)"),
+            Err(CapsError::Unbalanced)
+        );
         assert_eq!(ParsedCaps::parse(")"), Err(CapsError::Unbalanced));
         assert_eq!(ParsedCaps::parse(""), Err(CapsError::Unbalanced));
         // No outer parenthesis at all.

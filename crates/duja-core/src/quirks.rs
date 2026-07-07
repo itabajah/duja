@@ -9,8 +9,8 @@
 //!
 //! # Matching
 //!
-//! An entry's `match` is a [`StableDisplayId`](crate::id::StableDisplayId)
-//! **prefix** (e.g. `"MSI-30B6"` matches `"MSI-30B6-<serial>"`). A single
+//! An entry's `match` is a [`StableDisplayId`] **prefix** (e.g. `"MSI-30B6"`
+//! matches `"MSI-30B6-<serial>"`). A single
 //! trailing `*` turns it into a glob over that prefix (`"MSI-*"` matches every
 //! MSI display). There are no other wildcards and no regular expressions — the
 //! matcher is hand-rolled and bounded.
@@ -186,7 +186,9 @@ impl QuirkDb {
     #[must_use]
     pub fn embedded() -> &'static QuirkDb {
         static EMBEDDED: OnceLock<QuirkDb> = OnceLock::new();
-        EMBEDDED.get_or_init(|| QuirkDb::parse(EMBEDDED_QUIRKS_TOML).unwrap_or_else(|_| QuirkDb::empty()))
+        EMBEDDED.get_or_init(|| {
+            QuirkDb::parse(EMBEDDED_QUIRKS_TOML).unwrap_or_else(|_| QuirkDb::empty())
+        })
     }
 
     /// An empty database (schema-current, no quirks).
@@ -309,14 +311,21 @@ mod tests {
         assert_eq!(msi.min_write_gap_ms, Some(50));
         assert_eq!(msi.caps_retry, Some(3));
         assert_eq!(msi.verify_writes, Some(true));
-        assert_eq!(msi.input_source_allowed.as_deref(), Some(&[17u8, 18, 15][..]));
+        assert_eq!(
+            msi.input_source_allowed.as_deref(),
+            Some(&[17u8, 18, 15][..])
+        );
         assert!(msi.note.is_some());
     }
 
     #[test]
     fn quirk_resolve_applies_msi_quirks_via_embedded_db() {
         let id = StableDisplayId::from_edid(&msi_edid()).expect("valid edid");
-        assert!(id.as_str().starts_with("MSI-30B6"), "id was {}", id.as_str());
+        assert!(
+            id.as_str().starts_with("MSI-30B6"),
+            "id was {}",
+            id.as_str()
+        );
 
         let q = QuirkDb::embedded().resolve(&id);
         assert_eq!(q.min_write_gap_ms, Some(50));
@@ -407,9 +416,10 @@ mod tests {
 
     #[test]
     fn quirk_resolve_no_match_is_default() {
-        let db =
-            QuirkDb::parse("schema_version = 1\n[[quirk]]\nmatch = \"MSI-30B6\"\nddc_broken = true\n")
-                .expect("parses");
+        let db = QuirkDb::parse(
+            "schema_version = 1\n[[quirk]]\nmatch = \"MSI-30B6\"\nddc_broken = true\n",
+        )
+        .expect("parses");
         assert_eq!(db.resolve_id("DEL-A131-xyz"), ResolvedQuirks::default());
     }
 
