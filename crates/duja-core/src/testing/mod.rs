@@ -8,3 +8,7 @@
 pub mod clock;
 pub mod contract;
 pub mod controller;
+
+pub use clock::FakeClock;
+pub use contract::{Scenario, run_controller_contract};
+pub use controller::{Call, FakeController};

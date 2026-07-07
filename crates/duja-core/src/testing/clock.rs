@@ -1,7 +1,47 @@
 //! A deterministic, manually-advanced monotonic clock for testing the
 //! clock-passed-in state machines.
 
-// ---- specs first (TDD); implementation follows in the next commit ----
+use std::time::{Duration, Instant};
+
+/// A fake monotonic clock whose time only moves when [`advance`](Self::advance)
+/// is called.
+///
+/// It is anchored to a single real [`Instant`] at construction (there is no
+/// other way to mint an `Instant`), but only elapsed *differences* are
+/// meaningful, and those are fully deterministic.
+#[derive(Debug, Clone)]
+pub struct FakeClock {
+    base: Instant,
+    elapsed: Duration,
+}
+
+impl FakeClock {
+    /// Create a clock anchored at "now" with zero elapsed time.
+    #[must_use]
+    pub fn new() -> Self {
+        FakeClock {
+            base: Instant::now(),
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    /// The current fake instant (`anchor + total advanced`).
+    #[must_use]
+    pub fn now(&self) -> Instant {
+        self.base.checked_add(self.elapsed).unwrap_or(self.base)
+    }
+
+    /// Move the clock forward by `by`. Monotonic: time never goes backwards.
+    pub fn advance(&mut self, by: Duration) {
+        self.elapsed = self.elapsed.checked_add(by).unwrap_or(self.elapsed);
+    }
+}
+
+impl Default for FakeClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[cfg(test)]
 mod tests {
