@@ -363,9 +363,41 @@ mod tests {
         assert_eq!(id.as_str(), "GSM-5B09-312NTAB1C234");
     }
 
+    /// Dell-like fixture with a ZERO numeric serial: the true hash-fallback path.
+    fn dell_edid_no_serial() -> Vec<u8> {
+        synth_edid(
+            "DEL",
+            0xA131,
+            0,
+            [
+                filler(),
+                descriptor(0xFC, "DELL U2720Q"),
+                filler(),
+                filler(),
+            ],
+        )
+    }
+
+    #[test]
+    fn id_uses_numeric_serial_when_no_serial_string() {
+        // dell_edid carries numeric serial 0x3039 = 12345 and no 0xFF string:
+        // the numeric serial must rank above the content-hash fallback.
+        let id = StableDisplayId::from_edid(&dell_edid()).unwrap();
+        assert_eq!(id.as_str(), "DEL-A131-s12345");
+    }
+
+    #[test]
+    fn serial_string_wins_over_numeric_serial() {
+        // lg_edid carries BOTH a 0xFF serial string and a nonzero numeric
+        // serial; the string must win.
+        let id = StableDisplayId::from_edid(&lg_edid()).unwrap();
+        assert_eq!(id.as_str(), "GSM-5B09-312NTAB1C234");
+    }
+
     #[test]
     fn id_falls_back_to_hash_without_serial() {
-        let id = StableDisplayId::from_edid(&dell_edid()).unwrap();
+        // No 0xFF string AND a zero numeric serial -> content hash.
+        let id = StableDisplayId::from_edid(&dell_edid_no_serial()).unwrap();
         assert!(
             id.as_str().starts_with("DEL-A131-#h"),
             "unexpected id: {}",
@@ -379,11 +411,11 @@ mod tests {
 
     #[test]
     fn hash_fallback_is_deterministic_and_distinct() {
-        let a = StableDisplayId::from_edid(&dell_edid()).unwrap();
-        let b = StableDisplayId::from_edid(&dell_edid()).unwrap();
+        let a = StableDisplayId::from_edid(&dell_edid_no_serial()).unwrap();
+        let b = StableDisplayId::from_edid(&dell_edid_no_serial()).unwrap();
         assert_eq!(a, b);
 
-        let mut other = dell_edid();
+        let mut other = dell_edid_no_serial();
         // Perturb the product code and re-checksum so the hash must change.
         if let Some(byte) = other.get_mut(10) {
             *byte = byte.wrapping_add(1);
