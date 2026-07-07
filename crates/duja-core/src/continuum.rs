@@ -10,7 +10,143 @@
 // read better fully qualified at call sites than shortened.
 #![allow(clippy::module_name_repetitions)]
 
-// ---- specs first (TDD); implementation follows in the next commit ----
+use crate::model::DimMode;
+
+/// The maximum overlay opacity applied at user level 0.
+///
+/// Chosen below 1.0 so a fully-dimmed screen is near-black but never fully
+/// opaque by default (the user can always still see the screen and Duja's UI).
+pub const MAX_ALPHA: f32 = 0.88;
+
+/// Per-display configuration for the brightness continuum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContinuumConfig {
+    /// The lowest hardware brightness percentage Duja will drive; below it,
+    /// software dimming takes over. Ignored when `has_hardware` is `false`.
+    pub hw_floor_pct: u8,
+    /// How sub-floor dimming is realised.
+    pub mode: DimMode,
+    /// Whether the display has a real hardware brightness range. `false` is the
+    /// software-only (overlay-only) case, where `hardware_pct` is always `None`.
+    pub has_hardware: bool,
+}
+
+impl ContinuumConfig {
+    /// A hardware-backed display with the given floor and dim mode.
+    #[must_use]
+    pub fn hardware(hw_floor_pct: u8, mode: DimMode) -> Self {
+        ContinuumConfig {
+            hw_floor_pct,
+            mode,
+            has_hardware: true,
+        }
+    }
+
+    /// A software-only display (no hardware backlight); overlay/gamma only.
+    #[must_use]
+    pub fn software_only(mode: DimMode) -> Self {
+        ContinuumConfig {
+            hw_floor_pct: 100,
+            mode,
+            has_hardware: false,
+        }
+    }
+}
+
+/// The output of the continuum mapping: what to drive on each channel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContinuumOutput {
+    /// Hardware brightness percentage to write, or `None` for software-only.
+    pub hardware_pct: Option<u8>,
+    /// Overlay opacity in `[0.0, MAX_ALPHA]` (0 = no overlay).
+    pub overlay_alpha: f32,
+    /// Gamma scale in `[1.0 - MAX_ALPHA, 1.0]` when [`DimMode::Gamma`] is
+    /// engaged below the floor, otherwise `None`.
+    pub gamma: Option<f32>,
+}
+
+/// Map a unified user brightness level (`0..=100`) to hardware + software
+/// dimming, per the display's [`ContinuumConfig`].
+///
+/// At or above the hardware floor the user level drives the hardware directly
+/// (no overlay). Below the floor the hardware pins at the floor and the chosen
+/// [`DimMode`] takes over. Values above 100 are clamped.
+///
+/// # Examples
+/// ```
+/// use duja_core::continuum::{map_user_level, ContinuumConfig, MAX_ALPHA};
+/// use duja_core::model::DimMode;
+///
+/// let cfg = ContinuumConfig::hardware(30, DimMode::Overlay);
+/// // Above the floor: pure hardware.
+/// assert_eq!(map_user_level(80, &cfg).hardware_pct, Some(80));
+/// // At zero: hardware pinned at the floor, overlay at full strength.
+/// let dark = map_user_level(0, &cfg);
+/// assert_eq!(dark.hardware_pct, Some(30));
+/// assert!((dark.overlay_alpha - MAX_ALPHA).abs() < 1e-6);
+/// ```
+#[must_use]
+pub fn map_user_level(user_pct: u8, cfg: &ContinuumConfig) -> ContinuumOutput {
+    let user_u8 = user_pct.min(100);
+    let floor_u8 = cfg.hw_floor_pct.min(100);
+    let user = f32::from(user_u8);
+    let floor = f32::from(floor_u8);
+
+    if !cfg.has_hardware {
+        // Overlay/gamma spans the whole range; hardware is never touched.
+        let alpha_full = MAX_ALPHA * (100.0 - user) / 100.0;
+        return finish(None, alpha_full, cfg.mode);
+    }
+
+    if user_u8 >= floor_u8 {
+        // Pure hardware: the user level maps straight onto the hardware value.
+        ContinuumOutput {
+            hardware_pct: Some(user_u8),
+            overlay_alpha: 0.0,
+            gamma: None,
+        }
+    } else {
+        // Below the floor: pin hardware, dim in software. `floor` is >= 1 here
+        // (user_u8 < floor_u8), so the division is well-defined.
+        let alpha_full = MAX_ALPHA * (floor - user) / floor;
+        finish(Some(floor_u8), alpha_full, cfg.mode)
+    }
+}
+
+/// Apply the dim mode to a computed overlay strength, producing the output for
+/// the sub-floor / software-only regime.
+fn finish(hardware_pct: Option<u8>, alpha_full: f32, mode: DimMode) -> ContinuumOutput {
+    let alpha = alpha_full.clamp(0.0, MAX_ALPHA);
+    match mode {
+        DimMode::Overlay => ContinuumOutput {
+            hardware_pct,
+            overlay_alpha: alpha,
+            gamma: None,
+        },
+        DimMode::Gamma => ContinuumOutput {
+            hardware_pct,
+            overlay_alpha: 0.0,
+            gamma: Some((1.0 - alpha).clamp(1.0 - MAX_ALPHA, 1.0)),
+        },
+        DimMode::Off => ContinuumOutput {
+            hardware_pct,
+            overlay_alpha: 0.0,
+            gamma: None,
+        },
+    }
+}
+
+/// Reflect an externally-observed hardware percentage back to a slider level.
+///
+/// Above the floor the user slider maps 1:1 onto hardware, so this is the
+/// identity there. A reading below the floor (something else drove the panel
+/// under Duja's software floor) is reported as the floor — the lowest level
+/// Duja represents with pure hardware.
+#[must_use]
+pub fn reverse_map(hw_pct: u8, cfg: &ContinuumConfig) -> u8 {
+    let floor = cfg.hw_floor_pct.min(100);
+    hw_pct.clamp(floor, 100)
+}
 
 #[cfg(test)]
 mod tests {
