@@ -165,9 +165,17 @@ impl QuirkDb {
     ///   [`SUPPORTED_SCHEMA_VERSION`].
     /// - [`QuirkError::Toml`] if the input is not valid TOML or breaks schema.
     pub fn parse(input: &str) -> Result<Self, QuirkError> {
-        // Spec stub: replaced by the real parser in the implementation commit.
-        let _ = input;
-        Ok(QuirkDb::empty())
+        if input.len() > MAX_QUIRKS_LEN {
+            return Err(QuirkError::TooLarge { len: input.len() });
+        }
+        let db: QuirkDb = toml_edit::de::from_str(input)?;
+        if db.schema_version != SUPPORTED_SCHEMA_VERSION {
+            return Err(QuirkError::UnsupportedSchemaVersion {
+                found: db.schema_version,
+                supported: SUPPORTED_SCHEMA_VERSION,
+            });
+        }
+        Ok(db)
     }
 
     /// The lazily-parsed embedded quirk database.
@@ -197,9 +205,77 @@ impl QuirkDb {
 
     /// [`resolve`](Self::resolve) over the id as a string, for testability.
     fn resolve_id(&self, id: &str) -> ResolvedQuirks {
-        // Spec stub: replaced by the real matcher in the implementation commit.
-        let _ = (self.quirks.len(), id.len());
-        ResolvedQuirks::default()
+        // Gather every matching entry with its specificity, then merge from
+        // least to most specific so the most specific setter of each field wins.
+        let mut matched: Vec<(MatchKind, usize, &QuirkEntry)> = self
+            .quirks
+            .iter()
+            .filter_map(|entry| {
+                match_specificity(&entry.pattern, id).map(|(kind, len)| (kind, len, entry))
+            })
+            .collect();
+        // Stable sort keeps file order for equal specificity (later file entry
+        // then wins, since it is merged last).
+        matched.sort_by_key(|&(kind, len, _)| (kind, len));
+
+        let mut resolved = ResolvedQuirks::default();
+        for (_, _, entry) in matched {
+            resolved.merge_entry(entry);
+        }
+        resolved
+    }
+}
+
+/// How an entry matched: a glob is always less specific than an exact prefix,
+/// so the derived ordering (`Glob` < `Exact`) sorts glob matches first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MatchKind {
+    Glob,
+    Exact,
+}
+
+/// Test whether `pattern` matches `id`, returning its match kind and the length
+/// of the matched prefix (longer = more specific), or `None` if it does not.
+fn match_specificity(pattern: &str, id: &str) -> Option<(MatchKind, usize)> {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        id.starts_with(prefix)
+            .then_some((MatchKind::Glob, prefix.len()))
+    } else {
+        id.starts_with(pattern)
+            .then_some((MatchKind::Exact, pattern.len()))
+    }
+}
+
+impl ResolvedQuirks {
+    /// Overlay one entry's set fields onto `self` (used most-specific last).
+    fn merge_entry(&mut self, entry: &QuirkEntry) {
+        if let Some(value) = entry.min_write_gap_ms {
+            self.min_write_gap_ms = Some(value);
+        }
+        if let Some(value) = entry.caps_retry {
+            self.caps_retry = Some(value);
+        }
+        if let Some(value) = entry.verify_writes {
+            self.verify_writes = value;
+        }
+        if let Some(ref value) = entry.input_source_allowed {
+            self.input_source_allowed = Some(value.clone());
+        }
+        if let Some(value) = entry.max_brightness {
+            self.max_brightness = Some(value);
+        }
+        if let Some(value) = entry.no_input_switch {
+            self.no_input_switch = value;
+        }
+        if let Some(value) = entry.caps_unreliable {
+            self.caps_unreliable = value;
+        }
+        if let Some(value) = entry.ddc_broken {
+            self.ddc_broken = value;
+        }
+        if let Some(ref note) = entry.note {
+            self.notes.push(note.clone());
+        }
     }
 }
 
