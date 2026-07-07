@@ -5,7 +5,106 @@
 //! them) and the UI (which renders them); they carry no behaviour beyond a
 //! handful of pure accessors.
 
-// ---- specs first (TDD); implementation follows in the next commit ----
+use std::collections::BTreeSet;
+
+use crate::id::StableDisplayId;
+
+/// A DDC/CI VCP feature that Duja reads and writes.
+///
+/// The discriminant order (`Brightness` < `Contrast` < `InputSource`) is
+/// deliberate: it makes [`Feature`] usable as a [`BTreeSet`] key with a stable,
+/// meaningful ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Feature {
+    /// Luminance / backlight (VCP code `0x10`).
+    Brightness,
+    /// Contrast (VCP code `0x12`).
+    Contrast,
+    /// Input source selection (VCP code `0x60`).
+    InputSource,
+}
+
+impl Feature {
+    /// Every [`Feature`] variant, for exhaustive iteration in probes and tests.
+    pub const ALL: [Feature; 3] = [Feature::Brightness, Feature::Contrast, Feature::InputSource];
+
+    /// The MCCS VCP code that identifies this feature on the wire.
+    #[must_use]
+    pub fn vcp_code(&self) -> u8 {
+        match self {
+            Feature::Brightness => 0x10,
+            Feature::Contrast => 0x12,
+            Feature::InputSource => 0x60,
+        }
+    }
+}
+
+/// The current value and maximum of a VCP feature, as reported by hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeatureRange {
+    /// The current raw value.
+    pub current: u16,
+    /// The maximum raw value the feature accepts.
+    pub max: u16,
+}
+
+/// What a display can do, as discovered during probing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Capabilities {
+    /// The VCP features the display reports as controllable.
+    pub features: BTreeSet<Feature>,
+    /// Whether the display exposes a real hardware brightness range (`true` for
+    /// DDC/panel-backed displays; `false` for software-only dimming).
+    pub hardware_range: bool,
+    /// The raw MCCS capability string, if the backend captured one.
+    pub raw_capabilities: Option<String>,
+}
+
+impl Capabilities {
+    /// Whether `feature` is among the supported set.
+    #[must_use]
+    pub fn supports(&self, feature: Feature) -> bool {
+        self.features.contains(&feature)
+    }
+}
+
+/// How sub-hardware-floor dimming is realised for a display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DimMode {
+    /// A translucent black overlay window (default; GPU-cheap, HDR-safe).
+    #[default]
+    Overlay,
+    /// A reduced gamma ramp (opt-in; disabled under HDR).
+    Gamma,
+    /// No software dimming — clamp at the hardware floor.
+    Off,
+}
+
+/// The class of a display, which selects the control backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayKind {
+    /// An external monitor controlled over DDC/CI.
+    ExternalDdc,
+    /// A built-in laptop/all-in-one panel (WMI / `DisplayServices` / backlight).
+    InternalPanel,
+    /// A display with no hardware brightness control; overlay-only.
+    SoftwareOnly,
+}
+
+/// An immutable, UI-facing view of a single display's current state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplaySnapshot {
+    /// Durable EDID-derived identity.
+    pub id: StableDisplayId,
+    /// Human-readable name for display in the UI.
+    pub name: String,
+    /// Which backend class controls this display.
+    pub kind: DisplayKind,
+    /// The single unified user brightness level, 0..=100.
+    pub user_level_pct: u8,
+    /// Probed capabilities.
+    pub capabilities: Capabilities,
+}
 
 #[cfg(test)]
 mod tests {
