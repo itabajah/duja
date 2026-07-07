@@ -1,0 +1,9 @@
+# Normalize line endings: LF in the repo, LF on checkout everywhere.
+* text=auto eol=lf
+
+# Binary fixtures (EDID blobs etc.) must never be eol-mangled.
+*.bin binary
+*.edid binary
+*.png binary
+*.ico binary
+*.icns binary

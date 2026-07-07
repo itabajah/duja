@@ -1,0 +1,20 @@
+[package]
+name = "dujactl"
+description = "Command-line companion for Duja: scriptable control of the running app over local IPC."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "dujactl"
+path = "src/main.rs"
+
+[dependencies]
+duja-core.workspace = true
+duja-ipc.workspace = true
+
+[lints]
+workspace = true

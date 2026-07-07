@@ -1,0 +1,69 @@
+# Duja workspace — see docs/adr/ for architecture decisions.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/duja-core",
+    "crates/duja-ddc",
+    "crates/duja-panel",
+    "crates/duja-dimmer",
+    "crates/duja-platform",
+    "crates/duja-ipc",
+    "crates/duja-ui",
+    "crates/duja-app",
+    "crates/dujactl",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+# MSRV policy: "stable minus 2" (toolchain is 1.96.1), floor-bounded by Slint's
+# MSRV once it lands. Verified by the `msrv` CI job.
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/itabajah/duja"
+authors = ["Duja contributors"]
+homepage = "https://github.com/itabajah/duja"
+
+[workspace.dependencies]
+# Inter-crate paths (single source of truth for internal deps).
+duja-core = { path = "crates/duja-core" }
+duja-ddc = { path = "crates/duja-ddc" }
+duja-panel = { path = "crates/duja-panel" }
+duja-dimmer = { path = "crates/duja-dimmer" }
+duja-platform = { path = "crates/duja-platform" }
+duja-ipc = { path = "crates/duja-ipc" }
+duja-ui = { path = "crates/duja-ui" }
+# External deps are added here (version-pinned once, referenced with
+# `workspace = true`) at the phase where they are first used.
+
+# ---------------------------------------------------------------------------
+# Lint wall (ADR: bulletproof-production policy).
+# Tests may unwrap: each crate carries
+# `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]`.
+# Every `#[allow]` in source requires a `// RATIONALE:` comment (review rubric).
+# ---------------------------------------------------------------------------
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+undocumented_unsafe_blocks = "deny"
+indexing_slicing = "warn"
+arithmetic_side_effects = "warn"
+
+[profile.release]
+# Budget: stripped binary <= 12 MB (docs/perf-budgets.md).
+lto = "thin"        # try "fat" at P8 hardening
+codegen-units = 1
+strip = true
+opt-level = 3
+# Keep unwinding: thread supervision relies on catch_unwind (ADR-0005).
+panic = "unwind"

@@ -1,0 +1,18 @@
+[package]
+name = "duja-ipc"
+description = "Local IPC for Duja: protocol types, framing, and hardened per-OS transports (named pipe / unix socket)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+duja-core.workspace = true
+
+[dev-dependencies]
+duja-core = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,23 @@
+# Duja embedded monitor-quirk database.
+#
+# Compiled into duja-core via include_str!. Users can extend/override with
+# `quirks.override.toml` in their config directory; community reports arrive
+# through the `monitor-quirk-report` issue template.
+#
+# Matching: exact StableDisplayId prefix ("GSM-5B09") or bounded glob on
+# mfg/model ("DEL-*"). Exact beats glob. No user-supplied regex — ever.
+#
+# Schema (all fields optional unless noted):
+#   [[quirk]]
+#   match = "GSM-5B09"          # required: id prefix or bounded glob
+#   note = "why this exists / source report"
+#   min_write_gap_ms = 200      # slow DDC processors need longer gaps
+#   max_brightness = 100        # monitors that lie about their VCP max
+#   no_input_switch = true      # VCP 0x60 advertised but broken
+#   caps_unreliable = true      # ignore capability string, probe features
+#   ddc_broken = true           # force software-only control
+
+schema_version = 1
+
+# Seed entries land in P2 alongside the parser + matcher (test-first), sourced
+# from documented ddcutil/Lunar offender lists and own-hardware probing.

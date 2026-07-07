@@ -1,0 +1,15 @@
+# Conventional-commit enforcement (crate-ci/committed, runs in CI).
+style = "conventional"
+subject_length = 72
+allowed_types = [
+  "feat",
+  "fix",
+  "refactor",
+  "perf",
+  "test",
+  "docs",
+  "chore",
+  "ci",
+  "build",
+  "revert",
+]

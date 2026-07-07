@@ -1,0 +1,18 @@
+[package]
+name = "duja-ddc"
+description = "External-monitor hardware control for Duja via DDC/CI (VCP brightness/contrast/input-source)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+duja-core.workspace = true
+
+[dev-dependencies]
+duja-core = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

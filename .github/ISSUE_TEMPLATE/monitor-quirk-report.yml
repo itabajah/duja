@@ -1,0 +1,49 @@
+name: Monitor quirk report
+description: A specific monitor behaves badly with Duja (wrong ranges, ignored commands, needs slow writes). These reports seed the shared quirks database.
+labels: ["quirk"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks — quirk reports directly improve Duja for everyone with the same monitor.
+        Please run `dujactl doctor --report` and paste its output below; it contains the
+        monitor identity and probed capabilities (no personal data).
+  - type: input
+    id: monitor
+    attributes:
+      label: Monitor make and model
+      placeholder: "LG 27UK850, Dell U2720Q…"
+    validations:
+      required: true
+  - type: input
+    id: connection
+    attributes:
+      label: Connection path
+      placeholder: "DisplayPort direct / HDMI via USB-C dock / …"
+    validations:
+      required: true
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: Symptom
+      options:
+        - Brightness commands ignored
+        - Wrong/lying brightness range
+        - Needs slow writes (flickers or drops commands)
+        - Capability string wrong or missing
+        - Input-source switching broken
+        - Contrast broken
+        - Other (describe below)
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`dujactl doctor --report` output"
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Anything else

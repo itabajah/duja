@@ -1,0 +1,19 @@
+[package]
+name = "duja-core"
+description = "Pure domain logic for Duja: display model, brightness continuum, manager, config. No OS dependencies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# Exposes fakes + the reusable BrightnessController contract-test suite to
+# other crates' dev-dependencies. Never enabled in release builds.
+test-support = []
+
+[dependencies]
+
+[lints]
+workspace = true

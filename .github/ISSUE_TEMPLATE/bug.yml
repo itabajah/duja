@@ -1,0 +1,36 @@
+name: Bug report
+description: Something crashed, misbehaved, or didn't work as documented.
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Duja version
+      placeholder: "output of `dujactl version` or the About dialog"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      placeholder: "Windows 11 24H2 / macOS 15.2 / Fedora 42 KDE Wayland"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Display setup
+      description: Monitors, how they're connected (HDMI/DP/USB-C/dock), laptop panel?
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Attach relevant lines from the log folder (tray menu → Open log folder), or a crash log if one exists.
+      render: text

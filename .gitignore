@@ -1,0 +1,20 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# cargo-fuzz
+fuzz/target
+fuzz/artifacts
+fuzz/coverage
+
+# coverage output
+lcov.info
+coverage/
+
+# editor noise
+.vscode/
+.idea/
+*.swp
+
+# local-only environment
+.env
