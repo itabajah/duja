@@ -10,7 +10,7 @@ MADR-lite format. Accepted ADRs are changed by superseding, not editing.
 | [0004](0004-stable-edid-identity.md) | Display identity: stable EDID-derived IDs | accepted |
 | [0005](0005-threads-not-tokio.md) | Concurrency: std threads + channels, no async runtime | accepted |
 | 0006 | IPC design | pending (P5) |
-| 0007 | Config schema & migrations | pending (P2) |
+| [0007](0007-config-schema-and-migrations.md) | Config schema, migrations, and persistence | accepted |
 | 0008 | Licensing (MIT OR Apache-2.0; Slint royalty-free) | pending (P4, when Slint lands) |
 | [0009](0009-software-renderer-default.md) | Slint renderer: software renderer default | accepted |
 | 0010 | Linux tray: tray-icon vs ksni | pending (P7) |

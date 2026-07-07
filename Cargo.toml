@@ -14,6 +14,9 @@ members = [
     "crates/dujactl",
     "xtask",
 ]
+# `fuzz/` is its own workspace (cargo-fuzz + libfuzzer-sys, nightly to run); keep
+# it out of the main graph so its deps never touch the release lockfile.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.1"
@@ -39,8 +42,17 @@ duja-ui = { path = "crates/duja-ui" }
 # `workspace = true`) at the phase where they are first used.
 # Runtime: typed error enums per the error policy (§5). Runtime, no_std-free.
 thiserror = "2"
+# Runtime (config §7 + quirk DB): serde derive for the typed schemas;
+# toml_edit (not `toml`) as the single shared TOML crate — its document model
+# lets config round-trip unknown keys/comments, and its `serde` feature gives
+# the quirk DB typed deserialisation; tempfile for same-dir atomic writes.
+serde = { version = "1", features = ["derive"] }
+toml_edit = { version = "0.25", features = ["serde"] }
+tempfile = "3"
 # Dev-only: property-based testing for the pure-TDD kernel (continuum, EDID).
 proptest = "1"
+# Dev-only: snapshot testing for config migration fixtures (§4.1).
+insta = { version = "1", features = ["toml"] }
 
 # ---------------------------------------------------------------------------
 # Lint wall (ADR: bulletproof-production policy).
