@@ -14,6 +14,9 @@ members = [
     "crates/dujactl",
     "xtask",
 ]
+# `fuzz/` is its own workspace (cargo-fuzz + libfuzzer-sys, nightly to run); keep
+# it out of the main graph so its deps never touch the release lockfile.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.1"

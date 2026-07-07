@@ -1,0 +1,44 @@
+# Duja embedded monitor-quirk database.
+#
+# Compiled into duja-core via include_str!. Users can extend/override with
+# `quirks.override.toml` in their config directory; community reports arrive
+# through the `monitor-quirk-report` issue template.
+#
+# Matching (see crates/duja-core/src/quirks.rs):
+#   * `match` is a StableDisplayId prefix, e.g. "MSI-30B6" matches the id
+#     "MSI-30B6-<serial>". A trailing "*" makes it a glob over that prefix,
+#     e.g. "MSI-*" matches every MSI display. No other wildcards, no regex.
+#   * An exact (non-glob) prefix always beats a glob; among exacts the longest
+#     prefix wins, among globs the longest prefix wins. `resolve` MERGES every
+#     matching entry, so a broad "MSI-*" default can set fields that a specific
+#     "MSI-30B6" entry leaves untouched, and specific entries override broad
+#     ones field by field.
+#
+# Schema (all fields optional except `match`):
+#   [[quirk]]
+#   match                = "MSI-30B6"   # required: id prefix or trailing-* glob
+#   note                 = "why / source report"
+#   min_write_gap_ms     = 50           # slow DDC processors need longer gaps
+#   caps_retry           = 3            # extra caps-string read attempts
+#   verify_writes        = true         # read back after every write
+#   input_source_allowed = [17, 18, 15] # VCP 0x60 values (decimal) if metadata lies
+#   max_brightness       = 100          # override a bogus brightness VCP maximum
+#   no_input_switch      = false        # VCP 0x60 advertised but broken
+#   caps_unreliable      = false        # ignore capability string; probe features
+#   ddc_broken           = false        # force software-only control
+
+schema_version = 1
+
+# --- MSI MP273QP (P1 DDC spike; docs/adr/0002) --------------------------------
+# Own-hardware findings from the spike that decided the Windows DDC backend:
+# back-to-back VCP reads fail ~60-70% without pacing, the capability string is
+# slow (0.8-1.1 s) and intermittently fails, and writes must be read-back
+# verified. VCP 0x60 reports a bogus max=3 with current=15, so the input list is
+# taken from the caps string: DP=0x0F(15), HDMI1=0x11(17), HDMI2=0x12(18).
+[[quirk]]
+match = "MSI-30B6"
+note = "MSI MP273QP: needs >=50ms DDC pacing, flaky/slow caps string (retry), read-back verify; 0x60 input list from caps (docs/adr/0002)."
+min_write_gap_ms = 50
+caps_retry = 3
+verify_writes = true
+input_source_allowed = [17, 18, 15]
