@@ -121,18 +121,79 @@ pub enum DisplayState {
     },
 }
 
+/// Everything the manager retains for one resolved display id.
+#[derive(Debug, Clone)]
+struct DisplayRecord {
+    /// Connected / disconnected, with the relevant instant.
+    state: DisplayState,
+    /// Backend class, refreshed from the latest sighting.
+    kind: DisplayKind,
+    /// Resolved name from the latest sighting, if any.
+    name: Option<String>,
+    /// Capabilities from the latest sighting.
+    capabilities: Capabilities,
+    /// The last level recorded via [`DisplayManager::record_user_level`].
+    last_user_level: Option<u8>,
+    /// `false` after the watchdog marks the display stuck, until re-sighted.
+    responsive: bool,
+}
+
 /// Pure hot-plug state: diffing, per-display state, and level restore.
 ///
-/// Keyed by resolved [`StableDisplayId`] in a `BTreeMap`, so every listing is
-/// naturally sorted and diffing allocates only one small id set per pass.
+/// Keyed by resolved [`StableDisplayId`] in a `BTreeMap`, so every listing
+/// comes out sorted by id and the diff path allocates only a few small id
+/// sets per (rare) hot-plug pass.
+///
+/// # Examples
+/// ```
+/// # fn edid_id(serial: u32) -> duja_core::id::StableDisplayId {
+/// #     let mut e = vec![0x00u8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x04, 0x21, 0, 0];
+/// #     e.extend_from_slice(&serial.to_le_bytes());
+/// #     e.resize(127, 0);
+/// #     let sum: u8 = e.iter().copied().fold(0u8, u8::wrapping_add);
+/// #     e.push(sum.wrapping_neg());
+/// #     duja_core::id::StableDisplayId::from_edid(&e).unwrap()
+/// # }
+/// use std::time::Instant;
+/// use duja_core::manager::{DiscoveredDisplay, DisplayManager, ManagerEvent};
+/// use duja_core::model::{Capabilities, DisplayKind};
+///
+/// let monitor = DiscoveredDisplay {
+///     id: edid_id(7),
+///     kind: DisplayKind::ExternalDdc,
+///     name: Some("Office".to_owned()),
+///     capabilities: Capabilities::default(),
+/// };
+///
+/// let mut manager = DisplayManager::new();
+/// let t0 = Instant::now();
+///
+/// // First sighting: a decision to add.
+/// let events = manager.apply_enumeration(vec![monitor.clone()], t0);
+/// assert!(matches!(events.as_slice(), [ManagerEvent::Added { .. }]));
+///
+/// // The user dims it; the monitor is unplugged, then replugged:
+/// // the same EDID brings the level back.
+/// manager.record_user_level(&monitor.id, 30);
+/// manager.apply_enumeration(vec![], t0);
+/// let events = manager.apply_enumeration(vec![monitor], t0);
+/// assert!(matches!(
+///     events.as_slice(),
+///     [ManagerEvent::Reattached { restore_level: Some(30), .. }]
+/// ));
+/// ```
 #[derive(Debug, Clone, Default)]
-pub struct DisplayManager {}
+pub struct DisplayManager {
+    records: BTreeMap<StableDisplayId, DisplayRecord>,
+}
 
 impl DisplayManager {
     /// Create a manager with no known displays.
     #[must_use]
     pub fn new() -> Self {
-        DisplayManager {}
+        DisplayManager {
+            records: BTreeMap::new(),
+        }
     }
 
     /// Apply one (post-debounce) enumeration pass observed at `now`, returning
@@ -146,8 +207,62 @@ impl DisplayManager {
         seen: Vec<DiscoveredDisplay>,
         now: Instant,
     ) -> Vec<ManagerEvent> {
-        let _ = (seen, now);
-        Vec::new()
+        let resolved = resolve_slots(seen);
+        let mut events = Vec::new();
+
+        // The membership set the removal sweep diffs against.
+        let seen_ids: BTreeSet<StableDisplayId> =
+            resolved.iter().map(|(id, _)| id.clone()).collect();
+
+        // Sightings first, in the enumeration's input order.
+        for (id, display) in resolved {
+            match self.records.get_mut(&id) {
+                None => {
+                    self.records.insert(
+                        id.clone(),
+                        DisplayRecord {
+                            state: DisplayState::Connected { last_seen: now },
+                            kind: display.kind,
+                            name: display.name,
+                            capabilities: display.capabilities,
+                            last_user_level: None,
+                            responsive: true,
+                        },
+                    );
+                    events.push(ManagerEvent::Added { id });
+                }
+                Some(record) => {
+                    let was_disconnected =
+                        matches!(record.state, DisplayState::Disconnected { .. });
+                    let was_unresponsive = !record.responsive;
+                    record.state = DisplayState::Connected { last_seen: now };
+                    record.kind = display.kind;
+                    record.name = display.name;
+                    record.capabilities = display.capabilities;
+                    record.responsive = true;
+                    if was_disconnected {
+                        events.push(ManagerEvent::Reattached {
+                            id: id.clone(),
+                            restore_level: record.last_user_level,
+                        });
+                    }
+                    if was_unresponsive {
+                        events.push(ManagerEvent::Responsive { id });
+                    }
+                }
+            }
+        }
+
+        // Then the removal sweep, in id order (`BTreeMap` iteration). Records
+        // are retained — a replug must be able to restore them.
+        for (id, record) in &mut self.records {
+            if matches!(record.state, DisplayState::Connected { .. }) && !seen_ids.contains(id) {
+                record.state = DisplayState::Disconnected { since: now };
+                events.push(ManagerEvent::Removed { id: id.clone() });
+            }
+        }
+
+        events
     }
 
     /// Record the user's chosen level (percent, clamped to 100) for a display,
@@ -156,8 +271,13 @@ impl DisplayManager {
     /// Returns `true` if the display is known (connected **or** disconnected —
     /// levels survive unplugs), `false` for an unknown id.
     pub fn record_user_level(&mut self, id: &StableDisplayId, pct: u8) -> bool {
-        let _ = (id, pct);
-        false
+        match self.records.get_mut(id) {
+            Some(record) => {
+                record.last_user_level = Some(pct.min(100));
+                true
+            }
+            None => false,
+        }
     }
 
     /// Mark a connected display as unresponsive (fed by the P3 watchdog when
@@ -169,8 +289,13 @@ impl DisplayManager {
     /// enumeration that sights the display, which emits
     /// [`ManagerEvent::Responsive`].
     pub fn mark_unresponsive(&mut self, id: &StableDisplayId) -> Option<ManagerEvent> {
-        let _ = id;
-        None
+        let record = self.records.get_mut(id)?;
+        if record.responsive && matches!(record.state, DisplayState::Connected { .. }) {
+            record.responsive = false;
+            Some(ManagerEvent::Unresponsive { id: id.clone() })
+        } else {
+            None
+        }
     }
 
     /// UI-facing snapshots of every **connected** display, sorted by id.
@@ -180,14 +305,23 @@ impl DisplayManager {
     /// displays are included (the UI greys them; it does not hide them).
     #[must_use]
     pub fn snapshots(&self) -> Vec<DisplaySnapshot> {
-        Vec::new()
+        self.records
+            .iter()
+            .filter(|(_, record)| matches!(record.state, DisplayState::Connected { .. }))
+            .map(|(id, record)| DisplaySnapshot {
+                id: id.clone(),
+                name: record.name.clone().unwrap_or_else(|| id.to_string()),
+                kind: record.kind,
+                user_level_pct: record.last_user_level.unwrap_or(DEFAULT_USER_LEVEL_PCT),
+                capabilities: record.capabilities.clone(),
+            })
+            .collect()
     }
 
     /// The connection state of `id`, if the manager knows it.
     #[must_use]
     pub fn state_of(&self, id: &StableDisplayId) -> Option<DisplayState> {
-        let _ = id;
-        None
+        self.records.get(id).map(|record| record.state)
     }
 
     /// Whether `id` is currently believed responsive; `None` for unknown ids.
@@ -196,9 +330,43 @@ impl DisplayManager {
     /// unresponsive stays flagged until an enumeration sights it again.
     #[must_use]
     pub fn is_responsive(&self, id: &StableDisplayId) -> Option<bool> {
-        let _ = id;
-        None
+        self.records.get(id).map(|record| record.responsive)
     }
+}
+
+/// Resolve serial-less-twin collisions in one enumeration pass.
+///
+/// Ids that occur more than once get `-slot<n>` suffixes assigned in input
+/// (connector) order, `0..N-1`; ids that occur exactly once pass through
+/// untouched. Pure and total for any input.
+fn resolve_slots(seen: Vec<DiscoveredDisplay>) -> Vec<(StableDisplayId, DiscoveredDisplay)> {
+    // First pass: which ids collide?
+    let duplicated: BTreeSet<StableDisplayId> = {
+        let mut once: BTreeSet<&StableDisplayId> = BTreeSet::new();
+        let mut duplicated = BTreeSet::new();
+        for display in &seen {
+            if !once.insert(&display.id) {
+                duplicated.insert(display.id.clone());
+            }
+        }
+        duplicated
+    };
+
+    // Second pass: suffix colliding ids in the order given.
+    let mut next_slot: BTreeMap<StableDisplayId, u32> = BTreeMap::new();
+    seen.into_iter()
+        .map(|display| {
+            let id = if duplicated.contains(&display.id) {
+                let slot = next_slot.entry(display.id.clone()).or_insert(0);
+                let resolved = display.id.with_slot(*slot);
+                *slot = slot.wrapping_add(1);
+                resolved
+            } else {
+                display.id.clone()
+            };
+            (id, display)
+        })
+        .collect()
 }
 
 #[cfg(test)]
