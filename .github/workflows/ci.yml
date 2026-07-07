@@ -94,7 +94,9 @@ jobs:
   commit-lint:
     name: conventional commits
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    # Bot commit bodies (dependabot changelogs) can't obey our line-length
+    # rules; their PR titles are checked by the squash-merge convention instead.
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
