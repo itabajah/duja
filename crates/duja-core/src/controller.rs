@@ -1,7 +1,69 @@
 //! The [`BrightnessController`] trait every OS backend implements, and the
 //! backend-agnostic [`ControlError`] it surfaces.
 
-// ---- specs first (TDD); implementation follows in the next commit ----
+use std::error::Error;
+
+use crate::model::{Capabilities, Feature, FeatureRange};
+
+/// A backend-agnostic failure from a display-control operation.
+///
+/// Per-crate backend errors (`DdcError`, `PanelError`, …) cross into
+/// [`ControlError::Backend`] at the trait boundary.
+#[derive(Debug, thiserror::Error)]
+pub enum ControlError {
+    /// The display is no longer connected (unplugged, powered off, over RDP).
+    #[error("display is disconnected")]
+    Disconnected,
+    /// The display does not support the requested feature.
+    #[error("feature is not supported by this display")]
+    Unsupported,
+    /// The operation did not complete within the backend's deadline.
+    #[error("control operation timed out")]
+    Timeout,
+    /// An opaque backend-specific error.
+    #[error("backend error: {0}")]
+    Backend(#[source] Box<dyn Error + Send + Sync>),
+}
+
+impl ControlError {
+    /// Wrap any `Send + Sync` error as a [`ControlError::Backend`].
+    pub fn backend<E>(err: E) -> Self
+    where
+        E: Into<Box<dyn Error + Send + Sync>>,
+    {
+        ControlError::Backend(err.into())
+    }
+}
+
+/// A per-display handle for reading and writing VCP features.
+///
+/// `&mut self` is deliberate: it makes per-monitor serialization a
+/// compile-time property (each DDC worker exclusively owns its controller, so
+/// no locking is required). `Send + Debug` let a controller be moved onto its
+/// worker thread and logged.
+pub trait BrightnessController: Send + std::fmt::Debug {
+    /// Probe the display's capabilities (caps string + quirk merge).
+    ///
+    /// # Errors
+    /// Returns [`ControlError`] if the display cannot be reached or its
+    /// capabilities cannot be read.
+    fn probe(&mut self) -> Result<Capabilities, ControlError>;
+
+    /// Read the current value and maximum of `feature`.
+    ///
+    /// # Errors
+    /// [`ControlError::Unsupported`] if the feature is unavailable,
+    /// [`ControlError::Disconnected`] / [`ControlError::Timeout`] / other
+    /// [`ControlError`] on failure.
+    fn get(&mut self, feature: Feature) -> Result<FeatureRange, ControlError>;
+
+    /// Write `value` to `feature`.
+    ///
+    /// # Errors
+    /// [`ControlError::Unsupported`] if the feature is unavailable, or another
+    /// [`ControlError`] if the write cannot be completed.
+    fn set(&mut self, feature: Feature, value: u16) -> Result<(), ControlError>;
+}
 
 #[cfg(test)]
 mod tests {
