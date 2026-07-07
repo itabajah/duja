@@ -33,10 +33,10 @@ struct Membership {
 /// A collection of named sync groups.
 ///
 /// A display belongs to **at most one** group at a time. The single source of
-/// truth is a map from [`StableDisplayId`] to its [`Membership`]; a group is
-/// simply the set of displays that name it, so groups are created implicitly by
-/// [`add`](Self::add) and vanish when their last member leaves. This makes the
-/// "at most one group" invariant impossible to violate.
+/// truth is a map from [`StableDisplayId`] to its membership (group name +
+/// offset); a group is simply the set of displays that name it, so groups are
+/// created implicitly by [`add`](Self::add) and vanish when their last member
+/// leaves. This makes the "at most one group" invariant impossible to violate.
 #[derive(Debug, Clone, Default)]
 pub struct SyncGroups {
     members: BTreeMap<StableDisplayId, Membership>,
