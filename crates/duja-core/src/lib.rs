@@ -22,9 +22,9 @@
 //!   ([`sync::SyncGroups`])
 //! - [`config`] — typed config schema, format-preserving TOML document,
 //!   chained migrations, and crash-safe atomic persistence (the only I/O)
+//! - [`caps`] — total MCCS capability-string parser ([`caps::ParsedCaps`])
+//! - [`quirks`] — quirk database + stable-id matcher ([`quirks::QuirkDb`])
 //! - `testing` (feature `test-support`) — fakes + the controller contract suite
-//!
-//! Planned (later waves): `quirks`, `caps` (MCCS parser).
 //!
 //! # Example
 //!
@@ -48,6 +48,7 @@
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod caps;
 pub mod config;
 pub mod continuum;
 pub mod controller;
@@ -55,6 +56,7 @@ pub mod debounce;
 pub mod id;
 pub mod manager;
 pub mod model;
+pub mod quirks;
 pub mod sync;
 
 /// Deterministic fakes and the reusable controller contract suite.

@@ -1,0 +1,48 @@
+# cargo-fuzz targets for duja-core's total parsers.
+#
+# This is a SEPARATE workspace (own `[workspace]` table below) so the fuzz-only
+# dependency on libfuzzer-sys never enters the main workspace's lockfile or
+# lint/build graph. libfuzzer-sys needs a nightly toolchain to *run* (Sanitizer
+# coverage instrumentation); `cargo check` compiles fine on stable.
+[package]
+name = "duja-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.duja-core]
+path = "../crates/duja-core"
+
+# Keep this crate out of the parent workspace: it is its own root.
+[workspace]
+
+[profile.release]
+debug = 1
+
+# Prevent Cargo from treating targets as tests/benches/docs.
+[[bin]]
+name = "fuzz_caps_string"
+path = "fuzz_targets/fuzz_caps_string.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_edid_parse"
+path = "fuzz_targets/fuzz_edid_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_quirks_toml"
+path = "fuzz_targets/fuzz_quirks_toml.rs"
+test = false
+doc = false
+bench = false
