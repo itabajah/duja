@@ -1,0 +1,23 @@
+[package]
+name = "ddc-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Empty workspace table detaches this spike from the parent workspace and its lint wall.
+[workspace]
+
+# NOTE: we intentionally do NOT depend on `ddc` directly. ddc-hi 0.4.1 pins ddc ^0.2.0
+# (resolves to 0.2.2); adding `ddc = 0.3.0` pulls a SECOND, incompatible copy of the
+# `Ddc` trait. Use ddc-hi's re-exports (`ddc_hi::{Ddc, DdcTable, VcpValue, ...}`) instead.
+[features]
+# When enabled, adds a block that moves a `Display` into a thread. Expected to FAIL
+# to compile, empirically proving ddc-hi's Display/Handle is !Send (worker-thread test).
+prove_send = []
+
+[dependencies]
+# Default build uses ddc-hi defaults (winapi + nvapi + i2c + macos). To reproduce the
+# "winapi-only" experiment (what a Windows-only backend would actually see), swap to:
+#   ddc-hi = { version = "0.4.1", default-features = false, features = ["ddc-winapi"] }
+ddc-hi = "0.4.1"
+windows = { version = "0.62.2", features = ["Win32_Devices_Display", "Win32_Graphics_Gdi", "Win32_Foundation"] }
