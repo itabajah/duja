@@ -14,7 +14,7 @@ use std::path::Path;
 use toml_edit::{DocumentMut, Item, Table};
 
 use crate::config::error::ConfigError;
-use crate::config::migrate::{self, CURRENT_VERSION};
+use crate::config::migrate;
 use crate::config::persist;
 use crate::config::schema::{Config, DimMode, Theme};
 
@@ -63,7 +63,7 @@ impl ConfigDocument {
     /// Load configuration from `path`.
     ///
     /// A missing file yields [`defaults`](Self::defaults) (a normal first run).
-    /// An existing file is parsed and migrated up to [`CURRENT_VERSION`]. The
+    /// An existing file is parsed and migrated up to [`CURRENT_VERSION`](migrate::CURRENT_VERSION). The
     /// file is never rewritten here — the caller decides when to save.
     ///
     /// # Errors
@@ -198,6 +198,14 @@ impl ConfigDocument {
         });
     }
 
+    /// Set a monitor's `sync_offset` (percentage points against the group
+    /// master; only meaningful alongside a `sync_group`).
+    pub fn set_monitor_sync_offset(&mut self, id: &str, offset: i8) {
+        self.with_monitor(id, |monitor| {
+            monitor.insert("sync_offset", toml_edit::value(i64::from(offset)));
+        });
+    }
+
     /// Set a monitor's `excluded` flag.
     pub fn set_monitor_excluded(&mut self, id: &str, excluded: bool) {
         self.with_monitor(id, |monitor| {
@@ -238,19 +246,22 @@ impl ConfigDocument {
     }
 }
 
-/// Read the top-level `schema_version`, defaulting to [`CURRENT_VERSION`].
+/// Read the top-level `schema_version`, defaulting to `0` (pre-versioning).
 ///
-/// An absent (or non-integer / out-of-range) version is treated as the current
-/// version rather than as `0`: a v1 build always stamps the version on save, so
-/// an unstamped file is a hand-written *current* file. Treating it as an ancient
-/// version and running migrations against it would corrupt it. A genuinely older
-/// file always carries its own stamp and so is migrated correctly.
+/// An absent (or non-integer / out-of-range) version is treated as version 0
+/// and migrated forward, per ADR-0007: only pre-versioning builds — and hand-
+/// written files — omit the stamp, and every stamped build writes its version
+/// on save. Migration steps are therefore written to be **shape-tolerant**: a
+/// step that renames a key is a no-op when the key is absent, so migrating an
+/// unstamped file that already has the current shape merely stamps it. This is
+/// what keeps future migrations safe for hand-written files; treating unstamped
+/// as "current" would silently skip every migration step for them instead.
 fn read_schema_version(doc: &DocumentMut) -> u32 {
     doc.as_table()
         .get("schema_version")
         .and_then(Item::as_integer)
         .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(CURRENT_VERSION)
+        .unwrap_or(0)
 }
 
 /// Ensure `parent[key]` is a table, replacing a non-table item if necessary, and
@@ -449,7 +460,7 @@ theme = \"dark\"
 
         let doc = ConfigDocument::load(&path).expect("load + migrate");
         let cfg = doc.config().expect("typed");
-        assert_eq!(cfg.schema_version, CURRENT_VERSION);
+        assert_eq!(cfg.schema_version, migrate::CURRENT_VERSION);
         // The v0 key was migrated into the v1 field.
         assert_eq!(cfg.monitors.get("X").expect("entry").min_write_gap_ms, 150);
     }
@@ -469,9 +480,11 @@ theme = \"dark\"
     }
 
     #[test]
-    fn unversioned_file_is_treated_as_current_not_migrated() {
-        // No schema_version and a monitor using the *current* key name: this is
-        // a hand-written v1 file, so the v0 rename must NOT run.
+    fn unversioned_file_is_migrated_from_v0_shape_tolerantly() {
+        // No schema_version is treated as v0 and migrated forward (ADR-0007).
+        // The current-named key wins over a stray legacy key (shape-tolerant
+        // rename, no clobber), and the document is stamped to the current
+        // version on load.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         persist::write_atomic(
@@ -480,10 +493,24 @@ theme = \"dark\"
         )
         .expect("write");
         let doc = ConfigDocument::load(&path).expect("load");
-        // The stray old-style key is left untouched (not consumed by a rename).
-        assert!(doc.to_toml_string().contains("min_gap_ms = 999"));
+        // The stale legacy key is dropped; the explicit current value is kept.
+        assert!(!doc.to_toml_string().contains("999"));
+        assert!(doc.to_toml_string().contains("schema_version = 1"));
         let cfg = doc.config().expect("typed");
         assert_eq!(cfg.monitors.get("X").expect("entry").min_write_gap_ms, 150);
+    }
+
+    #[test]
+    fn unstamped_legacy_key_is_renamed_on_load() {
+        // A genuine pre-versioning file (only the old key) is upgraded in place.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        persist::write_atomic(&path, "[monitors.\"X\"]\nmin_gap_ms = 120\n").expect("write");
+        let cfg = ConfigDocument::load(&path)
+            .expect("load")
+            .config()
+            .expect("typed");
+        assert_eq!(cfg.monitors.get("X").expect("entry").min_write_gap_ms, 120);
     }
 
     #[test]

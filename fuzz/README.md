@@ -17,7 +17,19 @@ SanitizerCoverage instrumentation.
 To run: install the tools once with `rustup toolchain install nightly` and
 `cargo install cargo-fuzz`, then from the repo root run e.g.
 `cargo +nightly fuzz run fuzz_caps_string` (add `-- -max_total_time=300` for a
-timed session; `cargo +nightly fuzz list` shows all targets). Committed seeds
+timed session; `cargo +nightly fuzz list` shows all targets).
+
+**Windows note:** the default (address-sanitizer) build links
+`clang_rt.asan_dynamic-x86_64.dll`, which is not on `PATH` by default. Before
+running, prepend the MSVC host bin directory, e.g.
+`$env:Path = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\<ver>\bin\Hostx64\x64;$env:Path"`
+(otherwise the target exits with `0xc0000135`, a missing-DLL error). Do not
+retry with `-s none` after an ASan run without `cargo clean` — mixing sanitizer
+modes produces an `unresolved external symbol __start___sancov_cntrs` link error.
+
+Last full burn (2026-07-08): 1,000,000 executions per target, zero crashes
+(`fuzz_caps_string` 52k exec/s, `fuzz_edid_parse` 200k exec/s,
+`fuzz_quirks_toml` 4.4k exec/s). Committed seeds
 live in `fuzz/corpus/<target>/` — the real MSI MP273QP capability string, a
 valid synthetic 128-byte EDID, and the embedded `quirks.toml`. **Corpus
 policy:** keep the seeds small and meaningful (one valid, exercising sample per

@@ -149,6 +149,11 @@ pub struct MonitorConfig {
     /// The sync group this display belongs to; displays in the same group move
     /// together. `None` means the display is independent.
     pub sync_group: Option<String>,
+    /// Percentage-point offset applied to the group master when this display
+    /// moves with its [`sync_group`](Self::sync_group) (the
+    /// [`SyncGroups::fan_out`](crate::sync::SyncGroups::fan_out) semantics).
+    /// Meaningless without a group; persisted so offsets survive restarts.
+    pub sync_offset: i8,
     /// Whether Duja should ignore this display entirely.
     pub excluded: bool,
     /// Named DDC input sources and their VCP `0x60` codes (e.g. `hdmi1 = 17`).
@@ -166,6 +171,7 @@ impl Default for MonitorConfig {
             dim_mode: DimMode::Overlay,
             min_write_gap_ms: 100,
             sync_group: None,
+            sync_offset: 0,
             excluded: false,
             inputs: BTreeMap::new(),
         }
@@ -234,6 +240,7 @@ mod tests {
         assert_eq!(m.dim_mode, DimMode::Overlay);
         assert_eq!(m.min_write_gap_ms, 100);
         assert_eq!(m.sync_group, None);
+        assert_eq!(m.sync_offset, 0);
         assert!(!m.excluded);
         assert!(m.inputs.is_empty());
     }
@@ -347,17 +354,28 @@ mod tests {
             any_dim_mode(),
             0u64..=100_000,
             proptest::option::of(text_strategy()),
+            any::<i8>(),
             any::<bool>(),
             proptest::collection::btree_map(key_strategy(), any::<u16>(), 0..4),
         )
             .prop_map(
-                |(name, hw_floor_pct, dim_mode, min_write_gap_ms, sync_group, excluded, inputs)| {
+                |(
+                    name,
+                    hw_floor_pct,
+                    dim_mode,
+                    min_write_gap_ms,
+                    sync_group,
+                    sync_offset,
+                    excluded,
+                    inputs,
+                )| {
                     MonitorConfig {
                         name,
                         hw_floor_pct,
                         dim_mode,
                         min_write_gap_ms,
                         sync_group,
+                        sync_offset,
                         excluded,
                         inputs,
                     }

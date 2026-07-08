@@ -79,7 +79,11 @@ fn migrate_v0_to_v1(mut doc: DocumentMut) -> Result<(DocumentMut, u32), ConfigEr
 }
 
 /// Rename `old_key` to `new_key` in every `[monitors.*]` sub-table, leaving the
-/// value (and the rest of the table) untouched. A no-op where the key is absent.
+/// value (and the rest of the table) untouched. Shape-tolerant by design
+/// (unstamped files migrate from v0, so steps meet current-shaped tables): a
+/// no-op where `old_key` is absent, and when **both** keys exist the
+/// current-named key wins — the stale `old_key` is dropped, never clobbering
+/// the explicit new value.
 fn rename_in_each_monitor(doc: &mut DocumentMut, old_key: &str, new_key: &str) {
     let Some(monitors) = doc.get_mut("monitors").and_then(|m| m.as_table_mut()) else {
         return;
@@ -88,7 +92,9 @@ fn rename_in_each_monitor(doc: &mut DocumentMut, old_key: &str, new_key: &str) {
         let Some(table) = entry.as_table_mut() else {
             continue;
         };
-        if let Some(value) = table.remove(old_key) {
+        if table.contains_key(new_key) {
+            table.remove(old_key);
+        } else if let Some(value) = table.remove(old_key) {
             table.insert(new_key, value);
         }
     }
@@ -174,6 +180,16 @@ experimental = true
             step(parse("[monitors.\"X\"]\nmin_gap_ms = 50\n"), 0).expect("step runs");
         assert_eq!(version, 1);
         assert!(doc.to_string().contains("min_write_gap_ms = 50"));
+    }
+
+    #[test]
+    fn rename_does_not_clobber_existing_new_key() {
+        // Both keys present (hand-edited file): the current-named key wins and
+        // the stale old key is dropped — never overwritten by it.
+        let fixture = "[monitors.\"X\"]\nmin_write_gap_ms = 150\nmin_gap_ms = 999\n";
+        let out = migrate(parse(fixture), 0).expect("migrates").to_string();
+        assert!(out.contains("min_write_gap_ms = 150"), "{out}");
+        assert!(!out.contains("999"), "stale key value leaked: {out}");
     }
 
     #[test]
