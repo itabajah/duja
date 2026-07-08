@@ -10,3 +10,18 @@ All notable changes to Duja are documented here. The format is based on
 
 - Workspace scaffold: 9 crates + xtask, lint wall, CI quality gates, ADRs,
   perf budgets, security policy.
+- `duja-core` domain layer (pure, no OS APIs): EDID identity, display model +
+  `BrightnessController` trait, brightness continuum, debounce/coalesce,
+  hot-plug manager, sync groups, config (schema + migrations + atomic
+  persistence), MCCS caps parser, quirk database, and a reusable backend
+  contract suite. 193 tests, ~96% coverage, 3×1M fuzz executions clean.
+- ADR-0002 (own Windows dxva2 DDC backend), ADR-0007 (config schema &
+  migrations), ADR-0009 (software renderer default); ADR-0001/0003 verified.
+- `docs/STATUS.md` — human-readable project status snapshot.
+
+### Fixed
+
+- Contract suite now rejects backends reporting a bogus `max` and tolerates
+  the real input-source metadata lie (ADR-0002).
+- Unstamped config files migrate from v0 shape-tolerantly instead of being
+  treated as current (ADR-0007).

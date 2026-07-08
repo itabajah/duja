@@ -6,6 +6,9 @@
 fuzz/target
 fuzz/artifacts
 fuzz/coverage
+# Corpus entries libFuzzer generates during a run are not committed; the small
+# hand-picked seed inputs are force-added (see fuzz/README.md).
+fuzz/corpus/
 
 # coverage output
 lcov.info
