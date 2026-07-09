@@ -3,7 +3,7 @@
 //! [`duja_core::controller::BrightnessController`] adapter that consumes them.
 //!
 //! Splitting the transport out lets the OS-specific, `unsafe`-carrying WMI code
-//! ([`crate::wmi`], Windows only) and a deterministic in-memory fake share one
+//! (the `wmi` module, Windows only) and a deterministic in-memory fake share one
 //! [`crate::controller::PanelController`] implementation, so the whole control
 //! adapter is exercised by the cross-platform contract suite.
 

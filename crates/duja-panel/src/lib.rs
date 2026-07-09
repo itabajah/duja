@@ -12,7 +12,7 @@
 //! to `duja_core`'s [`BrightnessController`](duja_core::controller::BrightnessController)
 //! trait, applying the panel semantics (brightness-only, percent-domain,
 //! clamp-on-overrange). This split keeps the `unsafe` COM code confined to the
-//! Windows [`wmi`] module while the whole adapter is exercised cross-platform by
+//! Windows `wmi` module while the whole adapter is exercised cross-platform by
 //! `duja_core`'s controller contract suite against a fake transport.
 //!
 //! # Enumeration and graceful absence
@@ -46,7 +46,8 @@ use duja_core::id::StableDisplayId;
 /// a human-readable name, and enough OS handle to open a controller for it.
 ///
 /// The `instance_name` is the WMI `InstanceName` that keys every `WmiMonitor*`
-/// class for this panel; [`open`](Self::open) uses it to bind a transport.
+/// class for this panel; the Windows-only `open` method uses it to bind a
+/// transport.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelDisplay {
     id: StableDisplayId,
