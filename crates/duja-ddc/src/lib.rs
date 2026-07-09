@@ -14,10 +14,10 @@
 //! - [`clock`] — the [`clock::Clock`] time source ([`clock::SystemClock`] in
 //!   production; a virtual clock in tests).
 //!
-//! On Windows the crate additionally exposes [`enumerate`], which discovers the
-//! attached external monitors (identity from EDID, quirks from the embedded
-//! database) and hands back a [`DdcDisplay`] per monitor that can be turned into
-//! a thread-owned controller.
+//! On Windows the crate additionally exposes `enumerate` (in the
+//! Windows-only `win` module), which discovers the attached external monitors
+//! (identity from EDID, quirks from the embedded database) and hands back a
+//! `DdcDisplay` per monitor that can be turned into a thread-owned controller.
 //!
 //! # Safety policy
 //! All FFI is confined to the `win::sys` module, where every `unsafe` block
