@@ -86,6 +86,8 @@ name = "duja-ddc"
 version = "0.0.1"
 dependencies = [
  "duja-core",
+ "thiserror",
+ "windows 0.62.2",
 ]
 
 [[package]]

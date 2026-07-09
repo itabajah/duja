@@ -11,6 +11,16 @@ publish = false
 
 [dependencies]
 duja-core.workspace = true
+thiserror = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Devices_Display",
+    "Win32_Graphics_Gdi",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_System_Registry",
+] }
 
 [dev-dependencies]
 duja-core = { workspace = true, features = ["test-support"] }
