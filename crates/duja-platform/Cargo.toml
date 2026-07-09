@@ -11,6 +11,20 @@ publish = false
 
 [dependencies]
 duja-core.workspace = true
+thiserror = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Windows event pump: hidden top-level window + display/power/session
+# notifications (P3). default-features off; enable only the modules we touch.
+windows = { version = "0.62", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_LibraryLoader",
+    "Win32_Devices_Display",
+] }
 
 [dev-dependencies]
 duja-core = { workspace = true, features = ["test-support"] }

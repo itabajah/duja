@@ -42,6 +42,8 @@ duja-ui = { path = "crates/duja-ui" }
 # `workspace = true`) at the phase where they are first used.
 # Runtime: typed error enums per the error policy (§5). Runtime, no_std-free.
 thiserror = "2"
+# Runtime: lock-free MPMC channels for the std-thread actor model (ADR-0005).
+crossbeam-channel = "0.5"
 # Runtime (config §7 + quirk DB): serde derive for the typed schemas;
 # toml_edit (not `toml`) as the single shared TOML crate — its document model
 # lets config round-trip unknown keys/comments, and its `serde` feature gives
