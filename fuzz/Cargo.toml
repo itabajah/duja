@@ -19,6 +19,9 @@ libfuzzer-sys = "0.4"
 [dependencies.duja-core]
 path = "../crates/duja-core"
 
+[dependencies.duja-ipc]
+path = "../crates/duja-ipc"
+
 # Keep this crate out of the parent workspace: it is its own root.
 [workspace]
 
@@ -43,6 +46,13 @@ bench = false
 [[bin]]
 name = "fuzz_quirks_toml"
 path = "fuzz_targets/fuzz_quirks_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ipc_frame"
+path = "fuzz_targets/fuzz_ipc_frame.rs"
 test = false
 doc = false
 bench = false
