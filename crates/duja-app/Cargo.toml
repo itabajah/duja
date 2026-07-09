@@ -15,7 +15,11 @@ path = "src/main.rs"
 
 [dependencies]
 duja-core.workspace = true
+duja-ddc.workspace = true
+duja-panel.workspace = true
+duja-platform.workspace = true
 crossbeam-channel.workspace = true
+anyhow.workspace = true
 
 [dev-dependencies]
 duja-core = { workspace = true, features = ["test-support"] }
