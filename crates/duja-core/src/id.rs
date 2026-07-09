@@ -202,6 +202,45 @@ impl StableDisplayId {
         Ok(StableDisplayId(id))
     }
 
+    /// Derive an identity from already-decoded display parts, for backends that
+    /// obtain identity fields without the raw EDID blob.
+    ///
+    /// The Windows internal-panel backend reads `ManufacturerName`,
+    /// `ProductCodeID` and `SerialNumberID` from the `WmiMonitorID` WMI class
+    /// rather than the EDID base block. This constructor turns those parts into
+    /// an id whose format is **identical in shape** to
+    /// [`from_edid`](Self::from_edid), so quirk and config keys stay uniform
+    /// across backends. The serial component is chosen by the same ranking,
+    /// restricted to the information available here:
+    /// 1. a non-empty sanitized `serial` string (`MFG-PROD-<serial>`), else
+    /// 2. `MFG-PROD-#h<hash>`, an FNV-1a hash of the `MFG-PROD` base — a stable,
+    ///    charset-safe fallback when the panel exposes no usable serial.
+    ///
+    /// Unlike [`from_edid`](Self::from_edid) there is no numeric `-s<n>` tier:
+    /// `WmiMonitorID` surfaces a single serial *string*, so a numeric serial
+    /// (when present) already arrives as that string and is treated as one.
+    ///
+    /// # Errors
+    /// [`EdidError::InvalidManufacturer`] if `manufacturer` is not exactly three
+    /// `A`–`Z` letters — the invariant [`from_edid`](Self::from_edid) guarantees,
+    /// enforced here so every id shares the one `[A-Za-z0-9#-]` charset.
+    pub fn from_parts(
+        manufacturer: &str,
+        product_code: u16,
+        serial: Option<&str>,
+    ) -> Result<Self, EdidError> {
+        if manufacturer.len() != 3 || !manufacturer.bytes().all(|b| b.is_ascii_uppercase()) {
+            return Err(EdidError::InvalidManufacturer);
+        }
+        let base = format!("{manufacturer}-{product_code:04X}");
+        let serial_key = serial.map(sanitize).filter(|s| !s.is_empty());
+        let id = match serial_key {
+            Some(serial) => format!("{base}-{serial}"),
+            None => format!("{base}-#h{}", fnv1a_hex(base.as_bytes())),
+        };
+        Ok(StableDisplayId(id))
+    }
+
     /// Borrow the id as a string slice.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -510,6 +549,89 @@ mod tests {
         assert_eq!(info.manufacturer, "GSM");
     }
 
+    #[test]
+    fn from_parts_matches_from_edid_for_a_serial_string() {
+        // The panel backend and the DDC backend must derive the *same* id for a
+        // display sharing manufacturer/product/serial: from_parts's serial path
+        // is byte-for-byte from_edid's serial-string path.
+        let from_edid = StableDisplayId::from_edid(&lg_edid()).unwrap();
+        let from_parts = StableDisplayId::from_parts("GSM", 0x5B09, Some("312NTAB1C234")).unwrap();
+        assert_eq!(from_parts, from_edid);
+        assert_eq!(from_parts.as_str(), "GSM-5B09-312NTAB1C234");
+    }
+
+    #[test]
+    fn from_parts_uppercases_product_to_four_hex() {
+        let id = StableDisplayId::from_parts("DEL", 0x00A1, Some("SN1")).unwrap();
+        assert_eq!(id.as_str(), "DEL-00A1-SN1");
+    }
+
+    #[test]
+    fn from_parts_sanitizes_serial_to_charset() {
+        let id = StableDisplayId::from_parts("GSM", 0x5B09, Some("AB CD-12")).unwrap();
+        assert_eq!(id.as_str(), "GSM-5B09-ABCD12");
+    }
+
+    #[test]
+    fn from_parts_hashes_when_serial_absent_or_empty() {
+        // No serial and an all-punctuation serial both take the hash fallback.
+        for serial in [None, Some("   "), Some("--")] {
+            let id = StableDisplayId::from_parts("DEL", 0xA131, serial).unwrap();
+            assert!(
+                id.as_str().starts_with("DEL-A131-#h"),
+                "unexpected id: {}",
+                id.as_str()
+            );
+            let hex = id.as_str().rsplit("#h").next().unwrap_or_default();
+            assert_eq!(hex.len(), 8);
+            assert!(hex.bytes().all(|b| b.is_ascii_hexdigit()));
+        }
+    }
+
+    #[test]
+    fn from_parts_hash_fallback_is_deterministic() {
+        let a = StableDisplayId::from_parts("DEL", 0xA131, None).unwrap();
+        let b = StableDisplayId::from_parts("DEL", 0xA131, None).unwrap();
+        assert_eq!(a, b);
+        // A different product code must move the hash.
+        let c = StableDisplayId::from_parts("DEL", 0xA132, None).unwrap();
+        assert_ne!(a.as_str(), c.as_str());
+    }
+
+    #[test]
+    fn from_parts_rejects_bad_manufacturer() {
+        assert_eq!(
+            StableDisplayId::from_parts("gsm", 0x1, None),
+            Err(EdidError::InvalidManufacturer)
+        );
+        assert_eq!(
+            StableDisplayId::from_parts("GS", 0x1, None),
+            Err(EdidError::InvalidManufacturer)
+        );
+        assert_eq!(
+            StableDisplayId::from_parts("GSMM", 0x1, None),
+            Err(EdidError::InvalidManufacturer)
+        );
+        assert_eq!(
+            StableDisplayId::from_parts("G5M", 0x1, None),
+            Err(EdidError::InvalidManufacturer)
+        );
+    }
+
+    #[test]
+    fn from_parts_output_is_charset_clean() {
+        for serial in [Some("Serial 42!"), None] {
+            let id = StableDisplayId::from_parts("ABC", 0xBEEF, serial).unwrap();
+            assert!(
+                id.as_str()
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'#'),
+                "id left the charset: {}",
+                id.as_str()
+            );
+        }
+    }
+
     use proptest::prelude::*;
 
     proptest! {
@@ -537,6 +659,25 @@ mod tests {
             prop_assert_eq!(info.manufacturer, mfg);
             prop_assert_eq!(info.product_code, product);
             prop_assert_eq!(info.serial_number, serial);
+        }
+
+        /// from_parts never panics and never leaves the id charset for any
+        /// three-letter manufacturer, product code, and arbitrary serial text.
+        #[test]
+        fn from_parts_stays_in_charset(
+            a in b'A'..=b'Z',
+            b in b'A'..=b'Z',
+            c in b'A'..=b'Z',
+            product in any::<u16>(),
+            serial in prop::option::of(".*"),
+        ) {
+            let mfg = String::from_utf8(vec![a, b, c]).unwrap();
+            let id = StableDisplayId::from_parts(&mfg, product, serial.as_deref()).unwrap();
+            prop_assert!(
+                id.as_str()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'#')
+            );
         }
     }
 }
