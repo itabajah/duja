@@ -56,6 +56,10 @@ tempfile = "3"
 proptest = "1"
 # Dev-only: snapshot testing for config migration fixtures (§4.1).
 insta = { version = "1", features = ["toml"] }
+# Windows DDC/CI backend (duja-ddc, P3): thin dxva2 + SetupAPI/registry EDID.
+# Target-gated and feature-selected in the crate; default-features off keeps the
+# dependency lean. Version matches the P1 spike (windows 0.62.x).
+windows = { version = "0.62", default-features = false }
 
 # ---------------------------------------------------------------------------
 # Lint wall (ADR: bulletproof-production policy).
