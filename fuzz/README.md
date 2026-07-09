@@ -2,9 +2,11 @@
 
 Coverage-guided fuzzers for `duja-core`'s total parsers, built with
 [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) and `libfuzzer-sys`.
-There are three targets: `fuzz_caps_string` (the MCCS capability-string parser),
-`fuzz_edid_parse` (`EdidInfo::parse` + `StableDisplayId::from_edid`), and
-`fuzz_quirks_toml` (the quirk-database parser). Each simply feeds the raw input
+There are four targets: `fuzz_caps_string` (the MCCS capability-string parser),
+`fuzz_edid_parse` (`EdidInfo::parse` + `StableDisplayId::from_edid`),
+`fuzz_quirks_toml` (the quirk-database parser), and `fuzz_ipc_frame` (the
+`duja-ipc` length-prefixed frame decoders `read_request` / `read_response` /
+`read_frame_bytes`). Each simply feeds the raw input
 bytes to its parser and relies on libFuzzer to flag any panic, hang, or
 out-of-memory — the parsers are contractually total, so a crash is a bug. This
 crate is a **separate Cargo workspace** (see the `[workspace]` table in
