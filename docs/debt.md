@@ -17,6 +17,11 @@ detouring; delete entries when drained.
 | P3 | `dujactl` | `duja-ipc` dependency is unused until the P5 transport lands | Placeholder for the P5 IPC client |
 | P3 | `duja-panel` `wmi.rs` | `WmiMonitorID` array decoding, `WmiSetBrightness` invocation, and ProductCodeID assumptions never executed on real hardware (dev box has no internal panel) | Needs a 30-min borrowed-laptop run before P5 (plan §P3) |
 | P4 | `duja-app` `engine.rs`/`run.rs` | Suspend/resume DDC re-push: on resume the display set is usually unchanged, so the manager emits no `Added`/`Reattached` and the engine never re-applies levels — a monitor that forgot its brightness across sleep (or a laptop panel reset by the firmware) stays wrong until the user nudges the slider | Needs hardware evidence (which monitors drop DDC state across S3/modern-standby) before choosing a policy: re-push all levels on `PlatformEvent::Resume`, or only after a resume-triggered enumeration diff |
+| P5 | `duja-app` binary size | `duja.exe` is **17.21 MB** vs the ≤16 MB ADR-0012 budget (+1.2 MB, all ureq/rustls/ring/webpki-roots). Levers: fat LTO (−1.0 MB measured), feature-gate the update stack, drop `tracing-subscriber`'s `env-filter` regex | P8 hardening owns binary trimming; RAM and wakeup budgets still pass with headroom |
+| P5 | `duja-core` `quirks` | User-directory quirk override (`quirks.override.toml`) is documented in the module + plan §7 but not wired — embedded DB only | Reduces attack surface today; wire with the P8 quirk-DB refresh from beta reports |
+| P5 | `duja-ui` | Theme "Auto" resolves to dark: no OS dark-mode query is exposed by the pinned winit/slint | Revisit at the next Slint bump; explicit light/dark config is honoured |
+| P5 | `duja-ui` settings | Sync-group management (create/assign/offset) has no UI, so `MonitorConfig.sync_offset` (persisted since P2) still has no consumer | Needs a group-management design, not a toggle; post-beta |
+| P5 | `duja-app` `tray.rs` | `wire_settings_commands` holds `APP.borrow_mut()` across `update_from_vm`; safe today (Slint does not re-enter `on_command` from property writes) but a defensive split would remove a latent double-borrow panic | Latent, unobserved (P5 gate P1); revisit if Slint's callback semantics change |
 
 Drained at P2 gate (2026-07-08): MSI MP273QP quirk rows encoded in `quirks/quirks.toml`; contract suite hardened against `max`-lying backends (ADR-0002); unstamped-config migration semantics fixed (ADR-0007).
 
@@ -27,3 +32,10 @@ dxva2 backend (pacing, caps retry, verify-writes, `max_brightness`,
 Drained at P4 (2026-07-10): the ubuntu Slint system-deps step (fontconfig +
 xkbcommon + xcb + wayland) is wired into the `clippy`, `test`, and `docs` CI
 jobs now that `duja-ui` brings Slint into the workspace.
+
+Drained at P5 gate (2026-07-10): `dujactl`'s `duja-ipc` dependency is now a real
+consumer (IPC client); full DDC capability probing landed for input sources
+(`Capabilities.allowed_inputs` = caps ∩ quirks). Gate findings fixed: the IPC
+read deadline is armed once per exchange (a dribbling peer can no longer renew
+it per syscall and pin a handler thread) and the first pipe instance is closed
+on thread-spawn failure.

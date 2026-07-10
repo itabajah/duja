@@ -254,6 +254,31 @@ mod tests {
     }
 
     #[test]
+    fn version_components_compare_numerically_not_lexically() {
+        // The classic trap: "1.10.0" < "1.9.0" as strings, but 10 > 9 as
+        // numbers. Both directions, on minor and patch.
+        let t = FakeTransport::body(&release("v1.10.0"));
+        assert_eq!(
+            check_for_update(&t, "1.9.0"),
+            UpdateOutcome::UpdateAvailable {
+                version: "v1.10.0".to_owned()
+            }
+        );
+        let t = FakeTransport::body(&release("v1.9.0"));
+        assert_eq!(check_for_update(&t, "1.10.0"), UpdateOutcome::UpToDate);
+
+        let t = FakeTransport::body(&release("v1.0.10"));
+        assert_eq!(
+            check_for_update(&t, "1.0.9"),
+            UpdateOutcome::UpdateAvailable {
+                version: "v1.0.10".to_owned()
+            }
+        );
+        let t = FakeTransport::body(&release("v1.0.9"));
+        assert_eq!(check_for_update(&t, "1.0.10"), UpdateOutcome::UpToDate);
+    }
+
+    #[test]
     fn equal_release_is_up_to_date() {
         let t = FakeTransport::body(&release("v1.0.0"));
         assert_eq!(check_for_update(&t, "1.0.0"), UpdateOutcome::UpToDate);
