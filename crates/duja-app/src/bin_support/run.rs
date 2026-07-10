@@ -9,6 +9,7 @@ use anyhow::Context;
 use crossbeam_channel::Receiver;
 
 use duja_app::{EngineNotification, Enumeration};
+use duja_core::id::StableDisplayId;
 use duja_core::manager::DiscoveredDisplay;
 use duja_core::model::DisplaySnapshot;
 use duja_platform::{EventPump, PlatformEvent};
@@ -20,6 +21,17 @@ use crate::bin_support::fmt::{features_label, kind_label, render_table};
 pub(crate) fn enumerator() -> duja_app::Enumerator {
     Box::new(|| Enumeration {
         displays: backend::discover(),
+    })
+}
+
+/// Build the engine's controller factory: each call returns a deferred opener
+/// that re-enumerates and opens the display **on the worker thread** (so any
+/// thread-affine backend resource, e.g. a WMI COM apartment, is created and
+/// used on one thread).
+pub(crate) fn controller_factory() -> duja_app::ControllerFactory {
+    Box::new(|id: &StableDisplayId| {
+        let id = id.clone();
+        Box::new(move || backend::open_controller(&id)) as duja_app::ControllerOpener
     })
 }
 
@@ -139,7 +151,7 @@ pub(crate) fn headless() -> anyhow::Result<ExitCode> {
     let (engine, notifications) = duja_app::Engine::spawn(
         duja_app::EngineConfig::default(),
         enumerator(),
-        Box::new(backend::open_controller),
+        controller_factory(),
         tick_rx,
     );
 

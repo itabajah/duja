@@ -171,16 +171,23 @@ pub(crate) fn run(secs: u64, hz: u32) -> anyhow::Result<ExitCode> {
 }
 
 /// Build the counting controller factory over a shared registry of counters.
+///
+/// Each call returns a deferred opener that opens (and wraps) the controller on
+/// the worker thread; a counter set is registered only once the open succeeds.
 fn counting_factory(registry: Arc<Mutex<Vec<Arc<Counters>>>>) -> duja_app::ControllerFactory {
     Box::new(move |id: &StableDisplayId| {
-        let inner = backend::open_controller(id)?;
-        let counters = Counters::new_shared();
-        if let Ok(mut guard) = registry.lock() {
-            guard.push(counters.clone());
-        }
-        let wrapped: Box<dyn duja_core::controller::BrightnessController> =
-            Box::new(CountingController::new(inner, counters));
-        Some(wrapped)
+        let id = id.clone();
+        let registry = registry.clone();
+        Box::new(move || {
+            let inner = backend::open_controller(&id)?;
+            let counters = Counters::new_shared();
+            if let Ok(mut guard) = registry.lock() {
+                guard.push(counters.clone());
+            }
+            let wrapped: Box<dyn duja_core::controller::BrightnessController> =
+                Box::new(CountingController::new(inner, counters));
+            Some(wrapped)
+        }) as duja_app::ControllerOpener
     })
 }
 

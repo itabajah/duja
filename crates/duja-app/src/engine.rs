@@ -276,17 +276,22 @@ impl EngineState {
         self.notify_displays_changed();
     }
 
-    /// Open a controller via the factory and register a worker for `id`.
+    /// Ask the factory for a deferred opener and register a worker for `id`.
+    ///
+    /// The opener runs on the worker thread (see [`spawn_worker`]); a failed
+    /// open is reported back as [`AckOutcome::OpenFailed`], which retires the
+    /// dead handle. The worker is inserted unconditionally so any command
+    /// dispatched between here and the open is either delivered or harmlessly
+    /// dropped when the worker exits.
     fn spawn_for(&mut self, id: &StableDisplayId) {
-        if let Some(controller) = (self.factory)(id) {
-            let handle = spawn_worker(
-                id.clone(),
-                controller,
-                self.cfg.write_min_gap,
-                self.ack_tx.clone(),
-            );
-            self.workers.insert(id.clone(), handle);
-        }
+        let opener = (self.factory)(id);
+        let handle = spawn_worker(
+            id.clone(),
+            opener,
+            self.cfg.write_min_gap,
+            self.ack_tx.clone(),
+        );
+        self.workers.insert(id.clone(), handle);
     }
 
     /// Stop and detach any worker for `id` and clear its in-flight ops.
@@ -371,6 +376,20 @@ impl EngineState {
             AckOutcome::Panicked { key, seq } => {
                 self.clear_inflight_match(&id, key, seq);
                 self.mark_stuck(&id);
+            }
+            AckOutcome::OpenFailed => {
+                // The deferred open failed on the worker thread. Drop the dead
+                // handle and clear any state we optimistically recorded for it —
+                // but only if the handle currently registered is the one that
+                // exited, so a stale OpenFailed cannot retire a fresh worker
+                // that already replaced it (respawn / reattach).
+                if self
+                    .workers
+                    .get(&id)
+                    .is_some_and(|handle| handle.join.is_finished())
+                {
+                    self.retire_worker(&id);
+                }
             }
         }
     }

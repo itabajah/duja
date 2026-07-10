@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -230,11 +230,100 @@ fn within(dur: Duration, f: impl FnOnce() + Send + 'static) {
 
 fn recording_factory(writes: Sender<(Feature, u16)>) -> duja_app::ControllerFactory {
     Box::new(move |_id| {
-        Some(Box::new(Recording::new(writes.clone())) as Box<dyn BrightnessController>)
+        let writes = writes.clone();
+        Box::new(move || {
+            Some(Box::new(Recording::new(writes)) as Box<dyn BrightnessController>)
+        }) as duja_app::ControllerOpener
     })
 }
 
+/// A controller that records the thread its first hardware op runs on, so a
+/// test can prove open and use happen on the same (worker) thread.
+#[derive(Debug)]
+struct ThreadRecording {
+    op_thread: Arc<Mutex<Option<ThreadId>>>,
+    signal: Sender<()>,
+}
+
+impl BrightnessController for ThreadRecording {
+    fn probe(&mut self) -> Result<Capabilities, ControlError> {
+        Ok(caps())
+    }
+    fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+        let mut slot = self.op_thread.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(thread::current().id());
+            let _ = self.signal.send(());
+        }
+        Ok(FeatureRange {
+            current: 50,
+            max: 100,
+        })
+    }
+    fn set(&mut self, _feature: Feature, _value: u16) -> Result<(), ControlError> {
+        Ok(())
+    }
+}
+
 // --- tests ----------------------------------------------------------------
+
+#[test]
+fn controller_is_opened_on_the_worker_thread() {
+    // The controller (which may own thread-affine resources such as a COM
+    // apartment) must be OPENED on the very worker thread that will use and
+    // drop it — not on the engine thread. We record the thread the factory
+    // opens on and the thread the first hardware op runs on; they must match.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let (signal_tx, signal_rx) = unbounded::<()>();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    let open_thread: Arc<Mutex<Option<ThreadId>>> = Arc::new(Mutex::new(None));
+    let op_thread: Arc<Mutex<Option<ThreadId>>> = Arc::new(Mutex::new(None));
+
+    let factory: duja_app::ControllerFactory = {
+        let open_thread = open_thread.clone();
+        let op_thread = op_thread.clone();
+        let signal = signal_tx.clone();
+        Box::new(move |_id| {
+            let open_thread = open_thread.clone();
+            let op_thread = op_thread.clone();
+            let signal = signal.clone();
+            Box::new(move || {
+                *open_thread.lock().unwrap() = Some(thread::current().id());
+                Some(Box::new(ThreadRecording {
+                    op_thread: op_thread.clone(),
+                    signal: signal.clone(),
+                }) as Box<dyn BrightnessController>)
+            }) as duja_app::ControllerOpener
+        })
+    };
+
+    let (engine, _notes) = Engine::spawn(
+        EngineConfig::default(),
+        enumerator(state, calls_tx),
+        factory,
+        platform_rx,
+    );
+
+    // The engine dispatches an initial Get on add; it runs the controller's
+    // `get` on the worker thread and signals.
+    signal_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("initial get should run on the worker");
+
+    let opened = *open_thread.lock().unwrap();
+    let operated = *op_thread.lock().unwrap();
+    assert!(opened.is_some(), "controller was never opened");
+    assert_eq!(
+        opened, operated,
+        "controller must be opened on the same (worker) thread that uses it"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
 
 #[test]
 fn burst_yields_single_hw_write() {
@@ -298,8 +387,10 @@ fn stuck_controller_marks_display_unresponsive() {
         watchdog_timeout: Duration::from_millis(150),
         displaychange_debounce: Duration::from_millis(60),
     };
-    let factory: duja_app::ControllerFactory =
-        Box::new(|_id| Some(Box::new(Hang) as Box<dyn BrightnessController>));
+    let factory: duja_app::ControllerFactory = Box::new(|_id| {
+        Box::new(|| Some(Box::new(Hang) as Box<dyn BrightnessController>))
+            as duja_app::ControllerOpener
+    });
     let (engine, notes) = Engine::spawn(cfg, enumerator(state, calls_tx), factory, platform_rx);
     let cmds = engine.sender();
 
@@ -349,13 +440,20 @@ fn recovered_display_gets_fresh_worker() {
         let hang_first = hang_first.clone();
         let writes_tx = writes_tx.clone();
         Box::new(move |_id| {
-            let mut flag = hang_first.lock().unwrap();
-            if *flag {
+            let hang = {
+                let mut flag = hang_first.lock().unwrap();
+                let hang = *flag;
                 *flag = false;
-                Some(Box::new(Hang) as Box<dyn BrightnessController>)
-            } else {
-                Some(Box::new(Recording::new(writes_tx.clone())) as Box<dyn BrightnessController>)
-            }
+                hang
+            };
+            let writes_tx = writes_tx.clone();
+            Box::new(move || {
+                if hang {
+                    Some(Box::new(Hang) as Box<dyn BrightnessController>)
+                } else {
+                    Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
+                }
+            }) as duja_app::ControllerOpener
         })
     };
 
@@ -469,8 +567,10 @@ fn worker_panic_does_not_kill_engine() {
         watchdog_timeout: Duration::from_secs(5),
         displaychange_debounce: Duration::from_millis(60),
     };
-    let factory: duja_app::ControllerFactory =
-        Box::new(|_id| Some(Box::new(Panicky) as Box<dyn BrightnessController>));
+    let factory: duja_app::ControllerFactory = Box::new(|_id| {
+        Box::new(|| Some(Box::new(Panicky) as Box<dyn BrightnessController>))
+            as duja_app::ControllerOpener
+    });
     let (engine, notes) = Engine::spawn(cfg, enumerator(state, calls_tx), factory, platform_rx);
     let cmds = engine.sender();
 
