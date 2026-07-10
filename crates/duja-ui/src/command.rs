@@ -7,6 +7,7 @@
 //! `EngineCommand::RefreshNow` — so the UI never depends on the engine crate.
 
 use duja_core::id::StableDisplayId;
+use duja_core::model::DimMode;
 
 /// A user-driven intent produced by a view-model, for the shell to forward.
 ///
@@ -24,6 +25,67 @@ pub enum UiCommand {
         /// Desired level in percent, guaranteed `0..=100`.
         pct: u8,
     },
-    /// Run one enumeration pass immediately (the settings/refresh affordance).
+    /// Run one enumeration pass immediately (the refresh affordance).
     Refresh,
+    /// Open the settings window (the flyout's gear button).
+    OpenSettings,
+}
+
+/// The theme preference offered by the settings window.
+///
+/// A UI-level choice distinct from the flyout's resolved [`Theme`](crate::Theme)
+/// (which is only ever `Light`/`Dark`): `Auto` follows the OS. The app maps this
+/// onto the config's theme enum and re-resolves the rendered palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeChoice {
+    /// Follow the operating system's light/dark preference.
+    Auto,
+    /// Force the light palette.
+    Light,
+    /// Force the dark palette.
+    Dark,
+}
+
+/// A command emitted by the settings view-model, for the app to apply.
+///
+/// Like [`UiCommand`], these are plain data — no Slint, no engine, no config
+/// types beyond the shared [`StableDisplayId`]/[`DimMode`] domain values. The
+/// tray wiring maps each variant onto a config write (through the
+/// format-preserving document layer) and/or an engine command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsCommand {
+    /// Enable or disable launch at login (applied through the platform
+    /// `Autostart` trait and mirrored into the config).
+    SetAutostart(bool),
+    /// Change the theme preference.
+    SetTheme(ThemeChoice),
+    /// Turn the opt-in update check on or off (config only; no network).
+    SetUpdateCheck(bool),
+    /// Run the update check now (the manual "Check for updates" action).
+    CheckUpdates,
+    /// Open the GitHub releases page in the browser (shown only once an update
+    /// is available — Duja never downloads anything itself).
+    OpenReleasesPage,
+    /// Set a display's hardware-floor percentage (0..=50).
+    SetMonitorFloor {
+        /// The display to adjust.
+        id: StableDisplayId,
+        /// The new floor, guaranteed `0..=50`.
+        pct: u8,
+    },
+    /// Set a display's sub-floor dim mode.
+    SetMonitorDimMode {
+        /// The display to adjust.
+        id: StableDisplayId,
+        /// The chosen mode (a gamma choice is dropped by the caller when the
+        /// display is under the HDR guard; the VM never offers it there).
+        mode: DimMode,
+    },
+    /// Switch a display's active input source (raw MCCS `0x60` code).
+    SetInput {
+        /// The display to switch.
+        id: StableDisplayId,
+        /// The raw input-source code to select.
+        value: u8,
+    },
 }

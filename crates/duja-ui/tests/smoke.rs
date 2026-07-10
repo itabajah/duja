@@ -17,9 +17,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use duja_core::config::Config;
 use duja_core::id::StableDisplayId;
 use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
-use duja_ui::{FlyoutShell, FlyoutVm, Theme, UiCommand};
+use duja_ui::{
+    FlyoutShell, FlyoutVm, SettingsCommand, SettingsShell, SettingsVm, Theme, UiCommand,
+};
 
 fn snapshot(serial: &str, level: u8) -> DisplaySnapshot {
     DisplaySnapshot {
@@ -53,5 +56,33 @@ fn flyout_shell_instantiates_and_renders() {
     vm.borrow_mut().set_displays(vec![snapshot("A", 55)]);
     shell.update_from_vm(&vm.borrow());
 
+    shell.hide();
+}
+
+#[test]
+#[ignore = "needs a Slint backend; run with --ignored under a display server"]
+fn settings_shell_instantiates_and_renders() {
+    i_slint_backend_testing::init_no_event_loop();
+
+    let mut vm = SettingsVm::new();
+    let config = Config::default();
+    vm.set_general(true, true, duja_ui::ThemeChoice::Auto, true);
+    vm.set_displays(&[snapshot("A", 40), snapshot("B", 70)], &config, false);
+    let vm = Rc::new(RefCell::new(vm));
+
+    let shell = SettingsShell::new(vm.clone()).expect("settings shell instantiates");
+
+    let commands = Rc::new(RefCell::new(Vec::<SettingsCommand>::new()));
+    {
+        let commands = commands.clone();
+        shell.on_command(move |command| commands.borrow_mut().push(command));
+    }
+
+    // Re-render after an external mutation (e.g. an update-check result).
+    vm.borrow_mut()
+        .set_update_status(duja_ui::UpdateStatus::UpToDate);
+    shell.update_from_vm(&vm.borrow());
+
+    shell.show();
     shell.hide();
 }
