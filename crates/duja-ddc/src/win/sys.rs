@@ -47,6 +47,8 @@ use windows::Win32::System::Registry::{
 };
 use windows::core::{BOOL, GUID, PCWSTR};
 
+use duja_core::dimmer::DisplayBounds;
+
 use crate::transport::{TransportError, VcpReading};
 
 /// One active display path resolved via the CCD API: the GDI adapter name, the
@@ -141,8 +143,13 @@ pub(crate) fn enum_hmonitors() -> Vec<HMONITOR> {
     list
 }
 
-/// Recover the GDI adapter device name (e.g. `\\.\DISPLAY1`) for `hmon`.
-pub(crate) fn gdi_device(hmon: HMONITOR) -> Option<String> {
+/// Recover the GDI adapter device name (e.g. `\\.\DISPLAY1`) and the monitor's
+/// physical pixel bounds for `hmon`, in one `GetMonitorInfoW` call.
+///
+/// The bounds come from `MONITORINFO::rcMonitor` (the monitor's rectangle in
+/// virtual-desktop coordinates, origin may be negative). The overlay dimmer
+/// sizes a per-display window directly from these bounds.
+pub(crate) fn gdi_device_and_bounds(hmon: HMONITOR) -> Option<(String, DisplayBounds)> {
     let mut info = MONITORINFOEXW {
         monitorInfo: MONITORINFO {
             cbSize: size_of::<MONITORINFOEXW>() as u32,
@@ -156,7 +163,19 @@ pub(crate) fn gdi_device(hmon: HMONITOR) -> Option<String> {
     if !ok.as_bool() {
         return None;
     }
-    Some(wide_to_string(&info.szDevice))
+    Some((
+        wide_to_string(&info.szDevice),
+        rect_to_bounds(info.monitorInfo.rcMonitor),
+    ))
+}
+
+/// Convert a Win32 `RECT` (left/top/right/bottom) to a [`DisplayBounds`]
+/// (origin + unsigned extent). A right/bottom below left/top yields a zero
+/// extent (an empty, non-display rect) rather than an underflow.
+fn rect_to_bounds(rect: RECT) -> DisplayBounds {
+    let width = u32::try_from(rect.right.saturating_sub(rect.left)).unwrap_or(0);
+    let height = u32::try_from(rect.bottom.saturating_sub(rect.top)).unwrap_or(0);
+    DisplayBounds::new(rect.left, rect.top, width, height)
 }
 
 /// Resolve every active display path to its (GDI adapter name, monitor device
