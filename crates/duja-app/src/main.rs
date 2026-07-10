@@ -96,6 +96,9 @@ fn run_tray(verbose: bool) -> anyhow::Result<ExitCode> {
 
 /// The tray app is Windows-only in this build; other targets report and exit
 /// non-zero rather than silently doing nothing.
+// RATIONALE: the Result wrapper mirrors the Windows signature so the caller is
+// cfg-free; this stub itself can never fail.
+#[allow(clippy::unnecessary_wraps)]
 #[cfg(not(windows))]
 fn run_tray(_verbose: bool) -> anyhow::Result<ExitCode> {
     eprintln!("duja: the tray application is only available on Windows in this build");
