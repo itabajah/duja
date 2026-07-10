@@ -260,6 +260,52 @@ impl fmt::Display for StableDisplayId {
     }
 }
 
+/// Split a trailing `-slot<n>` twin disambiguator off an id string, returning
+/// the bare id and the numeric slot. `None` if the id carries no such suffix or
+/// the suffix is not `-slot` followed by a base-10 `u32`.
+///
+/// Serial components are sanitized to `[A-Za-z0-9]` (see [`sanitize`]), so the
+/// only source of a literal `-slot` boundary in a well-formed id is
+/// [`StableDisplayId::with_slot`]; `rfind` takes the last one so a serial that
+/// itself contains the text `slot` cannot shadow a real slot suffix.
+fn split_slot_suffix(id: &str) -> Option<(&str, u32)> {
+    let idx = id.rfind("-slot")?;
+    let (bare, suffix) = id.split_at(idx);
+    let n: u32 = suffix.strip_prefix("-slot")?.parse().ok()?;
+    Some((bare, n))
+}
+
+/// Choose which enumerated candidate satisfies a requested id, honoring
+/// `-slot<n>` identical-twin routing, and return its index in `candidates`.
+///
+/// Backends resolve serial-less twins to `<bare>-slot<n>` ids (slot = position
+/// in the deterministic enumeration order; see
+/// [`crate::manager::assign_twin_slots`]) while a raw backend enumeration
+/// reports the **bare** id for every twin. Matching therefore is:
+///
+/// 1. an exact id match — which covers every uniquely-identified display,
+///    including the pathological case of a serial that itself reads `slotN`;
+/// 2. otherwise a `<bare>-slot<n>` request selects the Nth (0-based) candidate
+///    whose bare id equals `<bare>`, in the order given.
+///
+/// Callers must pass `candidates` in the **same** deterministic order the twins
+/// were slotted in, so slot `n` and "the Nth bare match" coincide. Returns
+/// `None` when nothing matches.
+#[must_use]
+pub fn select_slot_match(requested: &str, candidates: &[&str]) -> Option<usize> {
+    if let Some(i) = candidates.iter().position(|c| *c == requested) {
+        return Some(i);
+    }
+    let (bare, n) = split_slot_suffix(requested)?;
+    let n = usize::try_from(n).ok()?;
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| **c == bare)
+        .nth(n)
+        .map(|(i, _)| i)
+}
+
 /// Keep only `[A-Za-z0-9]` from a serial string so ids stay in the id charset.
 fn sanitize(s: &str) -> String {
     s.chars().filter(char::is_ascii_alphanumeric).collect()
@@ -630,6 +676,47 @@ mod tests {
                 id.as_str()
             );
         }
+    }
+
+    // --- twin slot routing (select_slot_match) ---
+
+    #[test]
+    fn select_exact_match_wins() {
+        let a = StableDisplayId::from_parts("GSM", 0x5B09, Some("A")).unwrap();
+        let b = StableDisplayId::from_parts("GSM", 0x5B09, Some("B")).unwrap();
+        let cands = [a.as_str(), b.as_str()];
+        assert_eq!(select_slot_match(a.as_str(), &cands), Some(0));
+        assert_eq!(select_slot_match(b.as_str(), &cands), Some(1));
+    }
+
+    #[test]
+    fn select_twin_slot_picks_the_nth_bare_match() {
+        // Two serial-less twins share one bare id; enumeration reports the bare
+        // id for BOTH. `-slot<n>` must select the Nth bare match in order.
+        let bare = StableDisplayId::from_parts("GSM", 0x5B09, None).unwrap();
+        let cands = [bare.as_str(), bare.as_str()];
+        assert_eq!(select_slot_match(bare.with_slot(0).as_str(), &cands), Some(0));
+        assert_eq!(select_slot_match(bare.with_slot(1).as_str(), &cands), Some(1));
+        // A slot beyond the available twins resolves to nothing.
+        assert_eq!(select_slot_match(bare.with_slot(2).as_str(), &cands), None);
+    }
+
+    #[test]
+    fn select_returns_none_when_absent() {
+        let a = StableDisplayId::from_parts("GSM", 0x5B09, Some("A")).unwrap();
+        let b = StableDisplayId::from_parts("GSM", 0x5B09, Some("B")).unwrap();
+        assert_eq!(select_slot_match(a.as_str(), &[b.as_str()]), None);
+    }
+
+    #[test]
+    fn select_prefers_exact_over_slot_parse() {
+        // A display whose sanitized serial literally reads "slot1" enumerates as
+        // "GSM-5B09-slot1"; an exact request must match it rather than being
+        // misread as slot 1 of a "GSM-5B09" twin.
+        let serial_slot1 = StableDisplayId::from_parts("GSM", 0x5B09, Some("slot1")).unwrap();
+        assert_eq!(serial_slot1.as_str(), "GSM-5B09-slot1");
+        let cands = [serial_slot1.as_str()];
+        assert_eq!(select_slot_match(serial_slot1.as_str(), &cands), Some(0));
     }
 
     use proptest::prelude::*;

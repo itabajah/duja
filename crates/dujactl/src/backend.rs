@@ -24,9 +24,19 @@ pub struct CtlDisplay {
 /// Enumerate every controllable display (external DDC first, then panels).
 ///
 /// Never errors: a failing backend simply contributes nothing.
+///
+/// Identical-twin monitors that share one EDID id are disambiguated with
+/// `-slot<n>` suffixes — the same convention the daemon's
+/// [`DisplayManager`](duja_core::manager::DisplayManager) applies — so every
+/// row is individually addressable. [`open`] routes those slot ids back to the
+/// Nth physical unit (see [`duja_core::id::select_slot_match`]).
 pub fn discover() -> Vec<CtlDisplay> {
     let mut out = discover_ddc();
     out.extend(discover_panel());
+    let ids: Vec<StableDisplayId> = out.iter().map(|d| d.id.clone()).collect();
+    for (display, resolved) in out.iter_mut().zip(duja_core::manager::assign_twin_slots(&ids)) {
+        display.id = resolved;
+    }
     out
 }
 
@@ -82,10 +92,10 @@ pub fn open(id: &str) -> Option<Box<dyn BrightnessController>> {
 
 #[cfg(windows)]
 fn open_ddc(id: &str) -> Option<Box<dyn BrightnessController>> {
-    let matched = duja_ddc::enumerate()
-        .ok()?
-        .into_iter()
-        .find(|d| d.id.as_str() == id)?;
+    let displays = duja_ddc::enumerate().ok()?;
+    let candidates: Vec<&str> = displays.iter().map(|d| d.id.as_str()).collect();
+    let idx = duja_core::id::select_slot_match(id, &candidates)?;
+    let matched = displays.into_iter().nth(idx)?;
     Some(Box::new(matched.into_controller()))
 }
 
@@ -95,10 +105,10 @@ fn open_ddc(_id: &str) -> Option<Box<dyn BrightnessController>> {
 }
 
 fn open_panel(id: &str) -> Option<Box<dyn BrightnessController>> {
-    let matched = duja_panel::enumerate()
-        .ok()?
-        .into_iter()
-        .find(|p| p.id().as_str() == id)?;
+    let panels = duja_panel::enumerate().ok()?;
+    let candidates: Vec<&str> = panels.iter().map(|p| p.id().as_str()).collect();
+    let idx = duja_core::id::select_slot_match(id, &candidates)?;
+    let matched = panels.into_iter().nth(idx)?;
     open_panel_controller(&matched)
 }
 
