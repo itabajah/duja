@@ -3,7 +3,7 @@
 //! This module is **std-only and platform-independent** so its unit tests run on
 //! every CI OS: it turns the `[hotkeys]` config table (action → accelerator
 //! string) into a validated, typed [`HotkeyPlan`], and never touches the OS.
-//! The Windows tray assembly ([`crate::bin_support::tray`]) converts each parsed
+//! The Windows tray assembly (the Windows-only `bin_support::tray`) converts each parsed
 //! [`Accelerator`] into a `global_hotkey::hotkey::HotKey` at the boundary and
 //! registers it.
 //!
