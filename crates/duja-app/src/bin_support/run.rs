@@ -155,11 +155,19 @@ pub(crate) fn headless() -> anyhow::Result<ExitCode> {
         tick_rx,
     );
 
+    // IPC control server so dujactl can drive the headless pipeline too.
+    let ipc_server = crate::bin_support::ipc::start(std::sync::Arc::new(
+        crate::bin_support::ipc::HeadlessBridge::new(engine.sender()),
+    ));
+
     let notif_join = spawn_notification_printer(notifications);
 
     eprintln!("duja headless: pipeline running. type `q` then Enter to quit.");
     wait_for_quit();
 
+    if let Some(server) = ipc_server {
+        server.shutdown();
+    }
     engine.shutdown();
     forwarder.shutdown();
     let _ = notif_join.join();

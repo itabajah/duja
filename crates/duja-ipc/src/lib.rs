@@ -29,11 +29,13 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod endpoint;
 pub mod frame;
 pub mod protocol;
 
 use std::io::{Read, Write};
 
+pub use endpoint::{error_response, exchange, serve_once};
 pub use frame::{IpcError, MAX_FRAME_LEN, read_frame, read_frame_bytes, write_frame};
 pub use protocol::{
     DisplayInfo, DisplayKindDto, FeatureDto, ID_MAX_LEN, PROTOCOL_VERSION, Request, Response,
@@ -141,6 +143,7 @@ mod tests {
     fn every_request_variant_roundtrips() {
         for req in [
             Request::ListDisplays,
+            Request::ShowFlyout,
             Request::GetBrightness {
                 id: "DEL-A131-s12345".to_owned(),
             },

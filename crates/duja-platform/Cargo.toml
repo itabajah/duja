@@ -11,6 +11,10 @@ publish = false
 
 [dependencies]
 duja-core.workspace = true
+# The named-pipe transport (P5) speaks the duja-ipc protocol over a raw byte
+# stream, so the platform crate owns the confined Win32 `unsafe` while duja-ipc
+# stays `#![forbid(unsafe_code)]` pure protocol.
+duja-ipc.workspace = true
 thiserror = { workspace = true }
 crossbeam-channel = { workspace = true }
 
@@ -28,6 +32,13 @@ windows = { version = "0.62", default-features = false, features = [
     # disambiguates the mutex name per user.
     "Win32_System_Threading",
     "Win32_Security",
+    # IPC named-pipe transport (P5): pipe create/connect/peek, file read/write,
+    # the explicit DACL (SDDL → security descriptor), and the client PID/session
+    # check.
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_Security_Authorization",
 ] }
 
 [dev-dependencies]

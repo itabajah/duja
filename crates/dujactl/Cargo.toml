@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 duja-core.workspace = true
 duja-ipc.workspace = true
+duja-platform.workspace = true
 duja-ddc.workspace = true
 duja-panel.workspace = true
 anyhow.workspace = true

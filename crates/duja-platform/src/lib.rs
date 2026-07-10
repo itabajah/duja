@@ -29,8 +29,10 @@ use crossbeam_channel::Receiver;
 #[cfg(windows)]
 mod win;
 
+pub mod ipc;
 mod single_instance;
 
+pub use ipc::{IpcTransportError, PipeClient, PipeServer};
 pub use single_instance::SingleInstance;
 
 /// A normalized OS event relevant to display management.

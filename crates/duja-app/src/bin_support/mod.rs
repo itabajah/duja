@@ -11,6 +11,9 @@
 //! - [`counting`] — a [`counting::CountingController`] decorator that tallies
 //!   hardware set/get/error calls for the stress harness.
 //! - [`dimming`] — the pure continuum → dimmer planner (overlay/gamma + hardware).
+//! - [`ipc`] — the app side of the local IPC server: the [`ipc::IpcBridge`]
+//!   trait, the [`ipc::handle_request`] request→response mapping, and the
+//!   tray/headless bridges that route `set` and `show-flyout` to the right path.
 //! - [`gamma`] — wires the opt-in gamma sub-floor channel: a pure engage/restore
 //!   coordinator (unit-tested with a fake sink) plus the Windows guard-backed
 //!   sink that drives the GPU ramp and owns the persistent-ramp crash marker.
@@ -39,6 +42,7 @@ pub(crate) mod dimming;
 pub(crate) mod fmt;
 pub(crate) mod gamma;
 pub(crate) mod hotkey;
+pub(crate) mod ipc;
 pub(crate) mod logging;
 pub(crate) mod num;
 pub(crate) mod paths;

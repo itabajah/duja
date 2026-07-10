@@ -1129,6 +1129,7 @@ dependencies = [
  "duja-core",
  "duja-ddc",
  "duja-dimmer",
+ "duja-ipc",
  "duja-panel",
  "duja-platform",
  "duja-ui",
@@ -1201,6 +1202,7 @@ version = "0.0.1"
 dependencies = [
  "crossbeam-channel",
  "duja-core",
+ "duja-ipc",
  "thiserror 2.0.18",
  "windows 0.62.2",
 ]
@@ -1224,6 +1226,7 @@ dependencies = [
  "duja-ddc",
  "duja-ipc",
  "duja-panel",
+ "duja-platform",
 ]
 
 [[package]]
