@@ -16,13 +16,38 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
     "ISC",
     "Zlib",
     "MPL-2.0",
     "Unicode-3.0",
 ]
-# Slint is consumed under its Royalty-Free license (ADR-0008); the exception is
-# added here the moment the dependency lands (P1/P4), not before.
+# Slint is consumed under its Royalty-Free license (ADR-0008 / plan §8): the
+# tri-license is "GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR
+# LicenseRef-Slint-Software-3.0" and Duja takes the royalty-free option —
+# never GPL. The exception is scoped to the Slint family only so a GPL
+# license appearing anywhere else still fails the gate.
+exceptions = [
+    { crate = "slint", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "slint-build", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "slint-macros", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-core", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-core-macros", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-common", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-compiler", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-backend-winit", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-backend-selector", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-backend-testing", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-renderer-software", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "vtable", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "vtable-macro", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    # Pulled into the deny graph only by `graph.all-features = true` (we build
+    # the software renderer; skia is never enabled in any build profile).
+    { crate = "i-slint-renderer-skia", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    # Fuzz-only tooling (the fuzz/ workspace); NCSA is the permissive
+    # University of Illinois/NCSA license.
+    { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
 
 [bans]
 multiple-versions = "warn"
