@@ -74,6 +74,11 @@ pub(crate) enum AckOutcome {
         /// The sequence number of that operation.
         seq: u64,
     },
+    /// The deferred open (run on the worker thread) failed to produce a
+    /// controller; the worker never entered its loop and is exiting. The engine
+    /// drops the dead handle and leaves the display worker-less until the next
+    /// sighting.
+    OpenFailed,
 }
 
 /// A worker's reply to the engine, tagged with the worker's display id.

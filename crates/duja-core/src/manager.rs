@@ -334,39 +334,51 @@ impl DisplayManager {
     }
 }
 
-/// Resolve serial-less-twin collisions in one enumeration pass.
+/// Assign `-slot<n>` twin suffixes to a list of ids, in the order given.
 ///
-/// Ids that occur more than once get `-slot<n>` suffixes assigned in input
-/// (connector) order, `0..N-1`; ids that occur exactly once pass through
-/// untouched. Pure and total for any input.
-fn resolve_slots(seen: Vec<DiscoveredDisplay>) -> Vec<(StableDisplayId, DiscoveredDisplay)> {
+/// Ids that occur more than once get `-slot<n>` suffixes ([`StableDisplayId::with_slot`],
+/// slots `0..N-1`) assigned in input (connector) order; ids that occur exactly
+/// once pass through untouched. Pure and total for any input.
+///
+/// This is the exact twin-slotting rule
+/// [`DisplayManager::apply_enumeration`] applies, exposed so backends that
+/// address displays **without** the manager (e.g. `dujactl`) present and route
+/// twins the same way. Because the assignment depends only on input order, a
+/// backend that re-enumerates in the same deterministic order can pair a
+/// `-slot<n>` id back to the Nth bare-id match (see
+/// [`crate::id::select_slot_match`]).
+#[must_use]
+pub fn assign_twin_slots(ids: &[StableDisplayId]) -> Vec<StableDisplayId> {
     // First pass: which ids collide?
-    let duplicated: BTreeSet<StableDisplayId> = {
-        let mut once: BTreeSet<&StableDisplayId> = BTreeSet::new();
-        let mut duplicated = BTreeSet::new();
-        for display in &seen {
-            if !once.insert(&display.id) {
-                duplicated.insert(display.id.clone());
-            }
+    let mut once: BTreeSet<&StableDisplayId> = BTreeSet::new();
+    let mut duplicated: BTreeSet<&StableDisplayId> = BTreeSet::new();
+    for id in ids {
+        if !once.insert(id) {
+            duplicated.insert(id);
         }
-        duplicated
-    };
+    }
 
     // Second pass: suffix colliding ids in the order given.
-    let mut next_slot: BTreeMap<StableDisplayId, u32> = BTreeMap::new();
-    seen.into_iter()
-        .map(|display| {
-            let id = if duplicated.contains(&display.id) {
-                let slot = next_slot.entry(display.id.clone()).or_insert(0);
-                let resolved = display.id.with_slot(*slot);
+    let mut next_slot: BTreeMap<&StableDisplayId, u32> = BTreeMap::new();
+    ids.iter()
+        .map(|id| {
+            if duplicated.contains(id) {
+                let slot = next_slot.entry(id).or_insert(0);
+                let resolved = id.with_slot(*slot);
                 *slot = slot.wrapping_add(1);
                 resolved
             } else {
-                display.id.clone()
-            };
-            (id, display)
+                id.clone()
+            }
         })
         .collect()
+}
+
+/// Resolve serial-less-twin collisions in one enumeration pass, pairing each
+/// resolved id back to its [`DiscoveredDisplay`]. See [`assign_twin_slots`].
+fn resolve_slots(seen: Vec<DiscoveredDisplay>) -> Vec<(StableDisplayId, DiscoveredDisplay)> {
+    let ids: Vec<StableDisplayId> = seen.iter().map(|d| d.id.clone()).collect();
+    assign_twin_slots(&ids).into_iter().zip(seen).collect()
 }
 
 #[cfg(test)]
@@ -558,6 +570,19 @@ mod tests {
         assert_eq!(
             m.apply_enumeration(vec![disc(&a())], now()),
             vec![reattached(a(), Some(25))]
+        );
+    }
+
+    #[test]
+    fn assign_twin_slots_slots_only_collisions_in_order() {
+        let t = twin();
+        // Uniquely-identified ids pass through untouched.
+        assert_eq!(assign_twin_slots(&[a(), b()]), vec![a(), b()]);
+        // Collisions get slot suffixes in input order; a non-colliding id
+        // interleaved keeps its bare identity.
+        assert_eq!(
+            assign_twin_slots(&[t.clone(), a(), t.clone()]),
+            vec![t.with_slot(0), a(), t.with_slot(1)]
         );
     }
 

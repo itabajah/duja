@@ -14,11 +14,15 @@
 //! # Threading
 //! [`WmiTransport::open`] initializes a multithreaded COM apartment
 //! (`CoInitializeEx(COINIT_MULTITHREADED)`) on the calling thread and connects
-//! WMI there. A transport is then constructed on, and used from, that one
-//! worker thread. Re-initialization is tolerated: a second init on a thread
-//! already in an MTA returns `S_FALSE` (still balanced by an uninit), and a
-//! prior STA init returns `RPC_E_CHANGED_MODE`, which we accept without owning
-//! (or later releasing) the apartment.
+//! WMI there. It is designed to be called **on the worker thread that will own
+//! the transport**: the app's engine opens controllers through a deferred
+//! opener that runs on the worker thread, so `CoInitializeEx`, every WMI call,
+//! and the balancing `CoUninitialize` on drop all execute on that one thread —
+//! the transport is never constructed on one thread and moved to another.
+//! Re-initialization is tolerated: a second init on a thread already in an MTA
+//! returns `S_FALSE` (still balanced by an uninit), and a prior STA init returns
+//! `RPC_E_CHANGED_MODE`, which we accept without owning (or later releasing) the
+//! apartment.
 
 // RATIONALE: `WmiTransport`/`WmiConnection` namespace the WMI backend; the
 // `module_name_repetitions` pedantic lint fights the plan's chosen names.
@@ -113,12 +117,15 @@ struct WmiConnection {
     _apartment: ComApartment,
 }
 
-// SAFETY: a `WmiConnection` owns an MTA WMI proxy that is only ever constructed
-// on, and used from, a single per-display worker thread (the platform layer
-// pins each controller to its worker, mirroring the `BrightnessController`
-// `&mut self` ownership model). The COM interface pointer is not shared; `Send`
-// merely permits the one-time move onto that worker. The type is deliberately
-// NOT `Sync`.
+// SAFETY: a `WmiConnection` owns an MTA WMI proxy bound to the thread that ran
+// `CoInitializeEx`. The `BrightnessController` trait requires `Send`, so this
+// impl is what lets a boxed panel controller satisfy that bound. Soundness
+// rests on the connection being CONSTRUCTED, used, and dropped on one single
+// thread: the app's engine opens each controller through a deferred opener that
+// runs ON the worker thread that will own it (it does NOT open on the engine
+// thread and move the live proxy across), so `CoInitializeEx`/`CoUninitialize`
+// and every WMI call all run on that one thread. The interface pointer is never
+// shared; the type is deliberately NOT `Sync`.
 unsafe impl Send for WmiConnection {}
 
 impl WmiConnection {

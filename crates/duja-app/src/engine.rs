@@ -138,7 +138,7 @@ impl EngineState {
             }
             self.poll_watchdog(Instant::now());
 
-            let deadline = self.next_deadline(Instant::now());
+            let deadline = self.next_deadline();
 
             let wake = {
                 let mut sel = Select::new();
@@ -197,13 +197,14 @@ impl EngineState {
 
     /// Earliest instant the loop must wake: min of the debounce deadline and
     /// the earliest in-flight watchdog deadline. `None` when both are idle.
-    fn next_deadline(&mut self, now: Instant) -> Option<Instant> {
-        let debounce = match self.debouncer.poll(now) {
-            Action::FireAt(at) => Some(at),
-            Action::Fire => Some(now),
-            Action::Wait => None,
-        };
-        min_opt(debounce, self.earliest_watchdog_deadline())
+    ///
+    /// This **peeks** the debouncer ([`Debouncer::deadline`]) rather than
+    /// polling it: the loop already polls once at the top of each iteration to
+    /// fire what is due, and a second, mutating poll here (at a fractionally
+    /// later `Instant::now`) could consume a fire whose deadline fell between
+    /// the two reads — silently dropping the pending enumeration.
+    fn next_deadline(&self) -> Option<Instant> {
+        min_opt(self.debouncer.deadline(), self.earliest_watchdog_deadline())
     }
 
     /// The earliest `dispatched_at + watchdog_timeout` across all in-flight ops.
@@ -243,11 +244,21 @@ impl EngineState {
         if events.is_empty() {
             return;
         }
+        // A single pass can emit BOTH `Reattached` and `Responsive` for one id
+        // (documented "existence first, then health" ordering). The sighting
+        // event already spawns a fresh worker and issues the correct one-shot
+        // (a restore write or an initial Get); the `Responsive` arm must then
+        // only un-grey it — never retire that just-spawned worker, respawn a
+        // second one, and re-learn the panel's power-on level (which would drop
+        // the restore's in-flight write and clobber the user's saved level).
+        let mut respawned: std::collections::BTreeSet<StableDisplayId> =
+            std::collections::BTreeSet::new();
         for event in events {
             match event {
                 ManagerEvent::Added { id } => {
                     self.spawn_for(&id);
                     self.dispatch_initial_get(&id);
+                    respawned.insert(id);
                 }
                 ManagerEvent::Removed { id } => self.retire_worker(&id),
                 ManagerEvent::Reattached { id, restore_level } => {
@@ -258,10 +269,15 @@ impl EngineState {
                         Some(pct) => self.dispatch_set(&id, Feature::Brightness, pct),
                         None => self.dispatch_initial_get(&id),
                     }
+                    respawned.insert(id);
                 }
                 ManagerEvent::Responsive { id } => {
-                    // Recovery from unresponsive: respawn unless abandoned.
-                    if self.stuck_count.get(&id).copied().unwrap_or(0) < MAX_STUCK_RESPAWNS {
+                    // Recovery from unresponsive: respawn unless a sighting event
+                    // in THIS pass already did (dedupe), or the display has been
+                    // abandoned after too many stuck cycles.
+                    if !respawned.contains(&id)
+                        && self.stuck_count.get(&id).copied().unwrap_or(0) < MAX_STUCK_RESPAWNS
+                    {
                         self.retire_worker(&id);
                         self.spawn_for(&id);
                         self.dispatch_initial_get(&id);
@@ -275,17 +291,22 @@ impl EngineState {
         self.notify_displays_changed();
     }
 
-    /// Open a controller via the factory and register a worker for `id`.
+    /// Ask the factory for a deferred opener and register a worker for `id`.
+    ///
+    /// The opener runs on the worker thread (see [`spawn_worker`]); a failed
+    /// open is reported back as [`AckOutcome::OpenFailed`], which retires the
+    /// dead handle. The worker is inserted unconditionally so any command
+    /// dispatched between here and the open is either delivered or harmlessly
+    /// dropped when the worker exits.
     fn spawn_for(&mut self, id: &StableDisplayId) {
-        if let Some(controller) = (self.factory)(id) {
-            let handle = spawn_worker(
-                id.clone(),
-                controller,
-                self.cfg.write_min_gap,
-                self.ack_tx.clone(),
-            );
-            self.workers.insert(id.clone(), handle);
-        }
+        let opener = (self.factory)(id);
+        let handle = spawn_worker(
+            id.clone(),
+            opener,
+            self.cfg.write_min_gap,
+            self.ack_tx.clone(),
+        );
+        self.workers.insert(id.clone(), handle);
     }
 
     /// Stop and detach any worker for `id` and clear its in-flight ops.
@@ -352,14 +373,19 @@ impl EngineState {
                 seq,
                 result,
             } => {
-                self.clear_inflight_match(&id, InflightKey::Get(feature), seq);
-                if let Ok(range) = result
+                // Gate ALL Get side-effects on the seq matching the tracked
+                // in-flight Get (mirroring the write path). A stale ack from a
+                // retired/superseded worker must not record calibration, and —
+                // crucially — must not consume the `pending_learn` token, which
+                // would drop the fresh worker's real reading.
+                let is_fresh = self.clear_inflight_match(&id, InflightKey::Get(feature), seq);
+                if is_fresh
+                    && let Ok(range) = result
                     && feature == Feature::Brightness
                 {
-                    // Calibration is always safe to record; the learned level
-                    // is applied only if the user has not set one in the
-                    // meantime (which would have cleared `pending_learn`).
                     self.brightness_max.insert(id.clone(), range.max);
+                    // The learned level is applied only if the user has not set
+                    // one in the meantime (which would have cleared it).
                     if self.pending_learn.remove(&id) {
                         let pct = raw_to_pct(range.current, range.max);
                         self.manager.record_user_level(&id, pct);
@@ -370,6 +396,20 @@ impl EngineState {
             AckOutcome::Panicked { key, seq } => {
                 self.clear_inflight_match(&id, key, seq);
                 self.mark_stuck(&id);
+            }
+            AckOutcome::OpenFailed => {
+                // The deferred open failed on the worker thread. Drop the dead
+                // handle and clear any state we optimistically recorded for it —
+                // but only if the handle currently registered is the one that
+                // exited, so a stale OpenFailed cannot retire a fresh worker
+                // that already replaced it (respawn / reattach).
+                if self
+                    .workers
+                    .get(&id)
+                    .is_some_and(|handle| handle.join.is_finished())
+                {
+                    self.retire_worker(&id);
+                }
             }
         }
     }
@@ -406,13 +446,20 @@ impl EngineState {
     }
 
     /// Remove the in-flight entry for `(id, key)` iff its seq matches (a newer
-    /// dispatch supersedes an older ack).
-    fn clear_inflight_match(&mut self, id: &StableDisplayId, key: InflightKey, seq: u64) {
+    /// dispatch supersedes an older ack), returning whether it matched.
+    ///
+    /// `true` means the ack corresponds to the current in-flight op, so its
+    /// side-effects are safe to apply; `false` means it is stale/superseded and
+    /// callers must ignore it.
+    fn clear_inflight_match(&mut self, id: &StableDisplayId, key: InflightKey, seq: u64) -> bool {
         let entry = (id.clone(), key);
         if let Some((tracked, _)) = self.inflight.get(&entry)
             && *tracked == seq
         {
             self.inflight.remove(&entry);
+            true
+        } else {
+            false
         }
     }
 

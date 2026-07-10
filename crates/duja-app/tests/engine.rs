@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -130,6 +130,39 @@ impl BrightnessController for Hang {
     }
 }
 
+/// A controller whose `get` announces it was entered (with the value it will
+/// return), blocks until externally released, and announces it is about to
+/// return — so a test can hold a Get in flight, force a respawn, and pin down
+/// the exact order acks are enqueued in.
+#[derive(Debug)]
+struct GatedGet {
+    entered: Sender<u16>,
+    release: Receiver<()>,
+    returned: Sender<()>,
+    current: u16,
+}
+
+impl BrightnessController for GatedGet {
+    fn probe(&mut self) -> Result<Capabilities, ControlError> {
+        Ok(caps())
+    }
+    fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+        let _ = self.entered.send(self.current);
+        let _ = self.release.recv();
+        // The worker enqueues this Get's ack immediately after `get` returns, so
+        // signalling here lets a test guarantee this ack is enqueued before it
+        // releases another worker's Get.
+        let _ = self.returned.send(());
+        Ok(FeatureRange {
+            current: self.current,
+            max: 100,
+        })
+    }
+    fn set(&mut self, _feature: Feature, _value: u16) -> Result<(), ControlError> {
+        Ok(())
+    }
+}
+
 /// A controller whose `set` panics; `get` succeeds.
 #[derive(Debug)]
 struct Panicky;
@@ -230,11 +263,99 @@ fn within(dur: Duration, f: impl FnOnce() + Send + 'static) {
 
 fn recording_factory(writes: Sender<(Feature, u16)>) -> duja_app::ControllerFactory {
     Box::new(move |_id| {
-        Some(Box::new(Recording::new(writes.clone())) as Box<dyn BrightnessController>)
+        let writes = writes.clone();
+        Box::new(move || Some(Box::new(Recording::new(writes)) as Box<dyn BrightnessController>))
+            as duja_app::ControllerOpener
     })
 }
 
+/// A controller that records the thread its first hardware op runs on, so a
+/// test can prove open and use happen on the same (worker) thread.
+#[derive(Debug)]
+struct ThreadRecording {
+    op_thread: Arc<Mutex<Option<ThreadId>>>,
+    signal: Sender<()>,
+}
+
+impl BrightnessController for ThreadRecording {
+    fn probe(&mut self) -> Result<Capabilities, ControlError> {
+        Ok(caps())
+    }
+    fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+        let mut slot = self.op_thread.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(thread::current().id());
+            let _ = self.signal.send(());
+        }
+        Ok(FeatureRange {
+            current: 50,
+            max: 100,
+        })
+    }
+    fn set(&mut self, _feature: Feature, _value: u16) -> Result<(), ControlError> {
+        Ok(())
+    }
+}
+
 // --- tests ----------------------------------------------------------------
+
+#[test]
+fn controller_is_opened_on_the_worker_thread() {
+    // The controller (which may own thread-affine resources such as a COM
+    // apartment) must be OPENED on the very worker thread that will use and
+    // drop it — not on the engine thread. We record the thread the factory
+    // opens on and the thread the first hardware op runs on; they must match.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let (signal_tx, signal_rx) = unbounded::<()>();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    let open_thread: Arc<Mutex<Option<ThreadId>>> = Arc::new(Mutex::new(None));
+    let op_thread: Arc<Mutex<Option<ThreadId>>> = Arc::new(Mutex::new(None));
+
+    let factory: duja_app::ControllerFactory = {
+        let open_thread = open_thread.clone();
+        let op_thread = op_thread.clone();
+        let signal = signal_tx.clone();
+        Box::new(move |_id| {
+            let open_thread = open_thread.clone();
+            let op_thread = op_thread.clone();
+            let signal = signal.clone();
+            Box::new(move || {
+                *open_thread.lock().unwrap() = Some(thread::current().id());
+                Some(Box::new(ThreadRecording {
+                    op_thread: op_thread.clone(),
+                    signal: signal.clone(),
+                }) as Box<dyn BrightnessController>)
+            }) as duja_app::ControllerOpener
+        })
+    };
+
+    let (engine, _notes) = Engine::spawn(
+        EngineConfig::default(),
+        enumerator(state, calls_tx),
+        factory,
+        platform_rx,
+    );
+
+    // The engine dispatches an initial Get on add; it runs the controller's
+    // `get` on the worker thread and signals.
+    signal_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("initial get should run on the worker");
+
+    let opened = *open_thread.lock().unwrap();
+    let operated = *op_thread.lock().unwrap();
+    assert!(opened.is_some(), "controller was never opened");
+    assert_eq!(
+        opened, operated,
+        "controller must be opened on the same (worker) thread that uses it"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
 
 #[test]
 fn burst_yields_single_hw_write() {
@@ -298,8 +419,10 @@ fn stuck_controller_marks_display_unresponsive() {
         watchdog_timeout: Duration::from_millis(150),
         displaychange_debounce: Duration::from_millis(60),
     };
-    let factory: duja_app::ControllerFactory =
-        Box::new(|_id| Some(Box::new(Hang) as Box<dyn BrightnessController>));
+    let factory: duja_app::ControllerFactory = Box::new(|_id| {
+        Box::new(|| Some(Box::new(Hang) as Box<dyn BrightnessController>))
+            as duja_app::ControllerOpener
+    });
     let (engine, notes) = Engine::spawn(cfg, enumerator(state, calls_tx), factory, platform_rx);
     let cmds = engine.sender();
 
@@ -349,13 +472,20 @@ fn recovered_display_gets_fresh_worker() {
         let hang_first = hang_first.clone();
         let writes_tx = writes_tx.clone();
         Box::new(move |_id| {
-            let mut flag = hang_first.lock().unwrap();
-            if *flag {
+            let hang = {
+                let mut flag = hang_first.lock().unwrap();
+                let hang = *flag;
                 *flag = false;
-                Some(Box::new(Hang) as Box<dyn BrightnessController>)
-            } else {
-                Some(Box::new(Recording::new(writes_tx.clone())) as Box<dyn BrightnessController>)
-            }
+                hang
+            };
+            let writes_tx = writes_tx.clone();
+            Box::new(move || {
+                if hang {
+                    Some(Box::new(Hang) as Box<dyn BrightnessController>)
+                } else {
+                    Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
+                }
+            }) as duja_app::ControllerOpener
         })
     };
 
@@ -458,6 +588,213 @@ fn replug_restores_last_level() {
 }
 
 #[test]
+fn reattach_of_unresponsive_display_restores_level_not_power_on_default() {
+    // A display is dimmed to 30% while its worker is wedged, trips the watchdog
+    // (unresponsive), is unplugged, then replugged. The manager emits BOTH
+    // Reattached { restore_level: Some(30) } and Responsive in one pass; the
+    // engine must restore 30 and must NOT let the Responsive arm respawn a
+    // second worker and re-learn the panel's power-on 50%.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (writes_tx, writes_rx) = unbounded();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    // First controller hangs (a write wedges it -> watchdog -> unresponsive);
+    // every later controller records writes and reads back the power-on 50%.
+    let hang_first = Arc::new(Mutex::new(true));
+    let factory: duja_app::ControllerFactory = {
+        let hang_first = hang_first.clone();
+        let writes_tx = writes_tx.clone();
+        Box::new(move |_id| {
+            let hang = {
+                let mut flag = hang_first.lock().unwrap();
+                let h = *flag;
+                *flag = false;
+                h
+            };
+            let writes_tx = writes_tx.clone();
+            Box::new(move || {
+                if hang {
+                    Some(Box::new(Hang) as Box<dyn BrightnessController>)
+                } else {
+                    Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
+                }
+            }) as duja_app::ControllerOpener
+        })
+    };
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(10),
+        watchdog_timeout: Duration::from_millis(150),
+        displaychange_debounce: Duration::from_millis(60),
+    };
+    let (engine, notes) = Engine::spawn(
+        cfg,
+        enumerator(state.clone(), calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // The user dims to 30% while the (hung) worker is wedged.
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 30,
+    })
+    .unwrap();
+
+    // The wedged write trips the watchdog.
+    let want = id.clone();
+    assert!(
+        wait_note(&notes, Duration::from_secs(2), |n| {
+            matches!(n, EngineNotification::DisplayUnresponsive(x) if *x == want)
+        }),
+        "expected the wedged write to mark the display unresponsive"
+    );
+
+    // Unplug (barrier via Snapshot), then replug the same display.
+    *state.lock().unwrap() = Vec::new();
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+    assert!(
+        snapshot(&cmds).is_empty(),
+        "the display should be gone after the unplug enumeration"
+    );
+    *state.lock().unwrap() = vec![discovered(&id)];
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+
+    // The fresh worker must receive the RESTORE write of 30%.
+    let (_c, seen) = drain_writes(&writes_rx, |f, v| f == Feature::Brightness && v == 30);
+    assert!(
+        seen.contains(&(Feature::Brightness, 30)),
+        "reattach must restore the saved 30%, saw writes {seen:?}"
+    );
+
+    // ...and the level must never be clobbered back to the power-on 50% by a
+    // stray initial-Get from a superseded second respawn.
+    let relearned = wait_note(&notes, Duration::from_millis(500), |n| {
+        matches!(
+            n,
+            EngineNotification::DisplaysChanged(snaps)
+                if snaps.iter().any(|s| s.id == id && s.user_level_pct == 50)
+        )
+    });
+    assert!(
+        !relearned,
+        "reattach re-learned the power-on 50%, losing the user's 30%"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn stale_get_ack_cannot_clobber_fresh_learn() {
+    // Worker A's initial Get is held in flight; the display is unplugged (A
+    // retired) and replugged (worker B, a fresh initial Get). We release A's
+    // stale Get first, then B's fresh one. The learned level must come from B's
+    // reading (70), never A's superseded reading (20).
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    let (entered_tx, entered_rx) = unbounded::<u16>();
+    let (release_a_tx, release_a_rx) = unbounded::<()>();
+    let (release_b_tx, release_b_rx) = unbounded::<()>();
+    let (returned_a_tx, returned_a_rx) = unbounded::<()>();
+    let (returned_b_tx, _returned_b_rx) = unbounded::<()>();
+
+    let calls = Arc::new(Mutex::new(0u32));
+    let factory: duja_app::ControllerFactory = {
+        let entered_tx = entered_tx.clone();
+        Box::new(move |_id| {
+            let n = {
+                let mut c = calls.lock().unwrap();
+                *c += 1;
+                *c
+            };
+            let entered_tx = entered_tx.clone();
+            let (current, release, returned) = if n == 1 {
+                (20u16, release_a_rx.clone(), returned_a_tx.clone())
+            } else {
+                (70u16, release_b_rx.clone(), returned_b_tx.clone())
+            };
+            Box::new(move || {
+                Some(Box::new(GatedGet {
+                    entered: entered_tx.clone(),
+                    release: release.clone(),
+                    returned: returned.clone(),
+                    current,
+                }) as Box<dyn BrightnessController>)
+            }) as duja_app::ControllerOpener
+        })
+    };
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(10),
+        // Large so the deliberately-blocked Gets never trip the watchdog.
+        watchdog_timeout: Duration::from_secs(30),
+        displaychange_debounce: Duration::from_millis(60),
+    };
+    let (engine, notes) = Engine::spawn(
+        cfg,
+        enumerator(state.clone(), calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // Worker A entered its initial Get (value 20) and is now blocked.
+    assert_eq!(
+        entered_rx.recv_timeout(Duration::from_secs(2)).ok(),
+        Some(20),
+        "worker A should enter its initial Get"
+    );
+
+    // Unplug (retiring A while its Get is in flight), then replug -> worker B.
+    *state.lock().unwrap() = Vec::new();
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+    assert!(snapshot(&cmds).is_empty(), "display should be gone");
+    *state.lock().unwrap() = vec![discovered(&id)];
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+
+    // Worker B entered its fresh initial Get (value 70) and is now blocked.
+    assert_eq!(
+        entered_rx.recv_timeout(Duration::from_secs(2)).ok(),
+        Some(70),
+        "worker B should enter its fresh initial Get"
+    );
+
+    // Release the STALE Get and wait until worker A has returned from it — its
+    // ack is enqueued immediately after. A snapshot round-trip then advances the
+    // engine loop. Only THEN release the fresh Get, so A's stale ack is strictly
+    // enqueued (and thus processed, FIFO) before B's fresh ack.
+    release_a_tx.send(()).unwrap();
+    returned_a_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker A should return from its stale Get");
+    let _ = snapshot(&cmds);
+    release_b_tx.send(()).unwrap();
+
+    // The fresh reading (70) must be the learned level — not A's stale 20.
+    let learned_fresh = wait_note(&notes, Duration::from_secs(2), |n| {
+        matches!(
+            n,
+            EngineNotification::DisplaysChanged(snaps)
+                if snaps.iter().any(|s| s.id == id && s.user_level_pct == 70)
+        )
+    });
+    assert!(
+        learned_fresh,
+        "the fresh Get reading (70) must be learned; a stale ack must not consume the learn"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
 fn worker_panic_does_not_kill_engine() {
     let id = display_id();
     let (platform_tx, platform_rx) = unbounded::<()>();
@@ -469,8 +806,10 @@ fn worker_panic_does_not_kill_engine() {
         watchdog_timeout: Duration::from_secs(5),
         displaychange_debounce: Duration::from_millis(60),
     };
-    let factory: duja_app::ControllerFactory =
-        Box::new(|_id| Some(Box::new(Panicky) as Box<dyn BrightnessController>));
+    let factory: duja_app::ControllerFactory = Box::new(|_id| {
+        Box::new(|| Some(Box::new(Panicky) as Box<dyn BrightnessController>))
+            as duja_app::ControllerOpener
+    });
     let (engine, notes) = Engine::spawn(cfg, enumerator(state, calls_tx), factory, platform_rx);
     let cmds = engine.sender();
 

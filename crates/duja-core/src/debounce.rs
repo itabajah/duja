@@ -46,6 +46,19 @@ impl Debouncer {
         Action::FireAt(deadline)
     }
 
+    /// The instant this debouncer is currently armed to fire, if any, **without
+    /// consuming or advancing** it.
+    ///
+    /// This is the read-only companion to [`poll`](Self::poll): a caller that
+    /// polls once per loop iteration (to fire what is due) can use this to
+    /// compute its wakeup deadline without a second, mutating `poll` racing the
+    /// first — a later `poll` could otherwise observe the deadline as passed and
+    /// silently consume the fire. Returns `None` when idle.
+    #[must_use]
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
     /// Evaluate the debouncer at `now`.
     ///
     /// Returns [`Action::Fire`] (and disarms) once the deadline has passed,
@@ -169,6 +182,37 @@ mod tests {
         assert_eq!(d.poll(at(b, 119)), Action::FireAt(at(b, 120)));
         assert_eq!(d.poll(at(b, 120)), Action::Fire);
         assert_eq!(d.poll(at(b, 121)), Action::Wait);
+    }
+
+    #[test]
+    fn deadline_peek_is_non_consuming() {
+        // Mirrors the engine loop: a first `poll` before the deadline must not
+        // lose the pending fire to a later, read-only wakeup computation. The
+        // engine computes its select wakeup via `deadline()`, which must NEVER
+        // disarm — otherwise a fire whose instant falls between the two reads is
+        // silently consumed and the enumeration is dropped.
+        let b = base();
+        let mut d = debouncer();
+        d.on_event(b); // armed, due at b + DELAY_MS
+        let due = at(b, DELAY_MS);
+
+        // Not yet due: still waiting.
+        assert_eq!(d.poll(at(b, 50)), Action::FireAt(due));
+        // Peeking reports the deadline without consuming it, even repeatedly and
+        // even though wall-clock time may already be past it.
+        assert_eq!(d.deadline(), Some(due));
+        assert_eq!(d.deadline(), Some(due));
+        // The pending fire is intact for the next real poll to claim.
+        assert_eq!(d.poll(due), Action::Fire);
+        // Consumed exactly once; now idle and un-peekable.
+        assert_eq!(d.deadline(), None);
+        assert_eq!(d.poll(at(b, 200)), Action::Wait);
+    }
+
+    #[test]
+    fn idle_debouncer_peeks_none() {
+        let d = debouncer();
+        assert_eq!(d.deadline(), None);
     }
 
     #[test]

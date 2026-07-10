@@ -1,9 +1,10 @@
 //! Per-monitor worker threads.
 //!
 //! Each worker exclusively owns its
-//! [`BrightnessController`](duja_core::controller::BrightnessController) (moved
-//! in at spawn — the trait's `&mut self` makes serialization a compile-time
-//! property, so no locking is needed). The loop:
+//! [`BrightnessController`](duja_core::controller::BrightnessController)
+//! (**opened on this thread** via the injected [`ControllerOpener`] as the first
+//! thing the worker does — the trait's `&mut self` makes serialization a
+//! compile-time property, so no locking is needed). The loop:
 //!
 //! 1. parks on its command channel when idle (**zero wakeups**);
 //! 2. drains every immediately-available command, keeping the newest value per
@@ -28,6 +29,7 @@ use duja_core::controller::BrightnessController;
 use duja_core::id::StableDisplayId;
 use duja_core::model::Feature;
 
+use crate::ControllerOpener;
 use crate::protocol::{AckOutcome, InflightKey, WorkerAck, WorkerCommand};
 
 /// The engine's handle to one worker: its command sender and join handle.
@@ -43,15 +45,29 @@ pub(crate) struct WorkerHandle {
     pub(crate) join: JoinHandle<()>,
 }
 
-/// Spawn a worker owning `controller` for `id`.
+/// Spawn a worker for `id` that opens its controller via `opener` **on its own
+/// thread**, then runs the control loop.
+///
+/// Running the open on the worker thread (rather than the engine thread) keeps
+/// every controller and its thread-affine resources — a COM apartment, a
+/// physical-monitor handle — constructed, used, and dropped on one thread. If
+/// the open returns `None`, the worker reports [`AckOutcome::OpenFailed`] and
+/// exits without ever entering the loop.
 pub(crate) fn spawn_worker(
     id: StableDisplayId,
-    controller: Box<dyn BrightnessController>,
+    opener: ControllerOpener,
     min_gap: Duration,
     ack_tx: Sender<WorkerAck>,
 ) -> WorkerHandle {
     let (cmd_tx, cmd_rx) = unbounded::<WorkerCommand>();
     let join = thread::spawn(move || {
+        let Some(controller) = opener() else {
+            let _ = ack_tx.send(WorkerAck {
+                id,
+                outcome: AckOutcome::OpenFailed,
+            });
+            return;
+        };
         worker_loop(&id, controller, min_gap, &cmd_rx, &ack_tx);
     });
     WorkerHandle { cmd_tx, join }
@@ -321,8 +337,10 @@ mod tests {
         // land — features never collapse into one another.
         let (writes_tx, writes_rx) = unbounded();
         let (ack_tx, _ack_rx) = unbounded();
-        let controller = Box::new(Recording::new(writes_tx));
-        let handle = spawn_worker(worker_id(), controller, Duration::from_millis(5), ack_tx);
+        let opener: crate::ControllerOpener = Box::new(move || {
+            Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
+        });
+        let handle = spawn_worker(worker_id(), opener, Duration::from_millis(5), ack_tx);
 
         for (i, feature) in [
             Feature::Brightness,
@@ -372,8 +390,10 @@ mod tests {
         // must coalesce to far fewer, and the LAST value must win.
         let (writes_tx, writes_rx) = unbounded();
         let (ack_tx, _ack_rx) = unbounded();
-        let controller = Box::new(Recording::new(writes_tx));
-        let handle = spawn_worker(worker_id(), controller, Duration::from_millis(80), ack_tx);
+        let opener: crate::ControllerOpener = Box::new(move || {
+            Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
+        });
+        let handle = spawn_worker(worker_id(), opener, Duration::from_millis(80), ack_tx);
 
         for _ in 0..100u32 {
             handle
@@ -406,6 +426,26 @@ mod tests {
         );
 
         handle.cmd_tx.send(WorkerCommand::Shutdown).unwrap();
+        handle.join.join().unwrap();
+    }
+
+    #[test]
+    fn failed_open_acks_open_failed_and_exits() {
+        // A deferred open that returns None must report OpenFailed and the
+        // worker thread must exit without entering its loop.
+        let (ack_tx, ack_rx) = unbounded();
+        let opener: crate::ControllerOpener = Box::new(|| None);
+        let handle = spawn_worker(worker_id(), opener, Duration::from_millis(5), ack_tx);
+
+        let ack = ack_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker never acked the failed open");
+        assert!(
+            matches!(ack.outcome, AckOutcome::OpenFailed),
+            "expected OpenFailed, got {:?}",
+            ack.outcome
+        );
+        // The thread exited on its own; joining must not hang.
         handle.join.join().unwrap();
     }
 }

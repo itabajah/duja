@@ -50,7 +50,7 @@
 //! let (engine, _notifications) = Engine::spawn(
 //!     EngineConfig::default(),
 //!     Box::new(|| Enumeration { displays: Vec::new() }),
-//!     Box::new(|_id| None),
+//!     Box::new(|_id| Box::new(|| None)),
 //!     platform_rx,
 //! );
 //! let commands = engine.sender();
@@ -121,14 +121,24 @@ pub struct Enumeration {
 /// (debounced) refresh. `FnMut` so a real enumerator may cache handles.
 pub type Enumerator = Box<dyn FnMut() -> Enumeration + Send>;
 
+/// A deferred controller open, run **on the worker thread** the controller will
+/// live on.
+///
+/// Returns `None` when the controller cannot be opened (e.g. the display
+/// vanished between enumeration and open, or a probe failed); the worker then
+/// reports the failure and exits, leaving the display worker-less until the
+/// next sighting.
+pub type ControllerOpener = Box<dyn FnOnce() -> Option<Box<dyn BrightnessController>> + Send>;
+
 /// How the engine (re)opens a controller for a display.
 ///
-/// Returns `None` when a controller cannot be opened (e.g. the display
-/// vanished between enumeration and open); the engine then leaves the display
-/// worker-less until the next sighting. Injected so tests use fakes and
+/// The factory runs on the **engine** thread and returns a [`ControllerOpener`]
+/// that the worker invokes as the very first thing on its **own** thread. This
+/// guarantees every controller — and any thread-affine resource it acquires
+/// (e.g. a COM apartment, a physical-monitor handle) — is constructed, used,
+/// and dropped on one and the same thread. Injected so tests use fakes and
 /// integration uses `duja-ddc` / `duja-panel`.
-pub type ControllerFactory =
-    Box<dyn Fn(&StableDisplayId) -> Option<Box<dyn BrightnessController>> + Send>;
+pub type ControllerFactory = Box<dyn Fn(&StableDisplayId) -> ControllerOpener + Send>;
 
 /// A message to the engine actor.
 #[derive(Debug)]

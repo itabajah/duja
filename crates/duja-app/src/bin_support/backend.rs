@@ -21,6 +21,20 @@
 //! `DdcDisplay`. [`discover`] takes only the metadata and drops each display
 //! immediately (releasing its handle); [`open_controller`] converts exactly the
 //! one matched display into a controller and drops the rest.
+//!
+//! # Identical-twin routing
+//!
+//! [`discover`] reports the **bare** EDID id for each display; the engine's
+//! [`DisplayManager`](duja_core::manager::DisplayManager) then resolves
+//! serial-less twins to `<bare>-slot<n>` ids, slot = position in enumeration
+//! order. When the engine later asks the factory to open one of those ids,
+//! [`open_controller`] re-enumerates and, via
+//! [`select_slot_match`](duja_core::id::select_slot_match), selects the **Nth**
+//! bare-id match for a `-slot<n>` request. This is correct only because both
+//! sides walk the *same* deterministic order: `duja_ddc::enumerate()` sorts by
+//! device-interface path and `duja_panel::enumerate()` by WMI instance, and
+//! [`assign_twin_slots`](duja_core::manager::assign_twin_slots) slots in that
+//! same input order — so slot `n` and "the Nth bare match" always coincide.
 
 use duja_core::controller::BrightnessController;
 use duja_core::id::StableDisplayId;
@@ -95,12 +109,12 @@ pub(crate) fn open_controller(id: &StableDisplayId) -> Option<Box<dyn Brightness
 
 #[cfg(windows)]
 fn open_ddc(id: &StableDisplayId) -> Option<Box<dyn BrightnessController>> {
-    // `find` consumes non-matching displays (releasing their handles) and stops
-    // at the first match; the remaining iterator is dropped, releasing the rest.
-    let matched = duja_ddc::enumerate()
-        .ok()?
-        .into_iter()
-        .find(|d| id_matches(id, &d.id))?;
+    let displays = duja_ddc::enumerate().ok()?;
+    let candidates: Vec<&str> = displays.iter().map(|d| d.id.as_str()).collect();
+    let idx = duja_core::id::select_slot_match(id.as_str(), &candidates)?;
+    // `nth(idx)` consumes and drops the earlier displays (releasing their
+    // handles); the remaining iterator is dropped after, releasing the rest.
+    let matched = displays.into_iter().nth(idx)?;
     Some(Box::new(matched.into_controller()))
 }
 
@@ -110,10 +124,10 @@ fn open_ddc(_id: &StableDisplayId) -> Option<Box<dyn BrightnessController>> {
 }
 
 fn open_panel(id: &StableDisplayId) -> Option<Box<dyn BrightnessController>> {
-    let matched = duja_panel::enumerate()
-        .ok()?
-        .into_iter()
-        .find(|p| id_matches(id, p.id()))?;
+    let panels = duja_panel::enumerate().ok()?;
+    let candidates: Vec<&str> = panels.iter().map(|p| p.id().as_str()).collect();
+    let idx = duja_core::id::select_slot_match(id.as_str(), &candidates)?;
+    let matched = panels.into_iter().nth(idx)?;
     open_panel_controller(&matched)
 }
 
@@ -134,31 +148,10 @@ fn open_panel_controller(
     None
 }
 
-/// Whether `candidate` (a pre-slotting enumerated id) is the display the engine
-/// asked for by its resolved `requested` id.
-///
-/// The engine resolves identical-twin monitors to `-slot<n>`-suffixed ids while
-/// enumeration reports the bare EDID id, so an exact match or a `"<id>-slot…"`
-/// prefix both count. (For twins this returns the first physical match, which
-/// the P3 harness accepts.)
-fn id_matches(requested: &StableDisplayId, candidate: &StableDisplayId) -> bool {
-    let (r, c) = (requested.as_str(), candidate.as_str());
-    r == c
-        || r.strip_prefix(c)
-            .is_some_and(|rest| rest.starts_with("-slot"))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{hardware_brightness_caps, id_matches};
-    use duja_core::id::StableDisplayId;
+    use super::hardware_brightness_caps;
     use duja_core::model::Feature;
-
-    fn id(s: &str) -> StableDisplayId {
-        // from_parts needs a 3-letter uppercase manufacturer; craft ids by hand
-        // through a real constructor so they are well-formed.
-        StableDisplayId::from_parts("GSM", 0x5B09, Some(s)).unwrap()
-    }
 
     #[test]
     fn caps_are_brightness_only_hardware_backed() {
@@ -167,28 +160,5 @@ mod tests {
         assert!(!caps.supports(Feature::Contrast));
         assert!(caps.hardware_range);
         assert_eq!(caps.raw_capabilities, None);
-    }
-
-    #[test]
-    fn exact_id_matches() {
-        let a = id("SERIAL1");
-        assert!(id_matches(&a, &a.clone()));
-    }
-
-    #[test]
-    fn slot_suffixed_request_matches_bare_candidate() {
-        let bare = id("TWIN");
-        let slotted = bare.with_slot(0);
-        assert!(id_matches(&slotted, &bare));
-    }
-
-    #[test]
-    fn different_ids_do_not_match() {
-        assert!(!id_matches(&id("A"), &id("B")));
-        // A bare candidate must not match a different id that merely shares a
-        // prefix without the `-slot` boundary.
-        let short = id("PANEL");
-        let longer = id("PANELX");
-        assert!(!id_matches(&longer, &short));
     }
 }
