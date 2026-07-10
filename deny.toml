@@ -6,6 +6,20 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# All four ignores below are transitively pinned by slint 1.17.1 (via winit /
+# resvg / image); none is reachable from untrusted input in Duja. Revisit on
+# every Slint upgrade (P8 hardening re-audits this list).
+ignore = [
+    # quick-xml DoS advisories: quick-xml sits under wayland-scanner, a
+    # build-time proc-macro parsing the wayland protocol XML bundled in the
+    # crates themselves (linux-only, never attacker-controlled).
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # unmaintained (not vulnerable): paste is a build-time proc-macro under
+    # image/exr; ttf-parser is pinned by fontdb/resvg inside Slint.
+    "RUSTSEC-2024-0436",
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; pinned by slint's resvg" },
+]
 
 [licenses]
 version = 2
