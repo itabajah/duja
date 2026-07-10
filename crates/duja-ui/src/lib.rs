@@ -10,9 +10,14 @@
 //!
 //! - [`flyout_vm`] — the flyout view-model: ordered [`FlyoutRow`]s, link-all,
 //!   theme, and the slider/refresh actions.
-//! - [`settings_vm`] — the P4 settings-panel skeleton.
-//! - [`command`] — [`UiCommand`], the only thing a view-model emits.
-//! - [`shell`] — [`FlyoutShell`], the Slint-facing seam (the sole Slint island).
+//! - [`settings_vm`] — the settings view-model: general toggles, the theme and
+//!   per-monitor selectors, the opt-in update check, and the read-only hotkey
+//!   list. Emits [`SettingsCommand`]s.
+//! - [`command`] — [`UiCommand`] / [`SettingsCommand`], the values a view-model
+//!   emits.
+//! - [`shell`] / [`settings_shell`] — [`FlyoutShell`] / [`SettingsShell`], the
+//!   Slint-facing seams; the generated component code is quarantined in the
+//!   crate-private `generated` module.
 //!
 //! ## Wave-2 wiring (`duja-app` assembly)
 //!
@@ -42,12 +47,19 @@
 
 pub mod command;
 pub mod flyout_vm;
+pub mod settings_shell;
 pub mod settings_vm;
 pub mod shell;
 
-pub use command::UiCommand;
+pub(crate) mod generated;
+
+pub use command::{SettingsCommand, ThemeChoice, UiCommand};
 pub use flyout_vm::{FlyoutRow, FlyoutVm, Theme};
-pub use settings_vm::{SettingControl, SettingKey, SettingsRow, SettingsVm};
+pub use settings_shell::SettingsShell;
+pub use settings_vm::{
+    DIM_MODE_ORDER, HotkeyRow, InputChoice, MAX_FLOOR_PCT, MonitorSection, SettingsVm, THEME_ORDER,
+    UpdateStatus,
+};
 pub use shell::FlyoutShell;
 
 /// The crate version, as compiled in.

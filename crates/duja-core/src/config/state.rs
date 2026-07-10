@@ -60,8 +60,14 @@ pub struct LevelEntry {
 pub struct StateFile {
     /// The state schema version.
     pub schema_version: u32,
+    /// When the opt-in update check last ran, in seconds since the Unix epoch.
+    ///
+    /// Lives here — not in the user's config — because it is volatile bookkeeping
+    /// the user never edits. `None` until the first manual check. A scalar, so it
+    /// serializes ahead of the `levels` table.
+    pub last_update_check_unix: Option<i64>,
     /// Last-known level per display id. Declared last so it serializes after the
-    /// scalar version key.
+    /// scalar keys.
     pub levels: BTreeMap<String, LevelEntry>,
 }
 
@@ -69,6 +75,7 @@ impl Default for StateFile {
     fn default() -> Self {
         StateFile {
             schema_version: STATE_VERSION,
+            last_update_check_unix: None,
             levels: BTreeMap::new(),
         }
     }
@@ -114,6 +121,17 @@ impl StateFile {
     #[must_use]
     pub fn level(&self, id: &str) -> Option<u8> {
         self.levels.get(id).map(|entry| entry.user_level_pct)
+    }
+
+    /// Record that the update check ran at `unix` (seconds since the epoch).
+    pub fn record_update_check(&mut self, unix: i64) {
+        self.last_update_check_unix = Some(unix);
+    }
+
+    /// When the update check last ran, if ever.
+    #[must_use]
+    pub fn last_update_check(&self) -> Option<i64> {
+        self.last_update_check_unix
     }
 }
 
@@ -191,6 +209,23 @@ mod tests {
         state.save(&path).expect("save");
 
         let loaded = StateFile::load(&path).expect("load");
+        assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn last_update_check_records_and_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.toml");
+
+        let mut state = StateFile::default();
+        assert_eq!(state.last_update_check(), None);
+        state.record("GSM-5B09-A", 40, 1_700_000_000);
+        state.record_update_check(1_700_000_500);
+        state.save(&path).expect("save");
+
+        let loaded = StateFile::load(&path).expect("load");
+        assert_eq!(loaded.last_update_check(), Some(1_700_000_500));
+        assert_eq!(loaded.level("GSM-5B09-A"), Some(40));
         assert_eq!(loaded, state);
     }
 

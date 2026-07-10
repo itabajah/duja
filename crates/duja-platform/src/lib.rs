@@ -29,9 +29,11 @@ use crossbeam_channel::Receiver;
 #[cfg(windows)]
 mod win;
 
+pub mod autostart;
 pub mod ipc;
 mod single_instance;
 
+pub use autostart::{Autostart, AutostartError};
 pub use ipc::{IpcTransportError, PipeClient, PipeServer};
 pub use single_instance::SingleInstance;
 

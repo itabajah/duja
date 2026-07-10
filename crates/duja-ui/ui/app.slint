@@ -1,0 +1,9 @@
+// Single compilation entry for `slint::include_modules!()`.
+//
+// Both windows are compiled through this one file so the generated Rust is
+// emitted exactly once (two independent `slint_build::compile` calls would each
+// re-emit the shared `flyout.slint` definitions and collide). Each window and
+// the structs its properties use are re-exported for the generated module.
+
+export { FlyoutWindow, FlyoutRowData } from "flyout.slint";
+export { SettingsWindow, SettingsMonitorData, SettingsHotkeyData } from "settings.slint";

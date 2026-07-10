@@ -101,9 +101,17 @@ fn rename_in_each_monitor(doc: &mut DocumentMut, old_key: &str, new_key: &str) {
 }
 
 /// Set the top-level `schema_version` scalar.
+///
+/// When the key already exists, only its *value* is replaced so the key's decor
+/// — crucially, a leading comment above it — is preserved; a fresh `insert`
+/// would drop that comment. A brand-new stamp (unversioned files) is appended.
 fn stamp_version(doc: &mut DocumentMut, version: u32) {
-    doc.as_table_mut()
-        .insert("schema_version", toml_edit::value(i64::from(version)));
+    let table = doc.as_table_mut();
+    if let Some(item) = table.get_mut("schema_version") {
+        *item = toml_edit::value(i64::from(version));
+    } else {
+        table.insert("schema_version", toml_edit::value(i64::from(version)));
+    }
 }
 
 #[cfg(test)]
@@ -201,6 +209,17 @@ experimental = true
         // Idempotent: migrating the result again changes nothing.
         let again = migrate(parse(&out), 1).expect("idempotent").to_string();
         assert_eq!(out, again);
+    }
+
+    #[test]
+    fn stamping_preserves_a_leading_comment_on_schema_version() {
+        // A file already at the current version whose `schema_version` carries a
+        // leading comment: re-stamping must keep that comment (regression — an
+        // `insert` over the existing key used to drop its decor).
+        let doc = parse("# keep me\nschema_version = 1\n\n[general]\nautostart = true\n");
+        let out = migrate(doc, 1).expect("noop migration").to_string();
+        assert!(out.contains("# keep me"), "leading comment dropped: {out}");
+        assert!(out.contains("schema_version = 1"), "{out}");
     }
 
     #[test]

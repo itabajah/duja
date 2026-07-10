@@ -1,0 +1,337 @@
+// Duja settings window — presentation only (plan §4.4). All logic lives in
+// `duja_ui::settings_vm::SettingsVm`; this file maps VM state to widgets and
+// widget events back to callbacks. Same design rules as the flyout:
+//   * Premium-minimal: 4/8 px spacing grid, one accent colour, subtle radii.
+//   * NO Timer elements and no idle animations (perf budget: zero idle wakeups).
+//   * Shared `Palette` (imported from flyout.slint) flips light/dark live.
+//   * Every user-visible string goes through @tr(...) for i18n from day one.
+//   * Keyboard: Esc emits esc-pressed; Tab traverses; widgets take arrow keys.
+
+import { Slider, Switch, ComboBox, ScrollView, Button } from "std-widgets.slint";
+import { Palette } from "flyout.slint";
+
+// One per-monitor section, mirroring `duja_ui::settings_vm::MonitorSection`.
+export struct SettingsMonitorData {
+    name: string,
+    floor-pct: int,
+    dim-mode-index: int,
+    gamma-available: bool,
+    inputs: [string],
+    has-inputs: bool,
+}
+
+// One read-only hotkey row, mirroring `duja_ui::settings_vm::HotkeyRow`.
+export struct SettingsHotkeyData {
+    action: string,
+    binding: string,
+    conflicted: bool,
+}
+
+export component SettingsWindow inherits Window {
+    title: @tr("Duja Settings");
+    preferred-width: 420px;
+    min-width: 360px;
+    preferred-height: 560px;
+    min-height: 320px;
+    max-height: 800px;
+    background: Palette.bg;
+
+    // --- inputs from the Rust shell (set from SettingsVm state) ---
+    in property <bool> dark <=> Palette.dark;
+    in-out property <bool> autostart-on;
+    in property <bool> autostart-supported: true;
+    in property <int> theme-index;
+    in-out property <bool> update-check-on;
+    in property <string> update-status;
+    in property <bool> update-available;
+    in property <[SettingsMonitorData]> monitors;
+    in property <[SettingsHotkeyData]> hotkeys;
+
+    // --- outputs to the Rust shell (mapped onto SettingsVm calls) ---
+    callback autostart-toggled(/* on */ bool);
+    callback theme-selected(/* index */ int);
+    callback update-check-toggled(/* on */ bool);
+    callback check-updates-clicked();
+    callback open-releases-clicked();
+    callback monitor-floor-changed(/* monitor-index */ int, /* percent */ float);
+    callback monitor-dim-mode-selected(/* monitor-index */ int, /* option */ int);
+    callback monitor-input-selected(/* monitor-index */ int, /* option */ int);
+    callback esc-pressed();
+
+    forward-focus: scope;
+    scope := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.esc-pressed();
+                return accept;
+            }
+            return reject;
+        }
+
+        ScrollView {
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                // ---- General ----
+                Text {
+                    text: @tr("General");
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: Palette.text;
+                    accessible-role: text;
+                    accessible-label: @tr("General");
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: @tr("Start with Windows");
+                        color: Palette.text;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Switch {
+                        checked <=> root.autostart-on;
+                        enabled: root.autostart-supported;
+                        accessible-label: @tr("Start with Windows");
+                        toggled => {
+                            root.autostart-toggled(self.checked);
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: @tr("Theme");
+                        color: Palette.text;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    ComboBox {
+                        model: [@tr("Auto"), @tr("Light"), @tr("Dark")];
+                        current-index: root.theme-index;
+                        accessible-label: @tr("Theme");
+                        selected => {
+                            root.theme-selected(self.current-index);
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: @tr("Check for updates");
+                        color: Palette.text;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Switch {
+                        checked <=> root.update-check-on;
+                        accessible-label: @tr("Check for updates");
+                        toggled => {
+                            root.update-check-toggled(self.checked);
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: @tr("Check now");
+                        enabled: root.update-check-on;
+                        accessible-label: @tr("Check for updates now");
+                        clicked => {
+                            root.check-updates-clicked();
+                        }
+                    }
+                    Text {
+                        text: root.update-status;
+                        color: Palette.text-subtle;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                }
+
+                if root.update-available: HorizontalLayout {
+                    Button {
+                        text: @tr("Open releases page");
+                        accessible-label: @tr("Open the releases page in your browser");
+                        clicked => {
+                            root.open-releases-clicked();
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border;
+                }
+
+                // ---- Displays ----
+                Text {
+                    text: @tr("Displays");
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: Palette.text;
+                }
+
+                if root.monitors.length == 0: Text {
+                    text: @tr("No displays detected");
+                    color: Palette.text-subtle;
+                    font-size: 13px;
+                }
+
+                for monitor[idx] in root.monitors: Rectangle {
+                    background: Palette.surface;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    accessible-role: groupbox;
+                    accessible-label: monitor.name;
+
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+
+                        Text {
+                            text: monitor.name;
+                            color: Palette.text;
+                            font-size: 14px;
+                            font-weight: 600;
+                            overflow: elide;
+                        }
+
+                        // Hardware floor.
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: @tr("Hardware floor");
+                                color: Palette.text-subtle;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                            Slider {
+                                horizontal-stretch: 1;
+                                minimum: 0;
+                                maximum: 50;
+                                value: monitor.floor-pct;
+                                accessible-label: @tr("Hardware floor");
+                                changed(v) => {
+                                    root.monitor-floor-changed(idx, v);
+                                }
+                            }
+                            Text {
+                                text: monitor.floor-pct + "%";
+                                color: Palette.text-subtle;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Dim mode.
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: @tr("Dim mode");
+                                color: Palette.text-subtle;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            ComboBox {
+                                model: [@tr("Overlay"), @tr("Gamma"), @tr("Off")];
+                                current-index: monitor.dim-mode-index;
+                                accessible-label: @tr("Dim mode");
+                                selected => {
+                                    root.monitor-dim-mode-selected(idx, self.current-index);
+                                }
+                            }
+                        }
+
+                        // Gamma-under-HDR hint (the VM rejects a gamma choice here).
+                        if !monitor.gamma-available: Text {
+                            text: @tr("Gamma is unavailable while HDR is active");
+                            color: Palette.text-subtle;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+
+                        // Input source (only when the display exposes switchable inputs).
+                        if monitor.has-inputs: HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: @tr("Input source");
+                                color: Palette.text-subtle;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            ComboBox {
+                                model: monitor.inputs;
+                                accessible-label: @tr("Input source");
+                                selected => {
+                                    root.monitor-input-selected(idx, self.current-index);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border;
+                }
+
+                // ---- Hotkeys (read-only) ----
+                Text {
+                    text: @tr("Hotkeys");
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: Palette.text;
+                }
+
+                if root.hotkeys.length == 0: Text {
+                    text: @tr("No hotkeys configured");
+                    color: Palette.text-subtle;
+                    font-size: 13px;
+                }
+
+                for hotkey in root.hotkeys: HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: hotkey.action;
+                        color: Palette.text;
+                        font-size: 12px;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: hotkey.binding;
+                        color: hotkey.conflicted ? #e06c6c : Palette.text-subtle;
+                        font-size: 12px;
+                    }
+                    if hotkey.conflicted: Text {
+                        text: @tr("conflict");
+                        color: #e06c6c;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Text {
+                    text: @tr("Edit hotkeys in the config file (in-app editing is coming later).");
+                    color: Palette.text-subtle;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}

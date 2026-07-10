@@ -92,6 +92,11 @@ tracing-appender = "0.2"
 # Build-only (duja-app build.rs, P4): embeds the PerMonitorV2 DPI-awareness
 # application manifest into the executable.
 embed-manifest = "1"
+# Opt-in update check (duja-app, P5): a single HTTPS GET to the GitHub releases
+# API. `default-features = false` + `tls` selects the rustls (ring) backend with
+# bundled webpki roots — NO native-tls, so the binary stays self-contained and
+# pulls in no OpenSSL/schannel. gzip/json/cookies are intentionally left off.
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 # ---------------------------------------------------------------------------
 # Lint wall (ADR: bulletproof-production policy).

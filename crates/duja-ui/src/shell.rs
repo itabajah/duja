@@ -28,39 +28,7 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use crate::command::UiCommand;
 use crate::flyout_vm::{FlyoutRow, FlyoutVm, Theme};
 
-/// The Slint-generated component code, quarantined behind blanket lint allows.
-///
-/// `slint-build` emits machine-generated Rust (vtables, item trees, unwraps on
-/// invariants the runtime upholds) that cannot satisfy this workspace's lint
-/// wall. Confining `include_modules!` to this module — with the wall's lints
-/// allowed *only here* — keeps every hand-written line under the full wall.
-// RATIONALE: generated code is not ours to fix; the allows are scoped to this
-// module and never leak to the shell's own logic below.
-#[allow(clippy::all, clippy::pedantic)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::todo,
-    clippy::unimplemented,
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    clippy::undocumented_unsafe_blocks
-)]
-#[allow(
-    dead_code,
-    unused,
-    non_camel_case_types,
-    non_snake_case,
-    unsafe_op_in_unsafe_fn,
-    unsafe_code
-)]
-#[allow(rust_2018_idioms)]
-mod generated {
-    slint::include_modules!();
-}
-
-use generated::{FlyoutRowData, FlyoutWindow};
+use crate::generated::{FlyoutRowData, FlyoutWindow};
 
 /// Owns the Slint flyout component and bridges it to a [`FlyoutVm`].
 pub struct FlyoutShell {
@@ -105,8 +73,8 @@ impl FlyoutShell {
     ///
     /// Slider drags, the link toggle and the refresh button call the matching
     /// [`FlyoutVm`] method; the emitted [`UiCommand`]s (if any) are passed to
-    /// `handler`. Esc hides the window; the settings gear is a no-op in P4
-    /// (it opens nothing yet, per the plan).
+    /// `handler`. Esc hides the window; the settings gear emits
+    /// [`UiCommand::OpenSettings`] for the app to open the settings window.
     pub fn on_command(&self, handler: impl FnMut(UiCommand) + 'static) {
         let handler = Rc::new(RefCell::new(handler));
 
@@ -157,8 +125,13 @@ impl FlyoutShell {
             });
         }
 
-        // Settings gear: opens nothing in P4.
-        self.ui.on_settings_clicked(|| {});
+        // Settings gear: emit OpenSettings for the app to open the window.
+        {
+            let handler = handler.clone();
+            self.ui.on_settings_clicked(move || {
+                (handler.borrow_mut())(UiCommand::OpenSettings);
+            });
+        }
     }
 
     /// Position the flyout at physical pixel `(x, y)` and show it.

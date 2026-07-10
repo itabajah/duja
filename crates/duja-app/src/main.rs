@@ -68,7 +68,31 @@ fn run(args: &[String]) -> anyhow::Result<ExitCode> {
         Command::Once => Ok(bin_support::run::once()),
         Command::Headless => bin_support::run::headless(),
         Command::Restore => Ok(bin_support::run::restore()),
+        Command::CheckUpdates => Ok(check_updates()),
         Command::Stress { secs, hz } => bin_support::stress::run(secs, hz),
+    }
+}
+
+/// Run the opt-in update check once and print the outcome (the `--check-updates`
+/// mode). Always makes the network request when invoked explicitly, regardless
+/// of the `general.update_check` config toggle — the flag *is* the opt-in.
+fn check_updates() -> ExitCode {
+    use bin_support::updates::{self, HttpsTransport, UpdateOutcome};
+
+    match updates::check_for_update(&HttpsTransport, env!("CARGO_PKG_VERSION")) {
+        UpdateOutcome::UpToDate => {
+            println!("Duja {} is up to date.", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
+        UpdateOutcome::UpdateAvailable { version } => {
+            println!("A newer release is available: {version}");
+            println!("Releases: {}", updates::RELEASES_PAGE_URL);
+            ExitCode::SUCCESS
+        }
+        UpdateOutcome::Failed(reason) => {
+            eprintln!("Update check failed: {reason}");
+            ExitCode::from(1)
+        }
     }
 }
 

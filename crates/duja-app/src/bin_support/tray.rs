@@ -48,14 +48,19 @@ use duja_core::dimmer::{DimCommand, Dimmer};
 use duja_core::id::StableDisplayId;
 use duja_core::model::{DisplayKind, DisplaySnapshot};
 use duja_dimmer::PlatformDimmer;
-use duja_ui::{FlyoutShell, FlyoutVm, UiCommand};
+use duja_platform::Autostart;
+use duja_ui::{
+    FlyoutShell, FlyoutVm, HotkeyRow, SettingsCommand, SettingsShell, SettingsVm, ThemeChoice,
+    UiCommand, UpdateStatus,
+};
 
 use crate::bin_support::bounds::BoundsMap;
 use crate::bin_support::dimming::{self, DisplayInput};
 use crate::bin_support::hotkey::{self, Accelerator, HotkeyAction, Modifiers as AccelModifiers};
 use crate::bin_support::paths::DujaPaths;
 use crate::bin_support::state_store::StateStore;
-use crate::bin_support::{backend, gamma, ipc, run, settings, startup};
+use crate::bin_support::updates::{self, HttpsTransport, UpdateOutcome};
+use crate::bin_support::{backend, gamma, ipc, run, settings, settings_apply, startup};
 
 /// The brightness step (percentage points) a `brightness_up` / `brightness_down`
 /// hotkey applies to every display. Fixed in P5; a configurable step is a
@@ -85,6 +90,8 @@ enum Action {
     Open,
     /// Toggle the flyout's visibility.
     Toggle,
+    /// Open the settings window.
+    OpenSettings,
     /// Restore the screen (clear overlays + identity gamma on every display).
     Restore,
     /// Nudge every display's brightness by the given signed step (a hotkey).
@@ -137,6 +144,9 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
     let shell = FlyoutShell::new(vm.clone())
         .map_err(|e| anyhow::anyhow!("failed to create the flyout window: {e}"))?;
 
+    // 4b. Settings window + autostart backend (window stays hidden until opened).
+    let (settings_shell, settings_vm, autostart) = build_settings_window()?;
+
     // 5. Tray icon + menu on the same thread.
     let tray = build_tray().context("creating the tray icon")?;
 
@@ -175,6 +185,11 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
         *slot.borrow_mut() = Some(AppState {
             shell,
             vm,
+            settings_shell,
+            settings_vm,
+            autostart,
+            config_path: paths.config.clone(),
+            snapshots: Vec::new(),
             dimmer,
             config,
             gamma_allowed,
@@ -190,6 +205,7 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
         });
     });
     wire_ui_commands();
+    wire_settings_commands();
     wire_tray_handlers();
     wire_hotkey_handler(hotkey_map);
     spawn_notification_bridge(notifications);
@@ -218,10 +234,50 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The settings window shell, its shared view-model, and the (optional)
+/// autostart backend, as returned by [`build_settings_window`].
+type SettingsSetup = (
+    SettingsShell,
+    Rc<RefCell<SettingsVm>>,
+    Option<Box<dyn Autostart>>,
+);
+
+/// Create the settings window shell + view-model and resolve the platform
+/// autostart backend.
+///
+/// # Errors
+/// Returns an error if the settings window cannot be created (fatal, like the
+/// flyout). An autostart resolve failure is *not* fatal — it only disables the
+/// launch-at-login toggle.
+fn build_settings_window() -> anyhow::Result<SettingsSetup> {
+    let settings_vm = Rc::new(RefCell::new(SettingsVm::new()));
+    let settings_shell = SettingsShell::new(settings_vm.clone())
+        .map_err(|e| anyhow::anyhow!("failed to create the settings window: {e}"))?;
+    let autostart: Option<Box<dyn Autostart>> = match duja_platform::autostart::system() {
+        Ok(a) => Some(Box::new(a)),
+        Err(e) => {
+            warn!(error = %e, "autostart unavailable; the launch-at-login toggle is disabled");
+            None
+        }
+    };
+    Ok((settings_shell, settings_vm, autostart))
+}
+
 /// The main-thread application state driven by every event source.
 struct AppState {
     shell: FlyoutShell,
     vm: Rc<RefCell<FlyoutVm>>,
+    /// The settings window shell and its shared view-model.
+    settings_shell: SettingsShell,
+    settings_vm: Rc<RefCell<SettingsVm>>,
+    /// The platform launch-at-login backend (`None` if unavailable — the toggle
+    /// is then shown disabled).
+    autostart: Option<Box<dyn Autostart>>,
+    /// The user-facing config file, for format-preserving settings writes.
+    config_path: std::path::PathBuf,
+    /// The most recent full snapshots (with capabilities), for the settings
+    /// per-monitor sections.
+    snapshots: Vec<DisplaySnapshot>,
     dimmer: Option<PlatformDimmer>,
     config: Config,
     gamma_allowed: bool,
@@ -255,6 +311,7 @@ impl AppState {
                     self.show_flyout();
                 }
             }
+            Action::OpenSettings => self.open_settings(),
             Action::Restore => self.restore_screen(),
             Action::Nudge(delta) => self.nudge_all(delta),
             Action::Quit => self.begin_quit(),
@@ -335,7 +392,136 @@ impl AppState {
             UiCommand::Refresh => {
                 let _ = self.engine_tx.send(EngineCommand::RefreshNow);
             }
+            UiCommand::OpenSettings => self.open_settings(),
         }
+    }
+
+    /// Rebuild the settings view-model from live state and show the window.
+    fn open_settings(&mut self) {
+        self.rebuild_settings();
+        self.settings_shell
+            .update_from_vm(&self.settings_vm.borrow());
+        self.settings_shell.show();
+    }
+
+    /// Refresh the settings view-model from the current config, snapshots,
+    /// autostart state, and hotkey table. Does not touch the window.
+    fn rebuild_settings(&mut self) {
+        let autostart_supported = self.autostart.is_some();
+        let autostart_on = self
+            .autostart
+            .as_ref()
+            .and_then(|a| a.is_enabled().ok())
+            .unwrap_or(false);
+        let theme = settings_apply::theme_to_choice(self.config.general.theme);
+        let update_check_on = self.config.general.update_check;
+
+        let hotkeys = resolved_hotkey_rows(&self.config);
+        {
+            let mut vm = self.settings_vm.borrow_mut();
+            vm.set_general(autostart_on, autostart_supported, theme, update_check_on);
+            vm.set_displays(&self.snapshots, &self.config, self.gamma_allowed);
+            vm.set_hotkeys(hotkeys);
+        }
+    }
+
+    /// Handle a command emitted by the settings view-model.
+    fn on_settings_command(&mut self, command: SettingsCommand) {
+        // 1. Persist the config-affecting part (format-preserving), then reload
+        //    the typed config so in-memory state matches disk.
+        match settings_apply::persist_config_change(&self.config_path, &command) {
+            Ok(true) => self.reload_config(),
+            Ok(false) => {}
+            Err(e) => warn!(error = %e, "failed to persist settings change"),
+        }
+
+        // 2. Apply the live side effect.
+        match command {
+            SettingsCommand::SetAutostart(on) => self.apply_autostart(on),
+            SettingsCommand::SetTheme(choice) => self.apply_theme(choice),
+            SettingsCommand::SetUpdateCheck(_) => {
+                // Config-only; the VM already reflects the toggle.
+            }
+            SettingsCommand::CheckUpdates => self.start_update_check(),
+            SettingsCommand::OpenReleasesPage => open_url(updates::RELEASES_PAGE_URL),
+            SettingsCommand::SetMonitorFloor { id, .. }
+            | SettingsCommand::SetMonitorDimMode { id, .. } => self.reapply_display(&id),
+            SettingsCommand::SetInput { id, value } => {
+                let _ = self.engine_tx.send(EngineCommand::SetInput { id, value });
+            }
+        }
+
+        self.settings_shell
+            .update_from_vm(&self.settings_vm.borrow());
+    }
+
+    /// Reload the typed config from disk after a settings write.
+    fn reload_config(&mut self) {
+        use duja_core::config::ConfigDocument;
+        match ConfigDocument::load(&self.config_path).and_then(|doc| doc.config()) {
+            Ok(config) => self.config = config,
+            Err(e) => {
+                warn!(error = %e, "config reload after settings write failed; keeping in-memory copy");
+            }
+        }
+    }
+
+    /// Apply a launch-at-login change through the platform trait, keeping the
+    /// view-model honest with the actual state on failure.
+    fn apply_autostart(&mut self, on: bool) {
+        let Some(autostart) = self.autostart.as_mut() else {
+            return;
+        };
+        if let Err(e) = autostart.set_enabled(on) {
+            warn!(error = %e, "failed to change launch-at-login");
+        }
+        // Reflect the actual state (which may differ from the request on error).
+        let actual = autostart.is_enabled().unwrap_or(on);
+        let supported = true;
+        let theme = settings_apply::theme_to_choice(self.config.general.theme);
+        self.settings_vm.borrow_mut().set_general(
+            actual,
+            supported,
+            theme,
+            self.config.general.update_check,
+        );
+    }
+
+    /// Re-resolve the flyout palette after a theme change and re-render it.
+    fn apply_theme(&mut self, _choice: ThemeChoice) {
+        let theme = settings::ui_theme(self.config.general.theme, os_dark_theme());
+        self.vm.borrow_mut().set_theme(theme);
+        self.render();
+    }
+
+    /// Re-apply a display's dimming after a floor/dim-mode change by re-driving
+    /// its current user level through the normal path (recomputes the hardware
+    /// target against the new continuum and re-plans overlays/gamma).
+    fn reapply_display(&mut self, id: &StableDisplayId) {
+        let level = self.state.level(id.as_str()).unwrap_or(100);
+        self.set_user_level(id, level);
+    }
+
+    /// Kick off the opt-in update check on a background thread (never blocks the
+    /// UI thread), then fold the result back onto the Slint loop.
+    fn start_update_check(&mut self) {
+        self.state.record_update_check(unix_now());
+        let _ = self.state.maybe_flush(Instant::now());
+        std::thread::Builder::new()
+            .name("duja-update-check".to_owned())
+            .spawn(|| {
+                let outcome = updates::check_for_update(&HttpsTransport, env!("CARGO_PKG_VERSION"));
+                let status = update_status_from(outcome);
+                let _ = slint::invoke_from_event_loop(move || {
+                    APP.with(|slot| {
+                        if let Some(app) = slot.borrow_mut().as_mut() {
+                            app.settings_vm.borrow_mut().set_update_status(status);
+                            app.settings_shell.update_from_vm(&app.settings_vm.borrow());
+                        }
+                    });
+                });
+            })
+            .ok();
     }
 
     /// Record a user level, forward the hardware write to the engine, and
@@ -381,6 +567,16 @@ impl AppState {
     /// overlays.
     fn on_displays_changed(&mut self, snapshots: Vec<DisplaySnapshot>) {
         self.displays = snapshots.iter().map(|s| (s.id.clone(), s.kind)).collect();
+        // Keep the full snapshots (with capabilities) for the settings sections,
+        // and refresh the (possibly-open) settings window's per-monitor list.
+        self.snapshots.clone_from(&snapshots);
+        self.settings_vm.borrow_mut().set_displays(
+            &self.snapshots,
+            &self.config,
+            self.gamma_allowed,
+        );
+        self.settings_shell
+            .update_from_vm(&self.settings_vm.borrow());
 
         let now = Instant::now();
         for snap in &snapshots {
@@ -511,6 +707,89 @@ fn wire_ui_commands() {
     });
 }
 
+/// Wire the settings window's command fan-out to the app state.
+fn wire_settings_commands() {
+    APP.with(|slot| {
+        if let Some(app) = slot.borrow().as_ref() {
+            app.settings_shell.on_command(|command| {
+                APP.with(|slot| {
+                    if let Some(app) = slot.borrow_mut().as_mut() {
+                        app.on_settings_command(command);
+                    }
+                });
+            });
+        }
+    });
+}
+
+/// Build the read-only hotkey rows for the settings window from the config's
+/// `[hotkeys]` table, flagging bindings caught in a conflict.
+fn resolved_hotkey_rows(config: &Config) -> Vec<HotkeyRow> {
+    let plan = hotkey::resolve(&config.hotkeys);
+    let conflicting: BTreeSet<Accelerator> =
+        plan.conflicts.iter().map(|c| c.accel.clone()).collect();
+    plan.bindings
+        .iter()
+        .map(|binding| HotkeyRow {
+            action_label: action_label(binding.action).to_owned(),
+            binding: binding.raw.clone(),
+            conflicted: conflicting.contains(&binding.accel),
+        })
+        .collect()
+}
+
+/// A human label for a hotkey action (the settings list is read-only English
+/// chrome; a localized label is a follow-up).
+fn action_label(action: HotkeyAction) -> &'static str {
+    match action {
+        HotkeyAction::BrightnessUp => "Brightness up",
+        HotkeyAction::BrightnessDown => "Brightness down",
+        HotkeyAction::ToggleFlyout => "Toggle flyout",
+    }
+}
+
+/// Map an update-check [`UpdateOutcome`] onto the settings [`UpdateStatus`].
+fn update_status_from(outcome: UpdateOutcome) -> UpdateStatus {
+    match outcome {
+        UpdateOutcome::UpToDate => UpdateStatus::UpToDate,
+        UpdateOutcome::UpdateAvailable { version } => UpdateStatus::Available { version },
+        UpdateOutcome::Failed(_) => UpdateStatus::Failed,
+    }
+}
+
+/// Open `url` in the user's default browser via `ShellExecuteW`. Best-effort:
+/// a failure is logged, never fatal. Duja only ever opens the releases *page* —
+/// it never downloads anything.
+fn open_url(url: &str) {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{PCWSTR, w};
+
+    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `wide` is a NUL-terminated wide string that outlives the call;
+    // the "open" verb (`w!`) is a static NUL-terminated literal. Passing a null
+    // HWND/dir/params is valid for opening a URL. The returned HINSTANCE is a
+    // legacy success/error code we do not dereference.
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW returns a value > 32 on success (legacy convention).
+    if result.0 as usize <= 32 {
+        warn!(
+            url,
+            code = result.0 as usize,
+            "failed to open the releases page"
+        );
+    }
+}
+
 /// Apply an IPC `set` on the Slint main thread through the flyout's own
 /// `set_user_level` path, so the persisted level and the overlay/gamma batch
 /// stay consistent with a slider drag. Callable from the IPC handler thread.
@@ -556,6 +835,8 @@ fn wire_tray_handlers() {
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         let action = if event.id() == &ids.open {
             Action::Open
+        } else if event.id() == &ids.settings {
+            Action::OpenSettings
         } else if event.id() == &ids.restore {
             Action::Restore
         } else if event.id() == &ids.quit {
@@ -745,25 +1026,35 @@ thread_local! {
 #[derive(Clone, Default)]
 struct MenuIds {
     open: tray_icon::menu::MenuId,
+    settings: tray_icon::menu::MenuId,
     restore: tray_icon::menu::MenuId,
     quit: tray_icon::menu::MenuId,
 }
 
-/// Build the tray icon with its right-click menu (Open / Restore screen / Quit).
+/// Build the tray icon with its right-click menu (Open / Settings / Restore
+/// screen / Quit).
 fn build_tray() -> anyhow::Result<tray_icon::TrayIcon> {
     use tray_icon::menu::{Menu, MenuItem};
     use tray_icon::{TrayIconBuilder, menu::PredefinedMenuItem};
 
     let menu = Menu::new();
     let open = MenuItem::new("Open", true, None);
+    let settings = MenuItem::new("Settings", true, None);
     let restore = MenuItem::new("Restore screen", true, None);
     let quit = MenuItem::new("Quit", true, None);
-    menu.append_items(&[&open, &restore, &PredefinedMenuItem::separator(), &quit])
-        .map_err(|e| anyhow::anyhow!("failed to build tray menu: {e}"))?;
+    menu.append_items(&[
+        &open,
+        &settings,
+        &restore,
+        &PredefinedMenuItem::separator(),
+        &quit,
+    ])
+    .map_err(|e| anyhow::anyhow!("failed to build tray menu: {e}"))?;
 
     MENU_IDS.with(|cell| {
         *cell.borrow_mut() = MenuIds {
             open: open.id().clone(),
+            settings: settings.id().clone(),
             restore: restore.id().clone(),
             quit: quit.id().clone(),
         };
