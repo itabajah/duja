@@ -1,0 +1,191 @@
+// Duja flyout — presentation only (plan §4.4). All logic lives in the Rust
+// view-models; this file maps model rows to widgets and widget events back to
+// callbacks. Design rules baked in:
+//   * Premium-minimal: 4/8 px spacing grid, one accent colour, subtle radii.
+//   * NO Timer elements and no idle animations (perf budget: zero idle wakeups).
+//   * Light/dark palettes defined once in `Palette`; the `dark` property flips
+//     them live.
+//   * Every user-visible string goes through @tr(...) for i18n from day one.
+//   * Keyboard: sliders take arrow keys, Tab traverses, Esc emits esc-pressed.
+
+import { Slider, Switch, ScrollView, Button } from "std-widgets.slint";
+
+// One monitor row, mirroring `duja_ui::flyout_vm::FlyoutRow`.
+export struct FlyoutRowData {
+    name: string,
+    percent: int,
+    kind: string,
+    greyed: bool,
+    slider-enabled: bool,
+}
+
+// Both palettes in one place; `dark` selects between them at render time.
+export global Palette {
+    in property <bool> dark: true;
+
+    out property <color> bg: dark ? #1b1b1f : #f6f6f8;
+    out property <color> surface: dark ? #26262b : #ffffff;
+    out property <color> surface-greyed: dark ? #202024 : #eeeef0;
+    out property <color> text: dark ? #f2f2f4 : #1a1a1e;
+    out property <color> text-subtle: dark ? #9a9aa2 : #6b6b73;
+    out property <color> border: dark ? #34343a : #e2e2e6;
+    // A single accent, tuned to read on both surfaces.
+    out property <color> accent: #3b82f6;
+}
+
+export component FlyoutWindow inherits Window {
+    title: @tr("Duja Brightness");
+    // Slim, tray-flyout proportions on an 8 px grid.
+    width: 320px;
+    min-height: 120px;
+    max-height: 560px;
+    background: Palette.bg;
+    no-frame: true;
+
+    // --- inputs from the Rust shell (set from FlyoutVm state) ---
+    in property <[FlyoutRowData]> rows;
+    in property <bool> no-displays;
+    in property <bool> dark <=> Palette.dark;
+    in-out property <bool> link-all;
+
+    // --- outputs to the Rust shell (mapped onto FlyoutVm calls) ---
+    callback slider-changed(/* row-index */ int, /* percent */ float);
+    callback link-toggled(/* on */ bool);
+    callback refresh-requested();
+    callback settings-clicked();
+    callback esc-pressed();
+
+    forward-focus: scope;
+    scope := FocusScope {
+        // Esc hides the flyout; everything else falls through to the widgets.
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.esc-pressed();
+                return accept;
+            }
+            return reject;
+        }
+
+        VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
+
+            // Header: title + settings gear.
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: @tr("Brightness");
+                    font-size: 15px;
+                    font-weight: 600;
+                    color: Palette.text;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    accessible-role: text;
+                    accessible-label: @tr("Brightness");
+                }
+                gear := Button {
+                    text: "⚙";
+                    accessible-label: @tr("Settings");
+                    clicked => {
+                        root.settings-clicked();
+                    }
+                }
+            }
+
+            // Empty-state label, shown only when there are no displays.
+            if root.no-displays: Rectangle {
+                height: 72px;
+                Text {
+                    text: @tr("No displays detected");
+                    color: Palette.text-subtle;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    accessible-role: text;
+                    accessible-label: @tr("No displays detected");
+                }
+            }
+
+            // Monitor rows.
+            if !root.no-displays: ScrollView {
+                vertical-stretch: 1;
+                min-height: 64px;
+                VerticalLayout {
+                    spacing: 8px;
+                    for row[idx] in root.rows: Rectangle {
+                        background: row.greyed ? Palette.surface-greyed : Palette.surface;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        opacity: row.greyed ? 0.55 : 1.0;
+                        accessible-role: groupbox;
+                        accessible-label: row.name + ", " + row.kind + ", " + row.percent + @tr(" percent");
+
+                        VerticalLayout {
+                            padding: 8px;
+                            spacing: 4px;
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: row.name;
+                                    color: Palette.text;
+                                    font-size: 13px;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: row.percent + "%";
+                                    color: Palette.text-subtle;
+                                    font-size: 13px;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: row.kind;
+                                    color: Palette.text-subtle;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Slider {
+                                    horizontal-stretch: 1;
+                                    minimum: 0;
+                                    maximum: 100;
+                                    value: row.percent;
+                                    enabled: row.slider-enabled;
+                                    accessible-label: row.name;
+                                    changed(v) => {
+                                        root.slider-changed(idx, v);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Footer: link-all toggle + refresh.
+            HorizontalLayout {
+                spacing: 8px;
+                link-switch := Switch {
+                    text: @tr("Link all");
+                    checked <=> root.link-all;
+                    accessible-label: @tr("Link all displays");
+                    toggled => {
+                        root.link-toggled(self.checked);
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                refresh := Button {
+                    text: @tr("Refresh");
+                    accessible-label: @tr("Refresh displays");
+                    clicked => {
+                        root.refresh-requested();
+                    }
+                }
+            }
+        }
+    }
+}

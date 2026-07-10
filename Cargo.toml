@@ -63,6 +63,16 @@ insta = { version = "1", features = ["toml"] }
 # Target-gated and feature-selected in the crate; default-features off keeps the
 # dependency lean. Version matches the P1 spike (windows 0.62.x).
 windows = { version = "0.62", default-features = false }
+# UI (duja-ui, P4): Slint with the software renderer (ADR-0009 — 9.76 MB binary,
+# ~17 MB idle RSS). Feature set + version pinned to the P1 `spike/eventloop`
+# recipe: default-features off, then the winit backend, std, compat, and the
+# software renderer. `slint-build` compiles the `.slint` markup in build.rs.
+slint = { version = "1.17.1", default-features = false, features = ["compat-1-2", "backend-winit", "std", "renderer-software"] }
+slint-build = "1.17.1"
+# Dev-only (duja-ui, feature `smoke`): experimental headless backend for the
+# component instantiation smoke test. Optional so the default build never pulls
+# it; enabled under `--all-features`. The smoke test itself is `#[ignore]`.
+i-slint-backend-testing = "1.17.1"
 
 # ---------------------------------------------------------------------------
 # Lint wall (ADR: bulletproof-production policy).
