@@ -9,8 +9,19 @@ repository.workspace = true
 authors.workspace = true
 publish = false
 
+[features]
+# Enables the `#[ignore]`d component-instantiation smoke test, which needs the
+# experimental headless Slint backend. Pulled in under `--all-features`.
+smoke = ["dep:i-slint-backend-testing"]
+
 [dependencies]
 duja-core.workspace = true
+slint.workspace = true
+# Optional: only linked when the `smoke` feature is on (see `[features]`).
+i-slint-backend-testing = { workspace = true, optional = true }
+
+[build-dependencies]
+slint-build.workspace = true
 
 [dev-dependencies]
 duja-core = { workspace = true, features = ["test-support"] }
