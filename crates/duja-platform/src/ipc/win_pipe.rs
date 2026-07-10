@@ -155,9 +155,15 @@ unsafe impl Send for SecurityDescriptor {}
 
 impl SecurityDescriptor {
     /// Build a protected DACL granting only `sid` full access (no inherited
-    /// ACEs, no `Everyone`).
+    /// ACEs, no `Everyone`), with `sid` as the explicit owner.
+    ///
+    /// The owner is set explicitly because an **elevated** token's default
+    /// owner for new objects is the `Administrators` group, not the user —
+    /// relying on the default would make the pipe's ownership depend on how
+    /// the process was launched (and fails the owner check on elevated CI
+    /// runners).
     fn user_only(sid: &str) -> Option<Self> {
-        let sddl = format!("D:P(A;;GA;;;{sid})");
+        let sddl = format!("O:{sid}D:P(A;;GA;;;{sid})");
         let wide: Vec<u16> = sddl.encode_utf16().chain(iter::once(0)).collect();
         let mut psd = PSECURITY_DESCRIPTOR::default();
         // SAFETY: `wide` is a NUL-terminated wide string living across the call;
