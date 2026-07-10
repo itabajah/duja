@@ -8,6 +8,12 @@ pub(crate) const DEFAULT_STRESS_HZ: u32 = 20;
 /// A parsed `duja` invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Command {
+    /// The default (no args): run the tray application. `verbose` routes DEBUG
+    /// logs to stderr instead of the WARN rotating file log.
+    Tray {
+        /// Whether `--verbose` was passed.
+        verbose: bool,
+    },
     /// Assemble the real pipeline and run until the user quits (`q<Enter>`).
     Headless,
     /// Enumerate once, print a table, exit.
@@ -19,7 +25,7 @@ pub(crate) enum Command {
         /// Flood rate in ticks per second per display.
         hz: u32,
     },
-    /// P4 stub: report there is nothing to restore yet.
+    /// Restore the screen: clear overlays + identity gamma, then report.
     Restore,
     /// Print usage.
     Help,
@@ -42,18 +48,22 @@ pub(crate) const USAGE: &str = "\
 duja — monitor brightness controller (dev harness)
 
 USAGE:
-    duja <MODE>
+    duja [MODE]
+
+With no MODE, duja runs as the tray application (tray icon + flyout).
 
 MODES:
+    (default)             run the tray application
+    --verbose             run the tray app with DEBUG logging to stderr
     --headless            assemble the real pipeline; run until `q<Enter>`
     --once                enumerate once, print a display table, exit
     --stress <secs>       flood SetUserLevel for <secs> seconds, print a report
         [--hz <n>]        flood rate per display (default 20)
-    --restore             P4 stub (nothing to restore yet)
+    --restore             clear overlays + reset identity gamma, then report
     --help                print this help
 
-With no monitors visible (e.g. a disconnected session) every mode degrades
-cleanly: it prints \"no displays\" and exits 0.";
+With no monitors visible (e.g. a disconnected session) the console modes
+degrade cleanly: they print \"no displays\" and exit 0.";
 
 /// Parse the argument list (excluding `argv[0]`) into a [`Command`].
 ///
@@ -63,10 +73,11 @@ cleanly: it prints \"no displays\" and exits 0.";
 pub(crate) fn parse(args: &[String]) -> Result<Command, CliError> {
     let mut iter = args.iter();
     let Some(mode) = iter.next() else {
-        return Ok(Command::Help);
+        return Ok(Command::Tray { verbose: false });
     };
 
     match mode.as_str() {
+        "--verbose" => expect_end(iter, Command::Tray { verbose: true }),
         "--headless" => expect_end(iter, Command::Headless),
         "--once" => expect_end(iter, Command::Once),
         "--restore" => expect_end(iter, Command::Restore),
@@ -130,8 +141,18 @@ mod tests {
     }
 
     #[test]
-    fn no_args_is_help() {
-        assert_eq!(parse(&[]), Ok(Command::Help));
+    fn no_args_is_the_tray_app() {
+        assert_eq!(parse(&[]), Ok(Command::Tray { verbose: false }));
+    }
+
+    #[test]
+    fn verbose_flag_selects_the_tray_app() {
+        assert_eq!(
+            parse(&args(&["--verbose"])),
+            Ok(Command::Tray { verbose: true })
+        );
+        // `--verbose` takes no trailing argument.
+        assert!(parse(&args(&["--verbose", "extra"])).is_err());
     }
 
     #[test]

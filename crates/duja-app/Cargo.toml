@@ -18,11 +18,35 @@ duja-core.workspace = true
 duja-ddc.workspace = true
 duja-panel.workspace = true
 duja-platform.workspace = true
+duja-dimmer.workspace = true
+duja-ui.workspace = true
 crossbeam-channel.workspace = true
 anyhow.workspace = true
+directories.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+# The tray app drives the Slint event loop directly (run_event_loop_until_quit,
+# invoke_from_event_loop). Same version/features as duja-ui so one Slint backend
+# is shared across the process.
+slint.workspace = true
+
+# Tray + cursor/work-area geometry live only on Windows.
+[target.'cfg(windows)'.dependencies]
+tray-icon.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+embed-manifest.workspace = true
 
 [dev-dependencies]
 duja-core = { workspace = true, features = ["test-support"] }
+duja-dimmer = { workspace = true }
+tempfile.workspace = true
 
 [lints]
 workspace = true

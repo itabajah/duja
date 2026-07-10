@@ -73,6 +73,20 @@ slint-build = "1.17.1"
 # component instantiation smoke test. Optional so the default build never pulls
 # it; enabled under `--all-features`. The smoke test itself is `#[ignore]`.
 i-slint-backend-testing = "1.17.1"
+# Tray icon (duja-app, P4): the tray + menu on the Slint main thread. Version
+# pinned to the P1 `spike/eventloop` recipe (tray-icon 0.24.1 + slint 1.17.1).
+tray-icon = "0.24.1"
+# Per-user config/state/log directories (duja-app, P4). Resolves the platform
+# ProjectDirs for io.github.itabajah.duja.
+directories = "6"
+# Structured logging (duja-app, P4): a WARN rotating file log by default,
+# DEBUG-to-stderr under `--verbose`. EnvFilter for level control.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+# Build-only (duja-app build.rs, P4): embeds the PerMonitorV2 DPI-awareness
+# application manifest into the executable.
+embed-manifest = "1"
 
 # ---------------------------------------------------------------------------
 # Lint wall (ADR: bulletproof-production policy).
