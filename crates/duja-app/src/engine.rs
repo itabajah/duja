@@ -244,11 +244,21 @@ impl EngineState {
         if events.is_empty() {
             return;
         }
+        // A single pass can emit BOTH `Reattached` and `Responsive` for one id
+        // (documented "existence first, then health" ordering). The sighting
+        // event already spawns a fresh worker and issues the correct one-shot
+        // (a restore write or an initial Get); the `Responsive` arm must then
+        // only un-grey it — never retire that just-spawned worker, respawn a
+        // second one, and re-learn the panel's power-on level (which would drop
+        // the restore's in-flight write and clobber the user's saved level).
+        let mut respawned: std::collections::BTreeSet<StableDisplayId> =
+            std::collections::BTreeSet::new();
         for event in events {
             match event {
                 ManagerEvent::Added { id } => {
                     self.spawn_for(&id);
                     self.dispatch_initial_get(&id);
+                    respawned.insert(id);
                 }
                 ManagerEvent::Removed { id } => self.retire_worker(&id),
                 ManagerEvent::Reattached { id, restore_level } => {
@@ -259,10 +269,15 @@ impl EngineState {
                         Some(pct) => self.dispatch_set(&id, Feature::Brightness, pct),
                         None => self.dispatch_initial_get(&id),
                     }
+                    respawned.insert(id);
                 }
                 ManagerEvent::Responsive { id } => {
-                    // Recovery from unresponsive: respawn unless abandoned.
-                    if self.stuck_count.get(&id).copied().unwrap_or(0) < MAX_STUCK_RESPAWNS {
+                    // Recovery from unresponsive: respawn unless a sighting event
+                    // in THIS pass already did (dedupe), or the display has been
+                    // abandoned after too many stuck cycles.
+                    if !respawned.contains(&id)
+                        && self.stuck_count.get(&id).copied().unwrap_or(0) < MAX_STUCK_RESPAWNS
+                    {
                         self.retire_worker(&id);
                         self.spawn_for(&id);
                         self.dispatch_initial_get(&id);

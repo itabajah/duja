@@ -556,6 +556,107 @@ fn replug_restores_last_level() {
 }
 
 #[test]
+fn reattach_of_unresponsive_display_restores_level_not_power_on_default() {
+    // A display is dimmed to 30% while its worker is wedged, trips the watchdog
+    // (unresponsive), is unplugged, then replugged. The manager emits BOTH
+    // Reattached { restore_level: Some(30) } and Responsive in one pass; the
+    // engine must restore 30 and must NOT let the Responsive arm respawn a
+    // second worker and re-learn the panel's power-on 50%.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (writes_tx, writes_rx) = unbounded();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    // First controller hangs (a write wedges it -> watchdog -> unresponsive);
+    // every later controller records writes and reads back the power-on 50%.
+    let hang_first = Arc::new(Mutex::new(true));
+    let factory: duja_app::ControllerFactory = {
+        let hang_first = hang_first.clone();
+        let writes_tx = writes_tx.clone();
+        Box::new(move |_id| {
+            let hang = {
+                let mut flag = hang_first.lock().unwrap();
+                let h = *flag;
+                *flag = false;
+                h
+            };
+            let writes_tx = writes_tx.clone();
+            Box::new(move || {
+                if hang {
+                    Some(Box::new(Hang) as Box<dyn BrightnessController>)
+                } else {
+                    Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
+                }
+            }) as duja_app::ControllerOpener
+        })
+    };
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(10),
+        watchdog_timeout: Duration::from_millis(150),
+        displaychange_debounce: Duration::from_millis(60),
+    };
+    let (engine, notes) = Engine::spawn(
+        cfg,
+        enumerator(state.clone(), calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // The user dims to 30% while the (hung) worker is wedged.
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 30,
+    })
+    .unwrap();
+
+    // The wedged write trips the watchdog.
+    let want = id.clone();
+    assert!(
+        wait_note(&notes, Duration::from_secs(2), |n| {
+            matches!(n, EngineNotification::DisplayUnresponsive(x) if *x == want)
+        }),
+        "expected the wedged write to mark the display unresponsive"
+    );
+
+    // Unplug (barrier via Snapshot), then replug the same display.
+    *state.lock().unwrap() = Vec::new();
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+    assert!(
+        snapshot(&cmds).is_empty(),
+        "the display should be gone after the unplug enumeration"
+    );
+    *state.lock().unwrap() = vec![discovered(&id)];
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+
+    // The fresh worker must receive the RESTORE write of 30%.
+    let (_c, seen) = drain_writes(&writes_rx, |f, v| f == Feature::Brightness && v == 30);
+    assert!(
+        seen.contains(&(Feature::Brightness, 30)),
+        "reattach must restore the saved 30%, saw writes {seen:?}"
+    );
+
+    // ...and the level must never be clobbered back to the power-on 50% by a
+    // stray initial-Get from a superseded second respawn.
+    let relearned = wait_note(&notes, Duration::from_millis(500), |n| {
+        matches!(
+            n,
+            EngineNotification::DisplaysChanged(snaps)
+                if snaps.iter().any(|s| s.id == id && s.user_level_pct == 50)
+        )
+    });
+    assert!(
+        !relearned,
+        "reattach re-learned the power-on 50%, losing the user's 30%"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
 fn worker_panic_does_not_kill_engine() {
     let id = display_id();
     let (platform_tx, platform_rx) = unbounded::<()>();
