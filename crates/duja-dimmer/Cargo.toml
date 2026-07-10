@@ -11,9 +11,33 @@ publish = false
 
 [dependencies]
 duja-core.workspace = true
+thiserror = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Overlay backend: layered click-through windows + gamma ramps + DXGI HDR probe.
+# default-features off; enable only the modules the backend touches.
+crossbeam-channel = { workspace = true }
+windows = { version = "0.62", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_UI_ColorSystem",
+    "Win32_System_LibraryLoader",
+] }
 
 [dev-dependencies]
 duja-core = { workspace = true, features = ["test-support"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# Live overlay tests inspect the windows this backend creates (FindWindowExW,
+# GetWindowLongPtrW, GetLayeredWindowAttributes, SendMessageW).
+windows = { version = "0.62", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [lints]
 workspace = true
