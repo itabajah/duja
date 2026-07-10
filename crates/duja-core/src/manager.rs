@@ -542,6 +542,44 @@ mod tests {
     }
 
     #[test]
+    fn a_seen_display_never_re_emits_added_while_retained() {
+        // The app pushes a saved level to the engine only on the FIRST sight of a
+        // display (its one-shot `applied` guard). That guard is sufficient
+        // precisely because the manager never emits `Added` twice for a retained
+        // record: a mere re-enumeration is silent, and a reconnect is a
+        // `Reattached` (which the engine restores). This pins that invariant down.
+        let mut m = DisplayManager::new();
+
+        // First sight: exactly one Added.
+        assert_eq!(
+            m.apply_enumeration(vec![disc(&a())], now()),
+            vec![added(a())]
+        );
+        // Re-enumeration while connected: silent (no second Added).
+        assert_eq!(m.apply_enumeration(vec![disc(&a())], now()), vec![]);
+
+        // Unplug then replug: a Reattached, NEVER a second Added.
+        assert_eq!(m.apply_enumeration(vec![], now()), vec![removed(a())]);
+        let replug = m.apply_enumeration(vec![disc(&a())], now());
+        assert_eq!(replug, vec![reattached(a(), None)]);
+
+        // Repeated unplug/replug cycles keep yielding Reattached, never Added.
+        for _ in 0..3 {
+            let _ = m.apply_enumeration(vec![], now());
+            let evs = m.apply_enumeration(vec![disc(&a())], now());
+            assert!(
+                !evs.iter().any(|e| matches!(e, ManagerEvent::Added { .. })),
+                "a retained display must never re-emit Added, got {evs:?}"
+            );
+            assert!(
+                evs.iter()
+                    .any(|e| matches!(e, ManagerEvent::Reattached { .. })),
+                "a reconnect must reattach, got {evs:?}"
+            );
+        }
+    }
+
+    #[test]
     fn reattach_without_recorded_level_carries_none() {
         let mut m = DisplayManager::new();
         let _ = m.apply_enumeration(vec![disc(&a())], now());

@@ -11,7 +11,7 @@ exit unless an ADR records the variance and the recovery plan.
 | Cold start → tray icon visible | < 300 ms | tracing span; DDC probing must be off the startup path |
 | Slider → DDC write dispatched | ≤ 1 coalesce interval (~100 ms) | tracing span |
 | Overlay alpha update | < 16 ms (one frame) | tracing span |
-| Stripped release binary | ≤ 12 MB | CI size report |
+| Stripped release binary | ≤ 16 MB (aspiration 12; see ADR-0012) | CI size report |
 | Soak (24 h) RSS growth | < 5 MB; flat GDI/USER handle counts | `--soak` self-report |
 
 Design rules that protect the budgets:

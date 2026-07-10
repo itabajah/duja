@@ -14,10 +14,12 @@
 //! # Continuum ownership
 //!
 //! The app owns each display's *user* level (persisted in the state file). A
-//! slider change maps through the continuum: the hardware target (pinned at the
-//! floor below it) goes to the engine via `SetUserLevel`; the overlay/gamma
-//! outputs go to the [`Dimmer`] as one declarative batch. The engine is kept
-//! dimmer-agnostic — the notification loop here drives the dimmer.
+//! slider change maps through the continuum into one declarative batch: the
+//! hardware target (pinned at the floor below it) goes to the engine via
+//! `SetUserLevel`; the overlay-alpha channel goes to the [`Dimmer`]; and the
+//! opt-in gamma channel goes to [`gamma::GammaBackend`], which owns the
+//! persistent-ramp crash marker. The engine is kept dimmer-agnostic — the
+//! notification loop here drives the dimmer and the gamma channel.
 //!
 //! # Degradation
 //!
@@ -27,7 +29,7 @@
 //! disables software dimming (hardware brightness still works).
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -44,13 +46,13 @@ use duja_core::dimmer::{DimCommand, Dimmer};
 use duja_core::id::StableDisplayId;
 use duja_core::model::{DisplayKind, DisplaySnapshot};
 use duja_dimmer::PlatformDimmer;
-use duja_ui::{FlyoutShell, FlyoutVm, ThrottleGate, UiCommand};
+use duja_ui::{FlyoutShell, FlyoutVm, UiCommand};
 
 use crate::bin_support::bounds::BoundsMap;
 use crate::bin_support::dimming::{self, DisplayInput};
 use crate::bin_support::paths::DujaPaths;
 use crate::bin_support::state_store::StateStore;
-use crate::bin_support::{backend, run, settings, startup};
+use crate::bin_support::{backend, gamma, run, settings, startup};
 
 mod geometry;
 mod icon;
@@ -60,8 +62,6 @@ mod icon;
 const FLYOUT_SIZE: (u32, u32) = (320, 480);
 /// Gap kept from the work-area edges when placing the flyout.
 const FLYOUT_MARGIN: i32 = 12;
-/// UI-side emit throttle interval (per display): ~one hardware nudge / 60 ms.
-const THROTTLE: std::time::Duration = std::time::Duration::from_millis(60);
 
 thread_local! {
     /// The main-thread application state, reachable from the foreign
@@ -143,7 +143,14 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
         }
     };
 
-    // 7. Publish the shared state and wire every event source.
+    // 7. Publish the shared state and wire every event source. The gamma channel
+    //    correlates a resolved display id to its GDI device via the same bounds
+    //    map the overlay planner reads (external displays carry a device name;
+    //    panels do not, and gamma never targets them).
+    let gamma = gamma::GammaBackend::new(paths.crash_marker.clone(), {
+        let bounds = bounds.clone();
+        move |id| bounds.lock().ok().and_then(|b| b.device_for(id))
+    });
     APP.with(|slot| {
         *slot.borrow_mut() = Some(AppState {
             shell,
@@ -155,7 +162,7 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
             state: StateStore::load(paths.state.clone()),
             crash_marker: paths.crash_marker.clone(),
             engine_tx: engine.sender(),
-            throttles: BTreeMap::new(),
+            gamma,
             displays: Vec::new(),
             applied: BTreeSet::new(),
             flyout_visible: false,
@@ -194,8 +201,10 @@ struct AppState {
     state: StateStore,
     crash_marker: std::path::PathBuf,
     engine_tx: Sender<EngineCommand>,
-    /// Per-display leading-edge emit throttles (keyed by id string).
-    throttles: BTreeMap<String, ThrottleGate>,
+    /// The opt-in gamma sub-floor channel (RAII crash-marker owner + engage/
+    /// restore executor). Drives [`DimCommand`]s carrying a gamma factor to the
+    /// GPU ramp; identity-restored on quit/restore.
+    gamma: gamma::GammaBackend,
     /// The current display set (resolved id + class) from the last enumeration.
     displays: Vec<(StableDisplayId, DisplayKind)>,
     /// Displays whose saved level has already been pushed to the engine.
@@ -246,6 +255,10 @@ impl AppState {
         {
             warn!(error = %e, "failed to clear overlays");
         }
+        // Restore the displays this session engaged (clearing the crash marker),
+        // then a belt-and-suspenders global identity pass for anything left over
+        // from a prior dirty run.
+        self.gamma.restore_all();
         let report = duja_dimmer::restore_all();
         info!(
             restored = report.restored.len(),
@@ -254,9 +267,13 @@ impl AppState {
         );
     }
 
-    /// Clean shutdown: persist state, clear the marker, quit the event loop.
+    /// Clean shutdown: persist state, restore gamma (clearing the marker), quit
+    /// the event loop.
     fn begin_quit(&mut self) {
         let _ = self.state.flush(Instant::now());
+        // The gamma guard restores every engaged display and clears the crash
+        // marker; the explicit remove is a redundant safety net.
+        self.gamma.restore_all();
         let _ = std::fs::remove_file(&self.crash_marker);
         if let Some(dimmer) = self.dimmer.as_mut() {
             let _ = dimmer.clear();
@@ -276,25 +293,24 @@ impl AppState {
         }
     }
 
-    /// Record a user level, throttle-gate the hardware write to the engine, and
+    /// Record a user level, forward the hardware write to the engine, and
     /// re-apply the overlay batch.
+    ///
+    /// Every `SetUserLevel` is forwarded — there is no UI-side throttle. The
+    /// engine worker enforces `write_min_gap` with last-wins coalescing, which
+    /// bounds the hardware write rate *and* guarantees the final value of a drag
+    /// lands (see P4 gate Finding 1: a leading-edge UI throttle used to drop the
+    /// final sample, leaving the hardware at an intermediate level).
     fn set_user_level(&mut self, id: &StableDisplayId, pct: u8) {
         let now = Instant::now();
         self.state.record(id.as_str(), pct, unix_now());
 
         if let Some(kind) = self.kind_of(id) {
-            let admit = self
-                .throttles
-                .entry(id.as_str().to_owned())
-                .or_insert_with(|| ThrottleGate::new(THROTTLE))
-                .allow(now);
-            if admit {
-                let hw = self.hardware_target(kind, id.as_str(), pct);
-                let _ = self.engine_tx.send(EngineCommand::SetUserLevel {
-                    id: id.clone(),
-                    pct: hw,
-                });
-            }
+            let hw = self.hardware_target(kind, id.as_str(), pct);
+            let _ = self.engine_tx.send(EngineCommand::SetUserLevel {
+                id: id.clone(),
+                pct: hw,
+            });
         }
         self.apply_overlays();
         let _ = self.state.maybe_flush(now);
@@ -358,7 +374,14 @@ impl AppState {
         self.shell.update_from_vm(&self.vm.borrow());
     }
 
-    /// Compute and apply the full overlay batch for every known display.
+    /// Compute and apply the full overlay batch for every known display, then
+    /// drive the gamma channel for any command carrying a gamma factor.
+    ///
+    /// Overlays and gamma are the two halves of one declarative batch: the
+    /// overlay backend diffs the alpha channel, while [`gamma::GammaBackend`]
+    /// engages/restores the GPU ramp for the (opt-in, SDR-only) gamma channel.
+    /// HDR/unknown displays never carry a gamma factor here — `effective_mode`
+    /// forces them onto the overlay path — so they can never reach the ramp.
     fn apply_overlays(&mut self) {
         let commands = self.plan_commands();
         if let Some(dimmer) = self.dimmer.as_mut()
@@ -366,6 +389,7 @@ impl AppState {
         {
             warn!(error = %e, "overlay apply failed");
         }
+        self.gamma.apply(&commands);
     }
 
     /// Build the declarative overlay command batch (pure; borrows `&self`).

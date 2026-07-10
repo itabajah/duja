@@ -1,6 +1,6 @@
 # Duja — Project Status
 
-_Last updated: 2026-07-10 (end of P3 Windows hardware slice)._
+_Last updated: 2026-07-10 (end of P4 Windows MVP)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -16,16 +16,19 @@ The authoritative plan is the phase roadmap; architecture decisions live in
 | P1 Spikes (risk burn-down) | `m1-spikes` | ✅ done |
 | P2 Core domain (`duja-core`) | `m2-core` | ✅ done |
 | P3 Windows hardware slice | `m3-win-hw` | ✅ done (hardware sign-off pending — see below) |
-| P4 Windows dimmer + UI (MVP) | `m4-win-mvp` / `v0.1.0-alpha` | ⏭️ next |
-| P5 Power features | `m5-win-full` / `v0.2.0-beta` | pending |
+| P4 Windows dimmer + UI (MVP) | `m4-win-mvp` | ✅ done (`v0.1.0-alpha` waits on the console-session QA below) |
+| P5 Power features | `m5-win-full` / `v0.2.0-beta` | ⏭️ next |
 | P6 macOS port | `m6-macos` / `v0.3.0-beta` | pending |
 | P7 Linux port | `m7-linux` / `v0.4.0-beta` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
 
-Health: **326 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
+Health: **466 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
 `cargo-deny` clean, 4 fuzz targets (caps, EDID, quirks, IPC frame) building on
-stable, adversarial gate reviews at P2 and P3 with all findings fixed
-test-first before tagging.
+stable, adversarial gate reviews at P2/P3/P4 with all findings fixed
+test-first before tagging. Perf (headless-measurable, P4 gate): idle RSS
+**23.3 MB** (budget ≤ 35), idle CPU **0 ms over 20 s** (zero wakeups),
+`duja.exe` 14.9 MB (budget raised to ≤ 16 MB by ADR-0012; P8 trims),
+`dujactl` 0.6 MB.
 
 ## What is done
 
@@ -99,32 +102,73 @@ executions clean at the gate.
   could drop an enumeration, COM apartment misuse across threads, un-seq-gated
   Get acks, and twin `-slot<n>` misrouting — all fixed test-first (PR #12).
 
+### P4 — Windows MVP (PRs #13–#16)
+- **`duja-ui`** — Slint flyout on the ADR-0009 software-renderer stack:
+  pure-Rust view-models (rows, link-all fan-out, themes; zero Slint types in
+  signatures), presentation-only `.slint` (light/dark, `@tr` strings, keyboard
+  + accessibility, no timers/animations), `FlyoutShell` confining Slint types.
+- **`duja-dimmer`** — the ADR-0003 spike productionized: pure `plan` diffing
+  kernel; a dedicated thread owning per-monitor click-through layered overlays
+  (`SetLayeredWindowAttributes`, `HTTRANSPARENT`, `WDA_EXCLUDEFROMCAPTURE`);
+  opt-in gamma with a safety floor; `ScreenStateGuard` + crash marker +
+  `restore_all` (a gamma ramp outlives a dead process — this is the
+  "never brick a screen" mechanism); DXGI HDR detection.
+- **`duja-app` tray assembly** — the app owns the continuum: persisted user
+  level → floored hardware target to the engine + declarative overlay/gamma
+  batch to the dimmer (HDR ⇒ overlay-only, decided once per enumeration).
+  Single instance (per-user named mutex), config + debounced state
+  persistence, crash-marker recovery at startup, tray icon + four-edge flyout
+  anchoring, `tracing` logging, PerMonitorV2 manifest, real `--restore`.
+- **Supply chain**: Slint royalty-free license exception (scoped per-crate),
+  documented advisory ignores for Slint/tray-icon-pinned transitives (GTK3
+  family until the P7 `ksni` decision, ADR-0010).
+- **P4 gate**: adversarial review found two real seam defects — the UI-side
+  throttle could drop a drag's final value (hardware stranded at a mid-drag
+  level while the UI looked right; throttle deleted, the engine coalescer is
+  the single pacing authority) and `dim_mode = "gamma"` never reached the
+  gamma API (now wired via a pure `GammaCoordinator` + `ScreenStateGuard`
+  sink, activating the crash-marker machinery). Both fixed test-first.
+- **Budget variance**: `duja.exe` 14.9 MB vs the 12 MB budget — raised to
+  16 MB by [ADR-0012](adr/0012-binary-size-budget-variance.md) with P8 trim
+  levers; RAM and wakeup budgets pass with headroom.
+
 ## What remains
 
-- **Hardware sign-off for P3 (needs a human at the console)** — every CI-side
-  criterion is green, but the live DDC round-trip could not run: this work was
-  driven from a **disconnected** session, and Windows only exposes real
-  displays to the interactive console session. When logged in at the machine,
-  run:
+- **One console-session checklist (needs you at the machine)** — everything
+  CI-verifiable is green; this work ran in a **disconnected** session where
+  Windows exposes no real displays. When logged in at the desk:
+
+  **P3 hardware sign-off:**
   ```powershell
   $env:DUJA_HW_TESTS = "1"; cargo nextest run -p duja-ddc --run-ignored all
   cargo run -p dujactl -- list        # expect the MSI MP273QP with MSI-30B6-… id
   cargo run -p dujactl -- set all brightness 40   # watch the panel change; set it back
-  cargo run -p duja-app -- --stress 60            # coalescing ratio ≪ 100 writes/100 inputs, zero errors
+  cargo run -p duja-app --release -- --stress 60  # writes ≪ inputs, zero errors
   ```
-  Manual checks from the plan: unplug/replug restores the level ≤ 2 s;
-  sleep/resume restores; monitor power-cycle recovers.
-- **P4 (next)** — `duja-dimmer` overlay (productionize the spike: per-monitor
-  click-through windows, HDR guard, gamma opt-in, crash marker + `--restore`)
-  + Slint flyout & tray + view-models → daily-driver MVP (`v0.1.0-alpha`).
-  Perf budgets measured at this gate (docs/perf-budgets.md).
-- **P5** — global hotkeys, VCP 0x60 input switching, IPC transport hardening +
-  `dujactl` over IPC, settings UI, opt-in update check (`v0.2.0-beta`).
+  Then: unplug/replug restores the level ≤ 2 s; sleep/resume restores; monitor
+  power-cycle recovers.
+
+  **P4 visual QA** (run `target\release\duja.exe`):
+  1. Tray icon visible with "Duja" tooltip, legible on light *and* dark taskbars.
+  2. Left-click toggles the flyout near the tray, fully on-screen (try a
+     top/left taskbar and mixed DPI if available).
+  3. Right-click menu: Open / Restore screen / Quit (clean exit, state saved).
+  4. Slider drives real brightness; below the hardware floor the overlay
+     engages seamlessly (no visible jump at the handoff); link-all fans out.
+  5. Overlays never intercept clicks; screenshots stay undimmed.
+  6. Unresponsive display greys out; hot-plug refreshes rows.
+  7. Double-clicked release exe opens no console; WARN log rotates under
+     `%LOCALAPPDATA%`.
+  8. Cold start → tray icon < 300 ms (feel; tracing span has the number).
+- **P5 (next)** — global hotkeys, VCP 0x60 input switching, IPC transport
+  hardening + `dujactl` over IPC, settings UI, opt-in update check
+  (`v0.2.0-beta`, public). Security checklist re-run item-by-item at its gate.
 - **P6/P7** — macOS and Linux ports behind the same trait + contract suite.
-- **P8** — fuzz burn-in, soak, packaging (winget/brew/AUR), 1.0.
+- **P8** — fuzz burn-in, soak, packaging (winget/brew/AUR), binary-size trims
+  (ADR-0012), 1.0.
 - Deferred oddments live in [debt.md](debt.md) (notably: the WMI set-path needs
-  a borrowed laptop; `classify_failure`'s `GetLastError` assumption needs a
-  live unplug test).
+  a borrowed laptop; `classify_failure`'s `GetLastError` assumption and
+  suspend/resume DDC re-push need live-hardware evidence).
 
 ## Notes & gotchas for whoever continues
 

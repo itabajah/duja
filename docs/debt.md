@@ -16,6 +16,7 @@ detouring; delete entries when drained.
 | P3 | `duja-ddc`/`duja-app` | Full DDC capability probing (contrast, input source) at enumeration; P3 sets brightness-only capabilities statically | Consumers (contrast UI, VCP 0x60 switching) land in P4/P5 |
 | P3 | `dujactl` | `duja-ipc` dependency is unused until the P5 transport lands | Placeholder for the P5 IPC client |
 | P3 | `duja-panel` `wmi.rs` | `WmiMonitorID` array decoding, `WmiSetBrightness` invocation, and ProductCodeID assumptions never executed on real hardware (dev box has no internal panel) | Needs a 30-min borrowed-laptop run before P5 (plan §P3) |
+| P4 | `duja-app` `engine.rs`/`run.rs` | Suspend/resume DDC re-push: on resume the display set is usually unchanged, so the manager emits no `Added`/`Reattached` and the engine never re-applies levels — a monitor that forgot its brightness across sleep (or a laptop panel reset by the firmware) stays wrong until the user nudges the slider | Needs hardware evidence (which monitors drop DDC state across S3/modern-standby) before choosing a policy: re-push all levels on `PlatformEvent::Resume`, or only after a resume-triggered enumeration diff |
 
 Drained at P2 gate (2026-07-08): MSI MP273QP quirk rows encoded in `quirks/quirks.toml`; contract suite hardened against `max`-lying backends (ADR-0002); unstamped-config migration semantics fixed (ADR-0007).
 

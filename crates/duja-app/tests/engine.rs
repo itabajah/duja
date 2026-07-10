@@ -408,6 +408,59 @@ fn burst_yields_single_hw_write() {
 }
 
 #[test]
+fn drag_burst_delivers_final_value() {
+    // Regression for P4 gate Finding 1. The tray used to gate SetUserLevel
+    // through a UI-side leading-edge throttle that admitted the FIRST sample of a
+    // burst and dropped the rest with no trailing flush — so a drag ending inside
+    // the throttle window never forwarded its final value, and the hardware
+    // settled at an intermediate level while the UI showed the correct one. The
+    // throttle is gone: the tray forwards every SetUserLevel, and the engine
+    // worker's write_min_gap last-wins coalescer bounds the write rate AND lands
+    // the final value. This drives a distinct-value descending sweep (a drag from
+    // 100 to 0) and asserts the FINAL value reaches the controller.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (writes_tx, writes_rx) = unbounded();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(80),
+        watchdog_timeout: Duration::from_secs(5),
+        displaychange_debounce: Duration::from_millis(60),
+    };
+    let (engine, _notes) = Engine::spawn(
+        cfg,
+        enumerator(state, calls_tx),
+        recording_factory(writes_tx),
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // A drag from 100 down to 0 in distinct 5% steps, faster than write_min_gap.
+    for step in 0..=20u8 {
+        let pct = 100 - step * 5;
+        cmds.send(EngineCommand::SetUserLevel {
+            id: id.clone(),
+            pct,
+        })
+        .unwrap();
+    }
+
+    // The controller must settle at the final value (0) — never an intermediate.
+    let (count, seen) = drain_writes(&writes_rx, |f, v| f == Feature::Brightness && v == 0);
+    assert!(count <= 21, "coalescing should drop intermediate writes");
+    assert_eq!(
+        seen.last().copied(),
+        Some((Feature::Brightness, 0)),
+        "the final drag value must land on the hardware, not an intermediate one"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
 fn stuck_controller_marks_display_unresponsive() {
     let id = display_id();
     let (platform_tx, platform_rx) = unbounded::<()>();

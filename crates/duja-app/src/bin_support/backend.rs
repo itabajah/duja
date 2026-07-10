@@ -59,33 +59,44 @@ pub(crate) fn discover() -> Vec<DiscoveredDisplay> {
     discover_all().0
 }
 
-/// Enumerate displays **and** their pixel bounds in one pass.
+/// One display's app-side geometry: its bare id, pixel bounds (external
+/// displays only), and GDI device name (the gamma channel's ramp target — also
+/// external displays only).
+pub(crate) type DisplayGeom = (String, Option<DisplayBounds>, Option<String>);
+
+/// Enumerate displays **and** their pixel bounds + GDI device names in one pass.
 ///
 /// Returns the [`DiscoveredDisplay`] list the engine consumes, plus a parallel
-/// `(bare id, Option<bounds>)` list in the *same* deterministic order (DDC
-/// first, then panels). The bounds list feeds an app-side
+/// [`DisplayGeom`] list in the *same* deterministic order (DDC first, then
+/// panels). The geometry list feeds an app-side
 /// [`BoundsMap`](crate::bin_support::bounds::BoundsMap); panels contribute
-/// `None` (no monitor rect is plumbed for them in P4). Never errors.
-pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<(String, Option<DisplayBounds>)>) {
+/// `None` bounds and `None` device (no monitor rect or GDI adapter is plumbed
+/// for them in P4). Never errors.
+pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<DisplayGeom>) {
     let mut displays = Vec::new();
-    let mut bounds = Vec::new();
+    let mut geom = Vec::new();
 
-    for (display, display_bounds) in discover_ddc() {
-        bounds.push((display.id.as_str().to_owned(), Some(display_bounds)));
+    for (display, display_bounds, gdi_device) in discover_ddc() {
+        geom.push((
+            display.id.as_str().to_owned(),
+            Some(display_bounds),
+            Some(gdi_device),
+        ));
         displays.push(display);
     }
     for display in discover_panel() {
-        bounds.push((display.id.as_str().to_owned(), None));
+        geom.push((display.id.as_str().to_owned(), None, None));
         displays.push(display);
     }
 
-    (displays, bounds)
+    (displays, geom)
 }
 
 #[cfg(windows)]
-fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds)> {
+fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
     // Each `DdcDisplay` is dropped at the end of the map closure, releasing its
-    // physical-monitor handle promptly — we keep only the metadata and bounds.
+    // physical-monitor handle promptly — we keep only the metadata, bounds, and
+    // GDI device name.
     match duja_ddc::enumerate() {
         Ok(displays) => displays
             .into_iter()
@@ -96,7 +107,7 @@ fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds)> {
                     name: d.name.clone(),
                     capabilities: hardware_brightness_caps(),
                 };
-                (display, d.bounds)
+                (display, d.bounds, d.gdi_device)
             })
             .collect(),
         Err(_) => Vec::new(),
@@ -104,7 +115,7 @@ fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds)> {
 }
 
 #[cfg(not(windows))]
-fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds)> {
+fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
     Vec::new()
 }
 
