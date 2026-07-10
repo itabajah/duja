@@ -15,6 +15,9 @@
 //! - [`controller`] — the [`controller::BrightnessController`] trait every
 //!   backend implements, and [`controller::ControlError`]
 //! - [`continuum`] — one user slider mapped onto hardware + software dimming
+//! - [`dimmer`] — the cross-platform software-dimming vocabulary
+//!   ([`dimmer::DimCommand`], [`dimmer::Dimmer`]); the Windows overlay backend
+//!   that implements it lives in the `duja-dimmer` crate
 //! - [`debounce`] — pure debounce / coalesce state machines
 //! - [`manager`] — hot-plug enumeration diffing, per-display state and level
 //!   restore ([`manager::DisplayManager`])
@@ -53,6 +56,7 @@ pub mod config;
 pub mod continuum;
 pub mod controller;
 pub mod debounce;
+pub mod dimmer;
 pub mod id;
 pub mod manager;
 pub mod model;

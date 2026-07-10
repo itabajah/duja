@@ -1062,7 +1062,10 @@ dependencies = [
 name = "duja-dimmer"
 version = "0.0.1"
 dependencies = [
+ "crossbeam-channel",
  "duja-core",
+ "thiserror",
+ "windows 0.62.2",
 ]
 
 [[package]]
