@@ -14,29 +14,40 @@ pub const EXIT_USAGE: u8 = 2;
 pub const EXIT_UNKNOWN_DISPLAY: u8 = 3;
 /// Exit code: a backend (hardware/OS) operation failed.
 pub const EXIT_BACKEND: u8 = 4;
+/// Exit code: reached the running app over IPC, but the exchange itself failed
+/// (a transport fault after connecting — distinct from a clean fall-back to the
+/// direct backend, which happens silently when no server is up).
+pub const EXIT_SERVER: u8 = 5;
 
 /// The usage text for `--help` and usage errors.
 pub const USAGE: &str = "\
-dujactl — scriptable control of Duja's displays (direct in-process backend)
+dujactl — scriptable control of Duja's displays
+
+Talks to the running Duja app over local IPC when it is up, and falls back to
+the direct in-process backend (DDC + panel) when it is not.
 
 USAGE:
-    dujactl <COMMAND>
+    dujactl [-v|--verbose] <COMMAND>
 
 COMMANDS:
     list                              list displays: id, kind, name, brightness, features
-    get <id>                          print one display's brightness current/max and percent
+    get <id>                          print one display's brightness percent
     set <id|all> brightness <0-100>   set brightness percent (mapped onto the probed range)
     input <id>                        list a display's allowed input sources and the current one
     input <id> <name|code>            switch the display's active input (e.g. hdmi1, dp1, 0x11)
-    doctor                            environment / backend / quirk diagnostics
+    doctor                            environment / backend / quirk diagnostics + server reachability
     version                           print the workspace version
     --help                            print this help
+
+OPTIONS:
+    -v, --verbose   report which path (ipc / direct) served each request
 
 EXIT CODES:
     0  ok
     2  usage / validation error
     3  unknown display id
-    4  backend (hardware/OS) error";
+    4  backend (hardware/OS) error
+    5  IPC server error (reached the app, but the exchange failed)";
 
 /// A parsed `dujactl` invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]

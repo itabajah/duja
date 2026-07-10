@@ -18,6 +18,7 @@ duja-core.workspace = true
 duja-ddc.workspace = true
 duja-panel.workspace = true
 duja-platform.workspace = true
+duja-ipc.workspace = true
 duja-dimmer.workspace = true
 duja-ui.workspace = true
 crossbeam-channel.workspace = true

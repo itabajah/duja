@@ -10,9 +10,26 @@ use duja_core::quirks::QuirkDb;
 use crate::backend;
 use crate::cli::{EXIT_BACKEND, EXIT_OK, EXIT_UNKNOWN_DISPLAY, EXIT_USAGE, SetTarget};
 use crate::fmt::{features_label, kind_label, pct_to_raw, quirk_summary, raw_to_pct, render_table};
+use crate::ipc;
 
-/// `list`: enumerate and print a table of displays.
-pub fn list() -> u8 {
+/// Note, in verbose mode, that the direct backend served the request.
+fn note_direct(verbose: bool) {
+    if verbose {
+        eprintln!("dujactl: no running app; served over direct backend");
+    }
+}
+
+/// `list`: over IPC if the app is up, else the direct backend.
+pub fn list(verbose: bool) -> u8 {
+    if let Some(mut client) = ipc::try_connect() {
+        return ipc::list(&mut client, verbose);
+    }
+    note_direct(verbose);
+    list_direct()
+}
+
+/// `list` against the direct in-process backend.
+fn list_direct() -> u8 {
     let displays = backend::discover();
     if displays.is_empty() {
         println!("no displays found");
@@ -55,8 +72,17 @@ fn read_brightness_and_features(id: &str) -> (String, String) {
     (brightness, features)
 }
 
-/// `get <id>`: print one display's brightness current/max and percent.
-pub fn get(id: &str) -> u8 {
+/// `get <id>`: over IPC if the app is up, else the direct backend.
+pub fn get(id: &str, verbose: bool) -> u8 {
+    if let Some(mut client) = ipc::try_connect() {
+        return ipc::get(&mut client, id, verbose);
+    }
+    note_direct(verbose);
+    get_direct(id)
+}
+
+/// `get <id>` against the direct backend: print current/max and percent.
+fn get_direct(id: &str) -> u8 {
     if !is_known(id) {
         eprintln!("unknown display `{id}`");
         return EXIT_UNKNOWN_DISPLAY;
@@ -82,9 +108,18 @@ pub fn get(id: &str) -> u8 {
     }
 }
 
-/// `set <id|all> brightness <0-100>`: map the percent onto each display's
-/// probed range, write, read back, and print the result.
-pub fn set(target: &SetTarget, percent: u8) -> u8 {
+/// `set <id|all> brightness <0-100>`: over IPC if the app is up, else direct.
+pub fn set(target: &SetTarget, percent: u8, verbose: bool) -> u8 {
+    if let Some(mut client) = ipc::try_connect() {
+        return ipc::set(&mut client, target, percent, verbose);
+    }
+    note_direct(verbose);
+    set_direct(target, percent)
+}
+
+/// `set` against the direct backend: map the percent onto each display's probed
+/// range, write, read back, and print the result.
+fn set_direct(target: &SetTarget, percent: u8) -> u8 {
     let ids: Vec<String> = match target {
         SetTarget::All => backend::discover()
             .into_iter()
@@ -227,6 +262,11 @@ pub fn doctor() -> u8 {
     let panel = backend::panel_count();
 
     println!("duja doctor");
+    if ipc::server_reachable() {
+        println!("  ipc server:     reachable (running app will serve dujactl)");
+    } else {
+        println!("  ipc server:     not running (dujactl uses the direct backend)");
+    }
     println!("  ddc displays:   {ddc}");
     println!("  panel displays: {panel}");
     if ddc == 0 && panel == 0 {

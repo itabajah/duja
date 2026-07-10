@@ -55,7 +55,7 @@ use crate::bin_support::dimming::{self, DisplayInput};
 use crate::bin_support::hotkey::{self, Accelerator, HotkeyAction, Modifiers as AccelModifiers};
 use crate::bin_support::paths::DujaPaths;
 use crate::bin_support::state_store::StateStore;
-use crate::bin_support::{backend, gamma, run, settings, startup};
+use crate::bin_support::{backend, gamma, ipc, run, settings, startup};
 
 /// The brightness step (percentage points) a `brightness_up` / `brightness_down`
 /// hotkey applies to every display. Fixed in P5; a configurable step is a
@@ -102,10 +102,15 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
     let _ = verbose; // logging is initialised by the caller.
     let paths = DujaPaths::resolve().unwrap_or_else(fallback_paths);
 
-    // 1. Single-instance guard: a second launch exits 0 (IPC show-flyout is P5).
+    // 1. Single-instance guard: a second launch asks the running instance to
+    //    surface its flyout over IPC, then exits 0.
     let instance = duja_platform::SingleInstance::acquire();
     if instance.already_running() {
-        info!("another duja instance is already running; exiting");
+        if ipc::show_running_instance() {
+            info!("another duja instance is running; asked it to show its flyout");
+        } else {
+            info!("another duja instance is already running; exiting");
+        }
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -189,6 +194,9 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
     wire_hotkey_handler(hotkey_map);
     spawn_notification_bridge(notifications);
 
+    // IPC control server: dujactl and second launches talk to us over the pipe.
+    let ipc_server = ipc::start(std::sync::Arc::new(ipc::TrayBridge::new(engine.sender())));
+
     info!("duja tray running");
     let loop_result = slint::run_event_loop_until_quit();
     if let Err(e) = loop_result {
@@ -196,6 +204,9 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
     }
 
     // 8. Clean teardown (state was flushed on Quit; this joins the threads).
+    if let Some(server) = ipc_server {
+        server.shutdown();
+    }
     engine.shutdown();
     forwarder.shutdown();
     APP.with(|slot| {
@@ -497,6 +508,31 @@ fn wire_ui_commands() {
                 });
             });
         }
+    });
+}
+
+/// Apply an IPC `set` on the Slint main thread through the flyout's own
+/// `set_user_level` path, so the persisted level and the overlay/gamma batch
+/// stay consistent with a slider drag. Callable from the IPC handler thread.
+pub(crate) fn ipc_apply_set_level(id: StableDisplayId, pct: u8) {
+    let _ = slint::invoke_from_event_loop(move || {
+        APP.with(|slot| {
+            if let Some(app) = slot.borrow_mut().as_mut() {
+                app.set_user_level(&id, pct);
+            }
+        });
+    });
+}
+
+/// Surface the flyout on the Slint main thread (IPC `ShowFlyout` / second
+/// instance). Callable from the IPC handler thread.
+pub(crate) fn ipc_show_flyout() {
+    let _ = slint::invoke_from_event_loop(|| {
+        APP.with(|slot| {
+            if let Some(app) = slot.borrow_mut().as_mut() {
+                app.show_flyout();
+            }
+        });
     });
 }
 

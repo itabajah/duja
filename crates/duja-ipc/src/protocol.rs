@@ -41,9 +41,9 @@ pub const ID_MAX_LEN: usize = 64;
 /// running app.
 ///
 /// Externally tagged and `deny_unknown_fields` for server-side strictness (see
-/// the module docs): `ListDisplays` serializes as the bare string
-/// `"list_displays"`, the data-carrying variants as a single-key object such as
-/// `{"set_brightness":{"id":"…","pct":50}}`.
+/// the module docs): `ListDisplays` and `ShowFlyout` serialize as the bare
+/// strings `"list_displays"` / `"show_flyout"`, the data-carrying variants as a
+/// single-key object such as `{"set_brightness":{"id":"…","pct":50}}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
@@ -61,6 +61,10 @@ pub enum Request {
         /// The desired level, `0..=100`.
         pct: u8,
     },
+    /// Ask the running app to surface its flyout (used by a second launch that
+    /// found an instance already running). A no-op on servers without a UI
+    /// (e.g. `--headless`), which answer [`Response::Ok`] anyway.
+    ShowFlyout,
 }
 
 impl Request {
@@ -71,7 +75,7 @@ impl Request {
     /// percentage exceeds 100.
     pub fn validate(&self) -> Result<(), IpcError> {
         match self {
-            Request::ListDisplays => Ok(()),
+            Request::ListDisplays | Request::ShowFlyout => Ok(()),
             Request::GetBrightness { id } => validate_id(id),
             Request::SetBrightness { id, pct } => {
                 validate_id(id)?;
