@@ -18,6 +18,11 @@
 //! an indeterminate probe both force overlay). The probe result is captured once
 //! per enumeration and passed in as `gamma_allowed`.
 
+// RATIONALE: these pure modules are consumed only by the Windows tray assembly,
+// but stay cross-platform (not cfg-gated) so their unit tests run on every CI
+// OS; the dead-code allow applies only where no consumer exists.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use duja_core::config::{Config, MonitorConfig, Theme as ConfigTheme};
 use duja_core::continuum::ContinuumConfig;
 use duja_core::model::{DimMode, DisplayKind};

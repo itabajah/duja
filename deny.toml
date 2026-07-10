@@ -19,6 +19,19 @@ ignore = [
     # image/exr; ttf-parser is pinned by fontdb/resvg inside Slint.
     "RUSTSEC-2024-0436",
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; pinned by slint's resvg" },
+    # unmaintained gtk-rs GTK3 bindings family + proc-macro-error: pulled ONLY
+    # by tray-icon's linux backend (libappindicator). Duja's linux tray backend
+    # is decided at P7 (ADR-0010 evaluates ksni, which drops GTK entirely);
+    # until then these are linux-only, build-graph-only on our CI, and carry no
+    # vulnerability — they are maintenance-status advisories.
+    "RUSTSEC-2024-0370",
+    "RUSTSEC-2024-0412",
+    "RUSTSEC-2024-0413",
+    "RUSTSEC-2024-0415",
+    "RUSTSEC-2024-0416",
+    "RUSTSEC-2024-0418",
+    "RUSTSEC-2024-0419",
+    "RUSTSEC-2024-0420",
 ]
 
 [licenses]

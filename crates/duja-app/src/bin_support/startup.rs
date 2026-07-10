@@ -9,6 +9,11 @@
 //! the filesystem, restore via an injected hook) so the whole flow is unit-
 //! testable without any Windows gamma call.
 
+// RATIONALE: these pure modules are consumed only by the Windows tray assembly,
+// but stay cross-platform (not cfg-gated) so their unit tests run on every CI
+// OS; the dead-code allow applies only where no consumer exists.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use std::path::Path;
 
 /// Recover from a possible dirty gamma exit.

@@ -7,6 +7,11 @@
 //! is injected — the caller supplies the cursor, work area, and flyout size — so
 //! the placement is exhaustively unit-testable without any Win32 call.
 
+// RATIONALE: these pure modules are consumed only by the Windows tray assembly,
+// but stay cross-platform (not cfg-gated) so their unit tests run on every CI
+// OS; the dead-code allow applies only where no consumer exists.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 /// A rectangle in virtual-desktop pixels (origin may be negative).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Rect {

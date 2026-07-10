@@ -17,7 +17,7 @@ const CONFIG_FILE: &str = "config.toml";
 /// The file name of the volatile per-display level state.
 const STATE_FILE: &str = "state.toml";
 /// The crash marker written before the first gamma engage (see
-/// [`duja_dimmer::mark_dirty`]).
+/// the Windows-only `duja_dimmer::mark_dirty`).
 const MARKER_FILE: &str = "gamma.dirty";
 /// The subdirectory that holds the rotating log files.
 const LOG_DIR: &str = "logs";

@@ -4,7 +4,7 @@
 //! run it, translate the outcome into an exit code.
 //!
 //! The default (no args) is the **tray application** (tray icon + flyout, engine,
-//! dimmer, config/state — see [`bin_support::tray`]). The console modes
+//! dimmer, config/state — see the Windows-only `bin_support::tray`). The console modes
 //! (`--headless`, `--once`, `--stress`, `--restore`) remain for development and
 //! degrade cleanly when no monitors are visible.
 //!

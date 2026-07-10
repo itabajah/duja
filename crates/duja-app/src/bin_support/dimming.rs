@@ -18,6 +18,11 @@
 //! The module is OS-free and fully unit-tested; the app's notification loop
 //! calls it and hands the batch to the real `Dimmer`.
 
+// RATIONALE: these pure modules are consumed only by the Windows tray assembly,
+// but stay cross-platform (not cfg-gated) so their unit tests run on every CI
+// OS; the dead-code allow applies only where no consumer exists.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use duja_core::continuum::{ContinuumConfig, map_user_level};
 use duja_core::dimmer::{DimCommand, DisplayBounds};
 use duja_core::id::StableDisplayId;
