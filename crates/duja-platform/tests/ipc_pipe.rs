@@ -22,7 +22,8 @@
     clippy::unnested_or_patterns
 )]
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use duja_ipc::{Request, Response};
@@ -296,6 +297,61 @@ fn dacl_grants_owner_only_no_everyone() {
     server.shutdown();
 }
 
+#[test]
+fn silent_readonly_client_cannot_pin_a_handler() {
+    // Regression for the peek-poll deadlock: a client that opens the pipe with
+    // GENERIC_READ only and writes nothing used to wedge a handler thread forever
+    // inside a single PeekNamedPipe call, so `shutdown()` hung joining it. With
+    // overlapped, cancellable reads the handler unblocks on the stop flag.
+    let name = unique_name("silent");
+    let server = PipeServer::serve_named(&name, fake_handler).expect("server up");
+
+    // The silent client stays open (never writing) for the whole test.
+    let silent = ReadOnlyClient::open(&name).expect("silent readonly connect");
+    // Give the listener time to accept it and hand it to a handler.
+    std::thread::sleep(Duration::from_millis(250));
+
+    // A well-behaved client must still be answered promptly by a free handler:
+    // proof that the silent client has not pinned the whole pool.
+    let start = Instant::now();
+    let mut c = PipeClient::connect_named(&name, short()).expect("second client connects");
+    let resp = c
+        .request(&Request::ShowFlyout)
+        .expect("second client answered");
+    assert_eq!(resp, Response::Ok, "the second client must be served");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "second client took too long ({:?}); a handler looks pinned",
+        start.elapsed()
+    );
+    drop(c);
+
+    // The core regression: shutdown must not hang joining the handler that is
+    // blocked reading from the still-open, still-silent client. Guard it with a
+    // watchdog so a re-introduced hang fails the test instead of stalling CI.
+    with_watchdog(Duration::from_secs(3), move || server.shutdown());
+
+    // Keep the silent client alive until after shutdown so the handler unblocks
+    // via the stop flag, not because the client disconnected.
+    drop(silent);
+}
+
+#[test]
+fn shutdown_completes_promptly_with_idle_connection() {
+    // Connect, send nothing, then immediately shut down: the handler is parked in
+    // its first read and must be cancelled by the stop flag well under 3 s.
+    let name = unique_name("idle");
+    let server = PipeServer::serve_named(&name, fake_handler).expect("server up");
+
+    let idle = RawPipe::connect(&name, short()).expect("raw connect");
+    // Let a handler pick up the connection and block on the header read.
+    std::thread::sleep(Duration::from_millis(250));
+
+    with_watchdog(Duration::from_secs(3), move || server.shutdown());
+
+    drop(idle);
+}
+
 // --- raw pipe + security helpers (Win32) ---------------------------------
 
 use windows::Win32::Foundation::{
@@ -378,6 +434,71 @@ impl Drop for RawPipe {
             let _ = CloseHandle(self.handle);
         }
     }
+}
+
+/// A raw client that opens the pipe with `GENERIC_READ` only and never writes —
+/// the exact silent, read-only peer that pinned a handler under the old design.
+/// Held open by the test; closes on drop.
+struct ReadOnlyClient {
+    handle: HANDLE,
+}
+
+impl ReadOnlyClient {
+    fn open(name: &str) -> Option<Self> {
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let opened = unsafe {
+                CreateFileW(
+                    PCWSTR(wide.as_ptr()),
+                    GENERIC_READ.0,
+                    FILE_SHARE_MODE(0),
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAGS_AND_ATTRIBUTES(0),
+                    None,
+                )
+            };
+            match opened {
+                Ok(handle) if !handle.is_invalid() => return Some(ReadOnlyClient { handle }),
+                _ => {
+                    let code = unsafe { GetLastError() };
+                    if code != ERROR_PIPE_BUSY || Instant::now() >= deadline {
+                        return None;
+                    }
+                    let _ = unsafe { WaitNamedPipeW(PCWSTR(wide.as_ptr()), 200) };
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ReadOnlyClient {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+/// Run `body` on a worker thread and fail the test if it does not finish within
+/// `budget` — so a re-introduced hang panics promptly instead of stalling CI.
+fn with_watchdog<F: FnOnce() + Send + 'static>(budget: Duration, body: F) {
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = done.clone();
+    let worker = std::thread::spawn(move || {
+        body();
+        flag.store(true, Ordering::SeqCst);
+    });
+    let start = Instant::now();
+    while start.elapsed() < budget {
+        if done.load(Ordering::SeqCst) {
+            worker.join().expect("watchdogged body panicked");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("watchdog: operation did not complete within {budget:?}");
 }
 
 /// Read exactly `buf.len()` bytes, or give up after `budget`. Returns whether it
