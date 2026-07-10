@@ -373,14 +373,19 @@ impl EngineState {
                 seq,
                 result,
             } => {
-                self.clear_inflight_match(&id, InflightKey::Get(feature), seq);
-                if let Ok(range) = result
+                // Gate ALL Get side-effects on the seq matching the tracked
+                // in-flight Get (mirroring the write path). A stale ack from a
+                // retired/superseded worker must not record calibration, and —
+                // crucially — must not consume the `pending_learn` token, which
+                // would drop the fresh worker's real reading.
+                let is_fresh = self.clear_inflight_match(&id, InflightKey::Get(feature), seq);
+                if is_fresh
+                    && let Ok(range) = result
                     && feature == Feature::Brightness
                 {
-                    // Calibration is always safe to record; the learned level
-                    // is applied only if the user has not set one in the
-                    // meantime (which would have cleared `pending_learn`).
                     self.brightness_max.insert(id.clone(), range.max);
+                    // The learned level is applied only if the user has not set
+                    // one in the meantime (which would have cleared it).
                     if self.pending_learn.remove(&id) {
                         let pct = raw_to_pct(range.current, range.max);
                         self.manager.record_user_level(&id, pct);
@@ -441,13 +446,20 @@ impl EngineState {
     }
 
     /// Remove the in-flight entry for `(id, key)` iff its seq matches (a newer
-    /// dispatch supersedes an older ack).
-    fn clear_inflight_match(&mut self, id: &StableDisplayId, key: InflightKey, seq: u64) {
+    /// dispatch supersedes an older ack), returning whether it matched.
+    ///
+    /// `true` means the ack corresponds to the current in-flight op, so its
+    /// side-effects are safe to apply; `false` means it is stale/superseded and
+    /// callers must ignore it.
+    fn clear_inflight_match(&mut self, id: &StableDisplayId, key: InflightKey, seq: u64) -> bool {
         let entry = (id.clone(), key);
         if let Some((tracked, _)) = self.inflight.get(&entry)
             && *tracked == seq
         {
             self.inflight.remove(&entry);
+            true
+        } else {
+            false
         }
     }
 

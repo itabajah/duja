@@ -130,6 +130,39 @@ impl BrightnessController for Hang {
     }
 }
 
+/// A controller whose `get` announces it was entered (with the value it will
+/// return), blocks until externally released, and announces it is about to
+/// return — so a test can hold a Get in flight, force a respawn, and pin down
+/// the exact order acks are enqueued in.
+#[derive(Debug)]
+struct GatedGet {
+    entered: Sender<u16>,
+    release: Receiver<()>,
+    returned: Sender<()>,
+    current: u16,
+}
+
+impl BrightnessController for GatedGet {
+    fn probe(&mut self) -> Result<Capabilities, ControlError> {
+        Ok(caps())
+    }
+    fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+        let _ = self.entered.send(self.current);
+        let _ = self.release.recv();
+        // The worker enqueues this Get's ack immediately after `get` returns, so
+        // signalling here lets a test guarantee this ack is enqueued before it
+        // releases another worker's Get.
+        let _ = self.returned.send(());
+        Ok(FeatureRange {
+            current: self.current,
+            max: 100,
+        })
+    }
+    fn set(&mut self, _feature: Feature, _value: u16) -> Result<(), ControlError> {
+        Ok(())
+    }
+}
+
 /// A controller whose `set` panics; `get` succeeds.
 #[derive(Debug)]
 struct Panicky;
@@ -650,6 +683,112 @@ fn reattach_of_unresponsive_display_restores_level_not_power_on_default() {
     assert!(
         !relearned,
         "reattach re-learned the power-on 50%, losing the user's 30%"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn stale_get_ack_cannot_clobber_fresh_learn() {
+    // Worker A's initial Get is held in flight; the display is unplugged (A
+    // retired) and replugged (worker B, a fresh initial Get). We release A's
+    // stale Get first, then B's fresh one. The learned level must come from B's
+    // reading (70), never A's superseded reading (20).
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    let (entered_tx, entered_rx) = unbounded::<u16>();
+    let (release_a_tx, release_a_rx) = unbounded::<()>();
+    let (release_b_tx, release_b_rx) = unbounded::<()>();
+    let (returned_a_tx, returned_a_rx) = unbounded::<()>();
+    let (returned_b_tx, _returned_b_rx) = unbounded::<()>();
+
+    let calls = Arc::new(Mutex::new(0u32));
+    let factory: duja_app::ControllerFactory = {
+        let entered_tx = entered_tx.clone();
+        Box::new(move |_id| {
+            let n = {
+                let mut c = calls.lock().unwrap();
+                *c += 1;
+                *c
+            };
+            let entered_tx = entered_tx.clone();
+            let (current, release, returned) = if n == 1 {
+                (20u16, release_a_rx.clone(), returned_a_tx.clone())
+            } else {
+                (70u16, release_b_rx.clone(), returned_b_tx.clone())
+            };
+            Box::new(move || {
+                Some(Box::new(GatedGet {
+                    entered: entered_tx.clone(),
+                    release: release.clone(),
+                    returned: returned.clone(),
+                    current,
+                }) as Box<dyn BrightnessController>)
+            }) as duja_app::ControllerOpener
+        })
+    };
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(10),
+        // Large so the deliberately-blocked Gets never trip the watchdog.
+        watchdog_timeout: Duration::from_secs(30),
+        displaychange_debounce: Duration::from_millis(60),
+    };
+    let (engine, notes) = Engine::spawn(
+        cfg,
+        enumerator(state.clone(), calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // Worker A entered its initial Get (value 20) and is now blocked.
+    assert_eq!(
+        entered_rx.recv_timeout(Duration::from_secs(2)).ok(),
+        Some(20),
+        "worker A should enter its initial Get"
+    );
+
+    // Unplug (retiring A while its Get is in flight), then replug -> worker B.
+    *state.lock().unwrap() = Vec::new();
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+    assert!(snapshot(&cmds).is_empty(), "display should be gone");
+    *state.lock().unwrap() = vec![discovered(&id)];
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+
+    // Worker B entered its fresh initial Get (value 70) and is now blocked.
+    assert_eq!(
+        entered_rx.recv_timeout(Duration::from_secs(2)).ok(),
+        Some(70),
+        "worker B should enter its fresh initial Get"
+    );
+
+    // Release the STALE Get and wait until worker A has returned from it — its
+    // ack is enqueued immediately after. A snapshot round-trip then advances the
+    // engine loop. Only THEN release the fresh Get, so A's stale ack is strictly
+    // enqueued (and thus processed, FIFO) before B's fresh ack.
+    release_a_tx.send(()).unwrap();
+    returned_a_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker A should return from its stale Get");
+    let _ = snapshot(&cmds);
+    release_b_tx.send(()).unwrap();
+
+    // The fresh reading (70) must be the learned level — not A's stale 20.
+    let learned_fresh = wait_note(&notes, Duration::from_secs(2), |n| {
+        matches!(
+            n,
+            EngineNotification::DisplaysChanged(snaps)
+                if snaps.iter().any(|s| s.id == id && s.user_level_pct == 70)
+        )
+    });
+    assert!(
+        learned_fresh,
+        "the fresh Get reading (70) must be learned; a stale ack must not consume the learn"
     );
 
     within(Duration::from_secs(2), move || engine.shutdown());
