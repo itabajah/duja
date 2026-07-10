@@ -76,6 +76,12 @@ impl StateStore {
         }
     }
 
+    /// Record that the update check just ran at `unix` (marks the store dirty).
+    pub(crate) fn record_update_check(&mut self, unix: i64) {
+        self.file.record_update_check(unix);
+        self.dirty = true;
+    }
+
     /// Persist the state if it is dirty and the debounce window has elapsed.
     ///
     /// Returns `true` if a write happened. Never an error path for the caller: a
