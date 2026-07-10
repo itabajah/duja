@@ -264,9 +264,8 @@ fn within(dur: Duration, f: impl FnOnce() + Send + 'static) {
 fn recording_factory(writes: Sender<(Feature, u16)>) -> duja_app::ControllerFactory {
     Box::new(move |_id| {
         let writes = writes.clone();
-        Box::new(move || {
-            Some(Box::new(Recording::new(writes)) as Box<dyn BrightnessController>)
-        }) as duja_app::ControllerOpener
+        Box::new(move || Some(Box::new(Recording::new(writes)) as Box<dyn BrightnessController>))
+            as duja_app::ControllerOpener
     })
 }
 

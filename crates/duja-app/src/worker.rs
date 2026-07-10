@@ -1,9 +1,10 @@
 //! Per-monitor worker threads.
 //!
 //! Each worker exclusively owns its
-//! [`BrightnessController`](duja_core::controller::BrightnessController) (moved
-//! in at spawn — the trait's `&mut self` makes serialization a compile-time
-//! property, so no locking is needed). The loop:
+//! [`BrightnessController`](duja_core::controller::BrightnessController)
+//! (**opened on this thread** via the injected [`ControllerOpener`] as the first
+//! thing the worker does — the trait's `&mut self` makes serialization a
+//! compile-time property, so no locking is needed). The loop:
 //!
 //! 1. parks on its command channel when idle (**zero wakeups**);
 //! 2. drains every immediately-available command, keeping the newest value per
@@ -336,8 +337,9 @@ mod tests {
         // land — features never collapse into one another.
         let (writes_tx, writes_rx) = unbounded();
         let (ack_tx, _ack_rx) = unbounded();
-        let opener: crate::ControllerOpener =
-            Box::new(move || Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>));
+        let opener: crate::ControllerOpener = Box::new(move || {
+            Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
+        });
         let handle = spawn_worker(worker_id(), opener, Duration::from_millis(5), ack_tx);
 
         for (i, feature) in [
@@ -388,8 +390,9 @@ mod tests {
         // must coalesce to far fewer, and the LAST value must win.
         let (writes_tx, writes_rx) = unbounded();
         let (ack_tx, _ack_rx) = unbounded();
-        let opener: crate::ControllerOpener =
-            Box::new(move || Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>));
+        let opener: crate::ControllerOpener = Box::new(move || {
+            Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
+        });
         let handle = spawn_worker(worker_id(), opener, Duration::from_millis(80), ack_tx);
 
         for _ in 0..100u32 {
@@ -434,14 +437,14 @@ mod tests {
         let opener: crate::ControllerOpener = Box::new(|| None);
         let handle = spawn_worker(worker_id(), opener, Duration::from_millis(5), ack_tx);
 
-        match ack_rx.recv_timeout(Duration::from_secs(2)) {
-            Ok(ack) => assert!(
-                matches!(ack.outcome, AckOutcome::OpenFailed),
-                "expected OpenFailed, got {:?}",
-                ack.outcome
-            ),
-            Err(_) => panic!("worker never acked the failed open"),
-        }
+        let ack = ack_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker never acked the failed open");
+        assert!(
+            matches!(ack.outcome, AckOutcome::OpenFailed),
+            "expected OpenFailed, got {:?}",
+            ack.outcome
+        );
         // The thread exited on its own; joining must not hang.
         handle.join.join().unwrap();
     }

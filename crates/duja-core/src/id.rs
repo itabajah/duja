@@ -695,8 +695,14 @@ mod tests {
         // id for BOTH. `-slot<n>` must select the Nth bare match in order.
         let bare = StableDisplayId::from_parts("GSM", 0x5B09, None).unwrap();
         let cands = [bare.as_str(), bare.as_str()];
-        assert_eq!(select_slot_match(bare.with_slot(0).as_str(), &cands), Some(0));
-        assert_eq!(select_slot_match(bare.with_slot(1).as_str(), &cands), Some(1));
+        assert_eq!(
+            select_slot_match(bare.with_slot(0).as_str(), &cands),
+            Some(0)
+        );
+        assert_eq!(
+            select_slot_match(bare.with_slot(1).as_str(), &cands),
+            Some(1)
+        );
         // A slot beyond the available twins resolves to nothing.
         assert_eq!(select_slot_match(bare.with_slot(2).as_str(), &cands), None);
     }

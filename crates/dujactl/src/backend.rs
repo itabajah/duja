@@ -34,7 +34,10 @@ pub fn discover() -> Vec<CtlDisplay> {
     let mut out = discover_ddc();
     out.extend(discover_panel());
     let ids: Vec<StableDisplayId> = out.iter().map(|d| d.id.clone()).collect();
-    for (display, resolved) in out.iter_mut().zip(duja_core::manager::assign_twin_slots(&ids)) {
+    for (display, resolved) in out
+        .iter_mut()
+        .zip(duja_core::manager::assign_twin_slots(&ids))
+    {
         display.id = resolved;
     }
     out
