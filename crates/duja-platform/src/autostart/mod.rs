@@ -171,6 +171,10 @@ mod stub {
     }
 
     /// The platform autostart (a stub that reports "unsupported" here).
+    ///
+    /// # Errors
+    /// Never fails on this target; the `Result` mirrors the Windows signature
+    /// so the caller stays cfg-free.
     // RATIONALE (clippy::unnecessary_wraps): mirrors the Windows `system()`
     // signature so the caller stays cfg-free.
     #[allow(clippy::unnecessary_wraps)]
