@@ -36,3 +36,23 @@ levers, in expected-payoff order, are recorded for P8:
   the original budget is restored.
 - The RAM budget — the budget users actually feel, and the reason Electron was
   rejected — is unchanged and passing at 23.3 MB idle.
+
+## Ledger
+
+| Gate | `duja.exe` (stripped, thin LTO) | Verdict |
+|---|---|---|
+| P4 (tray + flyout + dimmer) | 14.9 MB | within the raised 16 MB budget |
+| P5 (+ settings, autostart, ureq/rustls update check) | **17.21 MB** | **over by 1.2 MB** |
+
+P5's overage is entirely the opt-in update check's TLS stack
+(`ureq` + `rustls` + `ring` + `webpki-roots`). It is **not** accepted as a new
+budget: P8 must recover it. Levers, in expected-payoff order:
+
+1. Feature-gate the update check (default on for release, off for a "lite"
+   artifact) — removes the whole TLS stack.
+2. Fat LTO (measured −1.0 MB at P4).
+3. `tracing-subscriber` without `env-filter` (drops `regex`).
+4. Slint image-format features the flyout never uses.
+
+If P8 cannot get under 16 MB, this ADR is superseded by an explicit
+raise-with-rationale rather than silent drift. `dujactl` remains 0.6 MB.

@@ -219,6 +219,63 @@ fn slow_writer_hits_the_read_timeout() {
 }
 
 #[test]
+fn dribbling_writer_cannot_renew_the_read_timeout() {
+    // P5 gate finding C1: the read deadline used to be minted per `read()`
+    // syscall, so a peer trickling one byte every few seconds renewed it forever
+    // and pinned a handler thread (the frame never completes). The deadline is
+    // now armed once per exchange, so the connection must die ~READ_TIMEOUT
+    // after the FIRST read regardless of dribbled bytes.
+    use std::io::{Read, Write};
+
+    let name = unique_name("dribble");
+    let server = PipeServer::serve_named(&name, fake_handler).expect("server up");
+
+    let mut raw = RawPipe::connect(&name, short()).expect("raw connect");
+    // Promise 64 bytes, then dribble one byte at a time: under the old per-read
+    // deadline every byte renewed the 5 s budget, so the exchange never ended.
+    raw.write_all(&64u32.to_le_bytes()).expect("write prefix");
+
+    let start = Instant::now();
+    let mut dribbled = 0usize;
+    let mut died_at = None;
+    // Keep dribbling PAST the budget. The server must cut us off *while* we are
+    // still dribbling — that is the whole point.
+    while start.elapsed() < Duration::from_secs(12) {
+        // A write to a server-closed pipe fails (ERROR_NO_DATA / broken pipe).
+        if raw.write_all(b"x").is_err() {
+            died_at = Some(start.elapsed());
+            break;
+        }
+        dribbled += 1;
+        std::thread::sleep(Duration::from_millis(1500));
+    }
+
+    let died_at = died_at.unwrap_or_else(|| {
+        panic!(
+            "server still accepted writes after {dribbled} dribbled bytes over \
+             {:?}: the read deadline is being renewed per syscall (finding C1)",
+            start.elapsed()
+        )
+    });
+    assert!(
+        died_at < Duration::from_secs(10),
+        "connection survived {died_at:?}, well past the 5 s exchange budget"
+    );
+    // The read side agrees the exchange is over.
+    let mut buf = [0u8; 16];
+    assert!(matches!(raw.read(&mut buf), Ok(0) | Err(_)));
+
+    // And the server is still healthy: a well-behaved client is served at once.
+    let mut good = PipeClient::connect_named(&name, short()).expect("connect after dribble");
+    assert_eq!(
+        good.request(&Request::ShowFlyout).expect("served"),
+        Response::Ok
+    );
+
+    server.shutdown();
+}
+
+#[test]
 fn fifth_concurrent_connection_is_refused() {
     // A handler that blocks until released, so connections stay open and occupy
     // instances. Four should connect; the fifth must be refused (ERROR_PIPE_BUSY

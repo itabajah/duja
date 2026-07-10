@@ -357,11 +357,40 @@ unsafe fn wait_pending(
 struct PipeStream {
     handle: HANDLE,
     stop: Option<Arc<AtomicBool>>,
+    /// When set, the instant by which **all** reads on this stream must have
+    /// completed. See [`PipeStream::with_read_deadline`].
+    read_deadline: Option<Instant>,
 }
 
 impl PipeStream {
     fn new(handle: HANDLE, stop: Option<Arc<AtomicBool>>) -> Self {
-        PipeStream { handle, stop }
+        PipeStream {
+            handle,
+            stop,
+            read_deadline: None,
+        }
+    }
+
+    /// Arm a single deadline shared by every read of one request→response
+    /// exchange, starting now.
+    ///
+    /// Without this, each `read` syscall gets a fresh [`READ_TIMEOUT`] budget.
+    /// Because the framing layer drives reads with `read_exact` (which loops
+    /// until its buffer fills), a peer that dribbles one byte every few seconds
+    /// would renew the budget forever and pin a handler thread — the frame
+    /// never completes and the timeout never fires. Servers therefore arm one
+    /// whole-exchange deadline; clients keep the per-read budget (they talk to
+    /// a trusted, prompt server and their own `connect` bounds the wait).
+    fn with_read_deadline(mut self, budget: Duration) -> Self {
+        self.read_deadline = Instant::now().checked_add(budget);
+        self
+    }
+
+    /// The deadline this read must respect: the exchange-wide one if armed,
+    /// else a fresh per-read budget.
+    fn read_deadline(&self) -> Option<Instant> {
+        self.read_deadline
+            .or_else(|| Instant::now().checked_add(READ_TIMEOUT))
     }
 }
 
@@ -370,7 +399,7 @@ impl Read for PipeStream {
         if buf.is_empty() {
             return Ok(0);
         }
-        let deadline = Instant::now().checked_add(READ_TIMEOUT);
+        let deadline = self.read_deadline();
         let event = Event::new()?;
         let mut ov = OVERLAPPED {
             hEvent: event.0,
@@ -561,6 +590,9 @@ impl PipeServer {
         let handler: Arc<dyn Fn(Request) -> Response + Send + Sync> = Arc::new(handler);
         let (work_tx, work_rx) = bounded::<SendHandle>(MAX_CONNECTIONS as usize);
 
+        // From here on `first` is a live pipe instance this function owns: every
+        // early return must close it, or the instance (and its `nMaxInstances`
+        // slot) leaks for the life of the process.
         let mut workers = Vec::with_capacity(MAX_HANDLER_THREADS);
         for i in 0..MAX_HANDLER_THREADS {
             let rx = work_rx.clone();
@@ -569,18 +601,26 @@ impl PipeServer {
             let worker = std::thread::Builder::new()
                 .name(format!("duja-ipc-handler-{i}"))
                 .spawn(move || worker_loop(&rx, &stop, handler.as_ref()))
-                .map_err(|e| IpcTransportError::Io(e.to_string()))?;
+                .map_err(|e| {
+                    close_handle(first);
+                    IpcTransportError::Io(e.to_string())
+                })?;
             workers.push(worker);
         }
         drop(work_rx);
 
         let listener = {
             let stop = stop.clone();
-            let first = SendHandle(first);
+            let sent = SendHandle(first);
             std::thread::Builder::new()
                 .name("duja-ipc-listener".to_owned())
-                .spawn(move || listener_loop(&name_wide, &descriptor, first, &work_tx, &stop))
-                .map_err(|e| IpcTransportError::Io(e.to_string()))?
+                .spawn(move || listener_loop(&name_wide, &descriptor, sent, &work_tx, &stop))
+                .map_err(|e| {
+                    // The closure never ran, so nothing took ownership of the
+                    // instance; close the (Copy) handle we still hold.
+                    close_handle(first);
+                    IpcTransportError::Io(e.to_string())
+                })?
         };
 
         Ok(PipeServer {
@@ -718,7 +758,9 @@ fn serve_connection(
         close_handle(handle);
         return;
     }
-    let mut stream = PipeStream::new(handle, Some(stop.clone()));
+    // One deadline for the whole request read: a dribbling peer cannot renew it
+    // per syscall and pin this handler thread (see `with_read_deadline`).
+    let mut stream = PipeStream::new(handle, Some(stop.clone())).with_read_deadline(READ_TIMEOUT);
     let _ = duja_ipc::serve_once(&mut stream, handler);
     // `stream` drops here, closing the handle (freeing the instance slot).
 }
