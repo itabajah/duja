@@ -241,11 +241,36 @@ fn no_input_switch_quirk_drops_the_input_source_feature() {
         no_input_switch: true,
         ..ResolvedQuirks::default()
     };
-    let t = FakeTransport::nominal().with_caps(Some("(vcp(10 12 60))"));
+    let t = FakeTransport::nominal().with_caps(Some("(vcp(10 12 60(11120F)))"));
     let mut c = controller(t, quirks);
     let caps = c.probe().unwrap();
     assert!(caps.supports(Feature::Brightness));
     assert!(!caps.supports(Feature::InputSource));
+    // The value list is cleared alongside the dropped feature.
+    assert!(caps.allowed_inputs.is_empty());
+}
+
+#[test]
+fn probe_carries_input_value_list_from_caps() {
+    // The 0x60 value list from the capability string reaches allowed_inputs.
+    let t = FakeTransport::nominal().with_caps(Some("(vcp(10 12 60(11120F)))"));
+    let mut c = controller(t, ResolvedQuirks::default());
+    let caps = c.probe().unwrap();
+    assert!(caps.supports(Feature::InputSource));
+    assert_eq!(caps.allowed_inputs, vec![0x11, 0x12, 0x0F]);
+}
+
+#[test]
+fn probe_intersects_caps_list_with_allowed_quirk() {
+    // The caps string offers three inputs; the quirk narrows them to a subset.
+    let quirks = ResolvedQuirks {
+        input_source_allowed: Some(vec![0x11, 0x0F]),
+        ..ResolvedQuirks::default()
+    };
+    let t = FakeTransport::nominal().with_caps(Some("(vcp(10 12 60(11120F)))"));
+    let mut c = controller(t, quirks);
+    let caps = c.probe().unwrap();
+    assert_eq!(caps.allowed_inputs, vec![0x11, 0x0F]);
 }
 
 #[test]

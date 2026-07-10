@@ -324,6 +324,16 @@ impl DisplayManager {
         self.records.get(id).map(|record| record.state)
     }
 
+    /// The last-sighted capabilities of `id`, if the manager knows it.
+    ///
+    /// Used by the engine to validate an input-source switch against the
+    /// display's probed [`allowed_inputs`](crate::model::Capabilities::allowed_inputs)
+    /// before dispatching a write.
+    #[must_use]
+    pub fn capabilities_of(&self, id: &StableDisplayId) -> Option<&Capabilities> {
+        self.records.get(id).map(|record| &record.capabilities)
+    }
+
     /// Whether `id` is currently believed responsive; `None` for unknown ids.
     ///
     /// The flag is sticky across a disconnect: a display that vanished while

@@ -26,6 +26,8 @@ COMMANDS:
     list                              list displays: id, kind, name, brightness, features
     get <id>                          print one display's brightness current/max and percent
     set <id|all> brightness <0-100>   set brightness percent (mapped onto the probed range)
+    input <id>                        list a display's allowed input sources and the current one
+    input <id> <name|code>            switch the display's active input (e.g. hdmi1, dp1, 0x11)
     doctor                            environment / backend / quirk diagnostics
     version                           print the workspace version
     --help                            print this help
@@ -52,6 +54,13 @@ pub enum Command {
         target: SetTarget,
         /// Validated percent in `0..=100`.
         percent: u8,
+    },
+    /// List or switch a display's DDC input source (VCP `0x60`).
+    Input {
+        /// The target display's stable id.
+        id: String,
+        /// The requested input (name or code); `None` lists the allowed set.
+        value: Option<String>,
     },
     /// Print environment / backend / quirk diagnostics.
     Doctor,
@@ -100,6 +109,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         "--help" | "-h" | "help" => Ok(Command::Help),
         "get" => parse_get(iter),
         "set" => parse_set(iter),
+        "input" => parse_input(iter),
         other => Err(usage(&format!("unknown command `{other}`"))),
     }
 }
@@ -122,6 +132,21 @@ fn parse_get<'a>(mut iter: impl Iterator<Item = &'a String>) -> Result<Command, 
         return Err(usage(&format!("unexpected argument `{extra}`")));
     }
     Ok(Command::Get { id: id.clone() })
+}
+
+/// Parse `input <id> [<name|code>]`.
+fn parse_input<'a>(mut iter: impl Iterator<Item = &'a String>) -> Result<Command, UsageError> {
+    let id = iter
+        .next()
+        .ok_or_else(|| usage("input needs <id> [<name|code>]"))?;
+    let value = iter.next().cloned();
+    if let Some(extra) = iter.next() {
+        return Err(usage(&format!("unexpected argument `{extra}`")));
+    }
+    Ok(Command::Input {
+        id: id.clone(),
+        value,
+    })
 }
 
 /// Parse `set <id|all> brightness <0-100>`.
@@ -229,6 +254,38 @@ mod tests {
         assert!(parse(&args(&["set", "all", "brightness", "-1"])).is_err());
         assert!(parse(&args(&["set", "all", "brightness", "abc"])).is_err());
         assert!(parse(&args(&["set", "all", "brightness"])).is_err());
+    }
+
+    #[test]
+    fn input_parses_list_and_switch_forms() {
+        assert_eq!(
+            parse(&args(&["input", "GSM-1"])),
+            Ok(Command::Input {
+                id: "GSM-1".to_owned(),
+                value: None
+            })
+        );
+        assert_eq!(
+            parse(&args(&["input", "GSM-1", "hdmi1"])),
+            Ok(Command::Input {
+                id: "GSM-1".to_owned(),
+                value: Some("hdmi1".to_owned())
+            })
+        );
+        // A numeric/hex code is carried through verbatim (validated later).
+        assert_eq!(
+            parse(&args(&["input", "GSM-1", "0x11"])),
+            Ok(Command::Input {
+                id: "GSM-1".to_owned(),
+                value: Some("0x11".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn input_requires_an_id_and_rejects_extra_args() {
+        assert!(parse(&args(&["input"])).is_err());
+        assert!(parse(&args(&["input", "GSM-1", "hdmi1", "extra"])).is_err());
     }
 
     #[test]

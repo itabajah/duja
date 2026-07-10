@@ -47,6 +47,20 @@ fn caps() -> Capabilities {
             .collect(),
         hardware_range: true,
         raw_capabilities: None,
+        allowed_inputs: Vec::new(),
+    }
+}
+
+/// Capabilities that additionally advertise input switching with a fixed value
+/// list (`0x11`/`0x0F`) — for the input-source dispatch tests.
+fn caps_with_inputs() -> Capabilities {
+    Capabilities {
+        features: [Feature::Brightness, Feature::InputSource]
+            .into_iter()
+            .collect(),
+        hardware_range: true,
+        raw_capabilities: None,
+        allowed_inputs: vec![0x11, 0x0F],
     }
 }
 
@@ -56,6 +70,13 @@ fn discovered(id: &StableDisplayId) -> DiscoveredDisplay {
         kind: DisplayKind::ExternalDdc,
         name: Some("Test Monitor".to_owned()),
         capabilities: caps(),
+    }
+}
+
+fn discovered_with_inputs(id: &StableDisplayId) -> DiscoveredDisplay {
+    DiscoveredDisplay {
+        capabilities: caps_with_inputs(),
+        ..discovered(id)
     }
 }
 
@@ -454,6 +475,58 @@ fn drag_burst_delivers_final_value() {
         seen.last().copied(),
         Some((Feature::Brightness, 0)),
         "the final drag value must land on the hardware, not an intermediate one"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn set_input_rejects_code_not_in_probed_list() {
+    // The engine must only forward an input-source switch whose code is in the
+    // display's probed allowed_inputs. A code outside that set is dropped before
+    // it can reach the worker (and the wire); an allowed code is forwarded as a
+    // Feature::InputSource write.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (writes_tx, writes_rx) = unbounded();
+    let (calls_tx, _calls_rx) = unbounded();
+    // Enumerate the display advertising inputs 0x11 and 0x0F only.
+    let state: Displays = Arc::new(Mutex::new(vec![discovered_with_inputs(&id)]));
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(10),
+        watchdog_timeout: Duration::from_secs(5),
+        displaychange_debounce: Duration::from_millis(60),
+    };
+    let (engine, _notes) = Engine::spawn(
+        cfg,
+        enumerator(state, calls_tx),
+        recording_factory(writes_tx),
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // A disallowed code (0x20) must be dropped; an allowed one (0x11) must land.
+    cmds.send(EngineCommand::SetInput {
+        id: id.clone(),
+        value: 0x20,
+    })
+    .unwrap();
+    cmds.send(EngineCommand::SetInput {
+        id: id.clone(),
+        value: 0x11,
+    })
+    .unwrap();
+
+    let (_count, seen) = drain_writes(&writes_rx, |f, v| f == Feature::InputSource && v == 0x11);
+    assert!(
+        seen.contains(&(Feature::InputSource, 0x11)),
+        "the allowed input switch must reach the worker, saw {seen:?}"
+    );
+    assert!(
+        !seen.contains(&(Feature::InputSource, 0x20)),
+        "a code not in the probed list must never reach the worker, saw {seen:?}"
     );
 
     within(Duration::from_secs(2), move || engine.shutdown());

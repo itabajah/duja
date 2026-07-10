@@ -154,6 +154,20 @@ pub enum EngineCommand {
         /// Desired level in percent (values above 100 are clamped).
         pct: u8,
     },
+    /// Switch a display's active input source (VCP `0x60`).
+    ///
+    /// `value` is a raw MCCS input code. The engine rejects (drops with a
+    /// warning) any code not in the display's probed
+    /// [`allowed_inputs`](duja_core::model::Capabilities::allowed_inputs); an
+    /// accepted code is dispatched to the worker as a
+    /// [`Feature::InputSource`](duja_core::model::Feature::InputSource) write
+    /// (never verified by readback — ADR-0002).
+    SetInput {
+        /// The target display.
+        id: StableDisplayId,
+        /// The raw MCCS input-source code to select.
+        value: u8,
+    },
     /// Run one enumeration pass immediately, bypassing the debounce.
     RefreshNow,
     /// Request the current UI-facing snapshots, delivered on `reply`.

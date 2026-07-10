@@ -256,6 +256,7 @@ mod tests {
                     .collect(),
                 hardware_range: true,
                 raw_capabilities: None,
+                allowed_inputs: Vec::new(),
             };
             let values = caps
                 .features

@@ -45,6 +45,7 @@ impl FakeController {
                 .collect(),
             hardware_range: true,
             raw_capabilities: None,
+            allowed_inputs: Vec::new(),
         };
         Self::with_capabilities(caps)
     }

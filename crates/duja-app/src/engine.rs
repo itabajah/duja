@@ -226,6 +226,9 @@ impl EngineState {
                 self.dispatch_set(&id, Feature::Brightness, pct);
                 self.notify_displays_changed();
             }
+            EngineCommand::SetInput { id, value } => {
+                self.dispatch_input(&id, value);
+            }
             EngineCommand::RefreshNow => self.refresh(),
             EngineCommand::Snapshot { reply } => {
                 let _ = reply.send(self.manager.snapshots());
@@ -333,6 +336,44 @@ impl EngineState {
             && handle
                 .cmd_tx
                 .send(crate::protocol::WorkerCommand::Set { feature, raw, seq })
+                .is_ok()
+        {
+            self.inflight.insert(
+                (id.clone(), InflightKey::Set(feature)),
+                (seq, Instant::now()),
+            );
+        }
+    }
+
+    /// Dispatch an input-source switch, if the display has a responsive worker
+    /// and `value` is in its probed allowed set.
+    ///
+    /// A code outside the probed list — or a display whose capabilities we have
+    /// not learned — is rejected here (dropped) rather than reaching the wire, so
+    /// the engine never asks a monitor to select an input it did not advertise.
+    /// The raw code is sent verbatim (no percent scaling); the controller writes
+    /// it without a verify-readback (ADR-0002).
+    fn dispatch_input(&mut self, id: &StableDisplayId, value: u8) {
+        let allowed = self
+            .manager
+            .capabilities_of(id)
+            .is_some_and(|caps| caps.allows_input(value));
+        if !allowed {
+            return;
+        }
+        if self.manager.is_responsive(id) != Some(true) {
+            return;
+        }
+        let seq = self.next_seq();
+        let feature = Feature::InputSource;
+        if let Some(handle) = self.workers.get(id)
+            && handle
+                .cmd_tx
+                .send(crate::protocol::WorkerCommand::Set {
+                    feature,
+                    raw: u16::from(value),
+                    seq,
+                })
                 .is_ok()
         {
             self.inflight.insert(

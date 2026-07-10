@@ -97,6 +97,7 @@ mod tests {
                 .collect(),
             hardware_range: true,
             raw_capabilities: None,
+            allowed_inputs: Vec::new(),
         };
         assert_eq!(features_label(&caps), "brightness,contrast");
     }
