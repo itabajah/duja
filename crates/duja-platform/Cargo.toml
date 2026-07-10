@@ -24,6 +24,10 @@ windows = { version = "0.62", default-features = false, features = [
     "Win32_System_RemoteDesktop",
     "Win32_System_LibraryLoader",
     "Win32_Devices_Display",
+    # Single-instance guard: a named mutex plus the token/SID lookup that
+    # disambiguates the mutex name per user.
+    "Win32_System_Threading",
+    "Win32_Security",
 ] }
 
 [dev-dependencies]

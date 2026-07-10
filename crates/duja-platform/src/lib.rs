@@ -29,6 +29,10 @@ use crossbeam_channel::Receiver;
 #[cfg(windows)]
 mod win;
 
+mod single_instance;
+
+pub use single_instance::SingleInstance;
+
 /// A normalized OS event relevant to display management.
 ///
 /// The vocabulary is deliberately platform-agnostic; each backend maps its raw

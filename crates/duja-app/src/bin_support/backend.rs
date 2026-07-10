@@ -37,6 +37,7 @@
 //! same input order — so slot `n` and "the Nth bare match" always coincide.
 
 use duja_core::controller::BrightnessController;
+use duja_core::dimmer::DisplayBounds;
 use duja_core::id::StableDisplayId;
 use duja_core::manager::DiscoveredDisplay;
 use duja_core::model::{Capabilities, DisplayKind, Feature};
@@ -55,23 +56,47 @@ fn hardware_brightness_caps() -> Capabilities {
 /// plain [`DiscoveredDisplay`] metadata. Never errors: a failing backend
 /// contributes nothing (matching the "graceful absence" contract).
 pub(crate) fn discover() -> Vec<DiscoveredDisplay> {
-    let mut out = discover_ddc();
-    out.extend(discover_panel());
-    out
+    discover_all().0
+}
+
+/// Enumerate displays **and** their pixel bounds in one pass.
+///
+/// Returns the [`DiscoveredDisplay`] list the engine consumes, plus a parallel
+/// `(bare id, Option<bounds>)` list in the *same* deterministic order (DDC
+/// first, then panels). The bounds list feeds an app-side
+/// [`BoundsMap`](crate::bin_support::bounds::BoundsMap); panels contribute
+/// `None` (no monitor rect is plumbed for them in P4). Never errors.
+pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<(String, Option<DisplayBounds>)>) {
+    let mut displays = Vec::new();
+    let mut bounds = Vec::new();
+
+    for (display, display_bounds) in discover_ddc() {
+        bounds.push((display.id.as_str().to_owned(), Some(display_bounds)));
+        displays.push(display);
+    }
+    for display in discover_panel() {
+        bounds.push((display.id.as_str().to_owned(), None));
+        displays.push(display);
+    }
+
+    (displays, bounds)
 }
 
 #[cfg(windows)]
-fn discover_ddc() -> Vec<DiscoveredDisplay> {
+fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds)> {
     // Each `DdcDisplay` is dropped at the end of the map closure, releasing its
-    // physical-monitor handle promptly — we keep only the metadata.
+    // physical-monitor handle promptly — we keep only the metadata and bounds.
     match duja_ddc::enumerate() {
         Ok(displays) => displays
             .into_iter()
-            .map(|d| DiscoveredDisplay {
-                id: d.id.clone(),
-                kind: DisplayKind::ExternalDdc,
-                name: d.name.clone(),
-                capabilities: hardware_brightness_caps(),
+            .map(|d| {
+                let display = DiscoveredDisplay {
+                    id: d.id.clone(),
+                    kind: DisplayKind::ExternalDdc,
+                    name: d.name.clone(),
+                    capabilities: hardware_brightness_caps(),
+                };
+                (display, d.bounds)
             })
             .collect(),
         Err(_) => Vec::new(),
@@ -79,7 +104,7 @@ fn discover_ddc() -> Vec<DiscoveredDisplay> {
 }
 
 #[cfg(not(windows))]
-fn discover_ddc() -> Vec<DiscoveredDisplay> {
+fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds)> {
     Vec::new()
 }
 

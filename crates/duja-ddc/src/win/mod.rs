@@ -17,6 +17,7 @@ mod sys;
 
 use std::fmt;
 
+use duja_core::dimmer::DisplayBounds;
 use duja_core::id::{EdidInfo, StableDisplayId};
 use duja_core::quirks::QuirkDb;
 use windows::Win32::Foundation::HANDLE;
@@ -101,6 +102,10 @@ pub struct DdcDisplay {
     pub name: Option<String>,
     /// The raw EDID bytes read from the registry.
     pub edid: Vec<u8>,
+    /// Physical pixel bounds of this monitor in the virtual desktop, from
+    /// `MONITORINFO::rcMonitor`. Feeds the overlay dimmer's per-display window
+    /// geometry (see `duja-app`'s bounds map).
+    pub bounds: DisplayBounds,
     handle: PhysicalMonitorHandle,
     sort_key: String,
 }
@@ -135,7 +140,7 @@ pub fn enumerate() -> Result<Vec<DdcDisplay>, DdcError> {
 
     let mut displays = Vec::new();
     for hmon in sys::enum_hmonitors() {
-        let Some(gdi) = sys::gdi_device(hmon) else {
+        let Some((gdi, bounds)) = sys::gdi_device_and_bounds(hmon) else {
             continue;
         };
         let Ok(handles) = sys::physical_monitors(hmon) else {
@@ -173,6 +178,7 @@ pub fn enumerate() -> Result<Vec<DdcDisplay>, DdcError> {
             id,
             name,
             edid: edid.clone(),
+            bounds,
             handle,
             sort_key: path.interface_path.clone(),
         });

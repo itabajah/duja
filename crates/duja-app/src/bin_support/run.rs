@@ -222,9 +222,38 @@ fn wait_for_quit() {
     }
 }
 
-/// `--restore`: P4 stub.
+/// `--restore`: reset any persisted screen state.
+///
+/// Overlay windows die with their owning process, so a separate `--restore`
+/// invocation cannot touch a running tray instance's overlays; what it *can*
+/// undo is the one piece of screen state that outlives a process — the gamma
+/// ramp — via [`duja_dimmer::restore_all`]. Exit is non-zero if any display
+/// could not be reset.
+#[cfg(windows)]
 pub(crate) fn restore() -> ExitCode {
-    println!("nothing to restore (no gamma/overlay state yet)");
+    let report = duja_dimmer::restore_all();
+    if report.restored.is_empty() && report.failed.is_empty() {
+        println!("nothing to restore (no displays with a resettable gamma ramp)");
+        return ExitCode::SUCCESS;
+    }
+    println!(
+        "restored identity gamma on {} display(s)",
+        report.restored.len()
+    );
+    for (name, err) in &report.failed {
+        println!("  failed: {name}: {err}");
+    }
+    if report.is_clean() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// `--restore` on non-Windows: software dimming is Windows-only for now.
+#[cfg(not(windows))]
+pub(crate) fn restore() -> ExitCode {
+    println!("nothing to restore (software dimming is Windows-only in this build)");
     ExitCode::SUCCESS
 }
 
