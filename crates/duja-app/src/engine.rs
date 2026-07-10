@@ -138,7 +138,7 @@ impl EngineState {
             }
             self.poll_watchdog(Instant::now());
 
-            let deadline = self.next_deadline(Instant::now());
+            let deadline = self.next_deadline();
 
             let wake = {
                 let mut sel = Select::new();
@@ -197,13 +197,14 @@ impl EngineState {
 
     /// Earliest instant the loop must wake: min of the debounce deadline and
     /// the earliest in-flight watchdog deadline. `None` when both are idle.
-    fn next_deadline(&mut self, now: Instant) -> Option<Instant> {
-        let debounce = match self.debouncer.poll(now) {
-            Action::FireAt(at) => Some(at),
-            Action::Fire => Some(now),
-            Action::Wait => None,
-        };
-        min_opt(debounce, self.earliest_watchdog_deadline())
+    ///
+    /// This **peeks** the debouncer ([`Debouncer::deadline`]) rather than
+    /// polling it: the loop already polls once at the top of each iteration to
+    /// fire what is due, and a second, mutating poll here (at a fractionally
+    /// later `Instant::now`) could consume a fire whose deadline fell between
+    /// the two reads — silently dropping the pending enumeration.
+    fn next_deadline(&self) -> Option<Instant> {
+        min_opt(self.debouncer.deadline(), self.earliest_watchdog_deadline())
     }
 
     /// The earliest `dispatched_at + watchdog_timeout` across all in-flight ops.
