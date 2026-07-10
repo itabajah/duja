@@ -27,6 +27,8 @@ pub(crate) enum Command {
     },
     /// Restore the screen: clear overlays + identity gamma, then report.
     Restore,
+    /// Run the opt-in update check once, print the outcome, exit (headless).
+    CheckUpdates,
     /// Print usage.
     Help,
 }
@@ -60,6 +62,7 @@ MODES:
     --stress <secs>       flood SetUserLevel for <secs> seconds, print a report
         [--hz <n>]        flood rate per display (default 20)
     --restore             clear overlays + reset identity gamma, then report
+    --check-updates       check GitHub for a newer release, print the result
     --help                print this help
 
 With no monitors visible (e.g. a disconnected session) the console modes
@@ -81,6 +84,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, CliError> {
         "--headless" => expect_end(iter, Command::Headless),
         "--once" => expect_end(iter, Command::Once),
         "--restore" => expect_end(iter, Command::Restore),
+        "--check-updates" => expect_end(iter, Command::CheckUpdates),
         "--help" | "-h" => Ok(Command::Help),
         "--stress" => parse_stress(iter),
         other => Err(CliError(format!("unknown mode `{other}`\n\n{USAGE}"))),
@@ -160,6 +164,10 @@ mod tests {
         assert_eq!(parse(&args(&["--headless"])), Ok(Command::Headless));
         assert_eq!(parse(&args(&["--once"])), Ok(Command::Once));
         assert_eq!(parse(&args(&["--restore"])), Ok(Command::Restore));
+        assert_eq!(
+            parse(&args(&["--check-updates"])),
+            Ok(Command::CheckUpdates)
+        );
         assert_eq!(parse(&args(&["--help"])), Ok(Command::Help));
     }
 

@@ -27,9 +27,13 @@
 //! - [`run`] — the `--once` / `--headless` assembly.
 //! - [`settings`] — config → [`ContinuumConfig`](duja_core::continuum::ContinuumConfig)
 //!   mapping, the HDR gamma guard, and theme resolution.
+//! - [`settings_apply`] — applying a settings command to the config document
+//!   (format-preserving) plus the UI ↔ config theme/dim-mode mappings.
 //! - [`startup`] — crash-marker recovery on launch.
 //! - [`state_store`] — the user-level book with debounced persistence.
 //! - [`stress`] — the `--stress` exit-criteria harness and its report.
+//! - [`updates`] — the opt-in update check: a pure decision function over an
+//!   injected transport, plus the rustls-backed HTTPS transport.
 //! - `tray` — (Windows only) the real tray + flyout assembly on the Slint main
 //!   thread. Not intra-doc-linked here: it is `cfg(windows)`, so a link would
 //!   break the cross-platform (Linux) rustdoc build.
@@ -50,9 +54,11 @@ pub(crate) mod positioning;
 pub(crate) mod rng;
 pub(crate) mod run;
 pub(crate) mod settings;
+pub(crate) mod settings_apply;
 pub(crate) mod startup;
 pub(crate) mod state_store;
 pub(crate) mod stress;
+pub(crate) mod updates;
 
 #[cfg(windows)]
 pub(crate) mod tray;

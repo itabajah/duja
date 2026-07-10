@@ -74,6 +74,12 @@ exceptions = [
     # Fuzz-only tooling (the fuzz/ workspace); NCSA is the permissive
     # University of Illinois/NCSA license.
     { crate = "libfuzzer-sys", allow = ["NCSA"] },
+    # The Mozilla CA root bundle shipped with rustls (via ureq's `tls` feature,
+    # the opt-in update check, P5). CDLA-Permissive-2.0 is a permissive data
+    # license covering the certificate *data*, not code; scoped to webpki-roots
+    # only so it cannot leak the allowance to anything else. Covers both the
+    # 0.26 and 1.0 versions ureq pulls.
+    { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [bans]
