@@ -29,7 +29,7 @@
 //! disables software dimming (hardware brightness still works).
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -37,6 +37,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use crossbeam_channel::Sender;
+use global_hotkey::hotkey::{Code, HotKey, Modifiers as GhkModifiers};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use tracing::{debug, error, info, warn};
 
 use duja_app::{Engine, EngineCommand, EngineConfig, EngineNotification, Enumeration};
@@ -50,9 +52,15 @@ use duja_ui::{FlyoutShell, FlyoutVm, UiCommand};
 
 use crate::bin_support::bounds::BoundsMap;
 use crate::bin_support::dimming::{self, DisplayInput};
+use crate::bin_support::hotkey::{self, Accelerator, HotkeyAction, Modifiers as AccelModifiers};
 use crate::bin_support::paths::DujaPaths;
 use crate::bin_support::state_store::StateStore;
 use crate::bin_support::{backend, gamma, run, settings, startup};
+
+/// The brightness step (percentage points) a `brightness_up` / `brightness_down`
+/// hotkey applies to every display. Fixed in P5; a configurable step is a
+/// settings-UI follow-up.
+const HOTKEY_BRIGHTNESS_STEP: i16 = 5;
 
 mod geometry;
 mod icon;
@@ -69,7 +77,8 @@ thread_local! {
     static APP: RefCell<Option<AppState>> = const { RefCell::new(None) };
 }
 
-/// An action requested by a tray/menu interaction, applied on the Slint thread.
+/// An action requested by a tray/menu/hotkey interaction, applied on the Slint
+/// thread.
 #[derive(Debug, Clone, Copy)]
 enum Action {
     /// Show the flyout at the tray/cursor anchor.
@@ -78,6 +87,8 @@ enum Action {
     Toggle,
     /// Restore the screen (clear overlays + identity gamma on every display).
     Restore,
+    /// Nudge every display's brightness by the given signed step (a hotkey).
+    Nudge(i16),
     /// Begin a clean shutdown.
     Quit,
 }
@@ -151,6 +162,10 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
         let bounds = bounds.clone();
         move |id| bounds.lock().ok().and_then(|b| b.device_for(id))
     });
+    // Global hotkeys: register from config on this (main) thread. A failure to
+    // create the manager or register a binding only disables that hotkey — the
+    // app runs on without it.
+    let (hotkey_manager, hotkey_map) = register_hotkeys(&config);
     APP.with(|slot| {
         *slot.borrow_mut() = Some(AppState {
             shell,
@@ -166,10 +181,12 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
             displays: Vec::new(),
             applied: BTreeSet::new(),
             flyout_visible: false,
+            _hotkeys: hotkey_manager,
         });
     });
     wire_ui_commands();
     wire_tray_handlers();
+    wire_hotkey_handler(hotkey_map);
     spawn_notification_bridge(notifications);
 
     info!("duja tray running");
@@ -210,6 +227,9 @@ struct AppState {
     /// Displays whose saved level has already been pushed to the engine.
     applied: BTreeSet<String>,
     flyout_visible: bool,
+    /// The global-hotkey manager, kept alive for the app's lifetime so its
+    /// registrations stay live. `None` if hotkeys could not be initialised.
+    _hotkeys: Option<GlobalHotKeyManager>,
 }
 
 impl AppState {
@@ -225,7 +245,21 @@ impl AppState {
                 }
             }
             Action::Restore => self.restore_screen(),
+            Action::Nudge(delta) => self.nudge_all(delta),
             Action::Quit => self.begin_quit(),
+        }
+    }
+
+    /// Adjust every known display's brightness by `delta` percentage points
+    /// (clamped 0..=100), routing each change through the same user-level path
+    /// the flyout slider uses so state, engine and overlays stay consistent.
+    fn nudge_all(&mut self, delta: i16) {
+        let ids: Vec<StableDisplayId> = self.displays.iter().map(|(id, _)| id.clone()).collect();
+        for id in ids {
+            let current = i16::from(self.state.level(id.as_str()).unwrap_or(100));
+            let next = current.saturating_add(delta).clamp(0, 100);
+            let pct = u8::try_from(next).unwrap_or(0);
+            self.set_user_level(&id, pct);
         }
     }
 
@@ -508,6 +542,164 @@ fn wire_tray_handlers() {
     }));
 }
 
+/// Register the configured global hotkeys on the current (main) thread.
+///
+/// Returns the manager (kept alive so registrations stay live) and a map from
+/// each registered hotkey's id to the [`Action`] it fires. Invalid bindings,
+/// accelerator conflicts, and per-binding registration failures (e.g. another
+/// app already owns the combo) are logged (WARN) and skipped — never fatal.
+fn register_hotkeys(config: &Config) -> (Option<GlobalHotKeyManager>, BTreeMap<u32, Action>) {
+    let plan = hotkey::resolve(&config.hotkeys);
+    for err in &plan.errors {
+        warn!(
+            key = %err.key,
+            binding = %err.raw,
+            reason = %err.reason,
+            "ignoring invalid hotkey binding"
+        );
+    }
+    for conflict in &plan.conflicts {
+        let actions: Vec<&str> = conflict.actions.iter().map(|a| a.config_key()).collect();
+        warn!(
+            combo = %conflict.accel,
+            ?actions,
+            "hotkey combo is bound to multiple actions; skipping all of them"
+        );
+    }
+
+    let mut map = BTreeMap::new();
+    if plan.bindings.is_empty() {
+        return (None, map);
+    }
+    let manager = match GlobalHotKeyManager::new() {
+        Ok(manager) => manager,
+        Err(e) => {
+            warn!(error = %e, "global hotkey manager unavailable; hotkeys disabled");
+            return (None, map);
+        }
+    };
+
+    // Skip every accelerator that appears in a conflict.
+    let conflicting: BTreeSet<Accelerator> =
+        plan.conflicts.iter().map(|c| c.accel.clone()).collect();
+
+    for binding in &plan.bindings {
+        if conflicting.contains(&binding.accel) {
+            continue;
+        }
+        let Some(hk) = accel_to_hotkey(&binding.accel) else {
+            warn!(binding = %binding.raw, "hotkey key not supported by the OS backend; skipping");
+            continue;
+        };
+        if binding.accel.modifiers.is_empty() {
+            warn!(binding = %binding.raw, "modifierless global hotkey may capture the key system-wide");
+        }
+        let id = hk.id();
+        match manager.register(hk) {
+            Ok(()) => {
+                map.insert(id, action_for(binding.action));
+                debug!(binding = %binding.raw, action = binding.action.config_key(), "registered hotkey");
+            }
+            Err(e) => warn!(
+                binding = %binding.raw,
+                error = %e,
+                "failed to register hotkey (already owned by another app?); skipping"
+            ),
+        }
+    }
+    (Some(manager), map)
+}
+
+/// Install the global-hotkey event handler that dispatches a pressed hotkey's
+/// [`Action`] onto the Slint loop. No-op when nothing is registered.
+fn wire_hotkey_handler(map: BTreeMap<u32, Action>) {
+    if map.is_empty() {
+        return;
+    }
+    GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+        // Fire on the press edge only (the release edge arrives on global-hotkey's
+        // worker thread); hop onto the Slint loop via `dispatch`.
+        if event.state() == HotKeyState::Pressed
+            && let Some(&action) = map.get(&event.id())
+        {
+            dispatch(action);
+        }
+    }));
+}
+
+/// Map a [`HotkeyAction`] onto the tray [`Action`] it triggers.
+fn action_for(action: HotkeyAction) -> Action {
+    match action {
+        HotkeyAction::BrightnessUp => Action::Nudge(HOTKEY_BRIGHTNESS_STEP),
+        HotkeyAction::BrightnessDown => Action::Nudge(-HOTKEY_BRIGHTNESS_STEP),
+        HotkeyAction::ToggleFlyout => Action::Toggle,
+    }
+}
+
+/// Convert a parsed [`Accelerator`] into a `global_hotkey` [`HotKey`], or `None`
+/// if the key has no `global_hotkey` [`Code`].
+fn accel_to_hotkey(accel: &Accelerator) -> Option<HotKey> {
+    let code = code_for_key(accel.key.as_str())?;
+    Some(HotKey::new(Some(ghk_modifiers(accel.modifiers)), code))
+}
+
+/// Translate Duja's modifier set into `global_hotkey`'s.
+fn ghk_modifiers(mods: AccelModifiers) -> GhkModifiers {
+    let mut out = GhkModifiers::empty();
+    if mods.contains(AccelModifiers::CONTROL) {
+        out |= GhkModifiers::CONTROL;
+    }
+    if mods.contains(AccelModifiers::ALT) {
+        out |= GhkModifiers::ALT;
+    }
+    if mods.contains(AccelModifiers::SHIFT) {
+        out |= GhkModifiers::SHIFT;
+    }
+    if mods.contains(AccelModifiers::SUPER) {
+        out |= GhkModifiers::SUPER;
+    }
+    out
+}
+
+/// Map a canonical key token (see [`hotkey`]) onto a `global_hotkey` [`Code`]
+/// via its W3C `KeyboardEvent.code` name.
+fn code_for_key(token: &str) -> Option<Code> {
+    use std::str::FromStr as _;
+    let w3c = match token {
+        "UP" => "ArrowUp".to_owned(),
+        "DOWN" => "ArrowDown".to_owned(),
+        "LEFT" => "ArrowLeft".to_owned(),
+        "RIGHT" => "ArrowRight".to_owned(),
+        "SPACE" => "Space".to_owned(),
+        "ENTER" => "Enter".to_owned(),
+        "TAB" => "Tab".to_owned(),
+        "ESCAPE" => "Escape".to_owned(),
+        "HOME" => "Home".to_owned(),
+        "END" => "End".to_owned(),
+        "PAGEUP" => "PageUp".to_owned(),
+        "PAGEDOWN" => "PageDown".to_owned(),
+        "INSERT" => "Insert".to_owned(),
+        "DELETE" => "Delete".to_owned(),
+        "BACKSPACE" => "Backspace".to_owned(),
+        other => {
+            if let Some(digits) = other.strip_prefix('F')
+                && !digits.is_empty()
+                && digits.bytes().all(|b| b.is_ascii_digit())
+            {
+                other.to_owned() // F1..=F24
+            } else {
+                let mut chars = other.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(c), None) if c.is_ascii_uppercase() => format!("Key{c}"),
+                    (Some(c), None) if c.is_ascii_digit() => format!("Digit{c}"),
+                    _ => return None,
+                }
+            }
+        }
+    };
+    Code::from_str(&w3c).ok()
+}
+
 thread_local! {
     /// The menu item ids, captured so the (Send) menu handler can match them.
     static MENU_IDS: RefCell<MenuIds> = RefCell::new(MenuIds::default());
@@ -605,4 +797,71 @@ fn spawn_notification_bridge(notifications: crossbeam_channel::Receiver<EngineNo
             }
         })
         .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    //! Coverage for the pure accelerator → `global_hotkey` conversion boundary
+    //! and the action mapping. The actual OS delivery of a `WM_HOTKEY` to the
+    //! registered handler is NOT unit-tested here (global-hotkey's test story is
+    //! weak and synthesising `WM_HOTKEY` does not reliably reach its handler); it
+    //! is covered by the P1 `spike/eventloop` proof and manual hardware QA.
+    use super::{Accelerator, Action, Code, GhkModifiers, HotkeyAction};
+    use super::{accel_to_hotkey, action_for, code_for_key, ghk_modifiers};
+
+    fn accel(s: &str) -> Accelerator {
+        Accelerator::parse(s).expect("valid accelerator")
+    }
+
+    #[test]
+    fn code_for_key_maps_every_supported_key_family() {
+        assert_eq!(code_for_key("UP"), Some(Code::ArrowUp));
+        assert_eq!(code_for_key("DOWN"), Some(Code::ArrowDown));
+        assert_eq!(code_for_key("F9"), Some(Code::F9));
+        assert_eq!(code_for_key("F24"), Some(Code::F24));
+        assert_eq!(code_for_key("A"), Some(Code::KeyA));
+        assert_eq!(code_for_key("7"), Some(Code::Digit7));
+        assert_eq!(code_for_key("SPACE"), Some(Code::Space));
+        assert_eq!(code_for_key("PAGEUP"), Some(Code::PageUp));
+        // A token with no W3C code maps to None (registration then skips it).
+        assert_eq!(code_for_key("NOPE"), None);
+    }
+
+    #[test]
+    fn ghk_modifiers_translates_each_flag() {
+        let all = accel("Ctrl+Alt+Shift+Super+Up");
+        let mods = ghk_modifiers(all.modifiers);
+        assert!(mods.contains(GhkModifiers::CONTROL));
+        assert!(mods.contains(GhkModifiers::ALT));
+        assert!(mods.contains(GhkModifiers::SHIFT));
+        assert!(mods.contains(GhkModifiers::SUPER));
+
+        let none = ghk_modifiers(accel("F9").modifiers);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn accel_to_hotkey_builds_the_expected_hotkey() {
+        let hk = accel_to_hotkey(&accel("Ctrl+Alt+Up")).expect("convertible");
+        assert_eq!(hk.key, Code::ArrowUp);
+        assert!(hk.mods.contains(GhkModifiers::CONTROL));
+        assert!(hk.mods.contains(GhkModifiers::ALT));
+        assert!(!hk.mods.contains(GhkModifiers::SHIFT));
+    }
+
+    #[test]
+    fn action_for_maps_actions_to_tray_actions() {
+        assert!(matches!(
+            action_for(HotkeyAction::BrightnessUp),
+            Action::Nudge(n) if n > 0
+        ));
+        assert!(matches!(
+            action_for(HotkeyAction::BrightnessDown),
+            Action::Nudge(n) if n < 0
+        ));
+        assert!(matches!(
+            action_for(HotkeyAction::ToggleFlyout),
+            Action::Toggle
+        ));
+    }
 }

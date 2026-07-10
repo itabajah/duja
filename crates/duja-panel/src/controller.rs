@@ -51,6 +51,7 @@ impl<T: PanelTransport> BrightnessController for PanelController<T> {
             features: [Feature::Brightness].into_iter().collect(),
             hardware_range: true,
             raw_capabilities: None,
+            allowed_inputs: Vec::new(),
         })
     }
 

@@ -58,6 +58,14 @@ pub struct Capabilities {
     pub hardware_range: bool,
     /// The raw MCCS capability string, if the backend captured one.
     pub raw_capabilities: Option<String>,
+    /// The discrete VCP `0x60` input-source values this display accepts, after
+    /// intersecting the capability-string value list with any
+    /// `input_source_allowed` quirk and clearing everything when `no_input_switch`
+    /// is set. Empty when input switching is unsupported, unknown, or disabled.
+    ///
+    /// The probe computes this once; the values are raw MCCS input codes (e.g.
+    /// `0x11` HDMI-1, `0x0F` `DisplayPort` — see [`crate::input_source`]).
+    pub allowed_inputs: Vec<u8>,
 }
 
 impl Capabilities {
@@ -65,6 +73,12 @@ impl Capabilities {
     #[must_use]
     pub fn supports(&self, feature: Feature) -> bool {
         self.features.contains(&feature)
+    }
+
+    /// Whether `code` is an input-source value this display accepts.
+    #[must_use]
+    pub fn allows_input(&self, code: u8) -> bool {
+        self.allowed_inputs.contains(&code)
     }
 }
 
@@ -162,12 +176,16 @@ mod tests {
             features: BTreeSet::from([Feature::Brightness, Feature::InputSource]),
             hardware_range: true,
             raw_capabilities: Some("(vcp(10 60))".to_owned()),
+            allowed_inputs: vec![0x11, 0x0F],
         };
         assert!(caps.supports(Feature::Brightness));
         assert!(caps.supports(Feature::InputSource));
         assert!(!caps.supports(Feature::Contrast));
         assert!(caps.hardware_range);
         assert_eq!(caps.raw_capabilities.as_deref(), Some("(vcp(10 60))"));
+        assert!(caps.allows_input(0x11));
+        assert!(caps.allows_input(0x0F));
+        assert!(!caps.allows_input(0x12));
     }
 
     #[test]
@@ -177,6 +195,8 @@ mod tests {
         assert!(!caps.hardware_range);
         assert_eq!(caps.raw_capabilities, None);
         assert!(!caps.supports(Feature::Brightness));
+        assert!(caps.allowed_inputs.is_empty());
+        assert!(!caps.allows_input(0x11));
     }
 
     #[test]

@@ -3,11 +3,12 @@
 //! pure [`crate::cli`] and [`crate::fmt`] modules; the logic here is only the
 //! backend calls and printing.
 
+use duja_core::input_source;
 use duja_core::model::Feature;
 use duja_core::quirks::QuirkDb;
 
 use crate::backend;
-use crate::cli::{EXIT_BACKEND, EXIT_OK, EXIT_UNKNOWN_DISPLAY, SetTarget};
+use crate::cli::{EXIT_BACKEND, EXIT_OK, EXIT_UNKNOWN_DISPLAY, EXIT_USAGE, SetTarget};
 use crate::fmt::{features_label, kind_label, pct_to_raw, quirk_summary, raw_to_pct, render_table};
 
 /// `list`: enumerate and print a table of displays.
@@ -136,6 +137,88 @@ fn apply_set(id: &str, percent: u8) -> Result<String, String> {
         after.max,
         raw_to_pct(after.current, after.max)
     ))
+}
+
+/// `input <id> [<name|code>]`: list a display's allowed input sources (and the
+/// current one), or switch to the requested input.
+///
+/// The allowed set is the display's probed
+/// [`allowed_inputs`](duja_core::model::Capabilities::allowed_inputs): the
+/// capability-string `0x60` value list intersected with any quirk override, and
+/// empty when the display advertises no switchable inputs. A switch validates the
+/// request against that set *before* writing, so `dujactl` never asks a monitor
+/// to select an input it did not advertise.
+///
+/// There is no auto-revert: if a switch lands on a dead input, re-run
+/// `dujactl input <id> <name>` from another machine/input to recover.
+pub fn input(id: &str, value: Option<&str>) -> u8 {
+    if !is_known(id) {
+        eprintln!("unknown display `{id}`");
+        return EXIT_UNKNOWN_DISPLAY;
+    }
+    let Some(mut controller) = backend::open(id) else {
+        eprintln!("backend error: could not open display `{id}`");
+        return EXIT_BACKEND;
+    };
+    let caps = match controller.probe() {
+        Ok(caps) => caps,
+        Err(err) => {
+            eprintln!("backend error probing `{id}`: {err}");
+            return EXIT_BACKEND;
+        }
+    };
+    if caps.allowed_inputs.is_empty() {
+        println!("{id}: no switchable input sources advertised");
+        return EXIT_OK;
+    }
+
+    match value {
+        None => {
+            // Read the current input (untrusted metadata; best effort).
+            let current = controller.get(Feature::InputSource).ok().map(|r| r.current);
+            println!("allowed inputs for {id}:");
+            for &code in &caps.allowed_inputs {
+                let here = current.is_some_and(|cur| cur == u16::from(code));
+                let marker = if here { "  <- current" } else { "" };
+                println!("  {} ({:#04x}){marker}", input_source::label(code), code);
+            }
+            EXIT_OK
+        }
+        Some(raw) => {
+            let Some(code) = input_source::parse_input(raw) else {
+                eprintln!("invalid input `{raw}` (want a name like hdmi1/dp1 or a code like 0x11)");
+                return EXIT_USAGE;
+            };
+            if !caps.allows_input(code) {
+                let names: Vec<String> = caps
+                    .allowed_inputs
+                    .iter()
+                    .map(|&c| input_source::label(c))
+                    .collect();
+                eprintln!(
+                    "input {} ({:#04x}) is not allowed on `{id}`; allowed: {}",
+                    input_source::label(code),
+                    code,
+                    names.join(", ")
+                );
+                return EXIT_USAGE;
+            }
+            match controller.set(Feature::InputSource, u16::from(code)) {
+                Ok(()) => {
+                    println!(
+                        "{id}: switched input -> {} ({:#04x})",
+                        input_source::label(code),
+                        code
+                    );
+                    EXIT_OK
+                }
+                Err(err) => {
+                    eprintln!("backend error switching input on `{id}`: {err}");
+                    EXIT_BACKEND
+                }
+            }
+        }
+    }
 }
 
 /// `doctor`: environment / backend / quirk diagnostics. Always exit 0.

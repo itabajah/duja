@@ -49,6 +49,7 @@ fn hardware_brightness_caps() -> Capabilities {
         features: [Feature::Brightness].into_iter().collect(),
         hardware_range: true,
         raw_capabilities: None,
+        allowed_inputs: Vec::new(),
     }
 }
 

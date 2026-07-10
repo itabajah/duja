@@ -120,6 +120,7 @@ mod tests {
                 features: [Feature::Brightness].into_iter().collect(),
                 hardware_range: true,
                 raw_capabilities: None,
+                allowed_inputs: Vec::new(),
             })
         }
         fn get(&mut self, feature: Feature) -> Result<FeatureRange, ControlError> {

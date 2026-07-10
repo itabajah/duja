@@ -132,7 +132,9 @@ impl ParsedCaps {
     ///
     /// Only the codes for known [`Feature`]s are carried across.
     /// [`Capabilities::hardware_range`] is set when brightness (`0x10`) is
-    /// present. [`Capabilities::raw_capabilities`] is left `None` — the backend
+    /// present. [`Capabilities::allowed_inputs`] carries the `0x60` value list
+    /// (empty when input source is unsupported or listed without discrete
+    /// values). [`Capabilities::raw_capabilities`] is left `None` — the backend
     /// that captured the string fills it in.
     #[must_use]
     pub fn to_capabilities(&self) -> Capabilities {
@@ -143,10 +145,15 @@ impl ParsedCaps {
             }
         }
         let hardware_range = features.contains(&Feature::Brightness);
+        let allowed_inputs = self
+            .allowed_values(Feature::InputSource.vcp_code())
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
         Capabilities {
             features,
             hardware_range,
             raw_capabilities: None,
+            allowed_inputs,
         }
     }
 }
@@ -430,6 +437,8 @@ mod tests {
         assert!(core.supports(Feature::InputSource)); // 0x60
         assert!(core.hardware_range);
         assert_eq!(core.raw_capabilities, None);
+        // The 0x60 value list is carried onto allowed_inputs.
+        assert_eq!(core.allowed_inputs, vec![0x11, 0x12, 0x0F]);
     }
 
     #[test]
@@ -439,6 +448,17 @@ mod tests {
         assert!(core.supports(Feature::InputSource));
         assert!(!core.supports(Feature::Brightness));
         assert!(!core.hardware_range);
+        assert_eq!(core.allowed_inputs, vec![0x11]);
+    }
+
+    #[test]
+    fn caps_input_source_without_value_list_has_no_allowed_inputs() {
+        // 0x60 present as a bare code (no parenthesised list): supported, but no
+        // discrete values are known.
+        let caps = ParsedCaps::parse("(vcp(10 60))").expect("parses");
+        let core = caps.to_capabilities();
+        assert!(core.supports(Feature::InputSource));
+        assert!(core.allowed_inputs.is_empty());
     }
 
     #[test]

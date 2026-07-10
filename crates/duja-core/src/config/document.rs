@@ -18,6 +18,27 @@ use crate::config::migrate;
 use crate::config::persist;
 use crate::config::schema::{Config, DimMode, Theme};
 
+/// The commented `[hotkeys]` example prepended to a freshly emitted default
+/// config. All bindings are optional and unbound by default; these lines
+/// document the format and the recognised actions without binding anything.
+const HOTKEYS_EXAMPLE_COMMENT: &str = "\
+# Global hotkeys (optional; none bound by default).
+#
+# Each value is an accelerator: modifiers (Ctrl / Alt / Shift / Super, any
+# order, case-insensitive) joined by '+' to exactly one key (an arrow, F1-F24,
+# a letter, a digit, or a named key such as Space). Actions:
+#   brightness_up    - raise every display's brightness by 5%
+#   brightness_down  - lower every display's brightness by 5%
+#   toggle_flyout    - show / hide the brightness flyout
+#
+# Uncomment and edit to enable:
+# [hotkeys]
+# brightness_up = \"Ctrl+Alt+Up\"
+# brightness_down = \"Ctrl+Alt+Down\"
+# toggle_flyout = \"Ctrl+Alt+B\"
+
+";
+
 /// A configuration file held as an editable, format-preserving TOML document.
 #[derive(Debug, Clone)]
 pub struct ConfigDocument {
@@ -50,13 +71,21 @@ impl ConfigDocument {
     }
 
     /// A document representing the full default configuration.
+    ///
+    /// The emitted TOML carries a commented `[hotkeys]` example block. Duja
+    /// binds no hotkeys out of the box (the `[hotkeys]` table is empty), so the
+    /// examples are commented out; the format-preserving document layer keeps
+    /// them across a later `load -> edit -> save`.
     #[must_use]
     pub fn defaults() -> Self {
         // Serializing the defaults cannot fail (every value is in range), but
         // an empty document is an equally correct fallback: it deserializes to
         // `Config::default()` too.
-        Self::from_config(&Config::default()).unwrap_or_else(|_| ConfigDocument {
-            doc: DocumentMut::new(),
+        let body = toml_edit::ser::to_string(&Config::default()).unwrap_or_default();
+        Self::parse(&format!("{HOTKEYS_EXAMPLE_COMMENT}{body}")).unwrap_or_else(|_| {
+            ConfigDocument {
+                doc: DocumentMut::new(),
+            }
         })
     }
 
@@ -303,6 +332,17 @@ mod tests {
     fn defaults_document_matches_default_config() {
         let doc = ConfigDocument::defaults();
         assert_eq!(doc.config().expect("typed"), Config::default());
+    }
+
+    #[test]
+    fn defaults_document_carries_commented_hotkey_examples() {
+        let doc = ConfigDocument::defaults();
+        let toml = doc.to_toml_string();
+        // The example block documents the actions and the accelerator format...
+        assert!(toml.contains("# brightness_up = \"Ctrl+Alt+Up\""), "{toml}");
+        assert!(toml.contains("# toggle_flyout = \"Ctrl+Alt+B\""), "{toml}");
+        // ...but binds nothing: the typed view still has an empty hotkeys table.
+        assert!(doc.config().expect("typed").hotkeys.is_empty());
     }
 
     #[test]

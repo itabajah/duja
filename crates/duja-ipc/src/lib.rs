@@ -197,6 +197,7 @@ mod tests {
                 features: [Feature::Brightness].into_iter().collect(),
                 hardware_range: true,
                 raw_capabilities: None,
+                allowed_inputs: Vec::new(),
             },
         };
         let info = DisplayInfo::from_snapshot(&snapshot);

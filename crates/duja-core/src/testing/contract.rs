@@ -284,6 +284,7 @@ mod tests {
                 features,
                 hardware_range: true,
                 raw_capabilities: None,
+                allowed_inputs: Vec::new(),
             })
         }
         fn get(&mut self, f: Feature) -> Result<FeatureRange, ControlError> {
@@ -350,6 +351,7 @@ mod tests {
                 features,
                 hardware_range: true,
                 raw_capabilities: None,
+                allowed_inputs: Vec::new(),
             })
         }
         fn get(&mut self, f: Feature) -> Result<FeatureRange, ControlError> {

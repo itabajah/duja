@@ -26,6 +26,7 @@
 //! - [`config`] — typed config schema, format-preserving TOML document,
 //!   chained migrations, and crash-safe atomic persistence (the only I/O)
 //! - [`caps`] — total MCCS capability-string parser ([`caps::ParsedCaps`])
+//! - [`input_source`] — MCCS VCP `0x60` input-source code ↔ name mapping
 //! - [`quirks`] — quirk database + stable-id matcher ([`quirks::QuirkDb`])
 //! - `testing` (feature `test-support`) — fakes + the controller contract suite
 //!
@@ -58,6 +59,7 @@ pub mod controller;
 pub mod debounce;
 pub mod dimmer;
 pub mod id;
+pub mod input_source;
 pub mod manager;
 pub mod model;
 pub mod quirks;

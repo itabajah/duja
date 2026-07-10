@@ -235,6 +235,7 @@ impl<T: VcpTransport, C: Clock> DdcController<T, C> {
                 features: BTreeSet::new(),
                 hardware_range: false,
                 raw_capabilities: None,
+                allowed_inputs: Vec::new(),
             });
         }
 
@@ -245,6 +246,7 @@ impl<T: VcpTransport, C: Clock> DdcController<T, C> {
                 Ok(raw) => {
                     let parsed = ParsedCaps::parse(&raw).unwrap_or_default();
                     let mut caps = intersect_features(&parsed);
+                    caps.allowed_inputs = self.resolve_allowed_inputs(caps.allowed_inputs);
                     caps.raw_capabilities = Some(raw);
                     caps
                 }
@@ -257,6 +259,7 @@ impl<T: VcpTransport, C: Clock> DdcController<T, C> {
 
         if self.quirks.no_input_switch {
             caps.features.remove(&Feature::InputSource);
+            caps.allowed_inputs.clear();
         }
         Ok(caps)
     }
@@ -276,11 +279,31 @@ impl<T: VcpTransport, C: Clock> DdcController<T, C> {
             }
         }
         let hardware_range = features.contains(&Feature::Brightness);
+        // No capability string here, so the only input-source knowledge is a
+        // quirk override (empty when there is none or switching is disabled).
+        let allowed_inputs = self.resolve_allowed_inputs(Vec::new());
         Ok(Capabilities {
             features,
             hardware_range,
             raw_capabilities: None,
+            allowed_inputs,
         })
+    }
+
+    /// Resolve the effective allowed input-source set for this display:
+    /// intersect the capability-string value list (`from_caps`) with the
+    /// `input_source_allowed` quirk when present, or fall back to the quirk when
+    /// the caps string carried no list. A `no_input_switch` display is cleared by
+    /// the caller.
+    fn resolve_allowed_inputs(&self, from_caps: Vec<u8>) -> Vec<u8> {
+        match self.quirks.input_source_allowed.as_deref() {
+            None => from_caps,
+            Some(quirk) if from_caps.is_empty() => quirk.to_vec(),
+            Some(quirk) => from_caps
+                .into_iter()
+                .filter(|code| quirk.contains(code))
+                .collect(),
+        }
     }
 
     /// Whether a prior probe positively established that `feature` is
@@ -419,7 +442,7 @@ fn control_error(err: TransportError) -> ControlError {
 }
 
 /// Build a [`Capabilities`] from a parsed capability string, keeping only the
-/// VCP codes Duja controls (`0x10`/`0x12`/`0x60`).
+/// VCP codes Duja controls (`0x10`/`0x12`/`0x60`) and the `0x60` value list.
 fn intersect_features(parsed: &ParsedCaps) -> Capabilities {
     let mut features = BTreeSet::new();
     for feature in Feature::ALL {
@@ -428,10 +451,15 @@ fn intersect_features(parsed: &ParsedCaps) -> Capabilities {
         }
     }
     let hardware_range = features.contains(&Feature::Brightness);
+    let allowed_inputs = parsed
+        .allowed_values(Feature::InputSource.vcp_code())
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
     Capabilities {
         features,
         hardware_range,
         raw_capabilities: None,
+        allowed_inputs,
     }
 }
 

@@ -76,6 +76,11 @@ i-slint-backend-testing = "1.17.1"
 # Tray icon (duja-app, P4): the tray + menu on the Slint main thread. Version
 # pinned to the P1 `spike/eventloop` recipe (tray-icon 0.24.1 + slint 1.17.1).
 tray-icon = "0.24.1"
+# Global hotkeys (duja-app, P5): system-wide accelerators registered on the
+# Slint main thread. Version pinned to the P1 `spike/eventloop` recipe
+# (global-hotkey 0.8.0 proven cohabiting with slint + tray-icon, zero idle
+# wakeups — WM_HOTKEY dispatched by winit's pump).
+global-hotkey = "0.8.0"
 # Per-user config/state/log directories (duja-app, P4). Resolves the platform
 # ProjectDirs for io.github.itabajah.duja.
 directories = "6"

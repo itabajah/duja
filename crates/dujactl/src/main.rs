@@ -36,6 +36,7 @@ fn dispatch(args: &[String]) -> u8 {
         Ok(Command::List) => run::list(),
         Ok(Command::Get { id }) => run::get(&id),
         Ok(Command::Set { target, percent }) => run::set(&target, percent),
+        Ok(Command::Input { id, value }) => run::input(&id, value.as_deref()),
         Ok(Command::Doctor) => run::doctor(),
         Ok(Command::Version) => run::version(),
         Err(err) => {
