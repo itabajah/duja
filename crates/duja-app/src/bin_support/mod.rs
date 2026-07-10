@@ -11,6 +11,9 @@
 //! - [`counting`] — a [`counting::CountingController`] decorator that tallies
 //!   hardware set/get/error calls for the stress harness.
 //! - [`dimming`] — the pure continuum → dimmer planner (overlay/gamma + hardware).
+//! - [`gamma`] — wires the opt-in gamma sub-floor channel: a pure engage/restore
+//!   coordinator (unit-tested with a fake sink) plus the Windows guard-backed
+//!   sink that drives the GPU ramp and owns the persistent-ramp crash marker.
 //! - [`logging`] — `tracing` setup with a size-rotated file log.
 //! - [`num`] — pure percent ↔ raw brightness scaling.
 //! - [`paths`] — resolved config/state/marker/log locations (`ProjectDirs`).
@@ -32,6 +35,7 @@ pub(crate) mod cli;
 pub(crate) mod counting;
 pub(crate) mod dimming;
 pub(crate) mod fmt;
+pub(crate) mod gamma;
 pub(crate) mod logging;
 pub(crate) mod num;
 pub(crate) mod paths;

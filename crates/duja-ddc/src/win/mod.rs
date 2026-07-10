@@ -106,6 +106,11 @@ pub struct DdcDisplay {
     /// `MONITORINFO::rcMonitor`. Feeds the overlay dimmer's per-display window
     /// geometry (see `duja-app`'s bounds map).
     pub bounds: DisplayBounds,
+    /// GDI adapter/source device name (e.g. `\\.\DISPLAY1`), from
+    /// `MONITORINFOEX::szDevice`. This is the handle `CreateDCW` needs to drive
+    /// the display's gamma ramp, so `duja-app` correlates a resolved id to its
+    /// gamma target through it (see the app's bounds map and gamma channel).
+    pub gdi_device: String,
     handle: PhysicalMonitorHandle,
     sort_key: String,
 }
@@ -179,6 +184,7 @@ pub fn enumerate() -> Result<Vec<DdcDisplay>, DdcError> {
             name,
             edid: edid.clone(),
             bounds,
+            gdi_device: gdi,
             handle,
             sort_key: path.interface_path.clone(),
         });

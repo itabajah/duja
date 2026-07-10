@@ -308,6 +308,30 @@ impl ScreenStateGuard {
         Ok(())
     }
 
+    /// Restore identity gamma on one touched display by GDI device name, drop it
+    /// from the touched set, and — if that empties the set — clear the crash
+    /// marker (no gamma remains engaged). A name that was never touched is a
+    /// no-op success.
+    ///
+    /// Used to reconcile a per-display change: when a display leaves the gamma
+    /// path (its slider rose above the sub-floor zone, or it was unplugged) while
+    /// others stay engaged.
+    ///
+    /// # Errors
+    /// [`DimmerError::Os`] if the identity ramp could not be written for the
+    /// named display.
+    pub fn restore_display(&mut self, name: &str) -> Result<(), DimmerError> {
+        let Some(pos) = self.touched.iter().position(|d| d.name == name) else {
+            return Ok(());
+        };
+        let display = self.touched.remove(pos);
+        let result = restore_identity(&display);
+        if self.touched.is_empty() {
+            self.clear_marker_now();
+        }
+        result
+    }
+
     /// Restore identity gamma on every touched display now, clear the marker,
     /// and forget the touched set (so [`Drop`] does nothing further). Returns
     /// what was restored.
@@ -447,6 +471,23 @@ mod tests {
         let mut guard = ScreenStateGuard::new(Some(path.clone()));
         // Directly exercise the marker path (no real display needed).
         guard.mark_if_needed();
+        assert!(marker_present(&path));
+        guard.restore_now();
+        assert!(!marker_present(&path));
+    }
+
+    #[test]
+    fn restore_display_of_untouched_name_is_a_noop() {
+        // Restoring a display the guard never engaged must not error and must not
+        // touch the marker.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("duja-restore-display-{}.tmp", std::process::id()));
+        let _ = clear_marker(&path);
+        let mut guard = ScreenStateGuard::new(Some(path.clone()));
+        guard.mark_if_needed();
+        assert!(marker_present(&path));
+        // Never-touched name: no-op success, marker untouched (gamma still "on").
+        guard.restore_display(r"\\.\NOPE").unwrap();
         assert!(marker_present(&path));
         guard.restore_now();
         assert!(!marker_present(&path));

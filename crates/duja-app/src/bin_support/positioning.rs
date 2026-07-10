@@ -2,10 +2,14 @@
 //!
 //! The tray lives in a corner of the work area (the screen minus the taskbar).
 //! Duja anchors the flyout to the click point but keeps it fully inside the work
-//! area with a small margin, and sits it against the work-area edge nearest the
-//! taskbar (the bottom edge in the common bottom-taskbar layout). All arithmetic
-//! is injected — the caller supplies the cursor, work area, and flyout size — so
-//! the placement is exhaustively unit-testable without any Win32 call.
+//! area with a small margin, and sits it against the work-area edge the taskbar
+//! occupies — inferred from the click, since the tray (and cursor) sit in the
+//! taskbar corner. All four taskbar placements are supported: a horizontal
+//! taskbar (bottom or top) pins the flyout to that edge and centres it
+//! horizontally on the cursor; a vertical taskbar (left or right) pins it to that
+//! edge and centres it vertically. All arithmetic is injected — the caller
+//! supplies the cursor, work area, and flyout size — so the placement is
+//! exhaustively unit-testable without any Win32 call.
 
 // RATIONALE: these pure modules are consumed only by the Windows tray assembly,
 // but stay cross-platform (not cfg-gated) so their unit tests run on every CI
@@ -39,17 +43,59 @@ impl Rect {
     }
 }
 
+/// Which work-area edge the taskbar (and therefore the tray) sits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Edge {
+    /// Horizontal taskbar along the bottom (the common layout).
+    Bottom,
+    /// Horizontal taskbar along the top.
+    Top,
+    /// Vertical taskbar along the left.
+    Left,
+    /// Vertical taskbar along the right.
+    Right,
+}
+
+/// Infer the taskbar edge from the click point within the work area.
+///
+/// The tray sits in the corner against the taskbar, so a tray click lands in (or
+/// hard against) that edge — it is the work-area edge the cursor is nearest, or
+/// beyond (a click inside the taskbar is *outside* the work area on that side, so
+/// its signed distance to that edge is the smallest). Ties resolve
+/// `Bottom > Top > Right > Left`, favouring the commonest layouts.
+fn taskbar_edge(cursor: (i32, i32), work: Rect) -> Edge {
+    let d_left = cursor.0.saturating_sub(work.x);
+    let d_right = work.right().saturating_sub(cursor.0);
+    let d_top = cursor.1.saturating_sub(work.y);
+    let d_bottom = work.bottom().saturating_sub(cursor.1);
+
+    let mut edge = Edge::Bottom;
+    let mut best = d_bottom;
+    for (distance, candidate) in [
+        (d_top, Edge::Top),
+        (d_right, Edge::Right),
+        (d_left, Edge::Left),
+    ] {
+        if distance < best {
+            best = distance;
+            edge = candidate;
+        }
+    }
+    edge
+}
+
 /// Compute the flyout's top-left corner (physical pixels).
 ///
 /// `cursor` is the click point (typically the tray click / cursor position);
 /// `work_area` is the monitor work area under it; `flyout` is the flyout's
 /// `(width, height)`; `margin` is the gap kept from every work-area edge.
 ///
-/// The flyout is centred horizontally on the cursor, then clamped so it never
-/// crosses a work-area edge, and pinned to the bottom of the work area (just
-/// above a bottom taskbar). When the work area is smaller than the flyout plus
-/// margins, the flyout is aligned to the top-left corner rather than pushed
-/// off-screen.
+/// The flyout is pinned to the work-area edge the taskbar occupies (inferred by
+/// [`taskbar_edge`]) and slid along that edge to follow the cursor — centred
+/// horizontally for a bottom/top taskbar, vertically for a left/right one — then
+/// clamped so it never crosses a work-area edge. When the work area is smaller
+/// than the flyout plus margins, the flyout is aligned to the top-left corner
+/// rather than pushed off-screen.
 pub(crate) fn flyout_origin(
     cursor: (i32, i32),
     work_area: Rect,
@@ -59,18 +105,21 @@ pub(crate) fn flyout_origin(
     let fw = i32::try_from(flyout.0).unwrap_or(i32::MAX);
     let fh = i32::try_from(flyout.1).unwrap_or(i32::MAX);
 
-    // Horizontal: centre on the cursor, then clamp into the work area.
-    let centred_x = cursor.0.saturating_sub(fw / 2);
     let min_x = work_area.x.saturating_add(margin);
     let max_x = work_area.right().saturating_sub(fw).saturating_sub(margin);
-    let x = clamp(centred_x, min_x, max_x);
-
-    // Vertical: sit against the bottom edge, above the taskbar margin.
     let min_y = work_area.y.saturating_add(margin);
     let max_y = work_area.bottom().saturating_sub(fh).saturating_sub(margin);
-    let y = clamp(max_y, min_y, max_y);
 
-    (x, y)
+    // Follow the cursor along the free axis (centred on it), pinned on the other.
+    let along_x = clamp(cursor.0.saturating_sub(fw / 2), min_x, max_x);
+    let along_y = clamp(cursor.1.saturating_sub(fh / 2), min_y, max_y);
+
+    match taskbar_edge(cursor, work_area) {
+        Edge::Bottom => (along_x, clamp(max_y, min_y, max_y)),
+        Edge::Top => (along_x, clamp(min_y, min_y, max_y)),
+        Edge::Left => (clamp(min_x, min_x, max_x), along_y),
+        Edge::Right => (clamp(max_x, min_x, max_x), along_y),
+    }
 }
 
 /// Clamp `value` into `[lo, hi]`, tolerating an inverted range (`hi < lo`, which
@@ -143,5 +192,68 @@ mod tests {
         };
         let (x, y) = flyout_origin((50, 50), tiny, FLYOUT, MARGIN);
         assert_eq!((x, y), (MARGIN, MARGIN));
+    }
+
+    // --- taskbar-edge inference across all four layouts -------------------
+
+    #[test]
+    fn infers_each_taskbar_edge_from_the_click() {
+        // A click hard against (or inside) an edge is nearest that edge.
+        assert_eq!(taskbar_edge((900, 1040), WORK), Edge::Bottom);
+        assert_eq!(taskbar_edge((900, 0), WORK), Edge::Top);
+        assert_eq!(taskbar_edge((0, 500), WORK), Edge::Left);
+        assert_eq!(taskbar_edge((1920, 500), WORK), Edge::Right);
+    }
+
+    #[test]
+    fn top_taskbar_pins_to_the_top_and_follows_x() {
+        // A top taskbar: tray top-right, click near the top edge.
+        let (x, y) = flyout_origin((1800, 0), WORK, FLYOUT, MARGIN);
+        assert_eq!(y, WORK.y + MARGIN, "flyout hangs from the top edge");
+        // Still centred horizontally on the cursor, clamped to the right:
+        // right (1920) - width (320) - margin (12) = 1588.
+        assert_eq!(x, 1588);
+    }
+
+    #[test]
+    fn left_taskbar_pins_to_the_left_and_follows_y() {
+        // A left taskbar with the tray at its bottom: click near the left edge,
+        // low down. The flyout sits against the left edge and is clamped so it
+        // stays inside the work area (bottom = 1040 - 420 - 12 = 608).
+        let (x, y) = flyout_origin((0, 900), WORK, FLYOUT, MARGIN);
+        assert_eq!(x, WORK.x + MARGIN, "flyout sits against the left edge");
+        assert_eq!(y, 608, "clamped to the bottom of the work area");
+    }
+
+    #[test]
+    fn left_taskbar_centres_vertically_when_there_is_room() {
+        // A mid-height click leaves room to centre vertically on the cursor:
+        // 400 - height (420) / 2 = 190.
+        let (_x, y) = flyout_origin((0, 400), WORK, FLYOUT, MARGIN);
+        assert_eq!(y, 190);
+    }
+
+    #[test]
+    fn right_taskbar_pins_to_the_right_and_follows_y() {
+        // A right taskbar: the work area is inset from the monitor's right, and
+        // the click lands hard against that inset edge.
+        let work = Rect {
+            x: 0,
+            y: 0,
+            w: 1880, // 1920 minus a 40px right taskbar
+            h: 1080,
+        };
+        let (x, y) = flyout_origin((1878, 500), work, FLYOUT, MARGIN);
+        // right (1880) - width (320) - margin (12) = 1548.
+        assert_eq!(x, 1548, "flyout sits against the right edge");
+        // Centred vertically on the cursor (500 - 210 = 290).
+        assert_eq!(y, 290);
+    }
+
+    #[test]
+    fn bottom_taskbar_is_still_the_tie_break_default() {
+        // A bottom-right corner click (equidistant to bottom and right) resolves
+        // to the common bottom-taskbar layout.
+        assert_eq!(taskbar_edge((1915, 1035), WORK), Edge::Bottom);
     }
 }

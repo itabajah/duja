@@ -12,7 +12,6 @@
 //!   theme, and the slider/refresh actions.
 //! - [`settings_vm`] — the P4 settings-panel skeleton.
 //! - [`command`] — [`UiCommand`], the only thing a view-model emits.
-//! - [`throttle`] — [`ThrottleGate`], the pure UI-side emit rate limiter.
 //! - [`shell`] — [`FlyoutShell`], the Slint-facing seam (the sole Slint island).
 //!
 //! ## Wave-2 wiring (`duja-app` assembly)
@@ -21,8 +20,10 @@
 //! `set_displays` / `set_unresponsive`, calls `FlyoutShell::update_from_vm`,
 //! and maps each [`UiCommand`] onto an `EngineCommand`
 //! (`SetLevel` ⇒ `SetUserLevel`, `Refresh` ⇒ `RefreshNow`). It also owns the
-//! tray icon, the flyout positioning (`show_at` / `hide`), and the
-//! [`ThrottleGate`] consulted before forwarding slider commands.
+//! tray icon and the flyout positioning (`show_at` / `hide`). Every slider
+//! change is forwarded — there is no UI-side throttle; the engine worker's
+//! `write_min_gap` last-wins coalescer bounds the hardware write rate and
+//! guarantees a drag's final value lands (P4 gate Finding 1).
 //!
 //! ## Idle budget
 //!
@@ -43,13 +44,11 @@ pub mod command;
 pub mod flyout_vm;
 pub mod settings_vm;
 pub mod shell;
-pub mod throttle;
 
 pub use command::UiCommand;
 pub use flyout_vm::{FlyoutRow, FlyoutVm, Theme};
 pub use settings_vm::{SettingControl, SettingKey, SettingsRow, SettingsVm};
 pub use shell::FlyoutShell;
-pub use throttle::ThrottleGate;
 
 /// The crate version, as compiled in.
 #[must_use]
