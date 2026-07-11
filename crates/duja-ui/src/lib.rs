@@ -55,11 +55,11 @@ pub(crate) mod generated;
 pub(crate) mod model_sync;
 
 pub use command::{SettingsCommand, ThemeChoice, UiCommand};
-pub use flyout_vm::{FlyoutRow, FlyoutVm, Theme};
+pub use flyout_vm::{DimmingInfo, FlyoutRow, FlyoutVm, Theme};
 pub use settings_shell::SettingsShell;
 pub use settings_vm::{
-    DIM_MODE_ORDER, HotkeyRow, InputChoice, MAX_FLOOR_PCT, MonitorSection, SettingsVm, THEME_ORDER,
-    UpdateStatus,
+    CaptureModifiers, DIM_MODE_ORDER, HotkeyRow, InputChoice, MAX_FLOOR_PCT, MonitorSection,
+    SettingsVm, THEME_ORDER, UpdateStatus, accelerator_string,
 };
 pub use shell::FlyoutShell;
 

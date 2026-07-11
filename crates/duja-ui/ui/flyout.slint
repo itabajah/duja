@@ -3,12 +3,12 @@
 // callbacks. Design rules baked in:
 //   * Premium-minimal: 4/8 px spacing grid, one accent colour, subtle radii.
 //   * NO Timer elements and no idle animations (perf budget: zero idle wakeups).
+//     Short, interaction-driven easing only (hover/press/thumb), which wakes the
+//     loop solely while the user is interacting.
 //   * Light/dark palettes defined once in `Palette`; the `dark` property flips
 //     them live.
 //   * Every user-visible string goes through @tr(...) for i18n from day one.
 //   * Keyboard: sliders take arrow keys, Tab traverses, Esc emits esc-pressed.
-
-import { Slider, Switch, ScrollView, Button } from "std-widgets.slint";
 
 // One monitor row, mirroring `duja_ui::flyout_vm::FlyoutRow`.
 export struct FlyoutRowData {
@@ -17,28 +17,303 @@ export struct FlyoutRowData {
     kind: string,
     greyed: bool,
     slider-enabled: bool,
+    // Feature 1: software-dimming toggle + floor marker.
+    dimming-on: bool,
+    has-floor: bool,
+    marker-fraction: float,
 }
 
-// Both palettes in one place; `dark` selects between them at render time.
+// Both palettes in one place; `dark` selects between them at render time. Tuned
+// for contrast in both themes, including the greyed/unresponsive treatment.
 export global Palette {
     in property <bool> dark: true;
 
-    out property <color> bg: dark ? #1b1b1f : #f6f6f8;
-    out property <color> surface: dark ? #26262b : #ffffff;
-    out property <color> surface-greyed: dark ? #202024 : #eeeef0;
-    out property <color> text: dark ? #f2f2f4 : #1a1a1e;
-    out property <color> text-subtle: dark ? #9a9aa2 : #6b6b73;
-    out property <color> border: dark ? #34343a : #e2e2e6;
+    out property <color> bg: dark ? #17171b : #f4f5f7;
+    out property <color> surface: dark ? #232329 : #ffffff;
+    out property <color> surface-hover: dark ? #2b2b33 : #f0f1f4;
+    out property <color> surface-greyed: dark ? #1d1d21 : #ececed;
+    out property <color> text: dark ? #f3f3f6 : #17171b;
+    out property <color> text-subtle: dark ? #9a9aa4 : #6b6b75;
+    out property <color> text-faint: dark ? #6d6d78 : #9a9aa4;
+    out property <color> border: dark ? #34343c : #e3e4e8;
+    out property <color> border-strong: dark ? #45454f : #cfd0d6;
     // A single accent, tuned to read on both surfaces.
-    out property <color> accent: #3b82f6;
+    out property <color> accent: dark ? #4f8cf7 : #2f6fed;
+    out property <color> accent-hover: dark ? #6a9ef8 : #4a82f0;
+    // Low-opacity accent used for the sub-floor (software-dimming) track zone.
+    out property <color> accent-soft: dark ? #4f8cf74d : #2f6fed33;
+    out property <color> track: dark ? #3a3a43 : #dfe0e6;
+    out property <color> track-dead: dark ? #2a2a31 : #d0d1d7;
+    out property <color> thumb: #ffffff;
+    out property <color> marker: dark ? #f3f3f6 : #3a3a43;
+    out property <color> focus-ring: dark ? #6a9ef8 : #2f6fed;
+    out property <color> danger: dark ? #f07a7a : #d64545;
+}
+
+// A square, keyboard-focusable icon button (header/footer chrome).
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    callback clicked();
+
+    // Sized via *literal* min/max so a parent layout gives it exactly 30px. A
+    // property-bound min/max is not picked up by Slint's layout constraint
+    // resolution (unlike a literal), which silently collapses the button.
+    min-width: 30px;
+    max-width: 30px;
+    min-height: 30px;
+    max-height: 30px;
+    border-radius: 8px;
+    background: touch.has-hover ? Palette.surface-hover : transparent;
+    animate background { duration: 120ms; }
+    border-width: fs.has-focus ? 2px : 0px;
+    border-color: Palette.focus-ring;
+    forward-focus: fs;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-action-default => { root.clicked(); }
+
+    Text {
+        text: icon;
+        font-size: 15px;
+        color: Palette.text-subtle;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    fs := FocusScope {
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            fs.focus();
+            root.clicked();
+        }
+    }
+}
+
+// A compact custom on/off pill (per-row software-dimming toggle). Custom rather
+// than std Switch so it fits the row without a bolted-on label.
+export component PillToggle inherits Rectangle {
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    in property <string> label;
+    callback toggled(bool);
+
+    min-width: 38px;
+    max-width: 38px;
+    min-height: 21px;
+    max-height: 21px;
+    border-radius: 10.5px;
+    opacity: enabled ? 1.0 : 0.45;
+    background: checked ? Palette.accent : Palette.track;
+    animate background { duration: 130ms; }
+    border-width: fs.has-focus ? 2px : 0px;
+    border-color: Palette.focus-ring;
+    forward-focus: fs;
+    accessible-role: switch;
+    accessible-checked: checked;
+    accessible-label: label;
+    accessible-action-default => {
+        if (enabled) { root.toggled(!root.checked); }
+    }
+
+    knob := Rectangle {
+        width: 15px;
+        height: 15px;
+        border-radius: 7.5px;
+        y: 3px;
+        x: checked ? parent.width - self.width - 3px : 3px;
+        animate x { duration: 130ms; easing: ease-out; }
+        background: Palette.thumb;
+    }
+
+    fs := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.toggled(!root.checked);
+                return accept;
+            }
+            return reject;
+        }
+    }
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            fs.focus();
+            root.toggled(!root.checked);
+        }
+    }
+}
+
+// The brightness slider with a hardware-floor handoff marker. Custom (not the
+// std Slider) so it can draw the marker and the two-tone sub-floor zone, and so
+// a mid-drag pointer grab is never disturbed by an external `value` write: while
+// pressed the thumb follows the pointer and ignores model writes to `value`
+// (consistent with the P0 in-place model-sync fix).
+export component BrightnessSlider inherits Rectangle {
+    in property <float> value;            // 0..=100 user level
+    in property <bool> enabled: true;
+    in property <bool> marker-visible;
+    in property <float> marker-fraction;  // 0..=1 handoff position
+    in property <bool> dimming-on;
+    callback changed(float);
+
+    min-width: 120px;
+    min-height: 28px;
+    max-height: 28px;
+    horizontal-stretch: 1;
+    opacity: enabled ? 1.0 : 0.5;
+    forward-focus: fs;
+    accessible-role: slider;
+    accessible-label: @tr("Brightness");
+    accessible-value: root.value;
+    accessible-value-minimum: 0;
+    accessible-value-maximum: 100;
+    accessible-value-step: 1;
+
+    property <length> thumb-size: 16px;
+    property <length> track-h: 6px;
+    property <length> usable: root.width - thumb-size;
+    // Below the floor with dimming off the slider bottoms out at the floor.
+    property <float> min-fraction: (!dimming-on && marker-visible) ? marker-fraction : 0;
+    property <bool> active: touch.pressed;
+    property <float> drag-value: value;
+    property <float> shown: active ? drag-value : value;
+    property <float> shown-frac: shown / 100;
+
+    function set-from-pointer() {
+        if (!root.enabled) {
+            return;
+        }
+        root.drag-value = clamp((touch.mouse-x - root.thumb-size / 2) / root.usable, root.min-fraction, 1.0) * 100;
+        root.changed(root.drag-value);
+    }
+    function nudge(delta: float) {
+        root.changed(clamp(root.value + delta, root.min-fraction * 100, 100));
+    }
+
+    // Track base.
+    Rectangle {
+        x: root.thumb-size / 2;
+        width: root.usable;
+        height: root.track-h;
+        y: (parent.height - self.height) / 2;
+        border-radius: self.height / 2;
+        background: Palette.track;
+
+        // Sub-floor zone (0..marker): dimming on ⇒ soft accent tint (the
+        // software-dimming range); dimming off ⇒ dead/greyed zone.
+        if root.marker-visible: Rectangle {
+            x: 0;
+            width: root.usable * root.marker-fraction;
+            height: parent.height;
+            border-radius: parent.border-radius;
+            background: root.dimming-on ? Palette.accent-soft : Palette.track-dead;
+        }
+    }
+
+    // Filled portion above the floor (hardware regime): solid accent.
+    Rectangle {
+        x: root.thumb-size / 2;
+        width: root.usable * root.shown-frac;
+        height: root.track-h;
+        y: (parent.height - self.height) / 2;
+        border-radius: self.height / 2;
+        background: Palette.accent;
+    }
+    // The part of the fill that sits below the marker reads dimmer (software
+    // regime) so the two regimes are legible.
+    if root.marker-visible && root.dimming-on: Rectangle {
+        x: root.thumb-size / 2;
+        width: root.usable * clamp(root.shown-frac, 0, root.marker-fraction);
+        height: root.track-h;
+        y: (parent.height - self.height) / 2;
+        border-radius: self.height / 2;
+        background: Palette.accent-soft;
+    }
+
+    // Handoff marker tick.
+    if root.marker-visible: Rectangle {
+        x: root.thumb-size / 2 + root.usable * root.marker-fraction - self.width / 2;
+        width: 2px;
+        height: root.track-h + 8px;
+        y: (parent.height - self.height) / 2;
+        border-radius: 1px;
+        background: Palette.marker;
+    }
+
+    // Thumb.
+    Rectangle {
+        width: root.thumb-size;
+        height: root.thumb-size;
+        border-radius: self.width / 2;
+        y: (parent.height - self.height) / 2;
+        x: root.usable * root.shown-frac;
+        background: Palette.thumb;
+        border-width: 1px;
+        border-color: Palette.border-strong;
+        drop-shadow-blur: root.active ? 6px : 3px;
+        drop-shadow-color: #00000040;
+        animate drop-shadow-blur { duration: 100ms; }
+    }
+
+    // Focus ring around the whole track when keyboard-focused.
+    if fs.has-focus: Rectangle {
+        x: 0;
+        width: root.width;
+        height: root.track-h + 12px;
+        y: (parent.height - self.height) / 2;
+        border-radius: self.height / 2;
+        border-width: 2px;
+        border-color: Palette.focus-ring;
+        background: transparent;
+    }
+
+    fs := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.RightArrow || event.text == Key.UpArrow) {
+                root.nudge(1);
+                return accept;
+            }
+            if (event.text == Key.LeftArrow || event.text == Key.DownArrow) {
+                root.nudge(-1);
+                return accept;
+            }
+            return reject;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        moved => {
+            root.set-from-pointer();
+        }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                fs.focus();
+                root.set-from-pointer();
+            }
+        }
+    }
 }
 
 export component FlyoutWindow inherits Window {
     title: @tr("Duja Brightness");
     // Slim, tray-flyout proportions on an 8 px grid.
     width: 320px;
-    min-height: 120px;
-    max-height: 560px;
+    // Height driven by the app (no-frame windows are not auto-grown to content).
+    height: clamp(root.content-height, 160px, 620px);
     background: Palette.bg;
     no-frame: true;
 
@@ -47,12 +322,20 @@ export component FlyoutWindow inherits Window {
     in property <bool> no-displays;
     in property <bool> dark <=> Palette.dark;
     in-out property <bool> link-all;
+    // The visible content width (logical px); the app sets this to
+    // `design-width / scale` to compensate for the fractional-DPI buffer clip.
+    in property <length> usable-width: 320px;
+    // The desired window height (logical px), computed by the app from the row
+    // count (a no-frame window is not auto-grown to its content preferred size).
+    in property <length> content-height: 260px;
 
     // --- outputs to the Rust shell (mapped onto FlyoutVm calls) ---
     callback slider-changed(/* row-index */ int, /* percent */ float);
+    callback dimming-toggled(/* row-index */ int, /* on */ bool);
     callback link-toggled(/* on */ bool);
     callback refresh-requested();
     callback settings-clicked();
+    callback close-requested();
     callback esc-pressed();
 
     forward-focus: scope;
@@ -67,120 +350,196 @@ export component FlyoutWindow inherits Window {
         }
 
         VerticalLayout {
-            padding: 12px;
-            spacing: 8px;
+            // Constrain content to the visible width (left-aligned) so the
+            // fractional-DPI buffer clip never eats the right-hand controls.
+            x: 0;
+            width: root.usable-width;
+            padding: 14px;
+            spacing: 10px;
+            // Pack to the top: any slack from the explicitly-set window height
+            // sits at the bottom instead of stretching the cards' internals.
+            alignment: start;
 
-            // Header: title + settings gear.
+            // Header: product wordmark (stretch) + settings gear + close.
             HorizontalLayout {
-                spacing: 8px;
-                Text {
-                    text: @tr("Brightness");
-                    font-size: 15px;
-                    font-weight: 600;
-                    color: Palette.text;
-                    vertical-alignment: center;
+                spacing: 6px;
+                VerticalLayout {
                     horizontal-stretch: 1;
-                    accessible-role: text;
-                    accessible-label: @tr("Brightness");
+                    alignment: center;
+                    Text {
+                        text: @tr("Duja");
+                        font-size: 17px;
+                        font-weight: 800;
+                        color: Palette.text;
+                        horizontal-alignment: left;
+                        accessible-role: text;
+                        accessible-label: @tr("Duja");
+                    }
+                    Text {
+                        text: @tr("Brightness");
+                        font-size: 11px;
+                        font-weight: 500;
+                        color: Palette.text-faint;
+                        horizontal-alignment: left;
+                    }
                 }
-                gear := Button {
-                    text: "⚙";
-                    accessible-label: @tr("Settings");
+                gear := IconButton {
+                    icon: "⚙";
+                    label: @tr("Settings");
                     clicked => {
                         root.settings-clicked();
                     }
                 }
-            }
-
-            // Empty-state label, shown only when there are no displays.
-            if root.no-displays: Rectangle {
-                height: 72px;
-                Text {
-                    text: @tr("No displays detected");
-                    color: Palette.text-subtle;
-                    font-size: 13px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    accessible-role: text;
-                    accessible-label: @tr("No displays detected");
+                close := IconButton {
+                    icon: "×";
+                    label: @tr("Close");
+                    clicked => {
+                        root.close-requested();
+                    }
                 }
             }
 
-            // Monitor rows.
-            if !root.no-displays: ScrollView {
-                vertical-stretch: 1;
-                min-height: 64px;
+            // Empty-state, shown only when there are no displays.
+            if root.no-displays: Rectangle {
+                height: 96px;
+                border-radius: 12px;
+                background: Palette.surface;
+                border-width: 1px;
+                border-color: Palette.border;
                 VerticalLayout {
-                    spacing: 8px;
+                    alignment: center;
+                    spacing: 4px;
+                    Text {
+                        text: "🖥";
+                        font-size: 24px;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: @tr("No displays detected");
+                        color: Palette.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        accessible-role: text;
+                        accessible-label: @tr("No displays detected");
+                    }
+                    Text {
+                        text: @tr("Connect a display, then Refresh.");
+                        color: Palette.text-subtle;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+
+            // Monitor rows. Content-sized (no scroll wrapper) so the window grows
+            // to fit every card up to the window max-height, rather than a greedy
+            // `vertical-stretch` collapsing it to the min-height and clipping.
+            if !root.no-displays: VerticalLayout {
+                spacing: 8px;
                     for row[idx] in root.rows: Rectangle {
-                        background: row.greyed ? Palette.surface-greyed : Palette.surface;
-                        border-radius: 8px;
+                        background: row.greyed ? Palette.surface-greyed
+                            : (card-hover.has-hover ? Palette.surface-hover : Palette.surface);
+                        animate background { duration: 120ms; }
+                        border-radius: 12px;
                         border-width: 1px;
                         border-color: Palette.border;
-                        opacity: row.greyed ? 0.55 : 1.0;
+                        opacity: row.greyed ? 0.6 : 1.0;
                         accessible-role: groupbox;
                         accessible-label: row.name + ", " + row.kind + ", " + row.percent + @tr(" percent");
 
+                        card-hover := TouchArea {
+                            mouse-cursor: default;
+                            enabled: false;
+                        }
+
                         VerticalLayout {
-                            padding: 8px;
-                            spacing: 4px;
+                            padding: 12px;
+                            spacing: 8px;
 
                             HorizontalLayout {
                                 spacing: 8px;
-                                Text {
-                                    text: row.name;
-                                    color: Palette.text;
-                                    font-size: 13px;
-                                    overflow: elide;
+                                VerticalLayout {
                                     horizontal-stretch: 1;
+                                    spacing: 1px;
+                                    Text {
+                                        text: row.name;
+                                        color: Palette.text;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: row.greyed ? @tr("Unresponsive") : row.kind;
+                                        color: row.greyed ? Palette.danger : Palette.text-faint;
+                                        font-size: 10px;
+                                        font-weight: 500;
+                                    }
                                 }
                                 Text {
                                     text: row.percent + "%";
-                                    color: Palette.text-subtle;
-                                    font-size: 13px;
+                                    color: Palette.text;
+                                    font-size: 15px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
+                                    width: 44px;
+                                }
+                            }
+
+                            BrightnessSlider {
+                                value: row.percent;
+                                enabled: row.slider-enabled;
+                                dimming-on: row.dimming-on;
+                                marker-visible: row.has-floor;
+                                marker-fraction: row.marker-fraction;
+                                changed(v) => {
+                                    root.slider-changed(idx, v);
                                 }
                             }
 
                             HorizontalLayout {
                                 spacing: 8px;
                                 Text {
-                                    text: row.kind;
+                                    text: @tr("Software dimming");
                                     color: Palette.text-subtle;
                                     font-size: 11px;
                                     vertical-alignment: center;
-                                }
-                                Slider {
                                     horizontal-stretch: 1;
-                                    minimum: 0;
-                                    maximum: 100;
-                                    value: row.percent;
+                                }
+                                PillToggle {
+                                    checked: row.dimming-on;
                                     enabled: row.slider-enabled;
-                                    accessible-label: row.name;
-                                    changed(v) => {
-                                        root.slider-changed(idx, v);
+                                    label: @tr("Software dimming");
+                                    toggled(on) => {
+                                        root.dimming-toggled(idx, on);
                                     }
                                 }
                             }
                         }
                     }
-                }
             }
 
-            // Footer: link-all toggle + refresh.
+            // Footer: link-all toggle (stretch) + refresh.
             HorizontalLayout {
                 spacing: 8px;
-                link-switch := Switch {
-                    text: @tr("Link all");
+                PillToggle {
                     checked <=> root.link-all;
-                    accessible-label: @tr("Link all displays");
-                    toggled => {
-                        root.link-toggled(self.checked);
+                    label: @tr("Link all displays");
+                    toggled(on) => {
+                        root.link-toggled(on);
                     }
                 }
-                Rectangle { horizontal-stretch: 1; }
-                refresh := Button {
-                    text: @tr("Refresh");
-                    accessible-label: @tr("Refresh displays");
+                Text {
+                    text: @tr("Link all");
+                    color: Palette.text-subtle;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                IconButton {
+                    icon: "⟳";
+                    label: @tr("Refresh displays");
                     clicked => {
                         root.refresh-requested();
                     }

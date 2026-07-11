@@ -29,6 +29,18 @@ pub enum UiCommand {
     Refresh,
     /// Open the settings window (the flyout's gear button).
     OpenSettings,
+    /// Enable or disable software dimming for one display (the flyout's
+    /// per-row dimming toggle).
+    ///
+    /// `on` maps to the display's configured dim mode (default overlay) and
+    /// `off` maps to [`DimMode::Off`]; the app persists the change and re-plans
+    /// the dimmer batch.
+    SetDimmingEnabled {
+        /// The display to adjust.
+        id: StableDisplayId,
+        /// Whether software dimming should be engaged below the hardware floor.
+        on: bool,
+    },
 }
 
 /// The theme preference offered by the settings window.
@@ -87,5 +99,23 @@ pub enum SettingsCommand {
         id: StableDisplayId,
         /// The raw input-source code to select.
         value: u8,
+    },
+    /// Bind (or rebind) a global hotkey for an action to an accelerator string.
+    ///
+    /// `action_key` is the config-table key for the action (e.g.
+    /// `"brightness_up"`); `binding` is the accelerator as captured (e.g.
+    /// `"Ctrl+Alt+Up"`). The app parses and validates the binding, persists it,
+    /// and re-registers the live hotkeys.
+    SetHotkey {
+        /// The config-table key of the action to bind.
+        action_key: String,
+        /// The accelerator string to bind it to.
+        binding: String,
+    },
+    /// Clear the global hotkey bound to an action (`action_key` is its
+    /// config-table key). The app removes the binding and re-registers.
+    ClearHotkey {
+        /// The config-table key of the action to unbind.
+        action_key: String,
     },
 }

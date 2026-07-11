@@ -98,15 +98,79 @@ impl MonitorSection {
     }
 }
 
-/// One read-only configured-hotkey row.
+/// One configured-hotkey row (now editable: record / clear).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HotkeyRow {
+    /// The config-table key for this action (e.g. `brightness_up`), used to
+    /// address the emitted [`SettingsCommand::SetHotkey`] /
+    /// [`SettingsCommand::ClearHotkey`].
+    pub action_key: String,
     /// The action label (e.g. `Brightness up`).
     pub action_label: String,
-    /// The bound accelerator, as written (e.g. `Ctrl+Alt+Up`).
+    /// The bound accelerator, as written (e.g. `Ctrl+Alt+Up`); empty when unbound.
     pub binding: String,
     /// Whether this binding collides with another (shown as a warning).
     pub conflicted: bool,
+    /// Whether the OS refused to register this binding (already owned by another
+    /// app); shown as unavailable feedback in the row.
+    pub unavailable: bool,
+}
+
+/// The modifier state of a captured key chord (bundled so the capture API does
+/// not take a fistful of bools).
+// RATIONALE: a keyboard modifier set is inherently four independent booleans
+// (Ctrl/Alt/Shift/Super); a bitflag would only re-encode the same four bits and
+// obscure the field-per-modifier the Slint capture boundary fills in directly.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CaptureModifiers {
+    /// Control held.
+    pub ctrl: bool,
+    /// Alt / Option held.
+    pub alt: bool,
+    /// Shift held.
+    pub shift: bool,
+    /// Super / Windows / Command held.
+    pub meta: bool,
+}
+
+/// Assemble an accelerator string from a captured key chord.
+///
+/// `key` is the (already Slint-normalized) canonical key token, or `None` while
+/// only modifiers are held — a chord with no key yet is *pending*, so this
+/// returns `None` (nothing to bind). Modifiers are emitted in the canonical
+/// order (`Ctrl`, `Alt`, `Shift`, `Super`) the app's parser prints, so the
+/// produced string parses back to the same accelerator.
+///
+/// # Examples
+/// ```
+/// use duja_ui::settings_vm::{accelerator_string, CaptureModifiers};
+/// let ctrl_alt = CaptureModifiers { ctrl: true, alt: true, ..Default::default() };
+/// assert_eq!(
+///     accelerator_string(ctrl_alt, Some("Up")).as_deref(),
+///     Some("Ctrl+Alt+UP"),
+/// );
+/// // Only modifiers held so far: still recording, nothing to bind.
+/// let ctrl = CaptureModifiers { ctrl: true, ..Default::default() };
+/// assert_eq!(accelerator_string(ctrl, None), None);
+/// ```
+#[must_use]
+pub fn accelerator_string(mods: CaptureModifiers, key: Option<&str>) -> Option<String> {
+    let token = key.map(str::trim).filter(|t| !t.is_empty())?;
+    let mut out = String::new();
+    for (held, name) in [
+        (mods.ctrl, "Ctrl"),
+        (mods.alt, "Alt"),
+        (mods.shift, "Shift"),
+        (mods.meta, "Super"),
+    ] {
+        if held {
+            out.push_str(name);
+            out.push('+');
+        }
+    }
+    out.push_str(&token.to_ascii_uppercase());
+    Some(out)
 }
 
 /// The settings view-model.
@@ -356,6 +420,38 @@ impl SettingsVm {
         Some(SettingsCommand::SetInput {
             id: section.id.clone(),
             value: choice.code,
+        })
+    }
+
+    /// Capture a recorded key chord for the hotkey row at `row_index`, returning
+    /// the bind command.
+    ///
+    /// Returns `None` (still *pending*) when only modifiers are held (`key ==
+    /// None`) or the index is out of range — the recorder keeps listening. When a
+    /// key is present, emits a [`SettingsCommand::SetHotkey`] addressed to the
+    /// row's action; the app parses, validates, persists, and re-registers.
+    #[must_use]
+    pub fn capture_hotkey(
+        &self,
+        row_index: usize,
+        mods: CaptureModifiers,
+        key: Option<&str>,
+    ) -> Option<SettingsCommand> {
+        let row = self.hotkeys.get(row_index)?;
+        let binding = accelerator_string(mods, key)?;
+        Some(SettingsCommand::SetHotkey {
+            action_key: row.action_key.clone(),
+            binding,
+        })
+    }
+
+    /// Clear the binding for the hotkey row at `row_index`. Returns `None` for an
+    /// out-of-range index.
+    #[must_use]
+    pub fn clear_hotkey(&self, row_index: usize) -> Option<SettingsCommand> {
+        let row = self.hotkeys.get(row_index)?;
+        Some(SettingsCommand::ClearHotkey {
+            action_key: row.action_key.clone(),
         })
     }
 }
@@ -630,23 +726,96 @@ mod tests {
         assert_eq!(vm.select_monitor_input(0, 9), None);
     }
 
+    fn hotkey_row(action_key: &str, binding: &str) -> HotkeyRow {
+        HotkeyRow {
+            action_key: action_key.to_owned(),
+            action_label: action_key.to_owned(),
+            binding: binding.to_owned(),
+            conflicted: false,
+            unavailable: false,
+        }
+    }
+
     #[test]
     fn hotkeys_are_stored_and_exposed() {
         let mut vm = SettingsVm::new();
         vm.set_hotkeys(vec![
+            hotkey_row("brightness_up", "Ctrl+Alt+Up"),
             HotkeyRow {
-                action_label: "Brightness up".to_owned(),
-                binding: "Ctrl+Alt+Up".to_owned(),
-                conflicted: false,
-            },
-            HotkeyRow {
-                action_label: "Toggle flyout".to_owned(),
-                binding: "Ctrl+Alt+B".to_owned(),
                 conflicted: true,
+                ..hotkey_row("toggle_flyout", "Ctrl+Alt+B")
             },
         ]);
         assert_eq!(vm.hotkeys().len(), 2);
         assert!(vm.hotkeys().get(1).is_some_and(|r| r.conflicted));
+    }
+
+    fn mods(ctrl: bool, alt: bool, shift: bool, meta: bool) -> CaptureModifiers {
+        CaptureModifiers {
+            ctrl,
+            alt,
+            shift,
+            meta,
+        }
+    }
+
+    #[test]
+    fn accelerator_string_assembles_in_canonical_order() {
+        assert_eq!(
+            accelerator_string(mods(true, true, false, false), Some("Up")).as_deref(),
+            Some("Ctrl+Alt+UP")
+        );
+        assert_eq!(
+            accelerator_string(mods(false, false, true, true), Some("f9")).as_deref(),
+            Some("Shift+Super+F9")
+        );
+        // A bare key with no modifiers is a structurally valid accelerator.
+        assert_eq!(
+            accelerator_string(mods(false, false, false, false), Some("B")).as_deref(),
+            Some("B")
+        );
+    }
+
+    #[test]
+    fn accelerator_string_is_pending_without_a_key() {
+        // Modifiers-only (still recording) and an empty token both yield None.
+        assert_eq!(accelerator_string(mods(true, false, false, false), None), None);
+        assert_eq!(
+            accelerator_string(mods(true, true, false, false), Some("  ")),
+            None
+        );
+    }
+
+    #[test]
+    fn capture_hotkey_emits_sethotkey_for_the_row_action() {
+        let mut vm = SettingsVm::new();
+        vm.set_hotkeys(vec![hotkey_row("brightness_up", "")]);
+        assert_eq!(
+            vm.capture_hotkey(0, mods(true, true, false, false), Some("Up")),
+            Some(SettingsCommand::SetHotkey {
+                action_key: "brightness_up".to_owned(),
+                binding: "Ctrl+Alt+UP".to_owned(),
+            })
+        );
+        // Modifiers-only is pending (no command); out-of-range is ignored.
+        assert_eq!(vm.capture_hotkey(0, mods(true, false, false, false), None), None);
+        assert_eq!(
+            vm.capture_hotkey(9, mods(true, true, false, false), Some("Up")),
+            None
+        );
+    }
+
+    #[test]
+    fn clear_hotkey_emits_clear_for_the_row_action() {
+        let mut vm = SettingsVm::new();
+        vm.set_hotkeys(vec![hotkey_row("toggle_flyout", "Ctrl+Alt+B")]);
+        assert_eq!(
+            vm.clear_hotkey(0),
+            Some(SettingsCommand::ClearHotkey {
+                action_key: "toggle_flyout".to_owned(),
+            })
+        );
+        assert_eq!(vm.clear_hotkey(9), None);
     }
 
     #[test]

@@ -49,6 +49,14 @@ pub(crate) fn apply_to_document(doc: &mut ConfigDocument, command: &SettingsComm
             doc.set_monitor_dim_mode(id.as_str(), dim_mode_to_config(*mode));
             true
         }
+        SettingsCommand::SetHotkey {
+            action_key,
+            binding,
+        } => {
+            doc.set_hotkey(action_key, binding);
+            true
+        }
+        SettingsCommand::ClearHotkey { action_key } => doc.remove_hotkey(action_key),
         SettingsCommand::CheckUpdates
         | SettingsCommand::OpenReleasesPage
         | SettingsCommand::SetInput { .. } => false,
@@ -186,6 +194,41 @@ mod tests {
         assert!(saved.contains("update_check = true"), "{saved}");
         // The untouched key survived.
         assert!(saved.contains("autostart = true"), "{saved}");
+    }
+
+    #[test]
+    fn set_and_clear_hotkey_write_and_remove_binding() {
+        let mut doc = ConfigDocument::defaults();
+        assert!(apply_to_document(
+            &mut doc,
+            &SettingsCommand::SetHotkey {
+                action_key: "brightness_up".to_owned(),
+                binding: "Ctrl+Alt+UP".to_owned(),
+            }
+        ));
+        assert_eq!(
+            doc.config()
+                .expect("typed")
+                .hotkeys
+                .get("brightness_up")
+                .map(String::as_str),
+            Some("Ctrl+Alt+UP")
+        );
+        // Clearing an existing binding reports a change and removes it.
+        assert!(apply_to_document(
+            &mut doc,
+            &SettingsCommand::ClearHotkey {
+                action_key: "brightness_up".to_owned(),
+            }
+        ));
+        assert!(doc.config().expect("typed").hotkeys.is_empty());
+        // Clearing an absent binding is a no-op (no config change).
+        assert!(!apply_to_document(
+            &mut doc,
+            &SettingsCommand::ClearHotkey {
+                action_key: "brightness_up".to_owned(),
+            }
+        ));
     }
 
     #[test]
