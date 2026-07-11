@@ -1,11 +1,12 @@
-//! The non-Windows [`Dimmer`] stub.
+//! The [`Dimmer`] stub for targets without a native overlay backend.
 //!
-//! macOS (P6) and Linux (P7) get real overlay backends later. Until then this
-//! records-and-succeeds: [`apply`](Dimmer::apply) and [`clear`](Dimmer::clear)
-//! validate and remember the request but touch no screen, so the app's control
-//! logic, tests, and the diffing kernel run unchanged on every target. It is a
-//! documented no-op, **not** an error — higher layers treat "dimming applied"
-//! uniformly and the missing pixels are a platform limitation, not a fault.
+//! Windows and macOS have real backends; Linux (P7) gets one later. Until then
+//! this records-and-succeeds: [`apply`](Dimmer::apply) and
+//! [`clear`](Dimmer::clear) validate and remember the request but touch no
+//! screen, so the app's control logic, tests, and the diffing kernel run
+//! unchanged on every target. It is a documented no-op, **not** an error —
+//! higher layers treat "dimming applied" uniformly and the missing pixels are a
+//! platform limitation, not a fault.
 
 use duja_core::dimmer::{DimCommand, Dimmer, DimmerError};
 

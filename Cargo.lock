@@ -1197,7 +1197,14 @@ name = "duja-dimmer"
 version = "0.0.1"
 dependencies = [
  "crossbeam-channel",
+ "dispatch2",
  "duja-core",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "proptest",
  "thiserror 2.0.18",
  "windows 0.62.2",
 ]

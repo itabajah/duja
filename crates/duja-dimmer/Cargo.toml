@@ -28,8 +28,46 @@ windows = { version = "0.62", default-features = false, features = [
     "Win32_System_LibraryLoader",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS overlay backend: click-through NSWindow overlays marshalled onto the main
+# queue via dispatch2; opt-in gamma via Core Graphics; EDR guard via NSScreen.
+# Features are enabled per Objective-C class; a leaf class feature pulls in its
+# superclass features transitively.
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true, features = [
+    "std",
+    "NSGeometry",
+    "NSString",
+    "NSArray",
+] }
+objc2-app-kit = { workspace = true, features = [
+    "std",
+    # Unlocks the CGFloat/NSRect-typed methods (window frame, colour, alpha,
+    # NSScreen EDR headroom) — they are gated on the core-foundation geometry
+    # types coming from this feature.
+    "objc2-core-foundation",
+    "NSWindow",
+    "NSColor",
+    "NSScreen",
+    "NSResponder",
+    "NSView",
+    "NSGraphics",
+] }
+objc2-core-graphics = { workspace = true, features = [
+    "std",
+    "CGDirectDisplay",
+    "CGDisplayConfiguration",
+    "CGWindowLevel",
+    "CGError",
+    "CGGeometry",
+] }
+objc2-core-foundation = { workspace = true, features = ["std", "CFCGTypes"] }
+dispatch2 = { workspace = true }
+
 [dev-dependencies]
 duja-core = { workspace = true, features = ["test-support"] }
+# Property tests for the pure Cocoa geometry (coordinate flip round-trip).
+proptest = { workspace = true }
 
 [target.'cfg(windows)'.dev-dependencies]
 # Live overlay tests inspect the windows this backend creates (FindWindowExW,
@@ -38,6 +76,20 @@ windows = { version = "0.62", default-features = false, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# The live smoke test runs on the real main thread (harness = false), pumps a
+# CFRunLoop so the main-queue overlay ops drain, and asserts create/alpha/remove.
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = ["std", "NSApplication", "NSWindow"] }
+objc2-core-foundation = { workspace = true, features = ["std", "CFRunLoop", "CFDate"] }
+
+# The live smoke test owns `fn main` so it can run on the true main thread (the
+# default libtest harness runs test bodies on worker threads, where AppKit is
+# unusable). On non-macOS its `main` is empty and the binary trivially passes.
+[[test]]
+name = "macos_live"
+harness = false
 
 [lints]
 workspace = true
