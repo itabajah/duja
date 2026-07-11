@@ -23,13 +23,16 @@
 //! instance is the expected state, not a failure. Only a genuine backend fault
 //! on a machine that *does* have a panel surfaces as [`PanelError`].
 //!
-//! This crate is currently a Windows-only backend; on other targets [`enumerate`]
-//! is a no-op returning an empty list, so the workspace still builds and tests
-//! everywhere (the pure adapter logic is platform-independent).
+//! This crate has a Windows backend (`wmi`) and a macOS backend
+//! (`display_services`); on any other target [`enumerate`] is a no-op returning
+//! an empty list, so the workspace still builds and tests everywhere. The pure
+//! adapter logic — the transport seam, the float/level and identity mapping — is
+//! platform-independent and exercised by the controller contract on every OS.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 mod controller;
+mod display_services;
 mod error;
 mod transport;
 
@@ -40,22 +43,26 @@ pub use controller::PanelController;
 pub use error::PanelError;
 pub use transport::{PanelBrightness, PanelTransport};
 
+#[cfg(target_os = "macos")]
+pub use display_services::{DisplayServicesApi, DisplayServicesTransport, RealDisplayServices};
+
 use duja_core::id::StableDisplayId;
 
 /// An internal panel discovered by [`enumerate`], carrying its durable identity,
 /// a human-readable name, and enough OS handle to open a controller for it.
 ///
-/// The `instance_name` is the WMI `InstanceName` that keys every `WmiMonitor*`
-/// class for this panel; the Windows-only `open` method uses it to bind a
-/// transport.
+/// `instance_name` is the OS handle `open` binds a transport to: on Windows the
+/// WMI `InstanceName` that keys every `WmiMonitor*` class for this panel, on
+/// macOS the panel's `CGDirectDisplayID` rendered in decimal. It is kept as a
+/// `String` so the public type is uniform across backends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelDisplay {
     id: StableDisplayId,
     name: String,
-    #[cfg_attr(not(windows), allow(dead_code))]
-    // RATIONALE: `instance_name` keys the WMI transport in `open()`, which only
-    // exists on Windows; on other targets the field is retained for a uniform
-    // public type but is unused.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    // RATIONALE: `instance_name` keys the transport in `open()`, which only
+    // exists on Windows and macOS; on other targets the field is retained for a
+    // uniform public type but is unused.
     instance_name: String,
 }
 
@@ -73,8 +80,8 @@ impl PanelDisplay {
         &self.name
     }
 
-    /// The WMI `InstanceName` that identifies this panel across the
-    /// `WmiMonitor*` classes.
+    /// The OS handle that identifies this panel: the WMI `InstanceName` on
+    /// Windows, the decimal `CGDirectDisplayID` on macOS.
     #[must_use]
     pub fn instance_name(&self) -> &str {
         &self.instance_name
@@ -92,6 +99,32 @@ impl PanelDisplay {
     pub fn open(&self) -> Result<PanelController<wmi::WmiTransport>, PanelError> {
         let transport = wmi::WmiTransport::open(self.instance_name.clone())?;
         Ok(PanelController::new(transport))
+    }
+
+    /// Open a brightness controller bound to this panel.
+    ///
+    /// Parses the `CGDirectDisplayID` back out of `instance_name` and binds a
+    /// [`DisplayServicesTransport`] over the resolved private framework.
+    ///
+    /// # Errors
+    /// [`PanelError`] if `instance_name` is not a `CGDirectDisplayID` (it always
+    /// is for a value from [`enumerate`]) or the private framework can no longer
+    /// be resolved.
+    #[cfg(target_os = "macos")]
+    pub fn open(
+        &self,
+    ) -> Result<PanelController<DisplayServicesTransport<RealDisplayServices>>, PanelError> {
+        let display: display_services::CgDisplayId = self
+            .instance_name
+            .parse()
+            .map_err(|_| PanelError::Malformed("panel instance name is not a CGDirectDisplayID"))?;
+        let api = RealDisplayServices::resolve().ok_or(PanelError::DisplayServices {
+            context: "resolve DisplayServices framework",
+            code: 0,
+        })?;
+        Ok(PanelController::new(DisplayServicesTransport::new(
+            display, api,
+        )))
     }
 }
 
@@ -111,12 +144,26 @@ pub fn enumerate() -> Result<Vec<PanelDisplay>, PanelError> {
 
 /// Enumerate the internal panels that expose brightness control.
 ///
-/// On non-Windows targets this backend is not implemented, so the list is
-/// always empty. See the Windows variant for the real behaviour.
+/// Returns `Ok(vec![])` when the private `DisplayServices` framework is
+/// unavailable or no builtin panel reports brightness control; see the
+/// [crate docs](crate) on graceful absence.
 ///
 /// # Errors
-/// Never errors on non-Windows targets.
-#[cfg(not(windows))]
+/// Never errors: every absence is modelled as an empty list.
+#[cfg(target_os = "macos")]
+pub fn enumerate() -> Result<Vec<PanelDisplay>, PanelError> {
+    Ok(display_services::enumerate())
+}
+
+/// Enumerate the internal panels that expose brightness control.
+///
+/// On targets without a panel backend (non-Windows, non-macOS) this is a no-op,
+/// so the list is always empty. See the Windows and macOS variants for the real
+/// behaviour.
+///
+/// # Errors
+/// Never errors on these targets.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn enumerate() -> Result<Vec<PanelDisplay>, PanelError> {
     Ok(Vec::new())
 }
@@ -138,14 +185,14 @@ mod tests {
 
     #[test]
     fn enumerate_on_this_machine_does_not_error() {
-        // On the CI/dev desktop there is no internal panel, so this must return
-        // Ok — an empty list on Windows, and unconditionally empty elsewhere —
-        // and must never panic.
+        // Enumerate must return Ok and never panic on any machine. On Windows and
+        // macOS a host *with* an internal panel legitimately returns a non-empty
+        // list, so we assert only success there; a virtualized macOS CI runner
+        // may or may not report a builtin display, which is exactly why this
+        // asserts Ok, not emptiness (see the P6 brief).
         let panels = enumerate().expect("enumerate must not error on this machine");
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         assert!(panels.is_empty());
-        // On Windows we assert only that it succeeded; a machine *with* a panel
-        // would legitimately return a non-empty list.
         let _ = panels;
     }
 

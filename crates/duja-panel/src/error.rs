@@ -8,10 +8,11 @@ use duja_core::controller::ControlError;
 /// These cross into [`ControlError`] at the [`crate::PanelController`] trait
 /// boundary via the [`From`] impl below: a vanished panel becomes
 /// [`ControlError::Disconnected`], a deadline becomes [`ControlError::Timeout`],
-/// and everything else (a WMI/COM fault, malformed data) becomes an opaque
-/// [`ControlError::Backend`]. The mere *absence* of the WMI class or of any
-/// panel instance is **not** modelled here as an error — [`crate::enumerate`]
-/// reports that as an empty list, the expected state on a desktop.
+/// and everything else (a WMI/COM fault on Windows, a `DisplayServices` failure
+/// on macOS, malformed data) becomes an opaque [`ControlError::Backend`]. The mere
+/// *absence* of the WMI class, of the macOS private framework, or of any panel
+/// instance is **not** modelled here as an error — [`crate::enumerate`] reports
+/// that as an empty list, the expected state on a desktop.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PanelError {
@@ -33,6 +34,16 @@ pub enum PanelError {
     /// WMI returned data that did not match the expected shape.
     #[error("WMI returned malformed data: {0}")]
     Malformed(&'static str),
+    /// A macOS `DisplayServices` call failed. `context` names the failing
+    /// symbol; `code` is the raw non-zero return value for diagnosis.
+    #[error("DisplayServices failure in {context}: {code}")]
+    DisplayServices {
+        /// The `DisplayServices` symbol that failed (e.g.
+        /// `"DisplayServicesGetBrightness"`).
+        context: &'static str,
+        /// The raw non-zero status the call returned.
+        code: i32,
+    },
 }
 
 impl From<PanelError> for ControlError {
@@ -72,6 +83,13 @@ mod tests {
         ));
         assert!(matches!(
             ControlError::from(PanelError::Malformed("no CurrentBrightness")),
+            ControlError::Backend(_)
+        ));
+        assert!(matches!(
+            ControlError::from(PanelError::DisplayServices {
+                context: "DisplayServicesGetBrightness",
+                code: -1,
+            }),
             ControlError::Backend(_)
         ));
     }
