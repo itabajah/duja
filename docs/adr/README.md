@@ -15,6 +15,7 @@ MADR-lite format. Accepted ADRs are changed by superseding, not editing.
 | [0009](0009-software-renderer-default.md) | Slint renderer: software renderer default | accepted |
 | 0010 | Linux tray: tray-icon vs ksni | pending (P7) |
 | 0011 | GNOME Wayland dimming strategy | pending (P7 spike) |
+| [0013](0013-macos-ddc-wrap-vs-vendor.md) | macOS DDC/CI: own thin backend (don't wrap ddc-macos) | accepted |
 
 Spike evidence lives on branches `spike/eventloop`, `spike/ddc`,
 `spike/overlay` (code is not merged; findings are).

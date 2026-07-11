@@ -22,6 +22,9 @@ path = "../crates/duja-core"
 [dependencies.duja-ipc]
 path = "../crates/duja-ipc"
 
+[dependencies.duja-ddc]
+path = "../crates/duja-ddc"
+
 # Keep this crate out of the parent workspace: it is its own root.
 [workspace]
 
@@ -53,6 +56,13 @@ bench = false
 [[bin]]
 name = "fuzz_ipc_frame"
 path = "fuzz_targets/fuzz_ipc_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ddc_packet"
+path = "fuzz_targets/fuzz_ddc_packet.rs"
 test = false
 doc = false
 bench = false
