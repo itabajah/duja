@@ -128,6 +128,53 @@ fn clamp(value: i32, lo: i32, hi: i32) -> i32 {
     if hi < lo { lo } else { value.clamp(lo, hi) }
 }
 
+/// Scale a *logical* pixel size by a device scale factor into **physical**
+/// pixels.
+///
+/// The Slint window is laid out in logical pixels (`320px`), but the anchor math
+/// and `set_position` work in physical pixels (Win32 rects are physical on a
+/// Per-Monitor-V2 process). At a scale ≠ 1.0 the two differ, so the caller must
+/// convert the flyout size before clamping — otherwise the anchor keeps a
+/// *logical*-sized box on-screen while the real, larger physical window overflows
+/// the work-area edge (P0 live-QA bug 4). A non-finite/degenerate scale falls
+/// back to the unscaled dimension.
+pub(crate) fn scale_size(logical: (u32, u32), scale: f32) -> (u32, u32) {
+    (scale_dim(logical.0, scale), scale_dim(logical.1, scale))
+}
+
+/// Scale one dimension (see [`scale_size`]).
+fn scale_dim(value: u32, scale: f32) -> u32 {
+    // RATIONALE (cast_precision_loss): pixel counts are small; the f32 mantissa
+    // represents them exactly at these magnitudes.
+    #[allow(clippy::cast_precision_loss)]
+    let scaled = (value as f32) * scale;
+    if scaled.is_finite() && scaled >= 1.0 {
+        // RATIONALE (cast_possible_truncation, cast_sign_loss): `scaled` is
+        // finite, ≥ 1.0, and a rounded pixel count well within u32; the guard
+        // rules out negatives, NaN and infinities.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let out = scaled.round() as u32;
+        out
+    } else {
+        value
+    }
+}
+
+/// The top-left corner (physical pixels) that centres a window of `size` within
+/// `work`, clamped so an oversized window pins to the work-area origin.
+///
+/// Used to place the settings window deliberately on the active monitor rather
+/// than letting the OS drop it at a default cascade spot (P0 live-QA bug 4).
+pub(crate) fn center_in(work: Rect, size: (u32, u32)) -> (i32, i32) {
+    let sw = i32::try_from(size.0).unwrap_or(i32::MAX);
+    let sh = i32::try_from(size.1).unwrap_or(i32::MAX);
+    let free_w = i32::try_from(work.w).unwrap_or(i32::MAX).saturating_sub(sw);
+    let free_h = i32::try_from(work.h).unwrap_or(i32::MAX).saturating_sub(sh);
+    let x = work.x.saturating_add((free_w / 2).max(0));
+    let y = work.y.saturating_add((free_h / 2).max(0));
+    (x, y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +302,93 @@ mod tests {
         // A bottom-right corner click (equidistant to bottom and right) resolves
         // to the common bottom-taskbar layout.
         assert_eq!(taskbar_edge((1915, 1035), WORK), Edge::Bottom);
+    }
+
+    // --- DPI scaling (P0 live-QA bug 4) ----------------------------------
+
+    #[test]
+    fn scale_size_rounds_and_falls_back_on_a_degenerate_scale() {
+        assert_eq!(scale_size((320, 200), 1.25), (400, 250));
+        assert_eq!(scale_size((320, 200), 1.0), (320, 200));
+        assert_eq!(scale_size((321, 200), 1.5), (482, 300)); // 481.5 → 482
+        // A non-finite or zero scale returns the logical size unchanged.
+        assert_eq!(scale_size((320, 200), f32::NAN), (320, 200));
+        assert_eq!(scale_size((320, 200), 0.0), (320, 200));
+    }
+
+    #[test]
+    fn physical_window_stays_on_screen_at_125_percent() {
+        // The exact live-QA geometry: a 2560x1440 monitor at 125 % with a 60 px
+        // physical bottom taskbar; the tray click lands in the bottom-right.
+        let work = Rect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1380,
+        };
+        let logical = (320u32, 200u32);
+        let scale = 1.25;
+        let phys = scale_size(logical, scale);
+        assert_eq!(phys, (400, 250));
+        let phys_w = i32::try_from(phys.0).unwrap();
+        let phys_h = i32::try_from(phys.1).unwrap();
+        let cursor = (2545, 1432);
+
+        // Pre-fix: the anchor was computed from the *logical* size, so the clamp
+        // kept only a 320-wide box inside the work area — the real 400-wide
+        // window then overran the right edge.
+        let bug = flyout_origin(cursor, work, logical, 15);
+        assert!(
+            bug.0 + phys_w > work.right(),
+            "reproduces the off-screen overflow: {} + {} > {}",
+            bug.0,
+            phys_w,
+            work.right()
+        );
+
+        // Fixed: anchoring with the physical size keeps the real window fully on
+        // screen and pinned against the taskbar edge.
+        let fixed = flyout_origin(cursor, work, phys, 15);
+        assert!(fixed.0 + phys_w <= work.right(), "right edge on-screen");
+        assert!(
+            fixed.1 + phys_h <= work.bottom(),
+            "bottom edge above the taskbar"
+        );
+        assert!(fixed.0 >= work.x, "left edge on-screen");
+        assert!(fixed.1 >= work.y, "top edge on-screen");
+    }
+
+    #[test]
+    fn center_in_centres_and_pins_oversized_windows() {
+        let work = Rect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1380,
+        };
+        // 420x560 logical settings window at 125 % → 525x700 physical.
+        let size = scale_size((420, 560), 1.25);
+        assert_eq!(size, (525, 700));
+        let (x, y) = center_in(work, size);
+        // Centred: (2560-525)/2 = 1017, (1380-700)/2 = 340.
+        assert_eq!((x, y), (1017, 340));
+
+        // An oversized window pins to the work-area origin rather than going off
+        // the top-left.
+        let (x, y) = center_in(work, (4000, 4000));
+        assert_eq!((x, y), (0, 0));
+    }
+
+    #[test]
+    fn center_in_honours_a_negative_origin_monitor() {
+        let work = Rect {
+            x: -2560,
+            y: 0,
+            w: 2560,
+            h: 1380,
+        };
+        let (x, _y) = center_in(work, (500, 500));
+        // -2560 + (2560-500)/2 = -2560 + 1030 = -1530.
+        assert_eq!(x, -1530);
     }
 }

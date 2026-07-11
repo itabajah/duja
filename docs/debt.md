@@ -22,7 +22,6 @@ detouring; delete entries when drained.
 | P5 | `duja-core` `quirks` | User-directory quirk override (`quirks.override.toml`) is documented in the module + plan §7 but not wired — embedded DB only | Reduces attack surface today; wire with the P8 quirk-DB refresh from beta reports |
 | P5 | `duja-ui` | Theme "Auto" resolves to dark: no OS dark-mode query is exposed by the pinned winit/slint | Revisit at the next Slint bump; explicit light/dark config is honoured |
 | P5 | `duja-ui` settings | Sync-group management (create/assign/offset) has no UI, so `MonitorConfig.sync_offset` (persisted since P2) still has no consumer | Needs a group-management design, not a toggle; post-beta |
-| P5 | `duja-app` `tray.rs` | `wire_settings_commands` holds `APP.borrow_mut()` across `update_from_vm`; safe today (Slint does not re-enter `on_command` from property writes) but a defensive split would remove a latent double-borrow panic | Latent, unobserved (P5 gate P1); revisit if Slint's callback semantics change |
 | P6 | `duja-ddc` `mac/` | macOS DDC/CI (enumeration + both I2C transports) has **never run on real hardware** — Duja has no Mac and CI mac runners are virtualized. Experimental until ≥3 independent community confirmations per architecture (Apple Silicon + Intel), per plan §P6 (ADR-0013) | Hardware-blind by design; the pure packet codec is fully CI-verified, only the FFI I/O is community-gated |
 | P6 | `duja-ddc` `mac/sys.rs` | Display↔I2C-service matching is **positional** (CGGetOnlineDisplayList order); two identical external monitors can mis-pair ("brightness on the wrong monitor"). Port MonitorControl's EDID-attribute scoring (`ioregMatchScore`, `Location`-weighted) | Needs a multi-external-display Mac to validate; positional is correct for the common single-display case |
 | P6 | `duja-ddc` `mac/sys.rs` | `io_return_to_result` maps every non-success `IOReturn` to `Timeout`; a truly gone display is only removed by re-enumeration, never surfaced as `Disconnected` from the transport. Distinguish `kIOReturnNoDevice`/`NotResponding` | Same live-unplug experiment gap as the Windows `classify_failure` debt; needs hardware |
@@ -44,3 +43,10 @@ consumer (IPC client); full DDC capability probing landed for input sources
 read deadline is armed once per exchange (a dribbling peer can no longer renew
 it per syscall and pin a handler thread) and the first pipe instance is closed
 on thread-spawn failure.
+
+Drained by the P0 live-QA fix (2026-07-11): the `tray.rs` `APP.borrow_mut()`
+-across-`update_from_vm` latent double-borrow is gone — all `AppState` access now
+goes through the re-entrancy-safe `ReentrantCell` dispatcher (`with_app`), and
+the *actual* live-QA crash (the settings shell callbacks held a `SettingsVm`
+`borrow_mut` across the app's re-render `borrow`) is fixed by releasing the
+borrow before the handler runs.

@@ -17,6 +17,7 @@ smoke = ["dep:i-slint-backend-testing"]
 [dependencies]
 duja-core.workspace = true
 slint.workspace = true
+i-slint-backend-winit.workspace = true
 # Optional: only linked when the `smoke` feature is on (see `[features]`).
 i-slint-backend-testing = { workspace = true, optional = true }
 

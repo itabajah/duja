@@ -81,7 +81,12 @@ impl SettingsShell {
             let vm = self.vm.clone();
             let handler = handler.clone();
             self.ui.on_autostart_toggled(move |on| {
-                if let Some(command) = vm.borrow_mut().toggle_autostart(on) {
+                // Bind first so the VM's `borrow_mut` is released before the
+                // handler runs — the app re-renders from the same VM inside the
+                // handler and a still-held borrow would double-borrow it (P0
+                // bugs 1 & 2).
+                let command = vm.borrow_mut().toggle_autostart(on);
+                if let Some(command) = command {
                     (handler.borrow_mut())(command);
                 }
             });
@@ -90,7 +95,8 @@ impl SettingsShell {
             let vm = self.vm.clone();
             let handler = handler.clone();
             self.ui.on_theme_selected(move |index| {
-                if let Some(command) = vm.borrow_mut().select_theme(to_index(index)) {
+                let command = vm.borrow_mut().select_theme(to_index(index));
+                if let Some(command) = command {
                     (handler.borrow_mut())(command);
                 }
             });
@@ -110,17 +116,15 @@ impl SettingsShell {
             let render = self.render_closure();
             let handler = handler.clone();
             self.ui.on_check_updates_clicked(move || {
-                if let Some(command) = vm.borrow_mut().request_update_check() {
-                    render(&vm.borrow());
-                    (handler.borrow_mut())(command);
-                }
+                apply_command(&vm, SettingsVm::request_update_check, &render, &handler);
             });
         }
         {
             let vm = self.vm.clone();
             let handler = handler.clone();
             self.ui.on_open_releases_clicked(move || {
-                (handler.borrow_mut())(vm.borrow().open_releases_page());
+                let command = vm.borrow().open_releases_page();
+                (handler.borrow_mut())(command);
             });
         }
     }
@@ -132,13 +136,12 @@ impl SettingsShell {
             let render = self.render_closure();
             let handler = handler.clone();
             self.ui.on_monitor_floor_changed(move |idx, pct| {
-                if let Some(command) = vm
-                    .borrow_mut()
-                    .set_monitor_floor(to_index(idx), clamp_pct(pct))
-                {
-                    render(&vm.borrow());
-                    (handler.borrow_mut())(command);
-                }
+                apply_command(
+                    &vm,
+                    |v| v.set_monitor_floor(to_index(idx), clamp_pct(pct)),
+                    &render,
+                    &handler,
+                );
             });
         }
         {
@@ -146,10 +149,10 @@ impl SettingsShell {
             let render = self.render_closure();
             let handler = handler.clone();
             self.ui.on_monitor_dim_mode_selected(move |idx, option| {
-                if let Some(command) = vm
+                let command = vm
                     .borrow_mut()
-                    .select_monitor_dim_mode(to_index(idx), to_index(option))
-                {
+                    .select_monitor_dim_mode(to_index(idx), to_index(option));
+                if let Some(command) = command {
                     (handler.borrow_mut())(command);
                 } else {
                     // A rejected gamma choice: re-render so the selector snaps
@@ -162,10 +165,10 @@ impl SettingsShell {
             let vm = self.vm.clone();
             let handler = handler.clone();
             self.ui.on_monitor_input_selected(move |idx, option| {
-                if let Some(command) = vm
+                let command = vm
                     .borrow()
-                    .select_monitor_input(to_index(idx), to_index(option))
-                {
+                    .select_monitor_input(to_index(idx), to_index(option));
+                if let Some(command) = command {
                     (handler.borrow_mut())(command);
                 }
             });
@@ -194,6 +197,24 @@ impl SettingsShell {
         let _ = self.ui.show();
     }
 
+    /// Move the settings window to physical pixel `(x, y)`.
+    ///
+    /// Used to centre the window on the active monitor instead of letting the OS
+    /// drop it at a default cascade spot (P0 live-QA bug 4). Physical pixels pass
+    /// through `set_position` unscaled.
+    pub fn set_position(&self, x: i32, y: i32) {
+        self.ui
+            .window()
+            .set_position(slint::PhysicalPosition::new(x, y));
+    }
+
+    /// The settings window's current size in **physical** pixels.
+    #[must_use]
+    pub fn physical_size(&self) -> (u32, u32) {
+        let size = self.ui.window().size();
+        (size.width, size.height)
+    }
+
     /// Hide the settings window without destroying it.
     pub fn hide(&self) {
         let _ = self.ui.hide();
@@ -216,7 +237,9 @@ fn render_into(
 
     let monitor_data: Vec<SettingsMonitorData> =
         vm.monitors().iter().map(monitor_to_data).collect();
-    monitors.set_vec(monitor_data);
+    // Diff in place (never `set_vec`) so a per-monitor slider/combo the user is
+    // interacting with is not destroyed by an unrelated re-render (P0 bug 3).
+    crate::model_sync::sync(monitors, monitor_data);
 
     let hotkey_data: Vec<SettingsHotkeyData> = vm
         .hotkeys()
@@ -227,7 +250,7 @@ fn render_into(
             conflicted: row.conflicted,
         })
         .collect();
-    hotkeys.set_vec(hotkey_data);
+    crate::model_sync::sync(hotkeys, hotkey_data);
 }
 
 /// Map one [`MonitorSection`] to its Slint counterpart.
@@ -262,6 +285,32 @@ fn status_line(status: &UpdateStatus) -> &str {
     }
 }
 
+/// Run a view-model mutation, then (only if it produced a command) re-render and
+/// dispatch it — with the VM's `borrow_mut` **released before** the re-render.
+///
+/// This is the structural cure for P0 live-QA bugs 1 & 2: the widget callbacks
+/// used to hold `vm.borrow_mut()` (an `if let` scrutinee temporary lives through
+/// the whole arm in edition 2024) across `render(&vm.borrow())` and the app's
+/// `update_from_vm(&vm.borrow())`, double-borrowing the same `RefCell` and
+/// panicking straight into Slint's FFI (→ abort). Binding the mutation's result
+/// to a local drops the mutable borrow first, so the subsequent shared borrows
+/// are safe.
+fn apply_command<H, R>(
+    vm: &RefCell<SettingsVm>,
+    mutate: impl FnOnce(&mut SettingsVm) -> Option<SettingsCommand>,
+    render: &R,
+    handler: &RefCell<H>,
+) where
+    H: FnMut(SettingsCommand),
+    R: Fn(&SettingsVm),
+{
+    let command = mutate(&mut vm.borrow_mut());
+    if let Some(command) = command {
+        render(&vm.borrow());
+        (handler.borrow_mut())(command);
+    }
+}
+
 /// Convert a Slint `i32` widget index to a `usize`, mapping a (shouldn't-happen)
 /// negative value to an out-of-range index the view-model then ignores.
 fn to_index(index: i32) -> usize {
@@ -283,6 +332,65 @@ fn clamp_pct(value: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use duja_core::config::Config;
+    use duja_core::id::StableDisplayId;
+    use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
+
+    fn snapshot(serial: &str) -> DisplaySnapshot {
+        DisplaySnapshot {
+            id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap(),
+            name: format!("Monitor {serial}"),
+            kind: DisplayKind::ExternalDdc,
+            user_level_pct: 50,
+            capabilities: Capabilities::default(),
+        }
+    }
+
+    fn vm_with_one_monitor() -> SettingsVm {
+        let mut vm = SettingsVm::new();
+        vm.set_displays(&[snapshot("A")], &Config::default(), true);
+        vm
+    }
+
+    // --- P0 bugs 1 & 2: the settings callbacks must not double-borrow the VM ---
+    //
+    // The regression is that a widget callback held `vm.borrow_mut()` across a
+    // re-render that *reads* the same VM (`render(&vm.borrow())` here, and the
+    // app's `update_from_vm(&vm.borrow())` in production). `apply_command` is
+    // exercised with exactly that shape: a `render` that borrows the VM. Before
+    // the fix (borrow held across the arm) this panics with a `BorrowError`;
+    // after it, the mutable borrow is released first and it runs cleanly.
+
+    #[test]
+    fn apply_command_releases_borrow_before_render_and_dispatch() {
+        let vm = RefCell::new(vm_with_one_monitor());
+        let rendered = std::cell::Cell::new(false);
+        let render = |v: &SettingsVm| {
+            // Reads the VM exactly as `update_from_vm` does.
+            let _ = v.monitors();
+            rendered.set(true);
+        };
+        let dispatched = RefCell::new(Vec::new());
+        let handler = RefCell::new(|c: SettingsCommand| dispatched.borrow_mut().push(c));
+
+        // A floor change produces a command → render + dispatch must both run.
+        apply_command(&vm, |v| v.set_monitor_floor(0, 10), &render, &handler);
+
+        assert!(rendered.get(), "re-render must run without a double borrow");
+        assert_eq!(dispatched.borrow().len(), 1);
+        assert!(matches!(
+            dispatched.borrow().first(),
+            Some(SettingsCommand::SetMonitorFloor { pct: 10, .. })
+        ));
+    }
+
+    #[test]
+    fn apply_command_noop_when_mutation_yields_nothing() {
+        let vm = RefCell::new(SettingsVm::new()); // no monitors → out-of-range
+        let render = |_v: &SettingsVm| panic!("must not render when no command");
+        let handler = RefCell::new(|_c: SettingsCommand| panic!("must not dispatch"));
+        apply_command(&vm, |v| v.set_monitor_floor(0, 10), &render, &handler);
+    }
 
     #[test]
     fn clamp_pct_bounds_and_rounds() {

@@ -11,15 +11,19 @@
 //! Levels honour `RUST_LOG` when set, else default to WARN (file) / DEBUG
 //! (`--verbose`, stderr). Callers log stable ids only — never raw EDID bytes.
 
+use std::backtrace::Backtrace;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing_subscriber::EnvFilter;
 
 /// The rotating log file's base name.
 const LOG_FILE: &str = "duja.log";
+/// The crash-record file's base name (written by the panic hook).
+pub(crate) const CRASH_FILE: &str = "duja-crash.log";
 /// Per-file size cap before rotation (5 MB).
 const MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// Total files kept (the live file plus two rotated generations).
@@ -59,6 +63,72 @@ pub(crate) fn init(log_dir: Option<&Path>, verbose: bool) {
             .with_ansi(false)
             .try_init();
     }
+}
+
+/// Install a panic hook that writes a crash record to disk **synchronously**
+/// before the process tears down.
+///
+/// A panic inside a Slint/FFI callback unwinds into `extern "C"` and aborts
+/// (`0xe06d7363` → `0xc0000409`); the default hook only prints to stderr, which a
+/// `windows_subsystem = "windows"` release binary does not have — so the live-QA
+/// crash left **zero** diagnostics. This hook runs at panic time (before the
+/// abort) and writes the thread, panic message, location and a backtrace with
+/// plain [`std::fs`] (no buffering, an explicit flush), so the next field crash
+/// is recoverable from `crash_log`. It chains to the previous hook afterwards.
+///
+/// `crash_log` is `None` for console/`--verbose` modes (stderr is live there).
+pub(crate) fn install_panic_hook(crash_log: Option<PathBuf>) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(path) = crash_log.as_deref() {
+            let location = info.location().map(ToString::to_string);
+            let record = format_crash_record(
+                std::thread::current().name(),
+                &panic_message(info),
+                location.as_deref(),
+            );
+            let _ = write_crash_record(path, &record);
+        }
+        previous(info);
+    }));
+}
+
+/// Extract a human-readable message from a panic payload.
+fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let payload = info.payload();
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_owned()
+    }
+}
+
+/// Format a crash record: a timestamped block with the thread, location, message
+/// and a captured backtrace. Pure (backtrace aside) so it is unit-testable.
+fn format_crash_record(thread: Option<&str>, message: &str, location: Option<&str>) -> String {
+    let unix_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let backtrace = Backtrace::force_capture();
+    format!(
+        "--- duja crash ---\nunix_time={unix_time}\nthread={}\nlocation={}\nmessage={message}\nbacktrace:\n{backtrace}\n",
+        thread.unwrap_or("unknown"),
+        location.unwrap_or("unknown"),
+    )
+}
+
+/// Append `record` to `path` synchronously (creating the parent dir), flushing
+/// before returning. Best-effort — a logging failure never matters more than the
+/// crash itself.
+fn write_crash_record(path: &Path, record: &str) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(record.as_bytes())?;
+    file.flush()
 }
 
 /// Build an [`EnvFilter`] honouring `RUST_LOG`, defaulting to `default_level`.
@@ -182,6 +252,38 @@ mod tests {
         assert_eq!(w.write(b"world").expect("write"), 5);
         let contents = fs::read_to_string(dir.path().join("duja.log")).expect("read");
         assert_eq!(contents, "hello world");
+    }
+
+    #[test]
+    fn crash_record_is_written_synchronously_to_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A nested path proves the parent dir is created.
+        let path = dir.path().join("logs").join(CRASH_FILE);
+        let record = format_crash_record(Some("duja-main"), "boom happened", Some("tray.rs:1:2"));
+        write_crash_record(&path, &record).expect("write");
+        let contents = fs::read_to_string(&path).expect("read");
+        assert!(contents.contains("message=boom happened"), "{contents}");
+        assert!(contents.contains("thread=duja-main"), "{contents}");
+        assert!(contents.contains("location=tray.rs:1:2"), "{contents}");
+        assert!(contents.contains("backtrace:"), "{contents}");
+    }
+
+    #[test]
+    fn panic_hook_leaves_a_crash_record_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(CRASH_FILE);
+        // Save the current hook and restore it after, so this test does not leak
+        // its hook into any sibling test sharing the process.
+        let saved = std::panic::take_hook();
+        std::panic::set_hook(saved);
+        install_panic_hook(Some(path.clone()));
+        let result = std::panic::catch_unwind(|| panic!("simulated field crash"));
+        // Restore the default hook.
+        let _ = std::panic::take_hook();
+
+        assert!(result.is_err());
+        let contents = fs::read_to_string(&path).expect("crash record must exist");
+        assert!(contents.contains("simulated field crash"), "{contents}");
     }
 
     #[test]
