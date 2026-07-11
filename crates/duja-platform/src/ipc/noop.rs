@@ -1,9 +1,10 @@
-//! Non-Windows no-op IPC transport.
+//! No-op IPC transport for targets that are neither Windows nor unix.
 //!
-//! There is no local IPC on macOS/Linux yet (a unix-socket transport lands in
-//! P6/P7). The server accepts nothing; the client always reports
-//! [`IpcTransportError::NotRunning`] so `dujactl` transparently falls back to
-//! direct hardware access.
+//! Windows has the named-pipe transport and every unix target has the
+//! unix-domain-socket transport, so this stub is effectively dead — it exists
+//! only so the crate still builds on some exotic third target. The server
+//! accepts nothing; the client always reports [`IpcTransportError::NotRunning`]
+//! so `dujactl` transparently falls back to direct hardware access.
 
 use std::time::Duration;
 
