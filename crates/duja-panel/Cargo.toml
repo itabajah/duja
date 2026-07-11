@@ -28,6 +28,18 @@ features = [
     "Win32_System_Ole",
 ]
 
+# macOS internal-panel backend. Pinned here (not the workspace root) for the same
+# reason as `windows`: platform- and crate-specific, keeping the shared release
+# lockfile and root `[workspace.dependencies]` untouched. `core-graphics` (safe
+# CGDisplay enumeration) is taken with `default-features = false` + `link` — the
+# `link` feature emits the CoreGraphics framework link attribute, which is
+# required; the higher-OS API-gating features are not. `libc` provides
+# dlopen/dlsym for the private DisplayServices framework (bound by hand, since it
+# has no published bindings).
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.25", default-features = false, features = ["link"] }
+libc = "0.2"
+
 [dev-dependencies]
 duja-core = { workspace = true, features = ["test-support"] }
 
