@@ -1240,10 +1240,13 @@ dependencies = [
 name = "duja-platform"
 version = "0.0.1"
 dependencies = [
+ "core-foundation-sys",
  "crossbeam-channel",
+ "directories",
  "duja-core",
  "duja-ipc",
  "libc",
+ "rustix 1.1.4",
  "thiserror 2.0.18",
  "windows 0.62.2",
 ]

@@ -108,6 +108,14 @@ global-hotkey = "0.8.0"
 # Per-user config/state/log directories (duja-app, P4). Resolves the platform
 # ProjectDirs for io.github.itabajah.duja.
 directories = "6"
+# Unix single-instance lock + uid lookup (duja-platform, P6 macOS / P7 Linux):
+# rustix's safe wrappers give an advisory `flock` and `getuid` without any
+# `unsafe` in the single-instance module. `fs` = flock; `process` = getuid.
+rustix = { version = "1", features = ["fs", "process"] }
+# NOTE: `core-foundation-sys` (declared above in the duja-ddc block) is also the
+# macOS event pump's run-loop plumbing (duja-platform's dedicated CFRunLoop
+# thread); the CoreGraphics display-reconfiguration and IOKit system-power
+# externs are hand-declared in `duja-platform`'s `mac/sys.rs`.
 # Structured logging (duja-app, P4): a WARN rotating file log by default,
 # DEBUG-to-stderr under `--verbose`. EnvFilter for level control.
 tracing = "0.1"
