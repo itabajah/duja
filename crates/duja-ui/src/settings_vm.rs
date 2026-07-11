@@ -750,6 +750,9 @@ mod tests {
         assert!(vm.hotkeys().get(1).is_some_and(|r| r.conflicted));
     }
 
+    // RATIONALE: a terse test constructor mirroring `CaptureModifiers`' four
+    // modifier fields; the bool-per-modifier shape is the point here.
+    #[allow(clippy::fn_params_excessive_bools)]
     fn mods(ctrl: bool, alt: bool, shift: bool, meta: bool) -> CaptureModifiers {
         CaptureModifiers {
             ctrl,
@@ -779,7 +782,10 @@ mod tests {
     #[test]
     fn accelerator_string_is_pending_without_a_key() {
         // Modifiers-only (still recording) and an empty token both yield None.
-        assert_eq!(accelerator_string(mods(true, false, false, false), None), None);
+        assert_eq!(
+            accelerator_string(mods(true, false, false, false), None),
+            None
+        );
         assert_eq!(
             accelerator_string(mods(true, true, false, false), Some("  ")),
             None
@@ -798,7 +804,10 @@ mod tests {
             })
         );
         // Modifiers-only is pending (no command); out-of-range is ignored.
-        assert_eq!(vm.capture_hotkey(0, mods(true, false, false, false), None), None);
+        assert_eq!(
+            vm.capture_hotkey(0, mods(true, false, false, false), None),
+            None
+        );
         assert_eq!(
             vm.capture_hotkey(9, mods(true, true, false, false), Some("Up")),
             None

@@ -681,7 +681,7 @@ mod tests {
 
     impl HotkeyRegistrar for FakeRegistrar {
         fn clear(&mut self) {
-            self.clears += 1;
+            self.clears = self.clears.saturating_add(1);
             self.registered.clear();
         }
         fn register(&mut self, accel: &Accelerator, action: HotkeyAction) -> bool {
@@ -721,7 +721,11 @@ mod tests {
         let mut reg = FakeRegistrar::default();
         let outcomes = apply_plan(&mut reg, &plan);
         assert!(reg.registered.is_empty());
-        assert!(outcomes.iter().all(|o| o.result == RegisterResult::Conflict));
+        assert!(
+            outcomes
+                .iter()
+                .all(|o| o.result == RegisterResult::Conflict)
+        );
     }
 
     #[test]

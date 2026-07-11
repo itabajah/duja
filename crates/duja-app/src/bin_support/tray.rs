@@ -680,8 +680,10 @@ impl AppState {
         // DPI-compensate the framed window the same way as the flyout: content at
         // the visible logical width (design ÷ scale), window height = design × scale.
         let scale = self.settings_shell.scale_factor().max(0.1);
-        self.settings_shell
-            .set_geometry(SETTINGS_LOGICAL_WIDTH / scale, SETTINGS_LOGICAL_HEIGHT * scale);
+        self.settings_shell.set_geometry(
+            SETTINGS_LOGICAL_WIDTH / scale,
+            SETTINGS_LOGICAL_HEIGHT * scale,
+        );
         self.settings_shell.show();
         // Centre the window on the active monitor instead of leaving it at the
         // OS default cascade position (P0 live-QA bug 4).
@@ -1059,8 +1061,10 @@ fn resolved_hotkey_rows(
                 .bindings
                 .iter()
                 .any(|b| b.action == action && conflicting.contains(&b.accel));
-            let unavailable =
-                matches!(outcomes.get(&action), Some(hotkey::RegisterResult::OsRejected));
+            let unavailable = matches!(
+                outcomes.get(&action),
+                Some(hotkey::RegisterResult::OsRejected)
+            );
             HotkeyRow {
                 action_key: action.config_key().to_owned(),
                 action_label: action_label(action).to_owned(),
@@ -1481,8 +1485,8 @@ mod tests {
     //! weak and synthesising `WM_HOTKEY` does not reliably reach its handler); it
     //! is covered by the P1 `spike/eventloop` proof and manual hardware QA.
     use super::{Accelerator, Action, Code, GhkModifiers, HotkeyAction};
-    use super::{ToggleDecision, accel_to_hotkey, action_for, code_for_key, ghk_modifiers};
     use super::{TOGGLE_GUARD, toggle_decision};
+    use super::{ToggleDecision, accel_to_hotkey, action_for, code_for_key, ghk_modifiers};
     use std::time::Duration;
 
     #[test]
