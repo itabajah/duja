@@ -23,7 +23,7 @@
 // modules' dead-code allow.
 #![cfg_attr(not(windows), allow(dead_code))]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// A keyboard-modifier set, order-independent (a small bitmask).
@@ -301,6 +301,68 @@ pub fn resolve(hotkeys: &BTreeMap<String, String>) -> HotkeyPlan {
     plan.bindings.sort_by_key(|b| b.action);
     plan.conflicts = detect_conflicts(&plan.bindings);
     plan
+}
+
+/// How one binding fared when the tray tried to register it live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterResult {
+    /// Registered with the OS and now live.
+    Registered,
+    /// Skipped because its accelerator is bound to more than one action.
+    Conflict,
+    /// The OS refused the registration (the combo is already owned elsewhere).
+    OsRejected,
+}
+
+/// One binding's live-registration outcome, surfaced to the settings UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterOutcome {
+    /// The action the binding drives.
+    pub action: HotkeyAction,
+    /// The accelerator that was (attempted to be) registered.
+    pub accel: Accelerator,
+    /// What happened.
+    pub result: RegisterResult,
+}
+
+/// The OS-registration seam the tray implements over the real global-hotkey
+/// manager, faked in tests so [`apply_plan`] is exercised without touching the OS.
+pub trait HotkeyRegistrar {
+    /// Drop every current registration so a re-plan starts from a clean slate.
+    fn clear(&mut self);
+    /// Register one accelerator for an action. Returns `false` when the OS
+    /// refuses it (already owned by another app, or unsupported key).
+    fn register(&mut self, accel: &Accelerator, action: HotkeyAction) -> bool;
+}
+
+/// Re-register a whole [`HotkeyPlan`] against a [`HotkeyRegistrar`]: clear the old
+/// set, skip every accelerator caught in a conflict (P5 no-defaults policy: a
+/// combo bound to two actions binds neither), and register the rest — recording
+/// what happened to each for UI feedback.
+///
+/// Pure orchestration (no OS types), so it is unit-tested with a fake registrar.
+#[must_use]
+pub fn apply_plan(reg: &mut dyn HotkeyRegistrar, plan: &HotkeyPlan) -> Vec<RegisterOutcome> {
+    reg.clear();
+    let conflicting: BTreeSet<Accelerator> =
+        plan.conflicts.iter().map(|c| c.accel.clone()).collect();
+    plan.bindings
+        .iter()
+        .map(|binding| {
+            let result = if conflicting.contains(&binding.accel) {
+                RegisterResult::Conflict
+            } else if reg.register(&binding.accel, binding.action) {
+                RegisterResult::Registered
+            } else {
+                RegisterResult::OsRejected
+            };
+            RegisterOutcome {
+                action: binding.action,
+                accel: binding.accel.clone(),
+                result,
+            }
+        })
+        .collect()
 }
 
 /// Group the bindings by their accelerator and report every accelerator held by
@@ -606,5 +668,78 @@ mod tests {
             ("brightness_down", "Ctrl+Alt+Down"),
         ]));
         assert!(plan.conflicts.is_empty());
+    }
+
+    /// A fake registrar recording clears and registrations, with a configurable
+    /// set of accelerators the "OS" refuses.
+    #[derive(Default)]
+    struct FakeRegistrar {
+        clears: u32,
+        registered: Vec<(Accelerator, HotkeyAction)>,
+        reject: BTreeSet<Accelerator>,
+    }
+
+    impl HotkeyRegistrar for FakeRegistrar {
+        fn clear(&mut self) {
+            self.clears = self.clears.saturating_add(1);
+            self.registered.clear();
+        }
+        fn register(&mut self, accel: &Accelerator, action: HotkeyAction) -> bool {
+            if self.reject.contains(accel) {
+                return false;
+            }
+            self.registered.push((accel.clone(), action));
+            true
+        }
+    }
+
+    #[test]
+    fn apply_plan_clears_then_registers_non_conflicting_bindings() {
+        let plan = resolve(&table(&[
+            ("brightness_up", "Ctrl+Alt+Up"),
+            ("brightness_down", "Ctrl+Alt+Down"),
+        ]));
+        let mut reg = FakeRegistrar::default();
+        let outcomes = apply_plan(&mut reg, &plan);
+        // The old set is cleared before registering the new one.
+        assert_eq!(reg.clears, 1);
+        assert_eq!(reg.registered.len(), 2);
+        assert!(
+            outcomes
+                .iter()
+                .all(|o| o.result == RegisterResult::Registered)
+        );
+    }
+
+    #[test]
+    fn apply_plan_skips_conflicting_accelerators() {
+        // Same combo bound to two actions: neither is registered.
+        let plan = resolve(&table(&[
+            ("brightness_up", "Ctrl+Alt+Up"),
+            ("toggle_flyout", "alt+ctrl+up"),
+        ]));
+        let mut reg = FakeRegistrar::default();
+        let outcomes = apply_plan(&mut reg, &plan);
+        assert!(reg.registered.is_empty());
+        assert!(
+            outcomes
+                .iter()
+                .all(|o| o.result == RegisterResult::Conflict)
+        );
+    }
+
+    #[test]
+    fn apply_plan_reports_os_rejection() {
+        let plan = resolve(&table(&[("brightness_up", "Ctrl+Alt+Up")]));
+        let mut reg = FakeRegistrar {
+            reject: [accel("Ctrl+Alt+Up")].into_iter().collect(),
+            ..FakeRegistrar::default()
+        };
+        let outcomes = apply_plan(&mut reg, &plan);
+        assert!(reg.registered.is_empty());
+        assert_eq!(
+            outcomes.first().map(|o| o.result),
+            Some(RegisterResult::OsRejected)
+        );
     }
 }

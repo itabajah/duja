@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use crossbeam_channel::Sender;
@@ -46,7 +46,7 @@ use duja_core::config::Config;
 use duja_core::continuum::map_user_level;
 use duja_core::dimmer::{DimCommand, Dimmer};
 use duja_core::id::StableDisplayId;
-use duja_core::model::{DisplayKind, DisplaySnapshot};
+use duja_core::model::{DimMode, DisplayKind, DisplaySnapshot};
 use duja_dimmer::PlatformDimmer;
 use duja_platform::Autostart;
 use duja_ui::{
@@ -67,12 +67,54 @@ use crate::bin_support::{backend, gamma, ipc, run, settings, settings_apply, sta
 /// settings-UI follow-up.
 const HOTKEY_BRIGHTNESS_STEP: i16 = 5;
 
+/// How long after the flyout is hidden a tray-icon click is treated as the same
+/// dismissing gesture (rather than a fresh open), closing the click-outside race.
+const TOGGLE_GUARD: Duration = Duration::from_millis(200);
+
+/// What a tray-icon click resolves to, given flyout visibility + recency of hide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToggleDecision {
+    /// Open the flyout.
+    Show,
+    /// Hide the visible flyout.
+    Hide,
+    /// Swallow the click (it is the tail of the gesture that just dismissed the
+    /// flyout via focus-loss; re-opening would fight the user).
+    Ignore,
+}
+
+/// Decide what a tray-icon click should do.
+///
+/// A visible flyout hides. An already-hidden flyout normally re-opens — *unless*
+/// it was hidden within [`TOGGLE_GUARD`] of this click, which means focus-loss
+/// dismissal already fired for this same click; then the click is swallowed so
+/// the flyout does not immediately re-open (P0 live-QA bug 5 follow-up: clicking
+/// the tray icon while the flyout is open toggles it closed, not re-open).
+fn toggle_decision(
+    visible: bool,
+    since_hidden: Option<Duration>,
+    guard: Duration,
+) -> ToggleDecision {
+    if visible {
+        ToggleDecision::Hide
+    } else if since_hidden.is_some_and(|elapsed| elapsed < guard) {
+        ToggleDecision::Ignore
+    } else {
+        ToggleDecision::Show
+    }
+}
+
 mod geometry;
 mod icon;
 
 /// Nominal flyout size (px) for anchor computation; the window's real height is
 /// content-driven (see `flyout.slint`), this is the layout envelope.
 const FLYOUT_SIZE: (u32, u32) = (320, 480);
+/// The flyout's fixed logical width (matches `flyout.slint`).
+const FLYOUT_LOGICAL_WIDTH: f32 = 320.0;
+/// The settings window's fixed logical design size (matches `settings.slint`).
+const SETTINGS_LOGICAL_WIDTH: f32 = 440.0;
+const SETTINGS_LOGICAL_HEIGHT: f32 = 600.0;
 /// Gap kept from the work-area edges when placing the flyout.
 const FLYOUT_MARGIN: i32 = 12;
 
@@ -260,8 +302,12 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
     });
     // Global hotkeys: register from config on this (main) thread. A failure to
     // create the manager or register a binding only disables that hotkey — the
-    // app runs on without it.
-    let (hotkey_manager, hotkey_map) = register_hotkeys(&config);
+    // app runs on without it. The registrar is kept in the app state so the
+    // settings window can rebind and re-register it live.
+    let mut hotkeys = OsHotkeyRegistrar::new();
+    let initial_plan = hotkey::resolve(&config.hotkeys);
+    log_hotkey_issues(&initial_plan);
+    let hotkey_outcomes = outcomes_by_action(&hotkey::apply_plan(&mut hotkeys, &initial_plan));
     APP.with(|cell| {
         cell.set(Some(AppState {
             shell,
@@ -282,13 +328,15 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
             displays: Vec::new(),
             applied: BTreeSet::new(),
             flyout_visible: false,
-            _hotkeys: hotkey_manager,
+            last_hidden: None,
+            hotkeys,
+            hotkey_outcomes,
         }));
     });
     wire_ui_commands();
     wire_settings_commands();
     wire_tray_handlers();
-    wire_hotkey_handler(hotkey_map);
+    install_hotkey_event_handler();
     spawn_notification_bridge(notifications);
 
     // IPC control server: dujactl and second launches talk to us over the pipe.
@@ -375,9 +423,15 @@ struct AppState {
     /// Displays whose saved level has already been pushed to the engine.
     applied: BTreeSet<String>,
     flyout_visible: bool,
-    /// The global-hotkey manager, kept alive for the app's lifetime so its
-    /// registrations stay live. `None` if hotkeys could not be initialised.
-    _hotkeys: Option<GlobalHotKeyManager>,
+    /// When the flyout was last hidden, for the tray-click toggle guard
+    /// ([`toggle_decision`]).
+    last_hidden: Option<Instant>,
+    /// The live global-hotkey registrar (OS manager + id→action map), re-applied
+    /// whenever the hotkey config changes.
+    hotkeys: OsHotkeyRegistrar,
+    /// The last live-registration result per action, for settings-row feedback
+    /// (conflict / OS-rejected).
+    hotkey_outcomes: BTreeMap<HotkeyAction, hotkey::RegisterResult>,
 }
 
 impl AppState {
@@ -386,10 +440,11 @@ impl AppState {
         match action {
             Action::Open => self.show_flyout(),
             Action::Toggle => {
-                if self.flyout_visible {
-                    self.hide_flyout();
-                } else {
-                    self.show_flyout();
+                let since_hidden = self.last_hidden.map(|hidden| hidden.elapsed());
+                match toggle_decision(self.flyout_visible, since_hidden, TOGGLE_GUARD) {
+                    ToggleDecision::Hide => self.hide_flyout(),
+                    ToggleDecision::Show => self.show_flyout(),
+                    ToggleDecision::Ignore => {}
                 }
             }
             Action::OpenSettings => self.open_settings(),
@@ -423,6 +478,12 @@ impl AppState {
     /// floats far above the tray (P0 live-QA bug 4).
     fn show_flyout(&mut self) {
         use crate::bin_support::positioning::{flyout_origin, scale_size};
+        // Compensate for the Slint/winit fractional-DPI buffer undersize: lay the
+        // content out at the *visible* logical width (design ÷ scale) so nothing
+        // clips on the right (the window renders 320 logical → 400 px but the OS
+        // buffer stays 320 px, showing only the left 320 px = 256 logical here).
+        // Drive the window height too (a no-frame window is not auto-grown).
+        self.apply_flyout_geometry();
         let (cursor, work) = geometry::cursor_and_work_area();
         let scale = self.shell.scale_factor();
         let provisional =
@@ -435,12 +496,50 @@ impl AppState {
             let (x, y) = flyout_origin(cursor, work, actual, FLYOUT_MARGIN);
             self.shell.set_position(x, y);
         }
+        // Keep the flyout above other windows while visible and focus it so
+        // Esc/keyboard work immediately (user-reported: it opened underneath).
+        self.shell.surface(true);
+    }
+
+    /// Push the flyout's DPI-compensated usable width and content-derived height
+    /// into the window (both logical px).
+    fn apply_flyout_geometry(&self) {
+        let scale = self.shell.scale_factor().max(0.1);
+        // The window's `width`/`height` markup lengths are realised as *physical*
+        // pixels on this fractional-DPI path, while inner content is laid out in
+        // logical px. So: constrain content to the visible logical width
+        // (physical_width / scale = design / scale), and set the window height to
+        // the content's logical extent × scale so the visible logical height
+        // matches. On integer scales both reduce to the plain design values.
+        self.shell.set_usable_width(FLYOUT_LOGICAL_WIDTH / scale);
+        self.shell
+            .set_content_height(self.flyout_logical_height() * scale);
+    }
+
+    /// The flyout window's content-derived logical height.
+    ///
+    /// A no-frame window is not auto-sized to its preferred height, so this
+    /// mirrors the `.slint` layout arithmetic (chrome + one card per row) to size
+    /// it. Approximate by design — a few pixels of slack sit at the bottom.
+    fn flyout_logical_height(&self) -> f32 {
+        const CHROME: f32 = 118.0; // padding + header + footer + inter-section gaps
+        const CARD: f32 = 132.0; // one monitor card
+        const CARD_GAP: f32 = 8.0;
+        let rows = self.vm.borrow().rows().len();
+        let body = if rows == 0 {
+            100.0 // empty-state panel
+        } else {
+            let n = f32::from(u16::try_from(rows).unwrap_or(u16::MAX));
+            n * CARD + (n - 1.0) * CARD_GAP
+        };
+        (CHROME + body).clamp(160.0, 620.0)
     }
 
     /// Hide the flyout (process keeps running in the tray).
     fn hide_flyout(&mut self) {
         self.shell.hide();
         self.flyout_visible = false;
+        self.last_hidden = Some(Instant::now());
     }
 
     /// Dismiss the flyout when it loses focus (the user clicked outside it).
@@ -496,7 +595,81 @@ impl AppState {
                 let _ = self.engine_tx.send(EngineCommand::RefreshNow);
             }
             UiCommand::OpenSettings => self.open_settings(),
+            UiCommand::SetDimmingEnabled { id, on } => self.set_dimming_enabled(&id, on),
         }
+    }
+
+    /// Apply a flyout dimming toggle: persist the display's dim mode (overlay when
+    /// on, off when off), re-plan its dimmer batch, and refresh both windows.
+    ///
+    /// Routed through the same config-write + re-apply path a settings dim-mode
+    /// change uses, so the flyout toggle and the settings picker stay consistent.
+    fn set_dimming_enabled(&mut self, id: &StableDisplayId, on: bool) {
+        let mode = if on { DimMode::Overlay } else { DimMode::Off };
+        let command = SettingsCommand::SetMonitorDimMode {
+            id: id.clone(),
+            mode,
+        };
+        match settings_apply::persist_config_change(&self.config_path, &command) {
+            Ok(true) => self.reload_config(),
+            Ok(false) => {}
+            Err(e) => warn!(error = %e, "failed to persist dimming toggle"),
+        }
+        self.reapply_display(id);
+        self.refresh_flyout_dimming();
+        self.render();
+        // Keep the settings per-monitor picker in sync if it is open.
+        self.settings_vm.borrow_mut().set_displays(
+            &self.snapshots,
+            &self.config,
+            self.gamma_allowed,
+        );
+        self.settings_shell
+            .update_from_vm(&self.settings_vm.borrow());
+    }
+
+    /// Rebuild the flyout's per-display dimming info (floor + on/off) from the
+    /// current config and push it into the flyout view-model.
+    fn refresh_flyout_dimming(&self) {
+        use duja_core::config::DimMode as ConfigDimMode;
+        let info: BTreeMap<StableDisplayId, duja_ui::DimmingInfo> = self
+            .displays
+            .iter()
+            .map(|(id, kind)| {
+                let monitor = settings::monitor_config(&self.config, id.as_str());
+                let cfg = settings::continuum_for(*kind, &monitor, self.gamma_allowed);
+                (
+                    id.clone(),
+                    duja_ui::DimmingInfo {
+                        hardware_floor: cfg.hardware_floor,
+                        // Reflect the *configured* mode (not the HDR-guarded one)
+                        // so the toggle shows what the user chose.
+                        dimming_on: monitor.dim_mode != ConfigDimMode::Off,
+                    },
+                )
+            })
+            .collect();
+        self.vm.borrow_mut().set_dimming_info(info);
+    }
+
+    /// Resolve a fired global hotkey id to its action and apply it.
+    fn on_hotkey_fired(&mut self, id: u32) {
+        if let Some(action) = self.hotkeys.action_for_id(id) {
+            self.handle_action(action_for(action));
+        }
+    }
+
+    /// Re-resolve the hotkey config and re-register live, updating the
+    /// settings-row feedback (conflict / OS-rejected) and re-rendering.
+    fn reregister_hotkeys(&mut self) {
+        let plan = hotkey::resolve(&self.config.hotkeys);
+        log_hotkey_issues(&plan);
+        let outcomes = hotkey::apply_plan(&mut self.hotkeys, &plan);
+        self.hotkey_outcomes = outcomes_by_action(&outcomes);
+        let rows = resolved_hotkey_rows(&self.config, &self.hotkey_outcomes);
+        self.settings_vm.borrow_mut().set_hotkeys(rows);
+        self.settings_shell
+            .update_from_vm(&self.settings_vm.borrow());
     }
 
     /// Rebuild the settings view-model from live state and show the window.
@@ -504,6 +677,13 @@ impl AppState {
         self.rebuild_settings();
         self.settings_shell
             .update_from_vm(&self.settings_vm.borrow());
+        // DPI-compensate the framed window the same way as the flyout: content at
+        // the visible logical width (design ÷ scale), window height = design × scale.
+        let scale = self.settings_shell.scale_factor().max(0.1);
+        self.settings_shell.set_geometry(
+            SETTINGS_LOGICAL_WIDTH / scale,
+            SETTINGS_LOGICAL_HEIGHT * scale,
+        );
         self.settings_shell.show();
         // Centre the window on the active monitor instead of leaving it at the
         // OS default cascade position (P0 live-QA bug 4).
@@ -513,6 +693,8 @@ impl AppState {
             let (x, y) = crate::bin_support::positioning::center_in(work, size);
             self.settings_shell.set_position(x, y);
         }
+        // Bring settings to the foreground (normal level, not topmost).
+        self.settings_shell.focus();
     }
 
     /// Refresh the settings view-model from the current config, snapshots,
@@ -527,7 +709,7 @@ impl AppState {
         let theme = settings_apply::theme_to_choice(self.config.general.theme);
         let update_check_on = self.config.general.update_check;
 
-        let hotkeys = resolved_hotkey_rows(&self.config);
+        let hotkeys = resolved_hotkey_rows(&self.config, &self.hotkey_outcomes);
         {
             let mut vm = self.settings_vm.borrow_mut();
             vm.set_general(autostart_on, autostart_supported, theme, update_check_on);
@@ -538,6 +720,15 @@ impl AppState {
 
     /// Handle a command emitted by the settings view-model.
     fn on_settings_command(&mut self, command: SettingsCommand) {
+        // Guard: never persist a hotkey binding the parser would reject (an
+        // exotic key the .slint let through). The recorder just yields nothing.
+        if let SettingsCommand::SetHotkey { binding, .. } = &command
+            && Accelerator::parse(binding).is_err()
+        {
+            warn!(binding = %binding, "ignoring unparseable hotkey binding");
+            return;
+        }
+
         // 1. Persist the config-affecting part (format-preserving), then reload
         //    the typed config so in-memory state matches disk.
         match settings_apply::persist_config_change(&self.config_path, &command) {
@@ -556,9 +747,16 @@ impl AppState {
             SettingsCommand::CheckUpdates => self.start_update_check(),
             SettingsCommand::OpenReleasesPage => open_url(updates::RELEASES_PAGE_URL),
             SettingsCommand::SetMonitorFloor { id, .. }
-            | SettingsCommand::SetMonitorDimMode { id, .. } => self.reapply_display(&id),
+            | SettingsCommand::SetMonitorDimMode { id, .. } => {
+                self.reapply_display(&id);
+                self.refresh_flyout_dimming();
+                self.render();
+            }
             SettingsCommand::SetInput { id, value } => {
                 let _ = self.engine_tx.send(EngineCommand::SetInput { id, value });
+            }
+            SettingsCommand::SetHotkey { .. } | SettingsCommand::ClearHotkey { .. } => {
+                self.reregister_hotkeys();
             }
         }
 
@@ -714,7 +912,12 @@ impl AppState {
             })
             .collect();
         self.vm.borrow_mut().set_displays(rows);
+        self.refresh_flyout_dimming();
         self.render();
+        // Keep the width compensation + height current if the flyout is open.
+        if self.flyout_visible {
+            self.apply_flyout_geometry();
+        }
         self.apply_overlays();
         let _ = self.state.maybe_flush(now);
     }
@@ -831,18 +1034,44 @@ fn wire_settings_commands() {
     });
 }
 
-/// Build the read-only hotkey rows for the settings window from the config's
-/// `[hotkeys]` table, flagging bindings caught in a conflict.
-fn resolved_hotkey_rows(config: &Config) -> Vec<HotkeyRow> {
+/// Build the editable hotkey rows for the settings window.
+///
+/// One row per [`HotkeyAction`] (in a stable order), so every action shows a
+/// record/clear affordance even when currently unbound. Each row carries the
+/// configured binding (empty when unbound), a conflict flag (bound to the same
+/// combo as another action), and an OS-rejected flag (`unavailable`) from the
+/// last live registration outcome.
+fn resolved_hotkey_rows(
+    config: &Config,
+    outcomes: &BTreeMap<HotkeyAction, hotkey::RegisterResult>,
+) -> Vec<HotkeyRow> {
     let plan = hotkey::resolve(&config.hotkeys);
     let conflicting: BTreeSet<Accelerator> =
         plan.conflicts.iter().map(|c| c.accel.clone()).collect();
-    plan.bindings
-        .iter()
-        .map(|binding| HotkeyRow {
-            action_label: action_label(binding.action).to_owned(),
-            binding: binding.raw.clone(),
-            conflicted: conflicting.contains(&binding.accel),
+    HotkeyAction::ALL
+        .into_iter()
+        .map(|action| {
+            let binding = plan
+                .bindings
+                .iter()
+                .find(|b| b.action == action)
+                .map(|b| b.raw.clone())
+                .unwrap_or_default();
+            let conflicted = plan
+                .bindings
+                .iter()
+                .any(|b| b.action == action && conflicting.contains(&b.accel));
+            let unavailable = matches!(
+                outcomes.get(&action),
+                Some(hotkey::RegisterResult::OsRejected)
+            );
+            HotkeyRow {
+                action_key: action.config_key().to_owned(),
+                action_label: action_label(action).to_owned(),
+                binding,
+                conflicted,
+                unavailable,
+            }
         })
         .collect()
 }
@@ -956,87 +1185,116 @@ fn wire_tray_handlers() {
     }));
 }
 
-/// Register the configured global hotkeys on the current (main) thread.
+/// The live global-hotkey registrar: owns the OS manager, the currently
+/// registered [`HotKey`]s (so they can be unregistered on a re-plan), and the
+/// id → action map the event handler resolves against.
 ///
-/// Returns the manager (kept alive so registrations stay live) and a map from
-/// each registered hotkey's id to the [`Action`] it fires. Invalid bindings,
-/// accelerator conflicts, and per-binding registration failures (e.g. another
-/// app already owns the combo) are logged (WARN) and skipped — never fatal.
-fn register_hotkeys(config: &Config) -> (Option<GlobalHotKeyManager>, BTreeMap<u32, Action>) {
-    let plan = hotkey::resolve(&config.hotkeys);
-    for err in &plan.errors {
-        warn!(
-            key = %err.key,
-            binding = %err.raw,
-            reason = %err.reason,
-            "ignoring invalid hotkey binding"
-        );
-    }
-    for conflict in &plan.conflicts {
-        let actions: Vec<&str> = conflict.actions.iter().map(|a| a.config_key()).collect();
-        warn!(
-            combo = %conflict.accel,
-            ?actions,
-            "hotkey combo is bound to multiple actions; skipping all of them"
-        );
-    }
+/// Implements the pure [`hotkey::HotkeyRegistrar`] seam so [`hotkey::apply_plan`]
+/// drives it; the OS-touching parts live here, behind that seam.
+struct OsHotkeyRegistrar {
+    /// The OS manager, kept alive so registrations stay live. `None` if the
+    /// manager could not be created (hotkeys then silently unavailable).
+    manager: Option<GlobalHotKeyManager>,
+    /// The hotkeys currently registered with the OS (for `unregister_all`).
+    registered: Vec<HotKey>,
+    /// Which action each live hotkey id fires.
+    map: BTreeMap<u32, HotkeyAction>,
+}
 
-    let mut map = BTreeMap::new();
-    if plan.bindings.is_empty() {
-        return (None, map);
-    }
-    let manager = match GlobalHotKeyManager::new() {
-        Ok(manager) => manager,
-        Err(e) => {
-            warn!(error = %e, "global hotkey manager unavailable; hotkeys disabled");
-            return (None, map);
-        }
-    };
-
-    // Skip every accelerator that appears in a conflict.
-    let conflicting: BTreeSet<Accelerator> =
-        plan.conflicts.iter().map(|c| c.accel.clone()).collect();
-
-    for binding in &plan.bindings {
-        if conflicting.contains(&binding.accel) {
-            continue;
-        }
-        let Some(hk) = accel_to_hotkey(&binding.accel) else {
-            warn!(binding = %binding.raw, "hotkey key not supported by the OS backend; skipping");
-            continue;
+impl OsHotkeyRegistrar {
+    /// Create the registrar, eagerly building the OS manager on this (main)
+    /// thread. A manager failure is logged and leaves hotkeys unavailable.
+    fn new() -> Self {
+        let manager = match GlobalHotKeyManager::new() {
+            Ok(manager) => Some(manager),
+            Err(e) => {
+                warn!(error = %e, "global hotkey manager unavailable; hotkeys disabled");
+                None
+            }
         };
-        if binding.accel.modifiers.is_empty() {
-            warn!(binding = %binding.raw, "modifierless global hotkey may capture the key system-wide");
+        OsHotkeyRegistrar {
+            manager,
+            registered: Vec::new(),
+            map: BTreeMap::new(),
+        }
+    }
+
+    /// The action a live hotkey id fires, if any.
+    fn action_for_id(&self, id: u32) -> Option<HotkeyAction> {
+        self.map.get(&id).copied()
+    }
+}
+
+impl hotkey::HotkeyRegistrar for OsHotkeyRegistrar {
+    fn clear(&mut self) {
+        if let Some(manager) = &self.manager
+            && !self.registered.is_empty()
+            && let Err(e) = manager.unregister_all(&self.registered)
+        {
+            warn!(error = %e, "failed to unregister previous hotkeys");
+        }
+        self.registered.clear();
+        self.map.clear();
+    }
+
+    fn register(&mut self, accel: &Accelerator, action: HotkeyAction) -> bool {
+        let Some(manager) = &self.manager else {
+            return false;
+        };
+        let Some(hk) = accel_to_hotkey(accel) else {
+            warn!(accel = %accel, "hotkey key not supported by the OS backend; skipping");
+            return false;
+        };
+        if accel.modifiers.is_empty() {
+            warn!(accel = %accel, "modifierless global hotkey may capture the key system-wide");
         }
         let id = hk.id();
         match manager.register(hk) {
             Ok(()) => {
-                map.insert(id, action_for(binding.action));
-                debug!(binding = %binding.raw, action = binding.action.config_key(), "registered hotkey");
+                self.registered.push(hk);
+                self.map.insert(id, action);
+                debug!(accel = %accel, action = action.config_key(), "registered hotkey");
+                true
             }
-            Err(e) => warn!(
-                binding = %binding.raw,
-                error = %e,
-                "failed to register hotkey (already owned by another app?); skipping"
-            ),
+            Err(e) => {
+                warn!(accel = %accel, error = %e, "failed to register hotkey (already owned?); skipping");
+                false
+            }
         }
     }
-    (Some(manager), map)
 }
 
-/// Install the global-hotkey event handler that dispatches a pressed hotkey's
-/// [`Action`] onto the Slint loop. No-op when nothing is registered.
-fn wire_hotkey_handler(map: BTreeMap<u32, Action>) {
-    if map.is_empty() {
-        return;
+/// Log the parse errors and conflicts in a resolved [`hotkey::HotkeyPlan`].
+fn log_hotkey_issues(plan: &hotkey::HotkeyPlan) {
+    for err in &plan.errors {
+        warn!(key = %err.key, binding = %err.raw, reason = %err.reason, "ignoring invalid hotkey binding");
     }
+    for conflict in &plan.conflicts {
+        let actions: Vec<&str> = conflict.actions.iter().map(|a| a.config_key()).collect();
+        warn!(combo = %conflict.accel, ?actions, "hotkey combo bound to multiple actions; skipping all");
+    }
+}
+
+/// Index a batch of [`hotkey::RegisterOutcome`]s by action for settings-row
+/// feedback (the last outcome per action wins).
+fn outcomes_by_action(
+    outcomes: &[hotkey::RegisterOutcome],
+) -> BTreeMap<HotkeyAction, hotkey::RegisterResult> {
+    outcomes.iter().map(|o| (o.action, o.result)).collect()
+}
+
+/// Install the global-hotkey event handler. A pressed hotkey is resolved to its
+/// action against the live registrar (in the app state) on the Slint loop, so a
+/// live re-registration is picked up without re-installing the handler.
+fn install_hotkey_event_handler() {
     GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
         // Fire on the press edge only (the release edge arrives on global-hotkey's
-        // worker thread); hop onto the Slint loop via `dispatch`.
-        if event.state() == HotKeyState::Pressed
-            && let Some(&action) = map.get(&event.id())
-        {
-            dispatch(action);
+        // worker thread); hop onto the Slint loop via `with_app`.
+        if event.state() == HotKeyState::Pressed {
+            let id = event.id();
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(move |app| app.on_hotkey_fired(id));
+            });
         }
     }));
 }
@@ -1227,7 +1485,45 @@ mod tests {
     //! weak and synthesising `WM_HOTKEY` does not reliably reach its handler); it
     //! is covered by the P1 `spike/eventloop` proof and manual hardware QA.
     use super::{Accelerator, Action, Code, GhkModifiers, HotkeyAction};
-    use super::{accel_to_hotkey, action_for, code_for_key, ghk_modifiers};
+    use super::{TOGGLE_GUARD, toggle_decision};
+    use super::{ToggleDecision, accel_to_hotkey, action_for, code_for_key, ghk_modifiers};
+    use std::time::Duration;
+
+    #[test]
+    fn toggle_decision_hides_a_visible_flyout() {
+        // Visible → hide, regardless of the last-hidden timestamp.
+        assert_eq!(
+            toggle_decision(true, None, TOGGLE_GUARD),
+            ToggleDecision::Hide
+        );
+        assert_eq!(
+            toggle_decision(true, Some(Duration::from_millis(10)), TOGGLE_GUARD),
+            ToggleDecision::Hide
+        );
+    }
+
+    #[test]
+    fn toggle_decision_ignores_a_click_right_after_focus_loss_hide() {
+        // Hidden within the guard window: this click is the tail of the gesture
+        // that just dismissed the flyout; swallow it (do not re-open).
+        assert_eq!(
+            toggle_decision(false, Some(Duration::from_millis(50)), TOGGLE_GUARD),
+            ToggleDecision::Ignore
+        );
+    }
+
+    #[test]
+    fn toggle_decision_opens_when_hidden_long_ago_or_never() {
+        // Never shown, or hidden well before this click → open.
+        assert_eq!(
+            toggle_decision(false, None, TOGGLE_GUARD),
+            ToggleDecision::Show
+        );
+        assert_eq!(
+            toggle_decision(false, Some(Duration::from_millis(500)), TOGGLE_GUARD),
+            ToggleDecision::Show
+        );
+    }
 
     fn accel(s: &str) -> Accelerator {
         Accelerator::parse(s).expect("valid accelerator")

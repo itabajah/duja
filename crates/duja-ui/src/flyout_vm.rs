@@ -23,7 +23,7 @@
 //! The unresponsive set is tracked independently of the snapshot list, so a
 //! `set_displays` refresh preserves the greyed state.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use duja_core::id::StableDisplayId;
 use duja_core::model::{DisplayKind, DisplaySnapshot};
@@ -41,6 +41,21 @@ pub enum Theme {
     /// Dark palette (the flyout's default; the ADR-0009 Fluent dark look).
     #[default]
     Dark,
+}
+
+/// A display's dimming configuration, as the app resolves it from the continuum
+/// config and feeds into the flyout for the toggle + floor marker.
+///
+/// Kept minimal (no Slint, no continuum machinery) so the marker mapping is
+/// unit-testable in isolation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DimmingInfo {
+    /// The hardware brightness floor percentage, or `None` for a software-only
+    /// display (no hardware backlight, so no handoff marker).
+    pub hardware_floor: Option<u8>,
+    /// Whether software dimming is currently engaged (the configured dim mode is
+    /// not `Off`).
+    pub dimming_on: bool,
 }
 
 /// One monitor's row, as the `.slint` list renders it.
@@ -62,6 +77,43 @@ pub struct FlyoutRow {
     /// Whether the slider accepts input (the inverse of [`greyed`](Self::greyed)
     /// for P4; kept as its own field so future capability gating can diverge).
     pub slider_enabled: bool,
+    /// Whether software dimming is engaged for this display (drives the toggle).
+    pub dimming_on: bool,
+    /// The hardware brightness floor percentage, or `None` for a software-only
+    /// display. Drives the slider's handoff marker.
+    pub hardware_floor_pct: Option<u8>,
+}
+
+impl FlyoutRow {
+    /// Whether this display has a hardware floor (and therefore a handoff marker
+    /// on its slider). `false` for software-only displays.
+    #[must_use]
+    pub fn has_hardware_floor(&self) -> bool {
+        self.hardware_floor_pct.is_some()
+    }
+
+    /// The handoff fraction on the `0.0..=1.0` slider track: where hardware
+    /// brightness reaches its floor and software dimming takes over.
+    ///
+    /// This is the marker position the `.slint` layer renders. A floor of `20`
+    /// yields `0.2`; the degenerate floors `0` and `100` yield `0.0` and `1.0`.
+    /// A software-only display (no floor) yields `0.0` and no marker is drawn.
+    #[must_use]
+    pub fn floor_fraction(&self) -> f32 {
+        marker_fraction(self.hardware_floor_pct)
+    }
+}
+
+/// The handoff fraction (`0.0..=1.0`) for a hardware floor percentage.
+///
+/// `None` (software-only) and `Some(0)` both map to `0.0`; `Some(100)` maps to
+/// `1.0`; anything above 100 is clamped.
+#[must_use]
+fn marker_fraction(hardware_floor: Option<u8>) -> f32 {
+    match hardware_floor {
+        Some(pct) => f32::from(pct.min(100)) / 100.0,
+        None => 0.0,
+    }
 }
 
 /// The flyout's view-model: ordered rows, a link-all toggle, and a theme.
@@ -69,6 +121,10 @@ pub struct FlyoutRow {
 pub struct FlyoutVm {
     rows: Vec<FlyoutRow>,
     unresponsive: BTreeSet<StableDisplayId>,
+    /// Per-display dimming config (floor + on/off), tracked independently of the
+    /// snapshot list so it survives a `set_displays` refresh — the same pattern
+    /// as [`unresponsive`](Self::unresponsive).
+    dimming: BTreeMap<StableDisplayId, DimmingInfo>,
     link_all: bool,
     theme: Theme,
 }
@@ -86,6 +142,7 @@ impl FlyoutVm {
         FlyoutVm {
             rows: Vec::new(),
             unresponsive: BTreeSet::new(),
+            dimming: BTreeMap::new(),
             link_all: false,
             theme: Theme::default(),
         }
@@ -103,6 +160,7 @@ impl FlyoutVm {
             .into_iter()
             .map(|snap| {
                 let greyed = self.unresponsive.contains(&snap.id);
+                let dim = self.dimming.get(&snap.id).copied().unwrap_or_default();
                 FlyoutRow {
                     id: snap.id,
                     display_name: snap.name,
@@ -110,9 +168,47 @@ impl FlyoutVm {
                     kind_label: kind_label(snap.kind).to_owned(),
                     greyed,
                     slider_enabled: !greyed,
+                    dimming_on: dim.dimming_on,
+                    hardware_floor_pct: dim.hardware_floor,
                 }
             })
             .collect();
+    }
+
+    /// Replace the per-display dimming config (floor + on/off), patching each
+    /// matching row in place.
+    ///
+    /// Tracked independently of [`set_displays`](Self::set_displays) so the
+    /// marker + toggle survive snapshot refreshes. The app rebuilds this map from
+    /// the resolved continuum config whenever the config or display set changes.
+    pub fn set_dimming_info(&mut self, dimming: BTreeMap<StableDisplayId, DimmingInfo>) {
+        self.dimming = dimming;
+        for row in &mut self.rows {
+            let dim = self.dimming.get(&row.id).copied().unwrap_or_default();
+            row.dimming_on = dim.dimming_on;
+            row.hardware_floor_pct = dim.hardware_floor;
+        }
+    }
+
+    /// Toggle software dimming for the row at `row_index`, returning the command
+    /// to persist and re-plan.
+    ///
+    /// A greyed row (or an out-of-range index) changes nothing and returns
+    /// `None`. Otherwise the row's toggle state is updated optimistically and a
+    /// [`UiCommand::SetDimmingEnabled`] is emitted for the app to apply.
+    pub fn toggle_dimming(&mut self, row_index: usize, on: bool) -> Option<UiCommand> {
+        let row = self.rows.get_mut(row_index)?;
+        if row.greyed {
+            return None;
+        }
+        row.dimming_on = on;
+        if let Some(info) = self.dimming.get_mut(&row.id) {
+            info.dimming_on = on;
+        }
+        Some(UiCommand::SetDimmingEnabled {
+            id: row.id.clone(),
+            on,
+        })
     }
 
     /// Mark a display responsive or unresponsive, updating its row in place.
@@ -457,5 +553,99 @@ mod tests {
     fn refresh_requested_emits_refresh() {
         let vm = FlyoutVm::new();
         assert_eq!(vm.refresh_requested(), UiCommand::Refresh);
+    }
+
+    // --- dimming toggle + floor marker (feature 1) ---
+
+    fn dim(floor: Option<u8>, on: bool) -> DimmingInfo {
+        DimmingInfo {
+            hardware_floor: floor,
+            dimming_on: on,
+        }
+    }
+
+    #[test]
+    fn marker_fraction_maps_floor_to_track_position() {
+        // The canonical case and both degenerate floors.
+        assert!((marker_fraction(Some(20)) - 0.2).abs() < 1e-6);
+        assert!((marker_fraction(Some(0)) - 0.0).abs() < 1e-6);
+        assert!((marker_fraction(Some(100)) - 1.0).abs() < 1e-6);
+        // Over-range floor is clamped to 1.0.
+        assert!((marker_fraction(Some(250)) - 1.0).abs() < 1e-6);
+        // Software-only (no floor) sits at 0.0 (and draws no marker).
+        assert!((marker_fraction(None) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rows_expose_marker_and_toggle_from_dimming_info() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![
+            snap("A", "Ext", 60, DisplayKind::ExternalDdc),
+            snap("B", "Sw", 60, DisplayKind::SoftwareOnly),
+        ]);
+        let mut info = BTreeMap::new();
+        info.insert(id_of("A"), dim(Some(20), true));
+        info.insert(id_of("B"), dim(None, false));
+        vm.set_dimming_info(info);
+
+        let ext = vm.rows().first().expect("row A");
+        assert!(ext.has_hardware_floor());
+        assert!((ext.floor_fraction() - 0.2).abs() < 1e-6);
+        assert!(ext.dimming_on);
+
+        let sw = vm.rows().get(1).expect("row B");
+        assert!(!sw.has_hardware_floor());
+        assert!(!sw.dimming_on);
+    }
+
+    #[test]
+    fn dimming_info_survives_a_snapshot_refresh() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![snap("A", "Ext", 60, DisplayKind::ExternalDdc)]);
+        let mut info = BTreeMap::new();
+        info.insert(id_of("A"), dim(Some(30), true));
+        vm.set_dimming_info(info);
+        // A fresh snapshot batch must not clear the marker/toggle state.
+        vm.set_displays(vec![snap("A", "Ext", 55, DisplayKind::ExternalDdc)]);
+        let row = vm.rows().first().unwrap();
+        assert!((row.floor_fraction() - 0.3).abs() < 1e-6);
+        assert!(row.dimming_on);
+        assert_eq!(row.level_pct, 55);
+    }
+
+    #[test]
+    fn toggle_dimming_emits_command_and_updates_row() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![snap("A", "Ext", 60, DisplayKind::ExternalDdc)]);
+        let mut info = BTreeMap::new();
+        info.insert(id_of("A"), dim(Some(20), true));
+        vm.set_dimming_info(info);
+
+        assert_eq!(
+            vm.toggle_dimming(0, false),
+            Some(UiCommand::SetDimmingEnabled {
+                id: id_of("A"),
+                on: false,
+            })
+        );
+        assert!(!vm.rows().first().unwrap().dimming_on);
+        // Toggling back on round-trips.
+        assert_eq!(
+            vm.toggle_dimming(0, true),
+            Some(UiCommand::SetDimmingEnabled {
+                id: id_of("A"),
+                on: true,
+            })
+        );
+        assert!(vm.rows().first().unwrap().dimming_on);
+    }
+
+    #[test]
+    fn toggle_dimming_ignores_greyed_and_out_of_range() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![snap("A", "Ext", 60, DisplayKind::ExternalDdc)]);
+        vm.set_unresponsive(&id_of("A"), true);
+        assert_eq!(vm.toggle_dimming(0, false), None);
+        assert_eq!(vm.toggle_dimming(9, true), None);
     }
 }

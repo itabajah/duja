@@ -97,6 +97,24 @@ impl FlyoutShell {
             });
         }
 
+        // Dimming toggle: apply to the VM, re-render, forward the command.
+        {
+            let vm = self.vm.clone();
+            let rows = self.rows.clone();
+            let weak = self.ui.as_weak();
+            let handler = handler.clone();
+            self.ui.on_dimming_toggled(move |idx, on| {
+                let index = usize::try_from(idx).unwrap_or(usize::MAX);
+                let command = vm.borrow_mut().toggle_dimming(index, on);
+                if let Some(ui) = weak.upgrade() {
+                    render_into(&ui, &rows, &vm.borrow());
+                }
+                if let Some(command) = command {
+                    (handler.borrow_mut())(command);
+                }
+            });
+        }
+
         // Link toggle: pure VM state, no command.
         {
             let vm = self.vm.clone();
@@ -115,10 +133,18 @@ impl FlyoutShell {
             });
         }
 
-        // Esc hides the flyout (process keeps running in the tray).
+        // Esc and the close button both hide the flyout (process stays in tray).
         {
             let weak = self.ui.as_weak();
             self.ui.on_esc_pressed(move || {
+                if let Some(ui) = weak.upgrade() {
+                    let _ = ui.hide();
+                }
+            });
+        }
+        {
+            let weak = self.ui.as_weak();
+            self.ui.on_close_requested(move || {
                 if let Some(ui) = weak.upgrade() {
                     let _ = ui.hide();
                 }
@@ -132,6 +158,25 @@ impl FlyoutShell {
                 (handler.borrow_mut())(UiCommand::OpenSettings);
             });
         }
+    }
+
+    /// Set the flyout's usable content width (logical px).
+    ///
+    /// On a fractional-scale monitor Slint/winit leave the OS window buffer
+    /// narrower than the rendered content (the window renders `width` logical →
+    /// `width × scale` physical, but the OS buffer stays `width` physical), so the
+    /// right edge is clipped. Laying the content out at `design_width / scale`
+    /// keeps everything inside the visible buffer. No-op-safe on integer scales
+    /// (the value equals the design width).
+    pub fn set_usable_width(&self, logical_width: f32) {
+        self.ui.set_usable_width(logical_width);
+    }
+
+    /// Set the flyout's desired window height (logical px). A no-frame top-level
+    /// window is not auto-grown to its content preferred height after the rows
+    /// populate asynchronously, so the app drives it from the row count.
+    pub fn set_content_height(&self, logical_height: f32) {
+        self.ui.set_content_height(logical_height);
     }
 
     /// Position the flyout at physical pixel `(x, y)` and show it.
@@ -170,6 +215,26 @@ impl FlyoutShell {
     #[must_use]
     pub fn scale_factor(&self) -> f32 {
         self.ui.window().scale_factor()
+    }
+
+    /// Raise the flyout above other windows and (best-effort) give it focus.
+    ///
+    /// A tray flyout must never be buried, so while visible it is kept
+    /// always-on-top (`topmost`); it is also focused so Esc/keyboard work at once
+    /// and focus-loss dismissal has a coherent baseline. Focus may be refused by
+    /// the OS foreground lock when not shown from a user gesture (e.g. an IPC
+    /// `ShowFlyout`); the topmost level still applies. No-op off the winit backend.
+    pub fn surface(&self, topmost: bool) {
+        use i_slint_backend_winit::WinitWindowAccessor;
+        use i_slint_backend_winit::winit::window::WindowLevel;
+        self.ui.window().with_winit_window(|w| {
+            w.set_window_level(if topmost {
+                WindowLevel::AlwaysOnTop
+            } else {
+                WindowLevel::Normal
+            });
+            w.focus_window();
+        });
     }
 
     /// Hide the flyout without destroying it (it stays alive in the tray).
@@ -219,6 +284,9 @@ fn row_to_data(row: &FlyoutRow) -> FlyoutRowData {
         kind: SharedString::from(row.kind_label.as_str()),
         greyed: row.greyed,
         slider_enabled: row.slider_enabled,
+        dimming_on: row.dimming_on,
+        has_floor: row.has_hardware_floor(),
+        marker_fraction: row.floor_fraction(),
     }
 }
 

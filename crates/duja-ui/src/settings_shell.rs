@@ -65,14 +65,70 @@ impl SettingsShell {
         let handler = Rc::new(RefCell::new(handler));
         self.wire_general(&handler);
         self.wire_monitors(&handler);
+        self.wire_hotkeys(&handler);
 
-        // Esc hides the window (process keeps running in the tray).
-        let weak = self.ui.as_weak();
-        self.ui.on_esc_pressed(move || {
-            if let Some(ui) = weak.upgrade() {
-                let _ = ui.hide();
-            }
-        });
+        // Esc and the close button both hide the window (stays in the tray).
+        {
+            let weak = self.ui.as_weak();
+            self.ui.on_esc_pressed(move || {
+                if let Some(ui) = weak.upgrade() {
+                    let _ = ui.hide();
+                }
+            });
+        }
+        {
+            let weak = self.ui.as_weak();
+            self.ui.on_close_requested(move || {
+                if let Some(ui) = weak.upgrade() {
+                    let _ = ui.hide();
+                }
+            });
+        }
+    }
+
+    /// Wire the editable hotkey rows (record a chord / clear a binding).
+    fn wire_hotkeys<H: FnMut(SettingsCommand) + 'static>(&self, handler: &Rc<RefCell<H>>) {
+        {
+            let vm = self.vm.clone();
+            let render = self.render_closure();
+            let weak = self.ui.as_weak();
+            let handler = handler.clone();
+            self.ui
+                .on_hotkey_key_captured(move |idx, ctrl, alt, shift, meta, token| {
+                    let row = to_index(idx);
+                    let key = if token.is_empty() {
+                        None
+                    } else {
+                        Some(token.as_str())
+                    };
+                    let mods = crate::settings_vm::CaptureModifiers {
+                        ctrl,
+                        alt,
+                        shift,
+                        meta,
+                    };
+                    let command = vm.borrow().capture_hotkey(row, mods, key);
+                    // A complete chord ends recording and dispatches; a
+                    // modifiers-only (pending) chord keeps the recorder armed.
+                    if let Some(command) = command {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.set_recording_index(-1);
+                        }
+                        render(&vm.borrow());
+                        (handler.borrow_mut())(command);
+                    }
+                });
+        }
+        {
+            let vm = self.vm.clone();
+            let handler = handler.clone();
+            self.ui.on_hotkey_clear_clicked(move |idx| {
+                let command = vm.borrow().clear_hotkey(to_index(idx));
+                if let Some(command) = command {
+                    (handler.borrow_mut())(command);
+                }
+            });
+        }
     }
 
     /// Wire the general-section widgets (autostart, theme, update check).
@@ -215,6 +271,32 @@ impl SettingsShell {
         (size.width, size.height)
     }
 
+    /// The window's device scale factor (physical / logical pixels).
+    #[must_use]
+    pub fn scale_factor(&self) -> f32 {
+        self.ui.window().scale_factor()
+    }
+
+    /// Set the settings window's DPI-compensated usable content width and its
+    /// content height (both logical px), mirroring the flyout — the framed
+    /// window's buffer is also undersized on fractional-scale monitors.
+    pub fn set_geometry(&self, usable_width: f32, content_height: f32) {
+        self.ui.set_usable_width(usable_width);
+        self.ui.set_content_height(content_height);
+    }
+
+    /// Bring the settings window to the foreground (best-effort focus).
+    ///
+    /// A normal window — *not* topmost — so it opens above the caller but does not
+    /// float over everything. No-op off the winit backend or if the OS refuses
+    /// the foreground change.
+    pub fn focus(&self) {
+        use i_slint_backend_winit::WinitWindowAccessor;
+        self.ui.window().with_winit_window(|w| {
+            w.focus_window();
+        });
+    }
+
     /// Hide the settings window without destroying it.
     pub fn hide(&self) {
         let _ = self.ui.hide();
@@ -248,6 +330,7 @@ fn render_into(
             action: SharedString::from(row.action_label.as_str()),
             binding: SharedString::from(row.binding.as_str()),
             conflicted: row.conflicted,
+            unavailable: row.unavailable,
         })
         .collect();
     crate::model_sync::sync(hotkeys, hotkey_data);
