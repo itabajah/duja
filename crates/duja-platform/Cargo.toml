@@ -23,12 +23,6 @@ crossbeam-channel = { workspace = true }
 # tests, mirroring duja-core's `test-support` convention. Never in a release.
 test-support = []
 
-[target.'cfg(unix)'.dependencies]
-# IPC unix-domain-socket transport (P6 macOS / P7 Linux): the sockets and
-# permissions come from `std::os::unix`; `libc` is confined to the peer-credential
-# seam (getpeereid / SO_PEERCRED) and the euid/uid lookups.
-libc = { workspace = true }
-
 [target.'cfg(windows)'.dependencies]
 # Windows event pump: hidden top-level window + display/power/session
 # notifications (P3). default-features off; enable only the modules we touch.
@@ -53,6 +47,28 @@ windows = { version = "0.62", default-features = false, features = [
     "Win32_Storage_FileSystem",
     "Win32_Security_Authorization",
 ] }
+
+# -- Unix backends (macOS today, Linux at P7) -------------------------------
+[target.'cfg(unix)'.dependencies]
+# IPC unix-domain-socket transport (P6 macOS / P7 Linux): the sockets and
+# permissions come from `std::os::unix`; `libc` is confined to the peer-credential
+# seam (getpeereid / SO_PEERCRED) and the euid/uid lookups.
+libc = { workspace = true }
+# Single-instance guard: an advisory `flock` on a per-user lock file, plus the
+# uid that names the `/tmp` runtime-dir fallback. rustix's safe wrappers keep
+# `single_instance` free of `unsafe`.
+rustix = { workspace = true }
+# Resolves the macOS Application Support data dir (lock file) and the home dir
+# (LaunchAgent plist).
+directories = { workspace = true }
+
+# -- macOS event pump -------------------------------------------------------
+[target.'cfg(target_os = "macos")'.dependencies]
+# CoreFoundation run-loop plumbing for the dedicated CFRunLoop thread. The
+# CoreGraphics `CGDisplayRegisterReconfigurationCallback` and IOKit
+# `IORegisterForSystemPower` externs are hand-declared in `mac/sys.rs` (no
+# maintained safe binding covers them), each `unsafe` block carrying a SAFETY.
+core-foundation-sys = { workspace = true }
 
 [dev-dependencies]
 duja-core = { workspace = true, features = ["test-support"] }

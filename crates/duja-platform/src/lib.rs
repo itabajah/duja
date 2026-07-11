@@ -14,13 +14,15 @@
 //!   receive `WM_DISPLAYCHANGE`, which is the whole reason for a real window) +
 //!   `RegisterDeviceNotification` for the monitor device interface +
 //!   `WM_POWERBROADCAST` + `WTSRegisterSessionNotification`.
-//! - **macOS** (P6) — `CGDisplayRegisterReconfigurationCallback`.
+//! - **macOS** (P6) — a dedicated `CFRunLoop` thread with
+//!   `CGDisplayRegisterReconfigurationCallback` (display topology) and `IOKit`
+//!   `IORegisterForSystemPower` (suspend/resume). See the `mac` module.
 //! - **Linux** (P7) — udev `drm` monitor.
 //!
-//! On non-Windows targets today the pump is a no-op: [`spawn`](EventPump::spawn)
-//! succeeds and returns a receiver that stays open but never yields an event
-//! (so `recv_timeout` blocks and times out rather than reporting a disconnect).
-//! The real backends replace it in P6/P7.
+//! On the remaining non-Windows, non-macOS targets the pump is still a no-op:
+//! [`spawn`](EventPump::spawn) succeeds and returns a receiver that stays open
+//! but never yields an event (so `recv_timeout` blocks and times out rather than
+//! reporting a disconnect). The real Linux backend replaces it in P7.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
@@ -28,6 +30,15 @@ use crossbeam_channel::Receiver;
 
 #[cfg(windows)]
 mod win;
+
+#[cfg(target_os = "macos")]
+mod mac;
+
+// Pure raw-code → `PlatformEvent` mapping for the macOS backend. Compiled on
+// macOS (where `mac::sys` calls it) and, under `cfg(test)`, on every host so its
+// logic is unit-tested cross-platform without macOS hardware.
+#[cfg(any(test, target_os = "macos"))]
+mod mac_events;
 
 pub mod autostart;
 pub mod ipc;
@@ -121,22 +132,27 @@ impl EventPump {
 #[cfg(windows)]
 type Backend = win::Pump;
 
-// -- Non-Windows no-op backend --------------------------------------------
+// -- macOS backend selection ----------------------------------------------
 
-/// Placeholder backend for targets without a real event source yet (P6/P7).
+#[cfg(target_os = "macos")]
+type Backend = mac::Pump;
+
+// -- Non-Windows, non-macOS no-op backend ---------------------------------
+
+/// Placeholder backend for targets without a real event source yet (Linux, P7).
 ///
 /// Holds the sending half of the channel open so the returned receiver blocks
 /// (and times out) rather than reporting an immediate disconnect — matching the
 /// "silent but live" contract documented on [`EventPump::spawn`].
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 struct Noop {
     _tx: crossbeam_channel::Sender<PlatformEvent>,
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 type Backend = Noop;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 impl Noop {
     // RATIONALE (clippy::unnecessary_wraps): the backend `spawn` contract is
     // fallible on Windows; the no-op backend keeps the identical signature so
@@ -186,7 +202,7 @@ mod tests {
         assert!(format!("{e:?}").contains("Init"));
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn noop_backend_spawns_and_shuts_down_without_firing() {
         use std::time::Duration;

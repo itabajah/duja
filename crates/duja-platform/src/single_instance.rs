@@ -12,13 +12,27 @@
 //! become the owner. (P4 has the second instance simply exit 0; the IPC
 //! "show the flyout of the running instance" handshake lands in P5.)
 //!
-//! On non-Windows targets the guard is a no-op that always reports "first"
-//! (there is no tray app there yet; real backends land in P6/P7).
+//! # Unix (macOS today, Linux at P7)
+//!
+//! The same contract is met with an **exclusive advisory `flock`** on a per-user
+//! lock file: the first process takes `LOCK_EX | LOCK_NB` and holds the open file
+//! open for its lifetime; a second process's `LOCK_NB` attempt fails with
+//! `EWOULDBLOCK` and learns it is not first. Advisory `flock` locks are released
+//! when the last file description closes *or the process dies*, so a crash never
+//! leaves a stuck lock — the next launch takes over the (still-present) lock file.
+//! The lock lives in the macOS Application Support data dir, else
+//! `$XDG_RUNTIME_DIR/duja/`, else `/tmp/duja-<uid>/`; each directory is created
+//! `0700`. `rustix`'s safe wrappers keep this module free of `unsafe`.
+//!
+//! On any other target the guard is a no-op that always reports "first".
 
 #[cfg(windows)]
 pub use imp::SingleInstance;
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+pub use unix::SingleInstance;
+
+#[cfg(not(any(windows, unix)))]
 pub use stub::SingleInstance;
 
 #[cfg(windows)]
@@ -230,7 +244,224 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+mod unix {
+    use std::fmt;
+    use std::fs::{File, OpenOptions};
+    use std::path::{Path, PathBuf};
+
+    use rustix::fs::{FlockOperation, flock};
+    use rustix::io::Errno;
+
+    /// The lock-file name inside the per-user lock directory.
+    const LOCK_FILE: &str = "duja.lock";
+
+    /// A held single-instance guard. While `already_running` is `false` it owns
+    /// the locked file; dropping it (or the process exiting) releases the
+    /// advisory lock.
+    pub struct SingleInstance {
+        /// The locked file, kept open for the process lifetime so the `flock`
+        /// stays held. `None` when this guard does not own the lock (another
+        /// instance is running, or acquisition degraded to "first").
+        _file: Option<File>,
+        already_running: bool,
+    }
+
+    impl fmt::Debug for SingleInstance {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("SingleInstance")
+                .field("already_running", &self.already_running)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl SingleInstance {
+        /// Acquire the process-wide Duja single-instance lock.
+        #[must_use]
+        pub fn acquire() -> Self {
+            match lock_path() {
+                Some(path) => Self::acquire_at(&path),
+                // No home/runtime directory to place a lock in: degrade to
+                // "first" so the app still runs (a headless/service context).
+                None => SingleInstance {
+                    _file: None,
+                    already_running: false,
+                },
+            }
+        }
+
+        /// Acquire the lock at an explicit path (test seam), creating the parent
+        /// directory `0700` if needed.
+        #[must_use]
+        pub(crate) fn acquire_at(path: &Path) -> Self {
+            let not_first = SingleInstance {
+                _file: None,
+                already_running: false,
+            };
+
+            if let Some(parent) = path.parent()
+                && ensure_dir_0700(parent).is_err()
+            {
+                // Cannot create the lock directory: degrade to "first".
+                return not_first;
+            }
+
+            // Opened only to obtain a descriptor to `flock`; contents are never
+            // read or written, so `truncate(false)` leaves any bytes untouched.
+            let Ok(file) = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(path)
+            else {
+                // Cannot open the lock file: degrade to "first".
+                return not_first;
+            };
+
+            match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => SingleInstance {
+                    _file: Some(file),
+                    already_running: false,
+                },
+                // Another live process holds the lock (EWOULDBLOCK / EAGAIN share
+                // a value on every unix, but match both names for clarity).
+                Err(e) if e == Errno::WOULDBLOCK || e == Errno::AGAIN => SingleInstance {
+                    _file: None,
+                    already_running: true,
+                },
+                // Any other lock failure: degrade to "first" so the app still runs.
+                Err(_) => not_first,
+            }
+        }
+
+        /// Whether another instance already held the lock when this guard was
+        /// acquired.
+        #[must_use]
+        pub fn already_running(&self) -> bool {
+            self.already_running
+        }
+    }
+
+    /// Create `dir` (and parents) if absent, with `0700` permissions.
+    fn ensure_dir_0700(dir: &Path) -> std::io::Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+
+    /// The full path to the per-user lock file, or `None` with no home/runtime dir.
+    fn lock_path() -> Option<PathBuf> {
+        Some(lock_dir()?.join(LOCK_FILE))
+    }
+
+    /// The per-user lock directory: the macOS Application Support data dir.
+    #[cfg(target_os = "macos")]
+    fn lock_dir() -> Option<PathBuf> {
+        let dirs = directories::ProjectDirs::from("io.github", "itabajah", "duja")?;
+        Some(dirs.data_dir().to_path_buf())
+    }
+
+    /// The per-user lock directory: `$XDG_RUNTIME_DIR/duja/`, else
+    /// `/tmp/duja-<uid>/` (a per-user path so two users never collide).
+    // RATIONALE (clippy::unnecessary_wraps): this variant always resolves a
+    // directory (the `/tmp` fallback never fails), but it mirrors the fallible
+    // macOS variant's `Option` signature so `lock_path` stays cfg-free.
+    #[cfg(not(target_os = "macos"))]
+    #[allow(clippy::unnecessary_wraps)]
+    fn lock_dir() -> Option<PathBuf> {
+        if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR")
+            && !runtime.is_empty()
+        {
+            return Some(PathBuf::from(runtime).join("duja"));
+        }
+        let uid = rustix::process::getuid().as_raw();
+        Some(PathBuf::from("/tmp").join(format!("duja-{uid}")))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A unique per-process lock path under the temp dir.
+        fn temp_lock_path(tag: &str) -> PathBuf {
+            std::env::temp_dir().join(format!("duja-si-{}-{tag}.lock", std::process::id()))
+        }
+
+        #[test]
+        fn second_handle_of_same_path_detects_the_first() {
+            let path = temp_lock_path("two-handle");
+            let _ = std::fs::remove_file(&path);
+
+            let first = SingleInstance::acquire_at(&path);
+            assert!(
+                !first.already_running(),
+                "first holder is not 'already running'"
+            );
+
+            // A second open-file-description on the same file conflicts even
+            // within one process, so the second guard sees the first.
+            let second = SingleInstance::acquire_at(&path);
+            assert!(
+                second.already_running(),
+                "second holder must detect the first"
+            );
+            drop(second);
+
+            // The first guard still holds the lock: a third handle still sees it.
+            let third = SingleInstance::acquire_at(&path);
+            assert!(
+                third.already_running(),
+                "lock is still held by the first guard"
+            );
+            drop(third);
+
+            // Releasing the owner frees the lock even though the file remains.
+            drop(first);
+            assert!(
+                path.exists(),
+                "the lock file persists after release (advisory lock)"
+            );
+            let fresh = SingleInstance::acquire_at(&path);
+            assert!(
+                !fresh.already_running(),
+                "the stale lock file is taken over after the owner releases"
+            );
+            drop(fresh);
+            let _ = std::fs::remove_file(&path);
+        }
+
+        #[test]
+        fn acquire_returns_a_usable_guard() {
+            let guard = SingleInstance::acquire();
+            let _ = guard.already_running();
+            assert!(format!("{guard:?}").contains("SingleInstance"));
+        }
+
+        #[test]
+        fn creates_lock_dir_with_0700() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = std::env::temp_dir().join(format!("duja-si-perm-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let path = dir.join(LOCK_FILE);
+
+            let guard = SingleInstance::acquire_at(&path);
+            assert!(!guard.already_running());
+            let mode = std::fs::metadata(&dir)
+                .expect("lock dir exists")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700, "lock dir must be 0700");
+
+            drop(guard);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
 mod stub {
     /// A no-op single-instance guard for platforms without a tray app yet.
     #[derive(Debug)]

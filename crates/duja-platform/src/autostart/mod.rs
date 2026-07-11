@@ -15,7 +15,9 @@
 //!   Win32 registry FFI round-trips under a throwaway scratch key.
 //! - The `Duja = "<quoted exe>"` command string is composed by the pure
 //!   [`run_command`], tested without touching the registry.
-//! - Non-Windows targets get a stub whose every operation reports
+//! - macOS uses a `launchd` `LaunchAgent` plist (see the `mac` module); its plist
+//!   generation and parsing are pure and host-tested (see the `plist` module).
+//! - Any remaining target gets a stub whose every operation reports
 //!   [`AutostartError::Unsupported`].
 //!
 //! A `FakeAutostart` is exposed to downstream tests (this crate's tests and,
@@ -27,10 +29,22 @@ use std::path::Path;
 #[cfg(windows)]
 mod win;
 
+#[cfg(target_os = "macos")]
+mod mac;
+
+// Pure plist generation/parsing for the macOS backend. Compiled on macOS (where
+// `mac` uses it) and, under `cfg(test)`, on every host so its logic is
+// unit-tested cross-platform without a real `~/Library`.
+#[cfg(any(test, target_os = "macos"))]
+mod plist;
+
 #[cfg(windows)]
 pub use win::{WindowsAutostart, system};
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub use mac::{MacAutostart, system};
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub use stub::{StubAutostart, system};
 
 /// Launch-at-login registration.
@@ -67,6 +81,10 @@ pub enum AutostartError {
     /// A registry (or equivalent store) operation failed.
     #[error("registry operation failed: {0}")]
     Registry(String),
+    /// A filesystem operation on the autostart entry failed (the macOS
+    /// `launchd` `LaunchAgent` plist).
+    #[error("autostart file operation failed: {0}")]
+    Io(String),
 }
 
 /// The Run-key value name Duja registers under.
@@ -149,7 +167,7 @@ impl Autostart for FakeAutostart {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 mod stub {
     use super::{Autostart, AutostartError};
 
