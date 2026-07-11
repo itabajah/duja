@@ -11,7 +11,8 @@ use duja_core::quirks::{QuirkDb, ResolvedQuirks};
 use duja_core::testing::{Scenario, run_controller_contract};
 
 use crate::controller::{DEFAULT_MIN_GAP, DdcController};
-use crate::fake::{FakeTransport, InjectKind, TestClock};
+use crate::ddcci::{DdcCiTransport, DdcWire, I2cBus};
+use crate::fake::{FakeI2cBus, FakeTransport, InjectKind, TestClock};
 
 /// A checksum-valid EDID for an MSI display with product code `0x30B6` and no
 /// serial, so its id begins `MSI-30B6` and picks up the embedded MSI quirks.
@@ -59,6 +60,91 @@ fn contract_factory(scenario: Scenario) -> DdcController<FakeTransport, TestCloc
 #[test]
 fn satisfies_core_controller_contract() {
     run_controller_contract(contract_factory, 0);
+}
+
+// --- the same contract, bound to the macOS DDC/CI transport --------------
+
+/// Build the macOS controller (`DdcController` over `DdcCiTransport`) for a
+/// contract scenario, driven by the scriptable [`FakeI2cBus`]. This proves the
+/// full mac stack — packet framing, checksum, reply parsing, retry, pacing,
+/// verify — satisfies the same core contract as the Windows backend, on every
+/// OS in CI, without any Mac hardware.
+fn mac_contract_factory(
+    scenario: Scenario,
+) -> DdcController<DdcCiTransport<FakeI2cBus>, TestClock> {
+    let bus = match scenario {
+        Scenario::Nominal => FakeI2cBus::nominal(),
+        Scenario::Disconnected => FakeI2cBus::disconnected(),
+        // Fail exactly enough read attempts that the first controller-level read
+        // exhausts its retries and surfaces the error, then recovers.
+        Scenario::ErrorThenOk => FakeI2cBus::nominal().failing(InjectKind::Timeout, 3, 0, 0),
+    };
+    DdcController::with_parts(
+        DdcCiTransport::new(bus),
+        ResolvedQuirks::default(),
+        TestClock::new(),
+    )
+}
+
+#[test]
+fn mac_transport_satisfies_core_controller_contract() {
+    run_controller_contract(mac_contract_factory, 0);
+}
+
+#[test]
+fn mac_transport_round_trips_a_brightness_write() {
+    // An end-to-end check through the real codec: set 42, read back 42.
+    let mut c = DdcController::with_parts(
+        DdcCiTransport::new(FakeI2cBus::nominal()),
+        ResolvedQuirks::default(),
+        TestClock::new(),
+    );
+    c.set(Feature::Brightness, 42).unwrap();
+    assert_eq!(c.get(Feature::Brightness).unwrap().current, 42);
+}
+
+#[test]
+fn mac_transport_round_trips_under_intel_framing() {
+    // The same logic must hold when the bus reports the Intel wire framing.
+    let bus = FakeI2cBus::nominal().with_wire(DdcWire::Intel);
+    let mut c = DdcController::with_parts(
+        DdcCiTransport::new(bus),
+        ResolvedQuirks::default(),
+        TestClock::new(),
+    );
+    c.set(Feature::Brightness, 33).unwrap();
+    assert_eq!(c.get(Feature::Brightness).unwrap().current, 33);
+    assert_eq!(c.transport().bus().wire(), DdcWire::Intel);
+}
+
+#[test]
+fn mac_transport_verified_write_detects_mismatch() {
+    // A bus that ignores writes leaves the readback stale, so a verified write
+    // must surface a backend error after exhausting its attempts.
+    let quirks = ResolvedQuirks {
+        verify_writes: true,
+        ..ResolvedQuirks::default()
+    };
+    let bus = FakeI2cBus::nominal().ignoring_writes();
+    let mut c = DdcController::with_parts(DdcCiTransport::new(bus), quirks, TestClock::new());
+    assert!(matches!(
+        c.set(Feature::Brightness, 42),
+        Err(ControlError::Backend(_))
+    ));
+}
+
+#[test]
+fn mac_transport_probes_capabilities_over_i2c() {
+    let mut c = DdcController::with_parts(
+        DdcCiTransport::new(FakeI2cBus::nominal()),
+        ResolvedQuirks::default(),
+        TestClock::new(),
+    );
+    let caps = c.probe().unwrap();
+    assert!(caps.supports(Feature::Brightness));
+    assert!(caps.supports(Feature::Contrast));
+    assert!(!caps.supports(Feature::InputSource));
+    assert_eq!(caps.raw_capabilities.as_deref(), Some("(vcp(10 12))"));
 }
 
 // --- pacing --------------------------------------------------------------
