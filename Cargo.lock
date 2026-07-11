@@ -1231,6 +1231,7 @@ dependencies = [
  "crossbeam-channel",
  "duja-core",
  "duja-ipc",
+ "libc",
  "thiserror 2.0.18",
  "windows 0.62.2",
 ]

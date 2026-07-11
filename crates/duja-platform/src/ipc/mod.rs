@@ -20,9 +20,12 @@
 //!   instances exist at once, so a flood is refused by the OS rather than
 //!   exhausting the server.
 //!
-//! On non-Windows targets the transport is a no-op stub: the server accepts
-//! nothing and the client always reports [`IpcTransportError::NotRunning`]
-//! (the unix-socket transport lands with the macOS/Linux ports in P6/P7).
+//! On unix targets (macOS now, Linux in P7) the transport is a hardened
+//! unix-domain socket (see the `unix_socket` module) carrying the same protocol
+//! behind the same public surface, so callers stay platform-agnostic. On the
+//! remaining targets — neither Windows nor unix, effectively none we build — the
+//! transport is a no-op stub: the server accepts nothing and the client always
+//! reports [`IpcTransportError::NotRunning`].
 
 use std::time::Duration;
 
@@ -31,13 +34,19 @@ use duja_ipc::IpcError;
 #[cfg(windows)]
 mod win_pipe;
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+mod unix_socket;
+
+#[cfg(not(any(windows, unix)))]
 mod noop;
 
 #[cfg(windows)]
 pub use win_pipe::{PipeClient, PipeServer, default_pipe_name};
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+pub use unix_socket::{PipeClient, PipeServer, default_pipe_name};
+
+#[cfg(not(any(windows, unix)))]
 pub use noop::{PipeClient, PipeServer, default_pipe_name};
 
 /// The maximum number of concurrent pipe instances the server keeps alive.
@@ -96,7 +105,7 @@ pub enum IpcTransportError {
     /// public surface is identical on every target).
     #[error("ipc transport error: {0}")]
     Io(String),
-    /// This platform has no IPC transport yet (non-Windows).
+    /// This platform has no IPC transport (neither Windows nor unix).
     #[error("local IPC is not supported on this platform")]
     Unsupported,
 }
