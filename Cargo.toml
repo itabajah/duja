@@ -93,6 +93,12 @@ io-kit-sys = "0.5"
 # software renderer. `slint-build` compiles the `.slint` markup in build.rs.
 slint = { version = "1.17.1", default-features = false, features = ["compat-1-2", "backend-winit", "std", "renderer-software"] }
 slint-build = "1.17.1"
+# The winit backend crate, used directly for two things the `slint` facade does
+# not expose: the raw `WindowEvent` filter (`on_winit_window_event`) that hides
+# the flyout when it loses focus (click-outside dismissal), and window
+# active/position plumbing. Same version + license as `slint` (already allowed
+# in deny.toml); it is the very backend `slint`'s `backend-winit` feature pulls.
+i-slint-backend-winit = "1.17.1"
 # Dev-only (duja-ui, feature `smoke`): experimental headless backend for the
 # component instantiation smoke test. Optional so the default build never pulls
 # it; enabled under `--all-features`. The smoke test itself is `#[ignore]`.

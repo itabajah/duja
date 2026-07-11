@@ -28,8 +28,8 @@
 //! non-zero exit — there is no app without them), while a missing dimmer only
 //! disables software dimming (hardware brightness still works).
 
-use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -79,7 +79,88 @@ const FLYOUT_MARGIN: i32 = 12;
 thread_local! {
     /// The main-thread application state, reachable from the foreign
     /// (tray/menu/notification) event handlers that hop onto the Slint loop.
-    static APP: RefCell<Option<AppState>> = const { RefCell::new(None) };
+    /// Access always goes through [`with_app`] / [`with_app_ref`], never a raw
+    /// borrow, so a re-entrant Slint callback can never nest the borrow.
+    static APP: ReentrantCell<AppState> = const { ReentrantCell::new() };
+}
+
+/// A single-threaded cell that **serialises** mutable access so a re-entrant call
+/// (one made from inside a running access) is deferred and drained afterwards
+/// rather than nesting the borrow.
+///
+/// This is the structural cure for the latent double-borrow the P5 gate flagged
+/// (debt.md): a settings/flyout callback calls `update_from_vm`/`set_*`/`show`,
+/// and if any such Slint write were to synchronously fire another Slint callback
+/// (a `changed`/`toggled`/two-way-binding write-back), that callback would
+/// re-enter and `borrow_mut()` the already-borrowed cell, panicking straight into
+/// Slint's FFI (→ abort — the `0xe06d7363` → `0xc0000409` live-QA crash). A
+/// re-entrant [`with`](ReentrantCell::with) instead finds `busy == true`, queues its work,
+/// and returns immediately; the in-flight call drains the queue after its own
+/// borrow ends, so no two `with` bodies ever hold the borrow at once.
+/// One deferred unit of work queued by a re-entrant [`ReentrantCell::with`].
+type Deferred<T> = Box<dyn FnOnce(&mut T)>;
+
+struct ReentrantCell<T> {
+    slot: RefCell<Option<T>>,
+    busy: Cell<bool>,
+    queue: RefCell<VecDeque<Deferred<T>>>,
+}
+
+impl<T> ReentrantCell<T> {
+    const fn new() -> Self {
+        ReentrantCell {
+            slot: RefCell::new(None),
+            busy: Cell::new(false),
+            queue: RefCell::new(VecDeque::new()),
+        }
+    }
+
+    /// Install (or clear) the held value. Used once at startup and teardown, when
+    /// nothing is running.
+    fn set(&self, value: Option<T>) {
+        *self.slot.borrow_mut() = value;
+    }
+
+    /// Run `f` against the value if present, re-entrancy-safe (see the type doc).
+    /// A call made while another is in progress is deferred and drained by the
+    /// active call.
+    fn with(&self, f: impl FnOnce(&mut T) + 'static) {
+        if self.busy.get() {
+            self.queue.borrow_mut().push_back(Box::new(f));
+            return;
+        }
+        self.busy.set(true);
+        self.run_one(Box::new(f));
+        while let Some(next) = self.pop() {
+            self.run_one(next);
+        }
+        self.busy.set(false);
+    }
+
+    /// Borrow the value for exactly one queued unit of work; the borrow is
+    /// released before the next unit runs, so nothing nests.
+    fn run_one(&self, f: Deferred<T>) {
+        if let Some(value) = self.slot.borrow_mut().as_mut() {
+            f(value);
+        }
+    }
+
+    /// Pop the next deferred unit of work, releasing the queue borrow first.
+    fn pop(&self) -> Option<Deferred<T>> {
+        self.queue.borrow_mut().pop_front()
+    }
+
+    /// Read the value immutably (setup only, never re-entrant): register
+    /// callbacks that themselves route through [`with`](ReentrantCell::with).
+    fn with_ref<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
+        self.slot.borrow().as_ref().map(f)
+    }
+}
+
+/// The one way every foreign event handler (tray/menu/hotkey/IPC/notification,
+/// and each Slint callback) reaches [`AppState`] — re-entrancy-safe.
+fn with_app(f: impl FnOnce(&mut AppState) + 'static) {
+    APP.with(|cell| cell.with(f));
 }
 
 /// An action requested by a tray/menu/hotkey interaction, applied on the Slint
@@ -181,8 +262,8 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
     // create the manager or register a binding only disables that hotkey — the
     // app runs on without it.
     let (hotkey_manager, hotkey_map) = register_hotkeys(&config);
-    APP.with(|slot| {
-        *slot.borrow_mut() = Some(AppState {
+    APP.with(|cell| {
+        cell.set(Some(AppState {
             shell,
             vm,
             settings_shell,
@@ -202,7 +283,7 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
             applied: BTreeSet::new(),
             flyout_visible: false,
             _hotkeys: hotkey_manager,
-        });
+        }));
     });
     wire_ui_commands();
     wire_settings_commands();
@@ -225,9 +306,9 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
     }
     engine.shutdown();
     forwarder.shutdown();
-    APP.with(|slot| {
+    APP.with(|cell| {
         // Dropping the AppState clears overlays via the dimmer's own teardown.
-        *slot.borrow_mut() = None;
+        cell.set(None);
     });
     drop(tray);
     drop(instance);
@@ -332,22 +413,44 @@ impl AppState {
     }
 
     /// Show the flyout anchored near the tray/cursor.
+    ///
+    /// The Win32 cursor/work-area rects are physical pixels (Per-Monitor-V2); the
+    /// Slint window is sized in logical pixels, so the nominal flyout size is
+    /// scaled to physical for the anchor. The window's real height is
+    /// content-driven and only known once shown, so we show at a provisional
+    /// anchor and then re-anchor with the actual physical size — otherwise the
+    /// window overflows the work-area edge (logical size used as physical) or
+    /// floats far above the tray (P0 live-QA bug 4).
     fn show_flyout(&mut self) {
+        use crate::bin_support::positioning::{flyout_origin, scale_size};
         let (cursor, work) = geometry::cursor_and_work_area();
-        let (x, y) = crate::bin_support::positioning::flyout_origin(
-            cursor,
-            work,
-            FLYOUT_SIZE,
-            FLYOUT_MARGIN,
-        );
-        self.shell.show_at(x, y);
+        let scale = self.shell.scale_factor();
+        let provisional =
+            flyout_origin(cursor, work, scale_size(FLYOUT_SIZE, scale), FLYOUT_MARGIN);
+        self.shell.show_at(provisional.0, provisional.1);
         self.flyout_visible = true;
+
+        let actual = self.shell.physical_size();
+        if actual.0 > 0 && actual.1 > 0 {
+            let (x, y) = flyout_origin(cursor, work, actual, FLYOUT_MARGIN);
+            self.shell.set_position(x, y);
+        }
     }
 
     /// Hide the flyout (process keeps running in the tray).
     fn hide_flyout(&mut self) {
         self.shell.hide();
         self.flyout_visible = false;
+    }
+
+    /// Dismiss the flyout when it loses focus (the user clicked outside it).
+    ///
+    /// Routed through the app so [`flyout_visible`](Self::flyout_visible) is kept
+    /// in sync — the next tray click then re-opens it (P0 live-QA bug 5).
+    fn on_focus_lost(&mut self) {
+        if self.flyout_visible {
+            self.hide_flyout();
+        }
     }
 
     /// Restore the screen: clear overlays and reset identity gamma everywhere.
@@ -402,6 +505,14 @@ impl AppState {
         self.settings_shell
             .update_from_vm(&self.settings_vm.borrow());
         self.settings_shell.show();
+        // Centre the window on the active monitor instead of leaving it at the
+        // OS default cascade position (P0 live-QA bug 4).
+        let (_cursor, work) = geometry::cursor_and_work_area();
+        let size = self.settings_shell.physical_size();
+        if size.0 > 0 && size.1 > 0 {
+            let (x, y) = crate::bin_support::positioning::center_in(work, size);
+            self.settings_shell.set_position(x, y);
+        }
     }
 
     /// Refresh the settings view-model from the current config, snapshots,
@@ -513,11 +624,9 @@ impl AppState {
                 let outcome = updates::check_for_update(&HttpsTransport, env!("CARGO_PKG_VERSION"));
                 let status = update_status_from(outcome);
                 let _ = slint::invoke_from_event_loop(move || {
-                    APP.with(|slot| {
-                        if let Some(app) = slot.borrow_mut().as_mut() {
-                            app.settings_vm.borrow_mut().set_update_status(status);
-                            app.settings_shell.update_from_vm(&app.settings_vm.borrow());
-                        }
+                    with_app(move |app| {
+                        app.settings_vm.borrow_mut().set_update_status(status);
+                        app.settings_shell.update_from_vm(&app.settings_vm.borrow());
                     });
                 });
             })
@@ -694,31 +803,31 @@ fn bounds_updating_enumerator(bounds: Arc<Mutex<BoundsMap>>) -> duja_app::Enumer
 
 /// Wire the flyout's command fan-out to the app state.
 fn wire_ui_commands() {
-    APP.with(|slot| {
-        if let Some(app) = slot.borrow().as_ref() {
+    // Read-only setup borrow (runs once, never re-entrant): register the
+    // handler, which routes every command through the re-entrancy-safe
+    // [`with_app`] dispatcher.
+    APP.with(|cell| {
+        cell.with_ref(|app| {
             app.shell.on_command(|command| {
-                APP.with(|slot| {
-                    if let Some(app) = slot.borrow_mut().as_mut() {
-                        app.on_ui_command(command);
-                    }
-                });
+                with_app(move |app| app.on_ui_command(command));
             });
-        }
+            // Click-outside-to-dismiss: hide the flyout when it loses focus,
+            // routed through the app so `flyout_visible` stays honest (bug 5).
+            app.shell.on_focus_lost(|| {
+                with_app(AppState::on_focus_lost);
+            });
+        });
     });
 }
 
 /// Wire the settings window's command fan-out to the app state.
 fn wire_settings_commands() {
-    APP.with(|slot| {
-        if let Some(app) = slot.borrow().as_ref() {
+    APP.with(|cell| {
+        cell.with_ref(|app| {
             app.settings_shell.on_command(|command| {
-                APP.with(|slot| {
-                    if let Some(app) = slot.borrow_mut().as_mut() {
-                        app.on_settings_command(command);
-                    }
-                });
+                with_app(move |app| app.on_settings_command(command));
             });
-        }
+        });
     });
 }
 
@@ -795,11 +904,7 @@ fn open_url(url: &str) {
 /// stay consistent with a slider drag. Callable from the IPC handler thread.
 pub(crate) fn ipc_apply_set_level(id: StableDisplayId, pct: u8) {
     let _ = slint::invoke_from_event_loop(move || {
-        APP.with(|slot| {
-            if let Some(app) = slot.borrow_mut().as_mut() {
-                app.set_user_level(&id, pct);
-            }
-        });
+        with_app(move |app| app.set_user_level(&id, pct));
     });
 }
 
@@ -807,22 +912,14 @@ pub(crate) fn ipc_apply_set_level(id: StableDisplayId, pct: u8) {
 /// instance). Callable from the IPC handler thread.
 pub(crate) fn ipc_show_flyout() {
     let _ = slint::invoke_from_event_loop(|| {
-        APP.with(|slot| {
-            if let Some(app) = slot.borrow_mut().as_mut() {
-                app.show_flyout();
-            }
-        });
+        with_app(AppState::show_flyout);
     });
 }
 
 /// Dispatch an [`Action`] onto the Slint main thread.
 fn dispatch(action: Action) {
     let _ = slint::invoke_from_event_loop(move || {
-        APP.with(|slot| {
-            if let Some(app) = slot.borrow_mut().as_mut() {
-                app.handle_action(action);
-            }
-        });
+        with_app(move |app| app.handle_action(action));
     });
 }
 
@@ -1115,11 +1212,7 @@ fn spawn_notification_bridge(notifications: crossbeam_channel::Receiver<EngineNo
         .spawn(move || {
             while let Ok(notification) = notifications.recv() {
                 let _ = slint::invoke_from_event_loop(move || {
-                    APP.with(|slot| {
-                        if let Some(app) = slot.borrow_mut().as_mut() {
-                            app.on_notification(notification);
-                        }
-                    });
+                    with_app(move |app| app.on_notification(notification));
                 });
             }
         })
@@ -1174,6 +1267,32 @@ mod tests {
         assert!(hk.mods.contains(GhkModifiers::CONTROL));
         assert!(hk.mods.contains(GhkModifiers::ALT));
         assert!(!hk.mods.contains(GhkModifiers::SHIFT));
+    }
+
+    #[test]
+    fn reentrant_cell_defers_instead_of_nesting_the_borrow() {
+        use super::ReentrantCell;
+        thread_local! {
+            static CELL: ReentrantCell<Vec<u32>> = const { ReentrantCell::new() };
+        }
+        CELL.with(|c| c.set(Some(Vec::new())));
+
+        CELL.with(|c| {
+            c.with(|v| {
+                v.push(1);
+                // Re-enter from inside a running `with`. A raw `borrow_mut`
+                // (the pre-fix pattern) would panic here with `BorrowMutError`
+                // and unwind into Slint's FFI → abort. The cell must instead
+                // defer this unit of work.
+                CELL.with(|c| c.with(|v| v.push(3)));
+                v.push(2);
+            });
+        });
+
+        let out = CELL.with(|c| c.with_ref(Clone::clone));
+        // The deferred re-entrant push ran *after* the outer body finished, and
+        // nothing panicked — the structural cure for P0 bugs 1 & 2.
+        assert_eq!(out, Some(vec![1, 2, 3]));
     }
 
     #[test]

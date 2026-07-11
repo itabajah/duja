@@ -103,10 +103,17 @@ fn check_updates() -> ExitCode {
 /// alongside their normal stdout output.
 fn init_logging(command: Command) {
     match command {
-        Command::Tray { verbose: true } => logging::init(None, true),
+        Command::Tray { verbose: true } => {
+            logging::init(None, true);
+            // Console/verbose mode: stderr is live, so no crash file is needed.
+            logging::install_panic_hook(None);
+        }
         Command::Tray { verbose: false } => {
             let log_dir = DujaPaths::resolve().map(|p| p.log_dir);
             logging::init(log_dir.as_deref(), false);
+            // The tray release build has no console; a panic (e.g. inside a Slint
+            // callback, which then aborts) would otherwise vanish. Persist it.
+            logging::install_panic_hook(log_dir.map(|dir| dir.join(logging::CRASH_FILE)));
         }
         _ => logging::init(None, false),
     }

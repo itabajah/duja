@@ -1257,6 +1257,7 @@ version = "0.0.1"
 dependencies = [
  "duja-core",
  "i-slint-backend-testing",
+ "i-slint-backend-winit",
  "slint",
  "slint-build",
 ]

@@ -140,22 +140,72 @@ impl FlyoutShell {
     /// places and shows. A failed show is swallowed — a flyout that cannot be
     /// presented is a soft failure, not a crash.
     pub fn show_at(&self, x: i32, y: i32) {
+        self.set_position(x, y);
+        let _ = self.ui.show();
+    }
+
+    /// Move the flyout to physical pixel `(x, y)` without changing visibility.
+    ///
+    /// The anchor is computed against the flyout's *nominal* size; the window's
+    /// real height is content-driven and only known once shown, so wave 2 shows
+    /// first, reads [`physical_size`](Self::physical_size), then calls this to
+    /// land the window against the tray edge (P0 live-QA bug 4).
+    pub fn set_position(&self, x: i32, y: i32) {
+        // Physical coordinates: `set_position` takes physical screen pixels and
+        // passes the `Physical` variant straight through (no scale applied), so
+        // Win32 physical anchors land unscaled on a Per-Monitor-V2 process.
         self.ui
             .window()
             .set_position(slint::PhysicalPosition::new(x, y));
-        let _ = self.ui.show();
+    }
+
+    /// The flyout window's current size in **physical** pixels.
+    #[must_use]
+    pub fn physical_size(&self) -> (u32, u32) {
+        let size = self.ui.window().size();
+        (size.width, size.height)
+    }
+
+    /// The window's device scale factor (physical / logical pixels).
+    #[must_use]
+    pub fn scale_factor(&self) -> f32 {
+        self.ui.window().scale_factor()
     }
 
     /// Hide the flyout without destroying it (it stays alive in the tray).
     pub fn hide(&self) {
         let _ = self.ui.hide();
     }
+
+    /// Invoke `handler` whenever the flyout window loses focus (the user clicked
+    /// outside it / activated another window).
+    ///
+    /// Standard tray-flyout dismissal: `slint` exposes no window-deactivate
+    /// callback, so this taps the raw winit `WindowEvent::Focused(false)` via the
+    /// backend accessor. The event still fires for a borderless (`no-frame`)
+    /// top-level window. The handler routes back through the app so the flyout's
+    /// visibility state stays consistent (P0 live-QA bug 5).
+    pub fn on_focus_lost(&self, mut handler: impl FnMut() + 'static) {
+        use i_slint_backend_winit::winit::event::WindowEvent;
+        use i_slint_backend_winit::{EventResult, WinitWindowAccessor};
+        self.ui
+            .window()
+            .on_winit_window_event(move |_window, event| {
+                if matches!(event, WindowEvent::Focused(false)) {
+                    handler();
+                }
+                // Let Slint keep processing the event normally.
+                EventResult::Propagate
+            });
+    }
 }
 
 /// Copy the view-model's state into the Slint component's properties.
 fn render_into(ui: &FlyoutWindow, rows: &VecModel<FlyoutRowData>, vm: &FlyoutVm) {
     let data: Vec<FlyoutRowData> = vm.rows().iter().map(row_to_data).collect();
-    rows.set_vec(data);
+    // Diff the rows model in place (never `set_vec`, which resets the repeater
+    // and destroys the element a user is mid-drag on — P0 live-QA bug 3).
+    crate::model_sync::sync(rows, data);
     ui.set_link_all(vm.link_all());
     ui.set_no_displays(vm.no_displays());
     ui.set_dark(matches!(vm.theme(), Theme::Dark));

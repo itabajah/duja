@@ -52,6 +52,7 @@ pub mod settings_vm;
 pub mod shell;
 
 pub(crate) mod generated;
+pub(crate) mod model_sync;
 
 pub use command::{SettingsCommand, ThemeChoice, UiCommand};
 pub use flyout_vm::{FlyoutRow, FlyoutVm, Theme};
