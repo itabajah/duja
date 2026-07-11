@@ -63,17 +63,21 @@
 //! nudge. This mirrors `win_pipe`'s sliced overlapped wait — same cost profile,
 //! same promptness.
 //!
-//! Reads and writes on an accepted connection are bounded the same way: the
-//! socket's `SO_RCVTIMEO`/`SO_SNDTIMEO` is set to a short slice and the operation
-//! is retried until it completes, times out, or the stop flag is observed. The
-//! server arms **one whole-exchange read deadline** (see
-//! [`SockStream::with_read_deadline`]) computed from an [`Instant`] and enforced
-//! by setting each slice to `min(slice, remaining_budget)`. This is the direct
-//! fix for P5 finding C1: a naive `set_read_timeout(READ_TIMEOUT)` renews
-//! `SO_RCVTIMEO` on **every** syscall, so a peer dribbling one byte at a time
-//! resets the budget forever and pins a handler thread (the frame never
-//! completes). Clients keep a per-read budget — they talk to a trusted, prompt
-//! server.
+//! Reads and writes on an accepted connection are bounded the same way, gated by
+//! a sliced [`poll`](poll_ready) on the non-blocking socket: the wait blocks for
+//! at most a slice, then the operation is retried until it completes, times out,
+//! or the stop flag is observed. `poll` is used rather than
+//! `SO_RCVTIMEO`/`SO_SNDTIMEO` because macOS rejects those socket options on
+//! `AF_UNIX` (`EINVAL`); `poll` behaves identically on Linux and macOS.
+//!
+//! The server arms **one whole-exchange read deadline** (see
+//! [`SockStream::with_read_deadline`]) computed from an [`Instant`]; each slice is
+//! `min(WAIT_SLICE, remaining_budget)`, so the budget is spent across the whole
+//! exchange, never renewed per read. This is the direct fix for P5 finding C1: a
+//! naive per-read timeout gives every `read` a fresh budget, so a peer dribbling
+//! one byte at a time renews it forever and pins a handler thread (the frame
+//! never completes). Clients keep a per-read budget — they talk to a trusted,
+//! prompt server.
 //!
 //! On the stop path a read/write returns [`io::ErrorKind::ConnectionAborted`],
 //! **never** [`io::ErrorKind::Interrupted`]: the framing layer's `read_exact`
@@ -239,15 +243,21 @@ fn peer_allowed(peer: Option<u32>, ours: u32) -> bool {
     peer == Some(ours)
 }
 
-// -- The connected-stream adapter (Read + Write with sliced timeouts) -----
+// -- The connected-stream adapter (Read + Write with poll-gated timeouts) --
 
 /// A connected socket presented as a `Read + Write` byte stream.
 ///
+/// The socket is non-blocking; each read/write first waits for readiness with a
+/// sliced [`poll`](poll_ready) so an optional shutdown flag is honoured promptly.
 /// Reads are bounded by an armed exchange deadline (server) or a fresh
-/// [`READ_TIMEOUT`] per read (client); writes by [`WRITE_TIMEOUT`]. Each blocking
-/// wait is sliced so an optional shutdown flag is honoured promptly.
+/// [`READ_TIMEOUT`] per read (client); writes by [`WRITE_TIMEOUT`].
+///
+/// `poll` is used rather than `SO_RCVTIMEO`/`SO_SNDTIMEO` because macOS rejects
+/// those options on `AF_UNIX` sockets (`EINVAL`); `poll` is uniform across Linux
+/// and macOS.
 struct SockStream {
     stream: UnixStream,
+    fd: RawFd,
     stop: Option<Arc<AtomicBool>>,
     /// When set, the instant by which **all** reads of one request→response
     /// exchange must have completed. See [`SockStream::with_read_deadline`].
@@ -257,29 +267,35 @@ struct SockStream {
 impl SockStream {
     /// A server-side stream, cancellable by `stop`.
     fn server(stream: UnixStream, stop: Arc<AtomicBool>) -> Self {
-        SockStream {
-            stream,
-            stop: Some(stop),
-            read_deadline: None,
-        }
+        Self::new(stream, Some(stop))
     }
 
     /// A client-side stream (no shutdown flag; per-read timeout budget).
     fn client(stream: UnixStream) -> Self {
+        Self::new(stream, None)
+    }
+
+    fn new(stream: UnixStream, stop: Option<Arc<AtomicBool>>) -> Self {
+        let fd = stream.as_raw_fd();
+        // Non-blocking so a `poll`-reported readiness that races away surfaces as
+        // `WouldBlock` (retried) rather than blocking past the deadline.
+        let _ = stream.set_nonblocking(true);
         SockStream {
             stream,
-            stop: None,
+            fd,
+            stop,
             read_deadline: None,
         }
     }
 
     /// Arm a single deadline shared by every read of one exchange, starting now.
     ///
-    /// Without this, each read would renew its `SO_RCVTIMEO` budget, and because
-    /// the framing layer drives reads with `read_exact` (looping until its buffer
-    /// fills), a peer dribbling one byte at a time would renew the budget forever
-    /// and pin a handler thread — P5 finding C1. Servers arm one whole-exchange
-    /// deadline; clients keep the per-read budget.
+    /// Without this, each read would get a fresh budget, and because the framing
+    /// layer drives reads with `read_exact` (looping until its buffer fills), a
+    /// peer dribbling one byte at a time would renew the budget forever and pin a
+    /// handler thread — P5 finding C1. Servers arm one whole-exchange deadline and
+    /// compute the remaining budget before each `poll`; clients keep the per-read
+    /// budget (they talk to a trusted, prompt server).
     fn with_read_deadline(mut self, budget: Duration) -> Self {
         self.read_deadline = Instant::now().checked_add(budget);
         self
@@ -300,8 +316,8 @@ impl SockStream {
     }
 }
 
-/// The slice to block for now: `min(WAIT_SLICE, remaining)`, or a terminal
-/// timeout if the deadline has already passed. `None` deadline ⇒ a full slice.
+/// The slice to wait for now: `min(WAIT_SLICE, remaining)`, or a terminal timeout
+/// if the deadline has already passed. `None` deadline ⇒ a full slice.
 fn slice_until(deadline: Option<Instant>) -> Result<Duration, ()> {
     match deadline {
         Some(dl) => match dl.checked_duration_since(Instant::now()) {
@@ -310,6 +326,33 @@ fn slice_until(deadline: Option<Instant>) -> Result<Duration, ()> {
         },
         None => Ok(WAIT_SLICE),
     }
+}
+
+/// Wait until `fd` is ready for `events` (`POLLIN`/`POLLOUT`) or `slice` elapses.
+///
+/// `Ok(true)` = ready, `Ok(false)` = timed out or interrupted (the caller
+/// re-checks the stop flag and deadline, then retries), `Err` = a real failure.
+fn poll_ready(fd: RawFd, events: libc::c_short, slice: Duration) -> io::Result<bool> {
+    let mut pfd = libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    };
+    // At least 1 ms so a sub-millisecond remainder does not become `poll(0)` (an
+    // immediate return that would busy-spin until the deadline check trips).
+    let ms = i32::try_from(slice.as_millis()).unwrap_or(i32::MAX).max(1);
+    // SAFETY: `pfd` is a single valid `pollfd` living across the call; `poll`
+    // reads `fd`/`events` and writes `revents`, touching nothing else.
+    let rc = unsafe { libc::poll(&mut pfd, 1, ms) };
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        // EINTR: report "not ready" so the caller re-checks stop and retries.
+        if err.kind() == io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(err);
+    }
+    Ok(rc > 0)
 }
 
 impl Read for SockStream {
@@ -328,18 +371,19 @@ impl Read for SockStream {
             let Ok(slice) = slice_until(deadline) else {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "ipc read timeout"));
             };
-            self.stream.set_read_timeout(Some(slice))?;
+            if !poll_ready(self.fd, libc::POLLIN, slice)? {
+                continue; // timed out or EINTR: re-check stop / deadline
+            }
             match self.stream.read(buf) {
                 Ok(n) => return Ok(n),
-                // The slice expired (`WouldBlock`/`TimedOut`) or the syscall was
-                // interrupted (`EINTR`): re-check the stop flag and deadline, then
-                // retry. The deadline bounds the loop, so `EINTR` cannot spin.
-                Err(e) => match e.kind() {
-                    io::ErrorKind::WouldBlock
-                    | io::ErrorKind::TimedOut
-                    | io::ErrorKind::Interrupted => {}
-                    _ => return Err(e),
-                },
+                // Readiness raced away or the syscall was interrupted: retry (the
+                // deadline bounds the loop, so this cannot spin).
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(e) => return Err(e),
             }
         }
     }
@@ -361,15 +405,17 @@ impl Write for SockStream {
             let Ok(slice) = slice_until(deadline) else {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "ipc write timeout"));
             };
-            self.stream.set_write_timeout(Some(slice))?;
+            if !poll_ready(self.fd, libc::POLLOUT, slice)? {
+                continue; // timed out or EINTR: re-check stop / deadline
+            }
             match self.stream.write(buf) {
                 Ok(n) => return Ok(n),
-                Err(e) => match e.kind() {
-                    io::ErrorKind::WouldBlock
-                    | io::ErrorKind::TimedOut
-                    | io::ErrorKind::Interrupted => {}
-                    _ => return Err(e),
-                },
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(e) => return Err(e),
             }
         }
     }
@@ -537,12 +583,8 @@ fn listener_loop(
                 if stop.load(Ordering::Acquire) {
                     break; // `stream` drops, closing it
                 }
-                // Accepted sockets do not inherit the listener's non-blocking
-                // flag portably; force blocking so `SO_RCVTIMEO`/`SO_SNDTIMEO`
-                // (which only affect blocking mode) govern the sliced timeouts.
-                if stream.set_nonblocking(false).is_err() {
-                    continue; // drop and try the next
-                }
+                // The handler wraps the accepted stream in a `SockStream`, which
+                // sets its own non-blocking mode for the `poll`-gated I/O.
                 active.fetch_add(1, Ordering::AcqRel);
                 if work_tx.send(stream).is_err() {
                     active.fetch_sub(1, Ordering::AcqRel);
@@ -672,9 +714,6 @@ impl PipeClient {
         loop {
             match UnixStream::connect(name) {
                 Ok(stream) => {
-                    stream
-                        .set_nonblocking(false)
-                        .map_err(|e| IpcTransportError::Io(e.to_string()))?;
                     return Ok(PipeClient {
                         stream: SockStream::client(stream),
                     });
