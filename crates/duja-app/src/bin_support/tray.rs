@@ -717,7 +717,8 @@ impl AppState {
             .update_from_vm(&self.settings_vm.borrow());
         // Drive the content height (logical); Slint clamps it to the window's
         // min/max. The buffer is corrected after show, like the flyout.
-        self.settings_shell.set_content_height(SETTINGS_LOGICAL_HEIGHT);
+        self.settings_shell
+            .set_content_height(SETTINGS_LOGICAL_HEIGHT);
         self.settings_shell.show();
         // Root-cause fix for the fractional-DPI buffer undersize: re-assert the
         // logical design size now the window is on its real monitor so Slint
@@ -1529,7 +1530,9 @@ mod tests {
     //! weak and synthesising `WM_HOTKEY` does not reliably reach its handler); it
     //! is covered by the P1 `spike/eventloop` proof and manual hardware QA.
     use super::{Accelerator, Action, Code, GhkModifiers, HotkeyAction};
-    use super::{DEFAULT_SOFTWARE_DIM_FLOOR_PCT, TOGGLE_GUARD, floor_to_seed_on_dimming, toggle_decision};
+    use super::{
+        DEFAULT_SOFTWARE_DIM_FLOOR_PCT, TOGGLE_GUARD, floor_to_seed_on_dimming, toggle_decision,
+    };
     use super::{ToggleDecision, accel_to_hotkey, action_for, code_for_key, ghk_modifiers};
     use std::time::Duration;
 
