@@ -116,12 +116,13 @@ export component SettingsWindow inherits Window {
     width: 440px;
     height: clamp(root.content-height, 340px, 820px);
     background: Palette.bg;
+    // Frameless like the flyout; the header is a drag handle (see below) and the
+    // ✕ / Esc close it. Keyboard resize/minimize are intentionally not offered.
+    no-frame: true;
 
     // --- inputs from the Rust shell (set from SettingsVm state) ---
     in property <bool> dark <=> Palette.dark;
-    // DPI-compensation, as in the flyout: content laid out at the visible logical
-    // width (design ÷ scale), and the window height driven by the app.
-    in property <length> usable-width: 440px;
+    // The desired window height (logical px), driven by the app.
     in property <length> content-height: 600px;
     in-out property <bool> autostart-on;
     in property <bool> autostart-supported: true;
@@ -149,6 +150,9 @@ export component SettingsWindow inherits Window {
     callback hotkey-clear-clicked(/* row */ int);
     callback close-requested();
     callback esc-pressed();
+    // Begin a system window move (frameless header drag). Wired to winit's
+    // `drag_window` in the shell.
+    callback start-drag();
 
     forward-focus: scope;
     scope := FocusScope {
@@ -161,38 +165,48 @@ export component SettingsWindow inherits Window {
         }
 
         VerticalLayout {
-            // Constrain content to the visible logical width (left-aligned) so the
-            // fractional-DPI buffer clip never eats the close button / right edge.
-            x: 0;
-            width: root.usable-width;
-            // Header band: title (stretch) + close.
-            HorizontalLayout {
-                padding-left: 18px;
-                padding-right: 14px;
-                padding-top: 14px;
-                padding-bottom: 6px;
-                spacing: 8px;
-                VerticalLayout {
-                    horizontal-stretch: 1;
-                    Text {
-                        text: @tr("Settings");
-                        font-size: 18px;
-                        font-weight: 800;
-                        color: Palette.text;
-                        horizontal-alignment: left;
-                    }
-                    Text {
-                        text: @tr("Duja");
-                        font-size: 11px;
-                        color: Palette.text-faint;
-                        horizontal-alignment: left;
+            // Header band: a drag handle (frameless window move) carrying the
+            // title (stretch) + close. The drag TouchArea sits *under* the
+            // content so the close button still receives its own clicks.
+            Rectangle {
+                drag := TouchArea {
+                    mouse-cursor: default;
+                    // Start a system move on press; the OS then follows the
+                    // pointer until release (no per-frame set-position needed).
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.down) {
+                            root.start-drag();
+                        }
                     }
                 }
-                IconButton {
-                    icon: "×";
-                    label: @tr("Close");
-                    clicked => {
-                        root.close-requested();
+                HorizontalLayout {
+                    padding-left: 18px;
+                    padding-right: 14px;
+                    padding-top: 14px;
+                    padding-bottom: 6px;
+                    spacing: 8px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        Text {
+                            text: @tr("Settings");
+                            font-size: 18px;
+                            font-weight: 800;
+                            color: Palette.text;
+                            horizontal-alignment: left;
+                        }
+                        Text {
+                            text: @tr("Duja");
+                            font-size: 11px;
+                            color: Palette.text-faint;
+                            horizontal-alignment: left;
+                        }
+                    }
+                    IconButton {
+                        icon: "×";
+                        label: @tr("Close");
+                        clicked => {
+                            root.close-requested();
+                        }
                     }
                 }
             }

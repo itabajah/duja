@@ -67,6 +67,21 @@ use crate::bin_support::{backend, gamma, ipc, run, settings, settings_apply, sta
 /// settings-UI follow-up.
 const HOTKEY_BRIGHTNESS_STEP: i16 = 5;
 
+/// The hardware floor (%) the flyout's "Software dimming" toggle establishes when
+/// it is switched on for a display that has none set.
+///
+/// Software dimming (an overlay/gamma sub-floor) only has a region to act in when
+/// there is a non-zero hardware floor — below it the hardware is pinned and the
+/// overlay takes over. The schema default is `hw_floor_pct = 0` (ADR-0007: "no
+/// artificial floor until the user sets one"), so a fresh display's toggle would
+/// otherwise be a visual no-op. Turning the toggle *on* is the user opting into
+/// that sub-floor regime, so we seed a sensible floor here; the Settings window's
+/// per-monitor slider then fine-tunes it, and setting the floor back to 0 there
+/// restores the full hardware range. Turning the toggle off leaves the floor
+/// (the slider still bottoms out at it, communicating the range) — it is
+/// re-tunable in Settings.
+const DEFAULT_SOFTWARE_DIM_FLOOR_PCT: u8 = 20;
+
 /// How long after the flyout is hidden a tray-icon click is treated as the same
 /// dismissing gesture (rather than a fresh open), closing the click-outside race.
 const TOGGLE_GUARD: Duration = Duration::from_millis(200);
@@ -81,6 +96,17 @@ enum ToggleDecision {
     /// Swallow the click (it is the tail of the gesture that just dismissed the
     /// flyout via focus-loss; re-opening would fight the user).
     Ignore,
+}
+
+/// The floor to seed when the flyout "Software dimming" toggle is switched on,
+/// given the display's current floor.
+///
+/// Returns [`DEFAULT_SOFTWARE_DIM_FLOOR_PCT`] only when dimming is being turned
+/// *on* for a display with no floor (`0`) — enabling the toggle is the user
+/// opting into a sub-floor regime, which needs a non-zero floor to be visible.
+/// Turning it off, or a display that already has a floor, seeds nothing.
+fn floor_to_seed_on_dimming(on: bool, current_floor: u8) -> Option<u8> {
+    (on && current_floor == 0).then_some(DEFAULT_SOFTWARE_DIM_FLOOR_PCT)
 }
 
 /// Decide what a tray-icon click should do.
@@ -478,12 +504,11 @@ impl AppState {
     /// floats far above the tray (P0 live-QA bug 4).
     fn show_flyout(&mut self) {
         use crate::bin_support::positioning::{flyout_origin, scale_size};
-        // Compensate for the Slint/winit fractional-DPI buffer undersize: lay the
-        // content out at the *visible* logical width (design ÷ scale) so nothing
-        // clips on the right (the window renders 320 logical → 400 px but the OS
-        // buffer stays 320 px, showing only the left 320 px = 256 logical here).
-        // Drive the window height too (a no-frame window is not auto-grown).
-        self.apply_flyout_geometry();
+        // Drive the window height from the row count (a no-frame window is not
+        // auto-grown to its content preferred size). Logical px — Slint scales it.
+        let logical_height = self.flyout_logical_height();
+        self.shell.set_content_height(logical_height);
+
         let (cursor, work) = geometry::cursor_and_work_area();
         let scale = self.shell.scale_factor();
         let provisional =
@@ -491,6 +516,17 @@ impl AppState {
         self.shell.show_at(provisional.0, provisional.1);
         self.flyout_visible = true;
 
+        // Root-cause fix for the fractional-DPI buffer undersize (former
+        // "compensated layout"): now the window is shown on its real monitor and
+        // its scale factor is known, re-assert the *logical* design size so Slint
+        // requests the correct physical buffer (design × scale) instead of the
+        // provisional design-px physical buffer it was born with. Content then
+        // fills the window edge-to-edge at every scale.
+        self.shell
+            .enforce_logical_size(FLYOUT_LOGICAL_WIDTH, logical_height);
+
+        // Re-anchor with the now-correct physical size so the window lands flush
+        // against the tray edge (P0 live-QA bug 4).
         let actual = self.shell.physical_size();
         if actual.0 > 0 && actual.1 > 0 {
             let (x, y) = flyout_origin(cursor, work, actual, FLYOUT_MARGIN);
@@ -499,21 +535,6 @@ impl AppState {
         // Keep the flyout above other windows while visible and focus it so
         // Esc/keyboard work immediately (user-reported: it opened underneath).
         self.shell.surface(true);
-    }
-
-    /// Push the flyout's DPI-compensated usable width and content-derived height
-    /// into the window (both logical px).
-    fn apply_flyout_geometry(&self) {
-        let scale = self.shell.scale_factor().max(0.1);
-        // The window's `width`/`height` markup lengths are realised as *physical*
-        // pixels on this fractional-DPI path, while inner content is laid out in
-        // logical px. So: constrain content to the visible logical width
-        // (physical_width / scale = design / scale), and set the window height to
-        // the content's logical extent × scale so the visible logical height
-        // matches. On integer scales both reduce to the plain design values.
-        self.shell.set_usable_width(FLYOUT_LOGICAL_WIDTH / scale);
-        self.shell
-            .set_content_height(self.flyout_logical_height() * scale);
     }
 
     /// The flyout window's content-derived logical height.
@@ -605,6 +626,23 @@ impl AppState {
     /// Routed through the same config-write + re-apply path a settings dim-mode
     /// change uses, so the flyout toggle and the settings picker stay consistent.
     fn set_dimming_enabled(&mut self, id: &StableDisplayId, on: bool) {
+        // Turning dimming on for a display with no floor set would have no visible
+        // effect (no sub-floor region), so seed a sensible floor first — the user
+        // is opting into the sub-floor regime by enabling the toggle. See
+        // [`DEFAULT_SOFTWARE_DIM_FLOOR_PCT`] / [`floor_to_seed_on_dimming`].
+        let current_floor = settings::monitor_config(&self.config, id.as_str()).hw_floor_pct;
+        if let Some(pct) = floor_to_seed_on_dimming(on, current_floor) {
+            let floor = SettingsCommand::SetMonitorFloor {
+                id: id.clone(),
+                pct,
+            };
+            match settings_apply::persist_config_change(&self.config_path, &floor) {
+                Ok(true) => self.reload_config(),
+                Ok(false) => {}
+                Err(e) => warn!(error = %e, "failed to seed a software-dimming floor"),
+            }
+        }
+
         let mode = if on { DimMode::Overlay } else { DimMode::Off };
         let command = SettingsCommand::SetMonitorDimMode {
             id: id.clone(),
@@ -677,14 +715,15 @@ impl AppState {
         self.rebuild_settings();
         self.settings_shell
             .update_from_vm(&self.settings_vm.borrow());
-        // DPI-compensate the framed window the same way as the flyout: content at
-        // the visible logical width (design ÷ scale), window height = design × scale.
-        let scale = self.settings_shell.scale_factor().max(0.1);
-        self.settings_shell.set_geometry(
-            SETTINGS_LOGICAL_WIDTH / scale,
-            SETTINGS_LOGICAL_HEIGHT * scale,
-        );
+        // Drive the content height (logical); Slint clamps it to the window's
+        // min/max. The buffer is corrected after show, like the flyout.
+        self.settings_shell.set_content_height(SETTINGS_LOGICAL_HEIGHT);
         self.settings_shell.show();
+        // Root-cause fix for the fractional-DPI buffer undersize: re-assert the
+        // logical design size now the window is on its real monitor so Slint
+        // requests the correct physical buffer (design × scale).
+        self.settings_shell
+            .enforce_logical_size(SETTINGS_LOGICAL_WIDTH, SETTINGS_LOGICAL_HEIGHT);
         // Centre the window on the active monitor instead of leaving it at the
         // OS default cascade position (P0 live-QA bug 4).
         let (_cursor, work) = geometry::cursor_and_work_area();
@@ -914,9 +953,14 @@ impl AppState {
         self.vm.borrow_mut().set_displays(rows);
         self.refresh_flyout_dimming();
         self.render();
-        // Keep the width compensation + height current if the flyout is open.
+        // Keep the content-driven height current if the flyout is open (the row
+        // count may have changed), re-asserting the logical size so the buffer
+        // tracks it.
         if self.flyout_visible {
-            self.apply_flyout_geometry();
+            let logical_height = self.flyout_logical_height();
+            self.shell.set_content_height(logical_height);
+            self.shell
+                .enforce_logical_size(FLYOUT_LOGICAL_WIDTH, logical_height);
         }
         self.apply_overlays();
         let _ = self.state.maybe_flush(now);
@@ -1485,9 +1529,31 @@ mod tests {
     //! weak and synthesising `WM_HOTKEY` does not reliably reach its handler); it
     //! is covered by the P1 `spike/eventloop` proof and manual hardware QA.
     use super::{Accelerator, Action, Code, GhkModifiers, HotkeyAction};
-    use super::{TOGGLE_GUARD, toggle_decision};
+    use super::{DEFAULT_SOFTWARE_DIM_FLOOR_PCT, TOGGLE_GUARD, floor_to_seed_on_dimming, toggle_decision};
     use super::{ToggleDecision, accel_to_hotkey, action_for, code_for_key, ghk_modifiers};
     use std::time::Duration;
+
+    // --- Defect 2: the flyout "Software dimming" toggle must actually engage ---
+    //
+    // The schema default `hw_floor_pct = 0` leaves no sub-floor region, so
+    // `map_user_level` never produces an overlay and the toggle was a visual
+    // no-op. Turning it on now seeds a floor so dimming has a region to act in;
+    // the pure `dimming::plan` tests then prove an overlay engages below a
+    // non-zero floor.
+    #[test]
+    fn dimming_toggle_seeds_a_floor_only_when_turned_on_without_one() {
+        // Turned on with no floor → seed the default so the overlay can engage.
+        assert_eq!(
+            floor_to_seed_on_dimming(true, 0),
+            Some(DEFAULT_SOFTWARE_DIM_FLOOR_PCT)
+        );
+        // Turned on with a floor already set → leave the user's floor alone.
+        assert_eq!(floor_to_seed_on_dimming(true, 25), None);
+        // Turned off → never seed (this was the pre-fix behaviour for *every*
+        // case, which is exactly why the on-with-no-floor toggle did nothing).
+        assert_eq!(floor_to_seed_on_dimming(false, 0), None);
+        assert_eq!(floor_to_seed_on_dimming(false, 25), None);
+    }
 
     #[test]
     fn toggle_decision_hides_a_visible_flyout() {

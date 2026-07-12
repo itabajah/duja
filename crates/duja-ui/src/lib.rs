@@ -51,6 +51,7 @@ pub mod settings_shell;
 pub mod settings_vm;
 pub mod shell;
 
+pub(crate) mod dpi;
 pub(crate) mod generated;
 pub(crate) mod model_sync;
 
