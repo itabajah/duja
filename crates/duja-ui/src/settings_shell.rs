@@ -22,6 +22,8 @@ pub struct SettingsShell {
     vm: Rc<RefCell<SettingsVm>>,
     monitors: Rc<VecModel<SettingsMonitorData>>,
     hotkeys: Rc<VecModel<SettingsHotkeyData>>,
+    /// The design logical size the buffer keeper enforces (see [`crate::dpi`]).
+    desired: crate::dpi::DesiredSize,
 }
 
 impl SettingsShell {
@@ -43,11 +45,19 @@ impl SettingsShell {
         ui.window()
             .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
 
+        // Install the fractional-DPI buffer keeper (no focus-loss dismissal for
+        // the settings window). `desired` seeds to the design size; the app
+        // updates it via `enforce_logical_size`.
+        let desired: crate::dpi::DesiredSize = Rc::new(std::cell::Cell::new((440.0, 600.0)));
+        let focus_lost: crate::dpi::FocusLostCb = Rc::new(RefCell::new(None));
+        crate::dpi::install_window_hook(ui.window(), desired.clone(), focus_lost);
+
         let shell = SettingsShell {
             ui,
             vm,
             monitors,
             hotkeys,
+            desired,
         };
         shell.update_from_vm(&shell.vm.borrow());
         Ok(shell)
@@ -66,6 +76,20 @@ impl SettingsShell {
         self.wire_general(&handler);
         self.wire_monitors(&handler);
         self.wire_hotkeys(&handler);
+
+        // Frameless header drag: start a winit system move so the OS drives the
+        // window under the pointer (correct at any DPI — no manual set-position).
+        {
+            let weak = self.ui.as_weak();
+            self.ui.on_start_drag(move || {
+                if let Some(ui) = weak.upgrade() {
+                    use i_slint_backend_winit::WinitWindowAccessor;
+                    ui.window().with_winit_window(|w| {
+                        let _ = w.drag_window();
+                    });
+                }
+            });
+        }
 
         // Esc and the close button both hide the window (stays in the tray).
         {
@@ -277,12 +301,18 @@ impl SettingsShell {
         self.ui.window().scale_factor()
     }
 
-    /// Set the settings window's DPI-compensated usable content width and its
-    /// content height (both logical px), mirroring the flyout — the framed
-    /// window's buffer is also undersized on fractional-scale monitors.
-    pub fn set_geometry(&self, usable_width: f32, content_height: f32) {
-        self.ui.set_usable_width(usable_width);
+    /// Set the settings window's desired content height (logical px). Like the
+    /// flyout, the app drives the height so the window grows to its content.
+    pub fn set_content_height(&self, content_height: f32) {
         self.ui.set_content_height(content_height);
+    }
+
+    /// Force the window's physical buffer to `logical × current-scale`, the same
+    /// fractional-DPI buffer-undersize cure as the flyout
+    /// ([`FlyoutShell::enforce_logical_size`](crate::FlyoutShell::enforce_logical_size)).
+    pub fn enforce_logical_size(&self, logical_width: f32, logical_height: f32) {
+        self.desired.set((logical_width, logical_height));
+        crate::dpi::enforce_physical_buffer(self.ui.window(), logical_width, logical_height);
     }
 
     /// Bring the settings window to the foreground (best-effort focus).
@@ -294,6 +324,9 @@ impl SettingsShell {
         use i_slint_backend_winit::WinitWindowAccessor;
         self.ui.window().with_winit_window(|w| {
             w.focus_window();
+            // Force a complete first frame after showing (see the flyout's
+            // `surface`): avoids an occasional partially-painted open.
+            w.request_redraw();
         });
     }
 

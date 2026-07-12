@@ -35,6 +35,10 @@ pub struct FlyoutShell {
     ui: FlyoutWindow,
     vm: Rc<RefCell<FlyoutVm>>,
     rows: Rc<VecModel<FlyoutRowData>>,
+    /// The design logical size the buffer keeper enforces (see [`crate::dpi`]).
+    desired: crate::dpi::DesiredSize,
+    /// The click-outside dismissal callback, invoked by the shared winit hook.
+    focus_lost: crate::dpi::FocusLostCb,
 }
 
 impl FlyoutShell {
@@ -55,7 +59,20 @@ impl FlyoutShell {
         ui.window()
             .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
 
-        let shell = FlyoutShell { ui, vm, rows };
+        // Install the single winit event hook: fractional-DPI buffer keeper +
+        // focus-loss forwarder. `desired` seeds to the design size; the app
+        // updates it via `enforce_logical_size`.
+        let desired: crate::dpi::DesiredSize = Rc::new(std::cell::Cell::new((320.0, 260.0)));
+        let focus_lost: crate::dpi::FocusLostCb = Rc::new(RefCell::new(None));
+        crate::dpi::install_window_hook(ui.window(), desired.clone(), focus_lost.clone());
+
+        let shell = FlyoutShell {
+            ui,
+            vm,
+            rows,
+            desired,
+            focus_lost,
+        };
         shell.update_from_vm(&shell.vm.borrow());
         Ok(shell)
     }
@@ -115,11 +132,19 @@ impl FlyoutShell {
             });
         }
 
-        // Link toggle: pure VM state, no command.
+        // Link toggle: pure VM state, no command — but re-render so the pill's
+        // `checked` (bound one-way to `link-all`) reflects the new state. Without
+        // the re-render the toggle stayed frozen and re-sent the same value on
+        // every click (P0 live-QA: "Link all does nothing").
         {
             let vm = self.vm.clone();
+            let rows = self.rows.clone();
+            let weak = self.ui.as_weak();
             self.ui.on_link_toggled(move |on| {
                 vm.borrow_mut().link_toggled(on);
+                if let Some(ui) = weak.upgrade() {
+                    render_into(&ui, &rows, &vm.borrow());
+                }
             });
         }
 
@@ -160,23 +185,34 @@ impl FlyoutShell {
         }
     }
 
-    /// Set the flyout's usable content width (logical px).
-    ///
-    /// On a fractional-scale monitor Slint/winit leave the OS window buffer
-    /// narrower than the rendered content (the window renders `width` logical →
-    /// `width × scale` physical, but the OS buffer stays `width` physical), so the
-    /// right edge is clipped. Laying the content out at `design_width / scale`
-    /// keeps everything inside the visible buffer. No-op-safe on integer scales
-    /// (the value equals the design width).
-    pub fn set_usable_width(&self, logical_width: f32) {
-        self.ui.set_usable_width(logical_width);
-    }
-
     /// Set the flyout's desired window height (logical px). A no-frame top-level
     /// window is not auto-grown to its content preferred height after the rows
     /// populate asynchronously, so the app drives it from the row count.
     pub fn set_content_height(&self, logical_height: f32) {
         self.ui.set_content_height(logical_height);
+    }
+
+    /// Force the window's physical buffer to `logical × scale`, sizing it from
+    /// the winit-reported (OS-true) scale factor rather than Slint's.
+    ///
+    /// A borderless (`no-frame`) window created while its scale factor is still
+    /// the provisional `1.0` allocates a design-px *physical* buffer; when it is
+    /// then shown on a fractional-DPI monitor the winit `ScaleFactorChanged`
+    /// buffer grow to `logical × scale` is **permanently** lost — Slint then lays
+    /// content out at the real scale (needing `logical × scale` physical) into a
+    /// buffer that stayed design-px physical, clipping the right/bottom edge (the
+    /// live-QA dead space / clip). `slint::Window::set_size(LogicalSize)` cannot
+    /// cure it because it multiplies by Slint's *own* (still-stale) scale.
+    ///
+    /// Driving winit's `request_inner_size` with an explicit **physical** size
+    /// derived from winit's scale factor grows the OS buffer directly, on a code
+    /// path the lost `ScaleFactorChanged` never touched. Idempotent; on an
+    /// integer scale it requests the design size unchanged.
+    pub fn enforce_logical_size(&self, logical_width: f32, logical_height: f32) {
+        // Record the target so the scale-change hook can re-assert it, then make
+        // an immediate best-effort pass for the already-settled cases.
+        self.desired.set((logical_width, logical_height));
+        crate::dpi::enforce_physical_buffer(self.ui.window(), logical_width, logical_height);
     }
 
     /// Position the flyout at physical pixel `(x, y)` and show it.
@@ -234,6 +270,11 @@ impl FlyoutShell {
                 WindowLevel::Normal
             });
             w.focus_window();
+            // Force a full repaint after (re)showing: a fresh show occasionally
+            // presented a partially-painted first frame until the next input
+            // (P0 live-QA bug 4/partial-render). An explicit redraw request makes
+            // the first presented frame complete.
+            w.request_redraw();
         });
     }
 
@@ -246,22 +287,14 @@ impl FlyoutShell {
     /// outside it / activated another window).
     ///
     /// Standard tray-flyout dismissal: `slint` exposes no window-deactivate
-    /// callback, so this taps the raw winit `WindowEvent::Focused(false)` via the
-    /// backend accessor. The event still fires for a borderless (`no-frame`)
-    /// top-level window. The handler routes back through the app so the flyout's
-    /// visibility state stays consistent (P0 live-QA bug 5).
-    pub fn on_focus_lost(&self, mut handler: impl FnMut() + 'static) {
-        use i_slint_backend_winit::winit::event::WindowEvent;
-        use i_slint_backend_winit::{EventResult, WinitWindowAccessor};
-        self.ui
-            .window()
-            .on_winit_window_event(move |_window, event| {
-                if matches!(event, WindowEvent::Focused(false)) {
-                    handler();
-                }
-                // Let Slint keep processing the event normally.
-                EventResult::Propagate
-            });
+    /// callback, so the shared winit hook (installed in [`new`](Self::new)) taps
+    /// the raw `WindowEvent::Focused(false)` and calls this handler. The event
+    /// still fires for a borderless (`no-frame`) top-level window. The handler
+    /// routes back through the app so the flyout's visibility state stays
+    /// consistent (P0 live-QA bug 5). A single winit hook serves both this and
+    /// the fractional-DPI buffer keeper.
+    pub fn on_focus_lost(&self, handler: impl FnMut() + 'static) {
+        *self.focus_lost.borrow_mut() = Some(Box::new(handler));
     }
 }
 
@@ -347,4 +380,74 @@ mod tests {
     // Instantiating the Slint window needs a real backend/event loop, which is
     // unavailable in this disconnected session and in headless CI. The smoke
     // test that exercises it lives behind `#[ignore]` in tests/smoke.rs.
+}
+
+/// Binding-layer regression tests that drive the *real* `.slint` widgets through
+/// the headless `i-slint-backend-testing` backend, catching bugs the pure
+/// view-model tests cannot see (they live in the `.slint` ↔ shell wiring).
+///
+/// Gated behind the `smoke` feature (which pulls the testing backend) so the
+/// default test build stays backend-free; run under `--all-features`.
+#[cfg(all(test, feature = "smoke"))]
+mod binding_tests {
+    use super::*;
+    use duja_core::id::StableDisplayId;
+    use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
+    use i_slint_backend_testing::ElementHandle;
+
+    fn snapshot(serial: &str, level: u8) -> DisplaySnapshot {
+        DisplaySnapshot {
+            id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap(),
+            name: format!("Monitor {serial}"),
+            kind: DisplayKind::ExternalDdc,
+            user_level_pct: level,
+            capabilities: Capabilities::default(),
+        }
+    }
+
+    // Defect 5: the flyout "Link all" toggle did nothing. The footer pill bound
+    // `checked <=> link-all` two-way, but nothing ever wrote `checked` and the
+    // shell did not re-render, so the pill stayed frozen and every click re-sent
+    // the same value — it could never turn on/off. This drives the actual widget
+    // through the .slint binding (a pure `FlyoutVm` test cannot: `link_toggled`
+    // was always called correctly). Proven red against the pre-fix markup/shell.
+    #[test]
+    fn link_all_toggle_round_trips_through_the_binding() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![snapshot("A", 40), snapshot("B", 70)]);
+        let vm = Rc::new(RefCell::new(vm));
+        let shell = FlyoutShell::new(vm.clone()).expect("shell instantiates");
+        // The link handler is registered inside `on_command`.
+        shell.on_command(|_cmd| {});
+
+        let switch = || {
+            ElementHandle::find_by_accessible_label(&shell.ui, "Link all displays")
+                .next()
+                .expect("the Link-all switch exists")
+        };
+
+        // Initially off, in both the VM and the rendered pill.
+        assert!(!vm.borrow().link_all());
+        assert_eq!(switch().accessible_checked(), Some(false));
+
+        // Click it: the VM turns on AND the pill reflects it (needs the re-render).
+        switch().invoke_accessible_default_action();
+        assert!(vm.borrow().link_all(), "VM link-all did not turn on");
+        assert_eq!(
+            switch().accessible_checked(),
+            Some(true),
+            "the pill did not reflect the on state (frozen toggle / missing re-render)"
+        );
+
+        // Click again: it must turn back off — the pre-fix frozen `checked` kept
+        // re-sending `true`, so this is the assertion the old code fails hardest.
+        switch().invoke_accessible_default_action();
+        assert!(
+            !vm.borrow().link_all(),
+            "VM link-all did not turn back off (the toggle was stuck on)"
+        );
+        assert_eq!(switch().accessible_checked(), Some(false));
+    }
 }

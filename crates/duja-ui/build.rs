@@ -6,6 +6,15 @@
 //! would re-emit their shared `flyout.slint` imports and collide.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    slint_build::compile("ui/app.slint")?;
+    // The `smoke` feature enables the `i-slint-backend-testing` interaction
+    // tests, whose `ElementHandle` API needs the Slint compiler to emit debug
+    // info into the generated code. Only turn it on for that build (it is dead
+    // weight otherwise). Cargo exposes an enabled feature as `CARGO_FEATURE_*`.
+    if std::env::var_os("CARGO_FEATURE_SMOKE").is_some() {
+        let config = slint_build::CompilerConfiguration::new().with_debug_info(true);
+        slint_build::compile_with_config("ui/app.slint", config)?;
+    } else {
+        slint_build::compile("ui/app.slint")?;
+    }
     Ok(())
 }

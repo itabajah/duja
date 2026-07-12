@@ -322,9 +322,6 @@ export component FlyoutWindow inherits Window {
     in property <bool> no-displays;
     in property <bool> dark <=> Palette.dark;
     in-out property <bool> link-all;
-    // The visible content width (logical px); the app sets this to
-    // `design-width / scale` to compensate for the fractional-DPI buffer clip.
-    in property <length> usable-width: 320px;
     // The desired window height (logical px), computed by the app from the row
     // count (a no-frame window is not auto-grown to its content preferred size).
     in property <length> content-height: 260px;
@@ -350,10 +347,6 @@ export component FlyoutWindow inherits Window {
         }
 
         VerticalLayout {
-            // Constrain content to the visible width (left-aligned) so the
-            // fractional-DPI buffer clip never eats the right-hand controls.
-            x: 0;
-            width: root.usable-width;
             padding: 14px;
             spacing: 10px;
             // Pack to the top: any slack from the explicitly-set window height
@@ -524,7 +517,12 @@ export component FlyoutWindow inherits Window {
             HorizontalLayout {
                 spacing: 8px;
                 PillToggle {
-                    checked <=> root.link-all;
+                    // One-way (not `<=>`): the shell owns the state — it updates
+                    // the VM and re-renders `link-all`, exactly like the per-row
+                    // dimming toggle. A two-way binding here left `checked` frozen
+                    // (nothing wrote it), so the pill never moved and every click
+                    // re-sent the same value (P0 live-QA: "Link all does nothing").
+                    checked: root.link-all;
                     label: @tr("Link all displays");
                     toggled(on) => {
                         root.link-toggled(on);
