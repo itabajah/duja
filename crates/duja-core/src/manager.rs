@@ -342,6 +342,20 @@ impl DisplayManager {
     pub fn is_responsive(&self, id: &StableDisplayId) -> Option<bool> {
         self.records.get(id).map(|record| record.responsive)
     }
+
+    /// The last user level recorded for `id`, or `None` if the display is unknown
+    /// or has no recorded level yet.
+    ///
+    /// Unlike [`snapshots`](Self::snapshots) this does **not** substitute
+    /// [`DEFAULT_USER_LEVEL_PCT`], so the engine can tell "never learned" apart
+    /// from a real value when deciding whether a poll reading is an external
+    /// change.
+    #[must_use]
+    pub fn user_level_of(&self, id: &StableDisplayId) -> Option<u8> {
+        self.records
+            .get(id)
+            .and_then(|record| record.last_user_level)
+    }
 }
 
 /// Assign `-slot<n>` twin suffixes to a list of ids, in the order given.
@@ -619,6 +633,23 @@ mod tests {
             m.apply_enumeration(vec![disc(&a())], now()),
             vec![reattached(a(), Some(25))]
         );
+    }
+
+    #[test]
+    fn user_level_of_returns_the_raw_recorded_level_without_the_default() {
+        let mut m = DisplayManager::new();
+        // Unknown id ⇒ None.
+        assert_eq!(m.user_level_of(&a()), None);
+        let _ = m.apply_enumeration(vec![disc(&a())], now());
+        // Known but never recorded ⇒ None (no DEFAULT substitution, unlike snapshots).
+        assert_eq!(m.user_level_of(&a()), None);
+        assert_eq!(
+            m.snapshots().first().unwrap().user_level_pct,
+            DEFAULT_USER_LEVEL_PCT
+        );
+        // After recording, it returns the exact clamped value.
+        assert!(m.record_user_level(&a(), 42));
+        assert_eq!(m.user_level_of(&a()), Some(42));
     }
 
     #[test]

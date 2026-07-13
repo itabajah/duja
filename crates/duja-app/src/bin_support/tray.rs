@@ -104,6 +104,23 @@ fn adopt_position(reading_pct: u8, persisted: Option<u8>, cfg: ContinuumConfig) 
     }
 }
 
+/// The perceptual gate for a poll reading: `Some(new_slider)` to reflect a
+/// genuine external change, or `None` when the reading matches what the current
+/// slider position already drives.
+///
+/// The `None` case covers our own state and, crucially, the pinned-floor/overlay
+/// case: below the transition the hardware sits at the floor and the reading
+/// matches it, so the reflection never yanks the thumb up to the transition even
+/// though `reverse_map` (alpha-agnostic) would map the floor reading there. A
+/// software-only display (no hardware channel) never reflects.
+fn reflected_level(current_perceived: u8, hw_pct: u8, cfg: ContinuumConfig) -> Option<u8> {
+    match map_user_level(current_perceived, &cfg).hardware_pct {
+        None => None,
+        Some(intended) if intended.abs_diff(hw_pct) <= 1 => None,
+        Some(_) => Some(reverse_map(hw_pct, &cfg)),
+    }
+}
+
 /// Adopt a fresh enumeration into the state book: record each display's adopted
 /// user level (see [`adopt_position`]) for every display the user has **not** taken
 /// control of this session.
@@ -541,6 +558,13 @@ impl AppState {
             .present_at(FLYOUT_LOGICAL_WIDTH, logical_height, x, y);
         self.flyout_visible = true;
 
+        // Reflect external brightness changes while the flyout is open: poll the
+        // hardware level so the monitor's own buttons move the slider. Disabled
+        // again on hide, keeping the idle engine at zero wakeups.
+        let _ = self
+            .engine_tx
+            .send(EngineCommand::SetLevelPolling { on: true });
+
         // Keep the flyout above other windows while visible and focus it so
         // Esc/keyboard work immediately (user-reported: it opened underneath).
         // This never resizes/moves the window; its redraw request just forces the
@@ -572,6 +596,10 @@ impl AppState {
         self.shell.hide();
         self.flyout_visible = false;
         self.last_hidden = Some(Instant::now());
+        // Stop level polling so the idle engine parks with zero wakeups.
+        let _ = self
+            .engine_tx
+            .send(EngineCommand::SetLevelPolling { on: false });
     }
 
     /// Dismiss the flyout when it loses focus (the user clicked outside it).
@@ -625,6 +653,11 @@ impl AppState {
             UiCommand::SetLevel { id, pct } => self.set_user_level(&id, pct),
             UiCommand::Refresh => {
                 let _ = self.engine_tx.send(EngineCommand::RefreshNow);
+                // Re-arm polling to re-read levels at once (idempotent while the
+                // flyout is already polling).
+                let _ = self
+                    .engine_tx
+                    .send(EngineCommand::SetLevelPolling { on: true });
             }
             UiCommand::OpenSettings => self.open_settings(),
             UiCommand::SetDimmingEnabled { id, on } => self.set_dimming_enabled(&id, on),
@@ -935,7 +968,44 @@ impl AppState {
                 self.vm.borrow_mut().set_unresponsive(&id, false);
                 self.render();
             }
+            EngineNotification::LevelRead { id, hw_pct } => self.on_level_read(&id, hw_pct),
         }
+    }
+
+    /// Reflect an externally-observed hardware level onto the perceptual slider.
+    ///
+    /// A poll saw the display's hardware brightness change from outside Duja. The
+    /// engine already suppressed our own writes (it only emits `LevelRead` on a
+    /// drift from what it last recorded); this second, perceptual gate additionally
+    /// suppresses a reading that merely matches the hardware our *current* slider
+    /// position already intends — which also covers the pinned-floor/overlay case
+    /// (below the floor the hardware sits at the floor and the reading matches it),
+    /// so the reflection never yanks the thumb up to the transition. A genuine
+    /// external change is reflected via [`reverse_map`] and updates the slider +
+    /// overlays; it **never writes to hardware**.
+    fn on_level_read(&mut self, id: &StableDisplayId, hw_pct: u8) {
+        let Some(kind) = self.kind_of(id) else {
+            return;
+        };
+        let cfg = settings::continuum_for(
+            kind,
+            &settings::monitor_config(&self.config, id.as_str()),
+            self.gamma_allowed,
+        );
+        let current = self
+            .state
+            .level(id.as_str())
+            .unwrap_or(DEFAULT_USER_LEVEL_PCT);
+        let Some(perceived) = reflected_level(current, hw_pct, cfg) else {
+            return;
+        };
+        self.state.record(id.as_str(), perceived, unix_now());
+        self.vm.borrow_mut().set_level(id, perceived);
+        self.render();
+        // Re-plan overlays: an external change that crosses the transition must
+        // clear/adjust any overlay a user-controlled display was showing.
+        self.apply_overlays();
+        let _ = self.state.maybe_flush(Instant::now());
     }
 
     /// Adopt a fresh enumeration: mirror each display's CURRENT hardware brightness
@@ -1585,7 +1655,7 @@ mod tests {
     use super::{ContinuumConfig, DimMode, TOGGLE_GUARD, toggle_decision};
     use super::{
         DEFAULT_USER_LEVEL_PCT, ToggleDecision, accel_to_hotkey, action_for, adopt_enumeration,
-        adopt_position, code_for_key, ghk_modifiers,
+        adopt_position, code_for_key, ghk_modifiers, reflected_level,
     };
     use crate::bin_support::state_store::StateStore;
     use duja_core::id::StableDisplayId;
@@ -1674,6 +1744,43 @@ mod tests {
             Some(70),
             "must adopt the live hardware reading, not the persisted 48"
         );
+    }
+
+    // --- external-change reflection: the perceptual gate ---
+
+    #[test]
+    fn reflected_level_ignores_a_reading_matching_the_current_slider() {
+        // Identity continuum: current slider 50 drives hardware 50; a reading of 50
+        // (± rounding) is our own state, not an external change.
+        let cfg = ContinuumConfig::hardware(0, 0, DimMode::Overlay);
+        assert_eq!(reflected_level(50, 50, cfg), None);
+        assert_eq!(reflected_level(50, 51, cfg), None); // within tolerance
+    }
+
+    #[test]
+    fn reflected_level_reflects_a_genuine_external_change() {
+        // A reading that differs from what the slider drives is reflected via
+        // reverse_map (identity here ⇒ 80).
+        let cfg = ContinuumConfig::hardware(0, 0, DimMode::Overlay);
+        assert_eq!(reflected_level(50, 80, cfg), Some(80));
+    }
+
+    #[test]
+    fn reflected_level_does_not_jump_when_pinned_below_the_floor() {
+        // floor 30, anchor 25 ⇒ transition B = 47.5. At slider 10 (below B) the
+        // hardware is pinned at the floor 30; a reading of 30 matches, so the gate
+        // returns None — the thumb must NOT jump up to pos(30) = 47.5 even though
+        // reverse_map(30) would map there.
+        let cfg = ContinuumConfig::hardware(30, 25, DimMode::Overlay);
+        assert_eq!(reflected_level(10, 30, cfg), None);
+        // But a reading well above the floor is a real external change.
+        assert!(reflected_level(10, 70, cfg).is_some());
+    }
+
+    #[test]
+    fn reflected_level_never_reflects_on_software_only() {
+        let cfg = ContinuumConfig::software_only(DimMode::Overlay);
+        assert_eq!(reflected_level(50, 80, cfg), None);
     }
 
     #[test]

@@ -216,9 +216,19 @@ retargets the hardware without moving the thumb. Consequences: the old
 20 %-seed hack behind the "Software dimming" toggle is gone (floor 0 now has a
 real software zone below the anchor); the toggle just switches the dim mode; and
 launch adoption reflects the live hardware reading through `reverse_map` so the
-slider mirrors reality with no first-touch jump. `reverse_map` (dead in v1) now
-has a runtime consumer; the external-button reflection that fully exercises it is
-the next PR.
+slider mirrors reality with no first-touch jump.
+
+**External-change reflection.** While the flyout is open the engine polls each
+responsive display's hardware level (a new `SetLevelPolling` command; off by
+default, so the idle engine keeps its zero-wakeup guarantee), and a reading that
+drifts from what Duja last recorded surfaces as `EngineNotification::LevelRead`.
+The app reflects it onto the perceptual slider via `reverse_map`, so turning the
+monitor's own buttons (or another app changing brightness) moves the thumb
+within ~2 s. Two echo gates keep Duja's own writes from bouncing back: the engine
+suppresses readings that match its recorded level (and skips a display with a
+write in flight), and the app suppresses a reading that matches the hardware the
+current slider already drives — which also covers the pinned-floor/overlay case,
+so the thumb never jumps to the transition. The reflection path writes no DDC.
 
 ## P5 gate results
 
