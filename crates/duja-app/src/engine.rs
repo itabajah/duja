@@ -516,15 +516,21 @@ impl EngineState {
                         self.manager.record_user_level(&id, pct);
                         self.notify_displays_changed();
                     } else if was_poll
-                        && self
-                            .manager
-                            .user_level_of(&id)
-                            .is_none_or(|known| pct.abs_diff(known) > 1)
+                        && self.manager.user_level_of(&id).is_none_or(|known| {
+                            // Compare at the RAW level against the raw our own last
+                            // write produced (`pct_to_raw(known)`), not at the pct
+                            // level against `known`. On a panel whose brightness_max
+                            // < 100 the write quantizes, so the readback pct differs
+                            // from the requested pct by up to the quantization step
+                            // — a pct-level compare would spuriously flag Duja's own
+                            // write as an external change. Reading back our own write
+                            // yields the exact raw we wrote (±1 for panel jitter).
+                            range.current.abs_diff(pct_to_raw(known, range.max)) > 1
+                        })
                     {
-                        // Poll read: the hardware drifted from what we last recorded,
-                        // so something outside Duja changed it (physical buttons,
-                        // another app). Our own writes match to within rounding and
-                        // are suppressed here. Record it (so a replug restores the
+                        // Poll read: the hardware drifted from the raw our last write
+                        // produced, so something outside Duja changed it (physical
+                        // buttons, another app). Record it (so a replug restores the
                         // external value) and reflect it to the app. A *stale*
                         // initial-`Get` ack (not a poll) falls through and is ignored.
                         self.manager.record_user_level(&id, pct);

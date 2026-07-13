@@ -908,12 +908,29 @@ impl AppState {
         )
     }
 
-    /// Re-apply a display's dimming after a floor/dim-mode change by re-driving
-    /// its current user level through the normal path (recomputes the hardware
-    /// target against the new continuum and re-plans overlays/gamma).
+    /// Re-apply a display's dimming after a floor/anchor/dim-mode change by
+    /// re-driving its current user level through the normal path (recomputes the
+    /// hardware target against the new continuum and re-plans overlays/gamma).
+    ///
+    /// The level is first re-clamped to the reachable range under the new config:
+    /// turning software dimming **off** (or raising the floor) lifts the slider's
+    /// minimum to the transition, so a level that was below it would otherwise
+    /// strand the thumb below the new minimum while the screen jumps up to the
+    /// transition brightness. Clamping keeps the thumb and the screen in sync.
     fn reapply_display(&mut self, id: &StableDisplayId) {
         let level = self.state.level(id.as_str()).unwrap_or(100);
-        self.set_user_level(id, level);
+        let clamped = match self.kind_of(id) {
+            Some(kind) => {
+                let cfg = settings::continuum_for(
+                    kind,
+                    &settings::monitor_config(&self.config, id.as_str()),
+                    self.gamma_allowed,
+                );
+                level.max(settings::min_reachable_pct(cfg))
+            }
+            None => level,
+        };
+        self.set_user_level(id, clamped);
     }
 
     /// Kick off the opt-in update check on a background thread (never blocks the
