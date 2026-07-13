@@ -141,6 +141,11 @@ pub struct MonitorConfig {
     /// off to software dimming. `0` means "no artificial floor" — drive the
     /// panel across its full hardware range.
     pub hw_floor_pct: u8,
+    /// Perceived brightness (%) the panel shows at hardware zero — the anchor of
+    /// the perceptual slider scale (see
+    /// [`continuum`](crate::continuum)). Lets the software/hardware split feel
+    /// natural on any panel; tuned per display in settings.
+    pub min_perceived_pct: u8,
     /// How to dim below [`hw_floor_pct`](Self::hw_floor_pct).
     pub dim_mode: DimMode,
     /// Minimum delay between consecutive hardware writes to this display, in
@@ -168,6 +173,7 @@ impl Default for MonitorConfig {
         MonitorConfig {
             name: None,
             hw_floor_pct: 0,
+            min_perceived_pct: 25,
             dim_mode: DimMode::Overlay,
             min_write_gap_ms: 100,
             sync_group: None,
@@ -351,6 +357,7 @@ mod tests {
         (
             proptest::option::of(text_strategy()),
             0u8..=100,
+            0u8..=100,
             any_dim_mode(),
             0u64..=100_000,
             proptest::option::of(text_strategy()),
@@ -362,6 +369,7 @@ mod tests {
                 |(
                     name,
                     hw_floor_pct,
+                    min_perceived_pct,
                     dim_mode,
                     min_write_gap_ms,
                     sync_group,
@@ -372,6 +380,7 @@ mod tests {
                     MonitorConfig {
                         name,
                         hw_floor_pct,
+                        min_perceived_pct,
                         dim_mode,
                         min_write_gap_ms,
                         sync_group,

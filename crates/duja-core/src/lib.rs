@@ -36,15 +36,16 @@
 //! use duja_core::continuum::{map_user_level, ContinuumConfig};
 //! use duja_core::model::DimMode;
 //!
-//! // A display that dims via overlay below a 30% hardware floor.
-//! let cfg = ContinuumConfig::hardware(30, DimMode::Overlay);
+//! // Perceptual anchor 25 (hardware zero looks ~25% bright), no hardware floor:
+//! // the slider position *is* perceived brightness.
+//! let cfg = ContinuumConfig::hardware(0, 25, DimMode::Overlay);
 //!
-//! // Above the floor, the slider drives the hardware directly.
-//! assert_eq!(map_user_level(70, &cfg).hardware_pct, Some(70));
+//! // The top of the slider is always full hardware.
+//! assert_eq!(map_user_level(100, &cfg).hardware_pct, Some(100));
 //!
-//! // Below it, hardware pins at the floor and the overlay engages.
-//! let dim = map_user_level(15, &cfg);
-//! assert_eq!(dim.hardware_pct, Some(30));
+//! // Below the anchor the panel sits at hardware zero and the overlay dims.
+//! let dim = map_user_level(10, &cfg);
+//! assert_eq!(dim.hardware_pct, Some(0));
 //! assert!(dim.overlay_alpha > 0.0);
 //! ```
 
