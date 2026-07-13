@@ -124,6 +124,11 @@ export component SettingsWindow inherits Window {
     in property <bool> dark <=> Palette.dark;
     // The desired window height (logical px), driven by the app.
     in property <length> content-height: 600px;
+    // Repaint anchor, flipped by the shell on every present (see the window-edge
+    // Rectangle below and `SettingsShell::present_at`): toggling it marks the
+    // whole window dirty so the software renderer presents a *complete* frame,
+    // curing the blank/partial first paint on re-open.
+    in property <bool> present-nonce;
     in-out property <bool> autostart-on;
     in property <bool> autostart-supported: true;
     in property <int> theme-index;
@@ -169,8 +174,15 @@ export component SettingsWindow inherits Window {
         // header/section padding leaves the 1px rim visible), so it never
         // intercepts pointer input. Square corners keep the opaque, software-
         // rendered window free of transparent-corner artifacts.
+        //
+        // Doubles as the repaint anchor (see the flyout): its `background` depends
+        // on `present-nonce`, and filling the whole window means a change here
+        // marks the entire window dirty — forcing a complete software-renderer
+        // present rather than a stale partial-damage region. The two alpha values
+        // (0 and 1/255) are visually identical yet genuinely different, so the
+        // compiler cannot fold the dependency and every flip repaints.
         Rectangle {
-            background: transparent;
+            background: root.present-nonce ? #00000001 : #00000000;
             border-width: 1px;
             border-color: Palette.window-edge;
         }

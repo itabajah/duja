@@ -232,10 +232,22 @@ impl FlyoutShell {
     /// transparent first frame that only repaired on a later click (item 1).
     /// Placing before a single `show()`, with no resize after, removes that race.
     /// A failed show is swallowed — an unpresentable flyout is a soft failure.
+    ///
+    /// Immediately after `show()` the repaint anchor is flipped: the winit
+    /// software renderer presents only the non-empty dirty region, and on Windows
+    /// a re-shown window gets a freshly-discarded (transparent) surface with no
+    /// `Occluded` event to trigger the renderer's own full-refresh path — so the
+    /// post-show render could present a blank or partial first frame that only
+    /// repaired on a later click. Flipping `present-nonce` (bound to the full-
+    /// window window-edge Rectangle) marks the entire window dirty, so the next
+    /// present covers the whole window. `show()`'s first-show pre-render runs
+    /// before this flip, and the actual paint cannot run until this event-loop
+    /// callback returns, so the flip is always in effect when the frame presents.
     pub fn present_at(&self, logical_width: f32, logical_height: f32, x: i32, y: i32) {
         self.desired.set((logical_width, logical_height));
         self.set_position(x, y);
         let _ = self.ui.show();
+        self.ui.set_present_nonce(!self.ui.get_present_nonce());
     }
 
     /// Move the flyout to physical pixel `(x, y)` without changing visibility.
@@ -445,5 +457,40 @@ mod binding_tests {
             "VM link-all did not turn back off (the toggle was stuck on)"
         );
         assert_eq!(switch().accessible_checked(), Some(false));
+    }
+
+    // First-paint fix: every present must force a *complete* frame. The winit
+    // software renderer presents only the non-empty dirty region, Windows discards
+    // a hidden window's surface, and winit emits no `Occluded` event on Windows —
+    // so a plain show + `request_redraw` could present a blank or partial first
+    // frame that only repaired when a later click dirtied individual widgets. The
+    // cure is a full-window repaint anchor (`present-nonce`, on the window-edge
+    // Rectangle) flipped on every `present_at`, marking the whole window dirty.
+    // This drives the real `.slint` property, which a pure `FlyoutVm` test cannot.
+    // Proven red against a `present_at` that does not flip the nonce.
+    #[test]
+    fn present_flips_the_repaint_nonce_on_every_show() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![snapshot("A", 40)]);
+        let vm = Rc::new(RefCell::new(vm));
+        let shell = FlyoutShell::new(vm).expect("shell instantiates");
+
+        let initial = shell.ui.get_present_nonce();
+        shell.present_at(320.0, 260.0, 0, 0);
+        assert_ne!(
+            shell.ui.get_present_nonce(),
+            initial,
+            "present_at must flip the repaint nonce so the whole window is dirtied"
+        );
+
+        // Every present flips it again — a re-open always forces a fresh full frame.
+        shell.present_at(320.0, 260.0, 0, 0);
+        assert_eq!(
+            shell.ui.get_present_nonce(),
+            initial,
+            "a second present must flip the nonce back (each show repaints fully)"
+        );
     }
 }
