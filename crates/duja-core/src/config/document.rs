@@ -197,6 +197,13 @@ impl ConfigDocument {
         });
     }
 
+    /// Set a monitor's `min_perceived_pct` (the perceptual scale anchor).
+    pub fn set_monitor_min_perceived_pct(&mut self, id: &str, pct: u8) {
+        self.with_monitor(id, |monitor| {
+            monitor.insert("min_perceived_pct", toml_edit::value(i64::from(pct)));
+        });
+    }
+
     /// Set a monitor's `dim_mode`.
     pub fn set_monitor_dim_mode(&mut self, id: &str, mode: DimMode) {
         self.with_monitor(id, |monitor| {
@@ -401,6 +408,7 @@ theme = \"dark\"
         let id = "GSM-5B09-312NTAB1C234";
         doc.set_monitor_name(id, "Left LG");
         doc.set_monitor_hw_floor_pct(id, 10);
+        doc.set_monitor_min_perceived_pct(id, 30);
         doc.set_monitor_dim_mode(id, DimMode::Gamma);
         doc.set_monitor_min_write_gap_ms(id, 200);
         doc.set_monitor_sync_group(id, Some("desk"));
@@ -418,11 +426,26 @@ theme = \"dark\"
         let monitor = cfg.monitors.get(id).expect("monitor entry");
         assert_eq!(monitor.name.as_deref(), Some("Left LG"));
         assert_eq!(monitor.hw_floor_pct, 10);
+        assert_eq!(monitor.min_perceived_pct, 30);
         assert_eq!(monitor.dim_mode, DimMode::Gamma);
         assert_eq!(monitor.min_write_gap_ms, 200);
         assert_eq!(monitor.sync_group.as_deref(), Some("desk"));
         assert!(!monitor.excluded);
         assert_eq!(monitor.inputs.get("hdmi1").copied(), Some(17));
+    }
+
+    #[test]
+    fn absent_min_perceived_pct_defaults_to_25() {
+        // A monitor table that predates the perceptual anchor (only a floor set)
+        // must deserialize with the schema default, not 0.
+        let doc = ConfigDocument::parse(
+            "schema_version = 1\n[monitors.\"GSM-5B09-x\"]\nhw_floor_pct = 10\n",
+        )
+        .expect("parse");
+        let cfg = doc.config().expect("typed");
+        let monitor = cfg.monitors.get("GSM-5B09-x").expect("entry");
+        assert_eq!(monitor.hw_floor_pct, 10);
+        assert_eq!(monitor.min_perceived_pct, 25);
     }
 
     #[test]
