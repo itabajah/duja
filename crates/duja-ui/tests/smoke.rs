@@ -83,6 +83,8 @@ fn settings_shell_instantiates_and_renders() {
         .set_update_status(duja_ui::UpdateStatus::UpToDate);
     shell.update_from_vm(&vm.borrow());
 
-    shell.show();
+    // One-shot present at the design size (origin 0,0) — the same entry the app
+    // uses; there is no separate `show` anymore.
+    shell.present_at(440.0, 600.0, 0, 0);
     shell.hide();
 }

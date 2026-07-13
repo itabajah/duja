@@ -128,36 +128,39 @@ fn clamp(value: i32, lo: i32, hi: i32) -> i32 {
     if hi < lo { lo } else { value.clamp(lo, hi) }
 }
 
-/// Scale a *logical* pixel size by a device scale factor into **physical**
-/// pixels.
+/// Convert a *logical* `(width, height)` in `f32` design units to a **physical**
+/// pixel size at `scale`, rounding and guarding a degenerate scale/extent.
 ///
-/// The Slint window is laid out in logical pixels (`320px`), but the anchor math
+/// The Slint window is laid out in logical pixels (`320px`) but the anchor math
 /// and `set_position` work in physical pixels (Win32 rects are physical on a
-/// Per-Monitor-V2 process). At a scale ≠ 1.0 the two differ, so the caller must
-/// convert the flyout size before clamping — otherwise the anchor keeps a
-/// *logical*-sized box on-screen while the real, larger physical window overflows
-/// the work-area edge (P0 live-QA bug 4). A non-finite/degenerate scale falls
-/// back to the unscaled dimension.
-pub(crate) fn scale_size(logical: (u32, u32), scale: f32) -> (u32, u32) {
-    (scale_dim(logical.0, scale), scale_dim(logical.1, scale))
+/// Per-Monitor-V2 process). At a scale ≠ 1.0 the two differ, so the caller
+/// converts the window's logical design size to physical before clamping —
+/// otherwise the anchor keeps a *logical*-sized box on-screen while the real,
+/// larger physical window overflows the work-area edge (P0 live-QA bug 4). The
+/// height is content-driven (`f32`), so this takes `f32` inputs. A
+/// non-finite/degenerate scale falls back to the unscaled dimension.
+pub(crate) fn physical_window_size(logical_w: f32, logical_h: f32, scale: f32) -> (u32, u32) {
+    (
+        physical_dim(logical_w, scale),
+        physical_dim(logical_h, scale),
+    )
 }
 
-/// Scale one dimension (see [`scale_size`]).
-fn scale_dim(value: u32, scale: f32) -> u32 {
-    // RATIONALE (cast_precision_loss): pixel counts are small; the f32 mantissa
-    // represents them exactly at these magnitudes.
-    #[allow(clippy::cast_precision_loss)]
-    let scaled = (value as f32) * scale;
-    if scaled.is_finite() && scaled >= 1.0 {
-        // RATIONALE (cast_possible_truncation, cast_sign_loss): `scaled` is
-        // finite, ≥ 1.0, and a rounded pixel count well within u32; the guard
-        // rules out negatives, NaN and infinities.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let out = scaled.round() as u32;
-        out
+/// Scale one logical `f32` dimension to a physical pixel count (see
+/// [`physical_window_size`]), clamped to at least one pixel.
+fn physical_dim(logical: f32, scale: f32) -> u32 {
+    let scale = if scale.is_finite() && scale >= 0.1 {
+        scale
     } else {
-        value
-    }
+        1.0
+    };
+    let scaled = (logical.max(1.0) * scale).round();
+    // RATIONALE (cast_possible_truncation, cast_sign_loss): `scaled` is finite,
+    // >= 1.0, and a rounded pixel count well within u32; the guards above rule out
+    // negatives, NaN and infinities.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let out = scaled as u32;
+    out.max(1)
 }
 
 /// The top-left corner (physical pixels) that centres a window of `size` within
@@ -307,13 +310,16 @@ mod tests {
     // --- DPI scaling (P0 live-QA bug 4) ----------------------------------
 
     #[test]
-    fn scale_size_rounds_and_falls_back_on_a_degenerate_scale() {
-        assert_eq!(scale_size((320, 200), 1.25), (400, 250));
-        assert_eq!(scale_size((320, 200), 1.0), (320, 200));
-        assert_eq!(scale_size((321, 200), 1.5), (482, 300)); // 481.5 → 482
-        // A non-finite or zero scale returns the logical size unchanged.
-        assert_eq!(scale_size((320, 200), f32::NAN), (320, 200));
-        assert_eq!(scale_size((320, 200), 0.0), (320, 200));
+    fn physical_window_size_scales_f32_logical_dims() {
+        // 320x250 logical at 125% → 400x313 (250 * 1.25 = 312.5 → 313).
+        assert_eq!(physical_window_size(320.0, 250.0, 1.25), (400, 313));
+        // Integer scale is identity.
+        assert_eq!(physical_window_size(440.0, 600.0, 1.0), (440, 600));
+        // A degenerate scale falls back to the unscaled (rounded) logical size.
+        assert_eq!(physical_window_size(320.0, 250.0, f32::NAN), (320, 250));
+        assert_eq!(physical_window_size(320.0, 250.0, 0.0), (320, 250));
+        // Extents clamp to at least one pixel.
+        assert_eq!(physical_window_size(0.0, 0.0, 1.25), (1, 1));
     }
 
     #[test]
@@ -328,7 +334,7 @@ mod tests {
         };
         let logical = (320u32, 200u32);
         let scale = 1.25;
-        let phys = scale_size(logical, scale);
+        let phys = physical_window_size(320.0, 200.0, scale);
         assert_eq!(phys, (400, 250));
         let phys_w = i32::try_from(phys.0).unwrap();
         let phys_h = i32::try_from(phys.1).unwrap();
@@ -367,7 +373,7 @@ mod tests {
             h: 1380,
         };
         // 420x560 logical settings window at 125 % → 525x700 physical.
-        let size = scale_size((420, 560), 1.25);
+        let size = physical_window_size(420.0, 560.0, 1.25);
         assert_eq!(size, (525, 700));
         let (x, y) = center_in(work, size);
         // Centred: (2560-525)/2 = 1017, (1380-700)/2 = 340.

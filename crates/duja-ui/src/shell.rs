@@ -17,7 +17,7 @@
 //! calling [`update_from_vm`](FlyoutShell::update_from_vm).
 //!
 //! Positioning and the tray icon are **not** here — that is app assembly (wave
-//! 2). The shell exposes only [`show_at`](FlyoutShell::show_at) and
+//! 2). The shell exposes only [`present_at`](FlyoutShell::present_at) and
 //! [`hide`](FlyoutShell::hide) for wave 2 to place the window.
 
 use std::cell::RefCell;
@@ -45,9 +45,9 @@ impl FlyoutShell {
     /// Instantiate the flyout window and bind it to `vm`.
     ///
     /// The window starts hidden (Slint shows only on an explicit
-    /// [`show_at`](Self::show_at)); the close button hides rather than destroys
-    /// so the process survives in the tray. The initial VM state is rendered
-    /// immediately.
+    /// [`present_at`](Self::present_at)); the close button hides rather than
+    /// destroys so the process survives in the tray. The initial VM state is
+    /// rendered immediately.
     ///
     /// # Errors
     /// Returns the Slint [`PlatformError`](slint::PlatformError) if the backend
@@ -188,8 +188,13 @@ impl FlyoutShell {
     /// Set the flyout's desired window height (logical px). A no-frame top-level
     /// window is not auto-grown to its content preferred height after the rows
     /// populate asynchronously, so the app drives it from the row count.
+    ///
+    /// Also keeps the DPI hook's target height current (the width is fixed) so a
+    /// genuine cross-monitor scale change re-asserts the correct physical buffer.
     pub fn set_content_height(&self, logical_height: f32) {
         self.ui.set_content_height(logical_height);
+        let (w, _) = self.desired.get();
+        self.desired.set((w, logical_height));
     }
 
     /// Force the window's physical buffer to `logical × scale`, sizing it from
@@ -215,42 +220,32 @@ impl FlyoutShell {
         crate::dpi::enforce_physical_buffer(self.ui.window(), logical_width, logical_height);
     }
 
-    /// Position the flyout at physical pixel `(x, y)` and show it.
+    /// Move the flyout to physical `(x, y)` while hidden, then present it once.
     ///
-    /// Wave 2 computes the anchor from the tray icon rect; the shell only
-    /// places and shows. A failed show is swallowed — a flyout that cannot be
-    /// presented is a soft failure, not a crash.
-    pub fn show_at(&self, x: i32, y: i32) {
+    /// The window is placed *before* `show()` and nothing resizes or moves it
+    /// after — Slint sizes the buffer natively for the monitor it is shown on
+    /// (PR #29), and the DPI hook re-asserts on a genuine cross-monitor scale
+    /// change. An explicit show-time buffer resize (the former enforce) triggered
+    /// an early hidden render that aged the software renderer's buffer, so the
+    /// post-show render went partial-and-empty and never presented — leaving a
+    /// transparent first frame that only repaired on a later click (item 1).
+    /// Placing before a single `show()`, with no resize after, removes that race.
+    /// A failed show is swallowed — an unpresentable flyout is a soft failure.
+    pub fn present_at(&self, logical_width: f32, logical_height: f32, x: i32, y: i32) {
+        self.desired.set((logical_width, logical_height));
         self.set_position(x, y);
         let _ = self.ui.show();
     }
 
     /// Move the flyout to physical pixel `(x, y)` without changing visibility.
     ///
-    /// The anchor is computed against the flyout's *nominal* size; the window's
-    /// real height is content-driven and only known once shown, so wave 2 shows
-    /// first, reads [`physical_size`](Self::physical_size), then calls this to
-    /// land the window against the tray edge (P0 live-QA bug 4).
+    /// Physical coordinates: `set_position` takes physical screen pixels and
+    /// passes the `Physical` variant straight through (no scale applied), so
+    /// Win32 physical anchors land unscaled on a Per-Monitor-V2 process.
     pub fn set_position(&self, x: i32, y: i32) {
-        // Physical coordinates: `set_position` takes physical screen pixels and
-        // passes the `Physical` variant straight through (no scale applied), so
-        // Win32 physical anchors land unscaled on a Per-Monitor-V2 process.
         self.ui
             .window()
             .set_position(slint::PhysicalPosition::new(x, y));
-    }
-
-    /// The flyout window's current size in **physical** pixels.
-    #[must_use]
-    pub fn physical_size(&self) -> (u32, u32) {
-        let size = self.ui.window().size();
-        (size.width, size.height)
-    }
-
-    /// The window's device scale factor (physical / logical pixels).
-    #[must_use]
-    pub fn scale_factor(&self) -> f32 {
-        self.ui.window().scale_factor()
     }
 
     /// Raise the flyout above other windows and (best-effort) give it focus.

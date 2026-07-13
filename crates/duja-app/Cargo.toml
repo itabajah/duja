@@ -46,6 +46,9 @@ windows = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
     # Opening the releases page in the default browser (ShellExecuteW).
     "Win32_UI_Shell",
+    # Querying the monitor scale under the cursor (GetDpiForMonitor) so the flyout
+    # is sized + placed correctly BEFORE it is shown (item 1: one-shot present).
+    "Win32_UI_HiDpi",
 ] }
 
 [build-dependencies]

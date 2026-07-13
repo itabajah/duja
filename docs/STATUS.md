@@ -229,8 +229,12 @@ against the physical MSI MP273QP, brightness restored to 70 afterwards):
 - **Full app → IPC → engine → hardware path** — with `duja --headless` up,
   `dujactl` reports **"served over ipc"** and drives the physical panel through
   the running app's engine (set 55 → readback 55 → restore 70); `doctor` shows
-  the IPC server reachable; the app applied its **persisted continuum level** on
-  startup; **clean exit (code 0)**.
+  the IPC server reachable; **clean exit (code 0)**. (Startup contract, changed in
+  UI round 4 / item 5: the app now **adopts the panel's current hardware
+  brightness** on launch — it mirrors reality into the UI and writes nothing. The
+  old behaviour of force-pushing the *persisted* continuum level on startup dimmed
+  the monitor to the last-saved level on every launch and was removed; only a
+  genuine user action writes to hardware thereafter.)
 - **Tray GUI stability** — `duja.exe` launches with the Slint software renderer +
   tray without crashing, **no console window**, and idle-samples **flat: RSS
   24.8 MB, 296 handles** (no leak) over the idle window — within the ≤ 35 MB

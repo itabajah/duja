@@ -64,18 +64,6 @@ impl StateStore {
         self.dirty = true;
     }
 
-    /// Seed `id`'s level only if it is not already known, returning the level in
-    /// effect afterwards. Used to adopt a freshly-sighted display's initial
-    /// hardware-derived level without overwriting a persisted user choice.
-    pub(crate) fn seed_if_absent(&mut self, id: &str, seed_pct: u8, updated_at_unix: i64) -> u8 {
-        if let Some(existing) = self.file.level(id) {
-            existing
-        } else {
-            self.record(id, seed_pct, updated_at_unix);
-            seed_pct
-        }
-    }
-
     /// Record that the update check just ran at `unix` (marks the store dirty).
     pub(crate) fn record_update_check(&mut self, unix: i64) {
         self.file.record_update_check(unix);
@@ -187,13 +175,5 @@ mod tests {
         }
         let reloaded = StateStore::load(path);
         assert_eq!(reloaded.level("DEL-A131-x"), Some(72));
-    }
-
-    #[test]
-    fn seed_if_absent_respects_existing_choice() {
-        let (mut s, _dir) = store();
-        assert_eq!(s.seed_if_absent("A", 30, 1), 30); // seeded
-        assert_eq!(s.seed_if_absent("A", 99, 2), 30); // kept
-        assert_eq!(s.level("A"), Some(30));
     }
 }

@@ -272,47 +272,32 @@ impl SettingsShell {
         }
     }
 
-    /// Show the settings window (a soft failure is swallowed, like the flyout).
-    pub fn show(&self) {
+    /// Move the settings window to physical `(x, y)` while hidden, then present it
+    /// once — the same one-shot present as the flyout (item 1). Slint sizes the
+    /// buffer natively for the monitor; nothing resizes/moves it after `show()`, so
+    /// the software renderer never presents a partial first frame. A soft failure
+    /// is swallowed, like the flyout.
+    pub fn present_at(&self, logical_width: f32, logical_height: f32, x: i32, y: i32) {
+        self.desired.set((logical_width, logical_height));
+        self.set_position(x, y);
         let _ = self.ui.show();
     }
 
-    /// Move the settings window to physical pixel `(x, y)`.
-    ///
-    /// Used to centre the window on the active monitor instead of letting the OS
-    /// drop it at a default cascade spot (P0 live-QA bug 4). Physical pixels pass
-    /// through `set_position` unscaled.
+    /// Move the settings window to physical pixel `(x, y)` (physical pixels pass
+    /// through `set_position` unscaled).
     pub fn set_position(&self, x: i32, y: i32) {
         self.ui
             .window()
             .set_position(slint::PhysicalPosition::new(x, y));
     }
 
-    /// The settings window's current size in **physical** pixels.
-    #[must_use]
-    pub fn physical_size(&self) -> (u32, u32) {
-        let size = self.ui.window().size();
-        (size.width, size.height)
-    }
-
-    /// The window's device scale factor (physical / logical pixels).
-    #[must_use]
-    pub fn scale_factor(&self) -> f32 {
-        self.ui.window().scale_factor()
-    }
-
     /// Set the settings window's desired content height (logical px). Like the
-    /// flyout, the app drives the height so the window grows to its content.
+    /// flyout, the app drives the height so the window grows to its content, and
+    /// keeps the DPI hook's target current for cross-monitor scale changes.
     pub fn set_content_height(&self, content_height: f32) {
         self.ui.set_content_height(content_height);
-    }
-
-    /// Force the window's physical buffer to `logical × current-scale`, the same
-    /// fractional-DPI buffer-undersize cure as the flyout
-    /// ([`FlyoutShell::enforce_logical_size`](crate::FlyoutShell::enforce_logical_size)).
-    pub fn enforce_logical_size(&self, logical_width: f32, logical_height: f32) {
-        self.desired.set((logical_width, logical_height));
-        crate::dpi::enforce_physical_buffer(self.ui.window(), logical_width, logical_height);
+        let (w, _) = self.desired.get();
+        self.desired.set((w, content_height));
     }
 
     /// Bring the settings window to the foreground (best-effort focus).

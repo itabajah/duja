@@ -46,6 +46,7 @@ use duja_core::config::Config;
 use duja_core::continuum::map_user_level;
 use duja_core::dimmer::{DimCommand, Dimmer};
 use duja_core::id::StableDisplayId;
+use duja_core::manager::DEFAULT_USER_LEVEL_PCT;
 use duja_core::model::{DimMode, DisplayKind, DisplaySnapshot};
 use duja_dimmer::PlatformDimmer;
 use duja_platform::Autostart;
@@ -109,6 +110,50 @@ fn floor_to_seed_on_dimming(on: bool, current_floor: u8) -> Option<u8> {
     (on && current_floor == 0).then_some(DEFAULT_SOFTWARE_DIM_FLOOR_PCT)
 }
 
+/// The user level to seed for a freshly-sighted display the user has not yet taken
+/// control of, choosing between the live hardware reading and the persisted value.
+///
+/// Item 5 — Duja adopts the monitor's CURRENT brightness on launch. This prefers
+/// the hardware reading (`reading_pct`, from the engine's initial Get) so the
+/// slider mirrors reality and nothing moves. It falls back to the persisted
+/// last-known only when the reading is still the pre-probe placeholder
+/// ([`DEFAULT_USER_LEVEL_PCT`] — before the Get lands, or when it fails) and a
+/// persisted value exists: the documented fallback for a failed hardware read.
+/// It never itself writes to hardware — adoption reflects reality, it does not
+/// restore a saved level.
+fn level_to_adopt(reading_pct: u8, persisted: Option<u8>) -> u8 {
+    match persisted {
+        Some(saved) if reading_pct == DEFAULT_USER_LEVEL_PCT => saved,
+        _ => reading_pct,
+    }
+}
+
+/// Adopt a fresh enumeration into the state book: record each display's adopted
+/// user level (see [`level_to_adopt`]) for every display the user has **not** taken
+/// control of this session.
+///
+/// This is the startup/hot-plug "adopt reality" step (item 5). It has **no engine
+/// channel by construction** — adoption records the level for the UI and persists
+/// it, but pushes NOTHING to the hardware, so a launch can never move the
+/// brightness. (The pre-fix code sent an `EngineCommand::SetUserLevel` for the
+/// persisted level here, which dimmed the monitor to the last-saved level on every
+/// launch.) A user-controlled display is skipped so a late enumeration echo cannot
+/// overwrite the user's chosen value.
+fn adopt_enumeration(
+    snapshots: &[DisplaySnapshot],
+    user_controlled: &BTreeSet<String>,
+    state: &mut StateStore,
+    now_unix: i64,
+) {
+    for snap in snapshots {
+        if user_controlled.contains(snap.id.as_str()) {
+            continue;
+        }
+        let level = level_to_adopt(snap.user_level_pct, state.level(snap.id.as_str()));
+        state.record(snap.id.as_str(), level, now_unix);
+    }
+}
+
 /// Decide what a tray-icon click should do.
 ///
 /// A visible flyout hides. An already-hidden flyout normally re-opens — *unless*
@@ -133,9 +178,6 @@ fn toggle_decision(
 mod geometry;
 mod icon;
 
-/// Nominal flyout size (px) for anchor computation; the window's real height is
-/// content-driven (see `flyout.slint`), this is the layout envelope.
-const FLYOUT_SIZE: (u32, u32) = (320, 480);
 /// The flyout's fixed logical width (matches `flyout.slint`).
 const FLYOUT_LOGICAL_WIDTH: f32 = 320.0;
 /// The settings window's fixed logical design size (matches `settings.slint`).
@@ -352,7 +394,7 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
             engine_tx: engine.sender(),
             gamma,
             displays: Vec::new(),
-            applied: BTreeSet::new(),
+            user_controlled: BTreeSet::new(),
             flyout_visible: false,
             last_hidden: None,
             hotkeys,
@@ -446,8 +488,12 @@ struct AppState {
     gamma: gamma::GammaBackend,
     /// The current display set (resolved id + class) from the last enumeration.
     displays: Vec<(StableDisplayId, DisplayKind)>,
-    /// Displays whose saved level has already been pushed to the engine.
-    applied: BTreeSet<String>,
+    /// Displays the user has explicitly driven this session (slider / hotkey /
+    /// IPC). Until a display is in this set, Duja only *adopts* its current
+    /// hardware brightness (mirrors it into the UI, writes nothing — item 5); once
+    /// the user acts it becomes authoritative, so a later enumeration echo never
+    /// clobbers the user's value, and its overlay/gamma may engage.
+    user_controlled: BTreeSet<String>,
     flyout_visible: bool,
     /// When the flyout was last hidden, for the tray-click toggle guard
     /// ([`toggle_decision`]).
@@ -493,47 +539,35 @@ impl AppState {
         }
     }
 
-    /// Show the flyout anchored near the tray/cursor.
+    /// Show the flyout anchored near the tray/cursor, in one shot.
     ///
-    /// The Win32 cursor/work-area rects are physical pixels (Per-Monitor-V2); the
-    /// Slint window is sized in logical pixels, so the nominal flyout size is
-    /// scaled to physical for the anchor. The window's real height is
-    /// content-driven and only known once shown, so we show at a provisional
-    /// anchor and then re-anchor with the actual physical size — otherwise the
-    /// window overflows the work-area edge (logical size used as physical) or
-    /// floats far above the tray (P0 live-QA bug 4).
+    /// The window is sized *and* anchored in physical pixels **while still hidden**
+    /// — using the target monitor's OS-queried scale (Per-Monitor-V2; Win32 rects
+    /// are physical) — then shown exactly once, with no resize or move afterwards.
+    /// A post-show resize (the former buffer re-assert) made the software renderer
+    /// occasionally present a partial/transparent first frame that only repaired on
+    /// a later click (item 1); presenting a correctly-sized, correctly-placed window
+    /// in one shot removes that race. The anchor still uses the true physical size
+    /// so the window lands flush against the tray edge at any scale (P0 live-QA bug
+    /// 4); Slint sizes the buffer natively for the monitor it is shown on (PR #29).
     fn show_flyout(&mut self) {
-        use crate::bin_support::positioning::{flyout_origin, scale_size};
+        use crate::bin_support::positioning::{flyout_origin, physical_window_size};
         // Drive the window height from the row count (a no-frame window is not
         // auto-grown to its content preferred size). Logical px — Slint scales it.
         let logical_height = self.flyout_logical_height();
         self.shell.set_content_height(logical_height);
 
-        let (cursor, work) = geometry::cursor_and_work_area();
-        let scale = self.shell.scale_factor();
-        let provisional =
-            flyout_origin(cursor, work, scale_size(FLYOUT_SIZE, scale), FLYOUT_MARGIN);
-        self.shell.show_at(provisional.0, provisional.1);
+        let (cursor, work, scale) = geometry::cursor_work_area_and_scale();
+        let physical = physical_window_size(FLYOUT_LOGICAL_WIDTH, logical_height, scale);
+        let (x, y) = flyout_origin(cursor, work, physical, FLYOUT_MARGIN);
+        self.shell
+            .present_at(FLYOUT_LOGICAL_WIDTH, logical_height, x, y);
         self.flyout_visible = true;
 
-        // Root-cause fix for the fractional-DPI buffer undersize (former
-        // "compensated layout"): now the window is shown on its real monitor and
-        // its scale factor is known, re-assert the *logical* design size so Slint
-        // requests the correct physical buffer (design × scale) instead of the
-        // provisional design-px physical buffer it was born with. Content then
-        // fills the window edge-to-edge at every scale.
-        self.shell
-            .enforce_logical_size(FLYOUT_LOGICAL_WIDTH, logical_height);
-
-        // Re-anchor with the now-correct physical size so the window lands flush
-        // against the tray edge (P0 live-QA bug 4).
-        let actual = self.shell.physical_size();
-        if actual.0 > 0 && actual.1 > 0 {
-            let (x, y) = flyout_origin(cursor, work, actual, FLYOUT_MARGIN);
-            self.shell.set_position(x, y);
-        }
         // Keep the flyout above other windows while visible and focus it so
         // Esc/keyboard work immediately (user-reported: it opened underneath).
+        // This never resizes/moves the window; its redraw request just forces the
+        // first presented frame to be complete.
         self.shell.surface(true);
     }
 
@@ -710,29 +744,27 @@ impl AppState {
             .update_from_vm(&self.settings_vm.borrow());
     }
 
-    /// Rebuild the settings view-model from live state and show the window.
+    /// Rebuild the settings view-model from live state and show the window, in one
+    /// shot (same partial-first-paint fix as the flyout — item 1).
     fn open_settings(&mut self) {
+        use crate::bin_support::positioning::{center_in, physical_window_size};
         self.rebuild_settings();
         self.settings_shell
             .update_from_vm(&self.settings_vm.borrow());
         // Drive the content height (logical); Slint clamps it to the window's
-        // min/max. The buffer is corrected after show, like the flyout.
+        // min/max.
         self.settings_shell
             .set_content_height(SETTINGS_LOGICAL_HEIGHT);
-        self.settings_shell.show();
-        // Root-cause fix for the fractional-DPI buffer undersize: re-assert the
-        // logical design size now the window is on its real monitor so Slint
-        // requests the correct physical buffer (design × scale).
+
+        // Size + centre the window on the active monitor in physical pixels while
+        // still hidden (using the monitor's OS-queried scale), then show once — no
+        // post-show resize/move. Centring on the active monitor also avoids the OS
+        // default cascade position (P0 live-QA bug 4).
+        let (_cursor, work, scale) = geometry::cursor_work_area_and_scale();
+        let physical = physical_window_size(SETTINGS_LOGICAL_WIDTH, SETTINGS_LOGICAL_HEIGHT, scale);
+        let (x, y) = center_in(work, physical);
         self.settings_shell
-            .enforce_logical_size(SETTINGS_LOGICAL_WIDTH, SETTINGS_LOGICAL_HEIGHT);
-        // Centre the window on the active monitor instead of leaving it at the
-        // OS default cascade position (P0 live-QA bug 4).
-        let (_cursor, work) = geometry::cursor_and_work_area();
-        let size = self.settings_shell.physical_size();
-        if size.0 > 0 && size.1 > 0 {
-            let (x, y) = crate::bin_support::positioning::center_in(work, size);
-            self.settings_shell.set_position(x, y);
-        }
+            .present_at(SETTINGS_LOGICAL_WIDTH, SETTINGS_LOGICAL_HEIGHT, x, y);
         // Bring settings to the foreground (normal level, not topmost).
         self.settings_shell.focus();
     }
@@ -881,6 +913,10 @@ impl AppState {
     /// final sample, leaving the hardware at an intermediate level).
     fn set_user_level(&mut self, id: &StableDisplayId, pct: u8) {
         let now = Instant::now();
+        // A genuine user action: this display is now user-controlled, so it writes
+        // to hardware here and its overlay/gamma may engage — and a later
+        // enumeration will not re-adopt (clobber) this level (item 5).
+        self.user_controlled.insert(id.as_str().to_owned());
         self.state.record(id.as_str(), pct, unix_now());
 
         if let Some(kind) = self.kind_of(id) {
@@ -909,9 +945,17 @@ impl AppState {
         }
     }
 
-    /// Adopt a fresh enumeration: seed levels, push saved levels to the engine
-    /// once, rebuild the flyout rows against *user* levels, and re-apply
-    /// overlays.
+    /// Adopt a fresh enumeration: mirror each display's CURRENT hardware brightness
+    /// into the UI (writing NOTHING to the hardware — item 5), rebuild the flyout
+    /// rows against *user* levels, and re-apply overlays for user-controlled
+    /// displays.
+    ///
+    /// A launch (or hot-plug) must never move the brightness: Duja adopts what the
+    /// monitor is actually at (`snap.user_level_pct`, from the engine's initial
+    /// Get), not the persisted file, and pushes no `SetUserLevel`. Persisted state
+    /// only seeds the UI as a fallback while that reading is still the pre-probe
+    /// placeholder (see [`level_to_adopt`]). Only a genuine user action
+    /// ([`set_user_level`](Self::set_user_level)) writes to hardware thereafter.
     fn on_displays_changed(&mut self, snapshots: Vec<DisplaySnapshot>) {
         self.displays = snapshots.iter().map(|s| (s.id.clone(), s.kind)).collect();
         // Keep the full snapshots (with capabilities) for the settings sections,
@@ -926,21 +970,17 @@ impl AppState {
             .update_from_vm(&self.settings_vm.borrow());
 
         let now = Instant::now();
-        for snap in &snapshots {
-            // Seed the user level from the persisted state, else the engine's
-            // initial hardware-derived reading.
-            let user = self
-                .state
-                .seed_if_absent(snap.id.as_str(), snap.user_level_pct, unix_now());
-            // Push the saved level to the engine the first time we see a display.
-            if self.applied.insert(snap.id.as_str().to_owned()) {
-                let hw = self.hardware_target(snap.kind, snap.id.as_str(), user);
-                let _ = self.engine_tx.send(EngineCommand::SetUserLevel {
-                    id: snap.id.clone(),
-                    pct: hw,
-                });
-            }
-        }
+        // Adopt reality: seed the state book from each display's live hardware
+        // reading (persisted last-known only as a placeholder fallback), for the
+        // displays the user has not taken control of. This writes NOTHING to the
+        // hardware — the former `SetUserLevel` push here is what dimmed the monitor
+        // to the last-saved level on every launch (item 5).
+        adopt_enumeration(
+            &snapshots,
+            &self.user_controlled,
+            &mut self.state,
+            unix_now(),
+        );
 
         // Rebuild the flyout rows showing the *user* levels (not the engine's
         // hardware echo).
@@ -991,10 +1031,16 @@ impl AppState {
     }
 
     /// Build the declarative overlay command batch (pure; borrows `&self`).
+    ///
+    /// Only displays the user has taken control of this session get an overlay/
+    /// gamma command; an untouched display is left at reality (no dimming) — Duja
+    /// never restores an overlay/gamma on launch, it adopts the current screen
+    /// (item 5). The batch is a diff, so an absent display is simply not dimmed.
     fn plan_commands(&self) -> Vec<DimCommand> {
         let inputs: Vec<DisplayInput> = self
             .displays
             .iter()
+            .filter(|(id, _)| self.user_controlled.contains(id.as_str()))
             .map(|(id, kind)| DisplayInput {
                 id: id.clone(),
                 kind: *kind,
@@ -1533,8 +1579,94 @@ mod tests {
     use super::{
         DEFAULT_SOFTWARE_DIM_FLOOR_PCT, TOGGLE_GUARD, floor_to_seed_on_dimming, toggle_decision,
     };
-    use super::{ToggleDecision, accel_to_hotkey, action_for, code_for_key, ghk_modifiers};
+    use super::{
+        DEFAULT_USER_LEVEL_PCT, ToggleDecision, accel_to_hotkey, action_for, adopt_enumeration,
+        code_for_key, ghk_modifiers, level_to_adopt,
+    };
+    use crate::bin_support::state_store::StateStore;
+    use duja_core::id::StableDisplayId;
+    use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
+    use std::collections::BTreeSet;
     use std::time::Duration;
+
+    // --- Item 5: launching Duja must NOT change the monitor brightness ---------
+    //
+    // The bug (confirmed on the live box: floor 20, overlay, persisted 48): the
+    // first enumeration pushed the PERSISTED level to the engine, dimming the
+    // monitor to the last-saved level on every launch, and seeded the UI from the
+    // persisted file. The fix ADOPTS the monitor's current hardware reading
+    // (`snap.user_level_pct`) and writes nothing. `adopt_enumeration` has no engine
+    // channel by construction, so adoption structurally cannot push a level; the
+    // live 20×-cycle probe confirms the brightness stays put on launch.
+
+    fn adopt_snap(serial: &str, reading_pct: u8) -> DisplaySnapshot {
+        DisplaySnapshot {
+            id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap(),
+            name: format!("Monitor {serial}"),
+            kind: DisplayKind::ExternalDdc,
+            user_level_pct: reading_pct,
+            capabilities: Capabilities::default(),
+        }
+    }
+
+    fn temp_state() -> (StateStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        (StateStore::load(dir.path().join("state.toml")), dir)
+    }
+
+    #[test]
+    fn level_to_adopt_prefers_the_live_hardware_reading_over_persisted() {
+        // A real reading is adopted verbatim, even against a different (low — the
+        // bug's trigger) persisted level: the slider mirrors reality, nothing moves.
+        assert_eq!(level_to_adopt(70, Some(20)), 70);
+        assert_eq!(level_to_adopt(70, None), 70);
+    }
+
+    #[test]
+    fn level_to_adopt_falls_back_to_persisted_only_for_the_pre_probe_placeholder() {
+        // While the reading is still the pre-probe placeholder, the persisted
+        // last-known seeds the UI (the documented fallback for a failed/pending read)…
+        assert_eq!(level_to_adopt(DEFAULT_USER_LEVEL_PCT, Some(20)), 20);
+        // …but with nothing persisted there is nothing better than the placeholder.
+        assert_eq!(
+            level_to_adopt(DEFAULT_USER_LEVEL_PCT, None),
+            DEFAULT_USER_LEVEL_PCT
+        );
+    }
+
+    #[test]
+    fn adoption_seeds_from_the_reading_and_pushes_no_level() {
+        // The old code pushed the persisted 48 to hardware here (dimming on launch);
+        // adoption takes the live reading (70) into state and — since this fn has no
+        // engine channel — sends ZERO SetUserLevel. The seed is the reading.
+        let snap = adopt_snap("A", 70);
+        let id = snap.id.as_str().to_owned();
+        let (mut state, _dir) = temp_state();
+        state.record(&id, 48, 1); // low persisted level, as on the live box
+        adopt_enumeration(&[snap], &BTreeSet::new(), &mut state, 2);
+        assert_eq!(
+            state.level(&id),
+            Some(70),
+            "must adopt the live hardware reading, not the persisted 48"
+        );
+    }
+
+    #[test]
+    fn adoption_never_clobbers_a_user_controlled_display() {
+        // After a genuine user change, a later enumeration echo must not re-adopt
+        // (overwrite) the user's chosen level.
+        let snap = adopt_snap("A", 70);
+        let id = snap.id.as_str().to_owned();
+        let (mut state, _dir) = temp_state();
+        state.record(&id, 35, 1); // the user's chosen level
+        let controlled: BTreeSet<String> = std::iter::once(id.clone()).collect();
+        adopt_enumeration(&[snap], &controlled, &mut state, 2);
+        assert_eq!(
+            state.level(&id),
+            Some(35),
+            "a user-controlled level must survive an enumeration echo"
+        );
+    }
 
     // --- Defect 2: the flyout "Software dimming" toggle must actually engage ---
     //

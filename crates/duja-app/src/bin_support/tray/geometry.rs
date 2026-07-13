@@ -14,8 +14,9 @@ use std::mem::size_of;
 
 use windows::Win32::Foundation::POINT;
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
 };
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 use crate::bin_support::positioning::Rect;
@@ -29,11 +30,16 @@ const DEFAULT_WORK: Rect = Rect {
     h: 1040,
 };
 
-/// The current cursor position and the work area of the monitor under it.
+/// The cursor position, the work area of the monitor under it, **and** that
+/// monitor's device scale factor (physical / logical pixels).
 ///
-/// Both fall back to sane defaults if the OS calls fail, so the caller always
-/// gets a usable anchor (never panics, never blocks).
-pub(super) fn cursor_and_work_area() -> ((i32, i32), Rect) {
+/// The scale is queried up front (from the monitor handle, not the flyout window)
+/// so the flyout can be sized + placed correctly in physical pixels *before* it
+/// is shown — a one-shot present with no post-show resize, which is what stops
+/// the software renderer occasionally presenting a partial first frame (item 1).
+/// Every field falls back to a sane default if the OS call fails, so the caller
+/// always gets a usable anchor (never panics, never blocks).
+pub(super) fn cursor_work_area_and_scale() -> ((i32, i32), Rect, f32) {
     let cursor = cursor_pos();
     let point = POINT {
         x: cursor.0,
@@ -55,7 +61,36 @@ pub(super) fn cursor_and_work_area() -> ((i32, i32), Rect) {
     } else {
         DEFAULT_WORK
     };
-    (cursor, work)
+    (cursor, work, monitor_scale(monitor))
+}
+
+/// The device scale factor of `monitor` (1.0 = 96 DPI), from its effective DPI.
+///
+/// The process is Per-Monitor-V2 DPI-aware (see `build.rs`), so this is the true
+/// physical scale. A failed query or a degenerate value falls back to `1.0`.
+fn monitor_scale(monitor: HMONITOR) -> f32 {
+    let mut dpi_x: u32 = 96;
+    let mut dpi_y: u32 = 96;
+    // SAFETY: `GetDpiForMonitor` writes the horizontal/vertical effective DPI into
+    // the two out-params for a valid monitor handle; `MDT_EFFECTIVE_DPI` is the
+    // documented type. On any error the values are left at our 96 (= 1.0) defaults.
+    let _ = unsafe {
+        GetDpiForMonitor(
+            monitor,
+            MDT_EFFECTIVE_DPI,
+            std::ptr::addr_of_mut!(dpi_x),
+            std::ptr::addr_of_mut!(dpi_y),
+        )
+    };
+    // RATIONALE (cast_precision_loss): an effective-DPI value is small (72..960)
+    // and exactly representable in f32.
+    #[allow(clippy::cast_precision_loss)]
+    let scale = dpi_x as f32 / 96.0;
+    if scale.is_finite() && scale >= 0.1 {
+        scale
+    } else {
+        1.0
+    }
 }
 
 /// The cursor position, or `(0, 0)` if it cannot be read.
