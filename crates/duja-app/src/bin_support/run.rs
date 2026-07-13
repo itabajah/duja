@@ -196,6 +196,9 @@ fn format_notification(notification: &EngineNotification) -> String {
         EngineNotification::DisplayResponsive(id) => {
             format!("display-responsive: {}", id.as_str())
         }
+        EngineNotification::LevelRead { id, hw_pct } => {
+            format!("level-read: {}={hw_pct}%", id.as_str())
+        }
     }
 }
 

@@ -280,6 +280,23 @@ impl FlyoutVm {
         commands
     }
 
+    /// Update a display's shown level in place from an **external** change
+    /// (a reflection poll), without emitting a command.
+    ///
+    /// Used when the monitor's own buttons (or another app) move the brightness:
+    /// the slider follows so it keeps mirroring reality. Drag-safe — the `.slint`
+    /// slider ignores model writes to `value` while the user is dragging, so a
+    /// reflection that lands mid-drag never fights the user's thumb. A no-op if no
+    /// row matches.
+    pub fn set_level(&mut self, id: &StableDisplayId, pct: u8) {
+        let pct = pct.min(100);
+        for row in &mut self.rows {
+            if &row.id == id {
+                row.level_pct = pct;
+            }
+        }
+    }
+
     /// Set the link-all toggle. Pure presentation state; emits no command.
     pub fn link_toggled(&mut self, on: bool) {
         self.link_all = on;
