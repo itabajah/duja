@@ -430,6 +430,11 @@ export component FlyoutWindow inherits Window {
     // The desired window height (logical px), computed by the app from the row
     // count (a no-frame window is not auto-grown to its content preferred size).
     in property <length> content-height: 260px;
+    // Repaint anchor, flipped by the shell on every present (see the window-edge
+    // Rectangle below and `FlyoutShell::present_at`): toggling it marks the whole
+    // window dirty so the software renderer presents a *complete* frame, curing
+    // the blank/partial first paint on tray re-open.
+    in property <bool> present-nonce;
     // Glide duration (ms) for external brightness changes; the app sets it from
     // the OS animation preference (0 = reduced motion / instant).
     in property <int> glide-ms;
@@ -459,8 +464,16 @@ export component FlyoutWindow inherits Window {
         // window; the 14px content padding leaves the 1px rim visible), so it never
         // intercepts pointer input. Square corners keep the opaque, software-
         // rendered window free of transparent-corner artifacts.
+        //
+        // Doubles as the repaint anchor: its `background` depends on
+        // `present-nonce`, and because it fills the whole window a change here
+        // marks the entire window dirty — forcing the software renderer to present
+        // a complete frame rather than a stale partial-damage region (the first-
+        // paint bug). The two alpha values (0 and 1/255) are visually identical
+        // over the opaque window yet genuinely different, so the compiler cannot
+        // fold the dependency and every flip repaints.
         Rectangle {
-            background: transparent;
+            background: root.present-nonce ? #00000001 : #00000000;
             border-width: 1px;
             border-color: Palette.window-edge;
         }

@@ -204,6 +204,21 @@ the Light/Dark theme (the shell never pushed the resolved palette to it — now
 covered by a settings binding test), removed three unused dependencies, and
 reconciled the docs in this file and the ADR index with the code.
 
+Live QA after the audit showed the partial first paint still recurring on tray
+re-open (blank window until a click repainted individual widgets), so #30's
+size-while-hidden fix reduced but did not eliminate it. Root-caused one level
+deeper in the vendored backend: the winit software renderer presents only the
+non-empty dirty region and cures a cleared surface via `WindowEvent::Occluded` —
+which **winit 0.30 never emits on Windows** — while Windows discards a hidden
+window's redirection surface on hide. So a re-shown window could present a blank
+or stale-partial first frame that only repaired when a later click dirtied a
+widget. `request_redraw()` only *schedules* a frame; it does not dirty anything.
+The cure is a full-window **repaint anchor** (`present-nonce`, bound to the
+window-edge Rectangle that fills each window) flipped by the shell immediately
+after `show()`: the flip marks the whole window dirty, so the next present covers
+it completely. Applied symmetrically to the flyout and settings windows, each
+covered by a binding test (proven red against a non-flipping present).
+
 ### Perceptual brightness continuum (v2, ADR-0014)
 
 The slider is now **perceptual**: the position *is* perceived brightness, so

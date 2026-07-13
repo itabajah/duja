@@ -294,6 +294,10 @@ impl SettingsShell {
         self.desired.set((logical_width, logical_height));
         self.set_position(x, y);
         let _ = self.ui.show();
+        // Flip the repaint anchor so the whole window is marked dirty and the
+        // software renderer presents a complete frame (see the flyout's
+        // `present_at` for the full root cause).
+        self.ui.set_present_nonce(!self.ui.get_present_nonce());
     }
 
     /// Move the settings window to physical pixel `(x, y)` (physical pixels pass
@@ -621,6 +625,33 @@ mod binding_tests {
         assert!(
             shell.ui.get_dark(),
             "settings palette must follow the resolved dark theme"
+        );
+    }
+
+    // First-paint fix, settings twin: like the flyout, every present must force a
+    // complete software-renderer frame via the full-window `present-nonce` anchor
+    // (see the flyout's `present_flips_the_repaint_nonce_on_every_show` for the
+    // root cause). Proven red against a `present_at` that does not flip the nonce.
+    #[test]
+    fn present_flips_the_repaint_nonce_on_every_show() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let vm = Rc::new(RefCell::new(SettingsVm::new()));
+        let shell = SettingsShell::new(vm).expect("settings shell instantiates");
+
+        let initial = shell.ui.get_present_nonce();
+        shell.present_at(440.0, 600.0, 0, 0);
+        assert_ne!(
+            shell.ui.get_present_nonce(),
+            initial,
+            "present_at must flip the repaint nonce so the whole window is dirtied"
+        );
+
+        shell.present_at(440.0, 600.0, 0, 0);
+        assert_eq!(
+            shell.ui.get_present_nonce(),
+            initial,
+            "a second present must flip the nonce back (each show repaints fully)"
         );
     }
 }
