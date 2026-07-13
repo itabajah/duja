@@ -93,6 +93,15 @@ pub enum SettingsCommand {
         /// display is under the HDR guard; the VM never offers it there).
         mode: DimMode,
     },
+    /// Set a display's perceptual scale anchor (`min_perceived_pct`): the
+    /// perceived brightness the panel shows at hardware zero. Tunes how the
+    /// slider splits software vs hardware so it feels natural per panel.
+    SetMonitorMinPerceived {
+        /// The display to adjust.
+        id: StableDisplayId,
+        /// The new anchor, guaranteed `5..=60` by the emitting view-model.
+        pct: u8,
+    },
     /// Switch a display's active input source (raw MCCS `0x60` code).
     SetInput {
         /// The display to switch.

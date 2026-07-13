@@ -72,9 +72,17 @@ pub(crate) struct EngineState {
     /// user `SetUserLevel` clears membership, so a late initial-`Get` ack can
     /// never clobber a level the user has already chosen.
     pending_learn: std::collections::BTreeSet<StableDisplayId>,
+    /// Displays with an in-flight **poll** `Get` (as opposed to an initial-learn
+    /// `Get`). Its ack takes the external-change reflection path; distinguishing
+    /// it here means a *stale* initial-`Get` ack (whose `pending_learn` a user
+    /// action already cleared) is correctly ignored, not mistaken for a poll.
+    poll_gets: std::collections::BTreeSet<StableDisplayId>,
     debouncer: Debouncer,
     /// How many times each display has been marked stuck.
     stuck_count: BTreeMap<StableDisplayId, u32>,
+    /// When the next level poll is due, or `None` while polling is disabled (the
+    /// flyout is closed). `None` keeps the idle engine at zero wakeups.
+    poll_next: Option<Instant>,
     seq: u64,
 }
 
@@ -111,8 +119,10 @@ impl EngineState {
             inflight: BTreeMap::new(),
             brightness_max: BTreeMap::new(),
             pending_learn: std::collections::BTreeSet::new(),
+            poll_gets: std::collections::BTreeSet::new(),
             debouncer: Debouncer::new(cfg.displaychange_debounce),
             stuck_count: BTreeMap::new(),
+            poll_next: None,
             seq: 0,
         };
 
@@ -137,6 +147,7 @@ impl EngineState {
                 self.refresh();
             }
             self.poll_watchdog(Instant::now());
+            self.fire_poll_if_due(Instant::now());
 
             let deadline = self.next_deadline();
 
@@ -204,7 +215,68 @@ impl EngineState {
     /// later `Instant::now`) could consume a fire whose deadline fell between
     /// the two reads — silently dropping the pending enumeration.
     fn next_deadline(&self) -> Option<Instant> {
-        min_opt(self.debouncer.deadline(), self.earliest_watchdog_deadline())
+        min_opt(
+            min_opt(self.debouncer.deadline(), self.earliest_watchdog_deadline()),
+            self.poll_next,
+        )
+    }
+
+    /// If a level poll is due, poll every eligible display and re-arm the next
+    /// poll. A no-op while polling is disabled (`poll_next` is `None`), so an idle
+    /// engine never wakes for this.
+    fn fire_poll_if_due(&mut self, now: Instant) {
+        if let Some(due) = self.poll_next
+            && now >= due
+        {
+            self.poll_levels();
+            self.poll_next = now.checked_add(self.cfg.level_poll_interval);
+        }
+    }
+
+    /// Dispatch a one-shot brightness read to every responsive display, skipping
+    /// any that would let a stale or self-inflicted reading through:
+    /// - not responsive (nothing to read);
+    /// - awaiting its initial-learn `Get` (that read owns the slot and records
+    ///   the level itself);
+    /// - a brightness `Set` in flight (don't read our own write mid-flight — the
+    ///   echo would look like an external change);
+    /// - a prior poll `Get` still pending (avoid superseding it).
+    fn poll_levels(&mut self) {
+        let ids: Vec<StableDisplayId> = self.workers.keys().cloned().collect();
+        for id in ids {
+            if self.manager.is_responsive(&id) != Some(true)
+                || self.pending_learn.contains(&id)
+                || self
+                    .inflight
+                    .contains_key(&(id.clone(), InflightKey::Set(Feature::Brightness)))
+                || self
+                    .inflight
+                    .contains_key(&(id.clone(), InflightKey::Get(Feature::Brightness)))
+            {
+                continue;
+            }
+            self.dispatch_poll_get(&id);
+        }
+    }
+
+    /// Dispatch a brightness read for a poll (unlike [`dispatch_initial_get`] it
+    /// does **not** set `pending_learn`, so its ack takes the external-change
+    /// reflection path rather than the initial-learn path).
+    fn dispatch_poll_get(&mut self, id: &StableDisplayId) {
+        let feature = Feature::Brightness;
+        let seq = self.next_seq();
+        if let Some(handle) = self.workers.get(id)
+            && handle
+                .cmd_tx
+                .send(crate::protocol::WorkerCommand::Get { feature, seq })
+                .is_ok()
+        {
+            self.inflight.insert(
+                (id.clone(), InflightKey::Get(feature)),
+                (seq, Instant::now()),
+            );
+            self.poll_gets.insert(id.clone());
+        }
     }
 
     /// The earliest `dispatched_at + watchdog_timeout` across all in-flight ops.
@@ -220,8 +292,11 @@ impl EngineState {
         match cmd {
             EngineCommand::SetUserLevel { id, pct } => {
                 let pct = pct.min(100);
-                // The user's intent wins over any in-flight initial-level probe.
+                // The user's intent wins over any in-flight level probe: cancel a
+                // pending initial-learn AND any pending poll `Get`, so a stale
+                // pre-write reading can never be mistaken for an external change.
                 self.pending_learn.remove(&id);
+                self.poll_gets.remove(&id);
                 self.manager.record_user_level(&id, pct);
                 self.dispatch_set(&id, Feature::Brightness, pct);
                 self.notify_displays_changed();
@@ -230,6 +305,12 @@ impl EngineState {
                 self.dispatch_input(&id, value);
             }
             EngineCommand::RefreshNow => self.refresh(),
+            EngineCommand::SetLevelPolling { on } => {
+                // Enabling (or re-enabling) arms an immediate poll; the loop fires
+                // it at the top of the next iteration. Disabling clears the
+                // deadline so the idle engine returns to zero wakeups.
+                self.poll_next = on.then_some(Instant::now());
+            }
             EngineCommand::Snapshot { reply } => {
                 let _ = reply.send(self.manager.snapshots());
             }
@@ -321,6 +402,7 @@ impl EngineState {
         drop(self.workers.remove(id));
         self.clear_inflight_for(id);
         self.pending_learn.remove(id);
+        self.poll_gets.remove(id);
     }
 
     /// Scale `pct` onto the display's brightness range and dispatch a write, if
@@ -425,12 +507,37 @@ impl EngineState {
                     && feature == Feature::Brightness
                 {
                     self.brightness_max.insert(id.clone(), range.max);
-                    // The learned level is applied only if the user has not set
-                    // one in the meantime (which would have cleared it).
+                    let pct = raw_to_pct(range.current, range.max);
+                    let was_poll = self.poll_gets.remove(&id);
                     if self.pending_learn.remove(&id) {
-                        let pct = raw_to_pct(range.current, range.max);
+                        // Initial learn: apply the reading only if the user has not
+                        // set a level in the meantime (which would have cleared the
+                        // pending flag).
                         self.manager.record_user_level(&id, pct);
                         self.notify_displays_changed();
+                    } else if was_poll
+                        && self.manager.user_level_of(&id).is_none_or(|known| {
+                            // Compare at the RAW level against the raw our own last
+                            // write produced (`pct_to_raw(known)`), not at the pct
+                            // level against `known`. On a panel whose brightness_max
+                            // < 100 the write quantizes, so the readback pct differs
+                            // from the requested pct by up to the quantization step
+                            // — a pct-level compare would spuriously flag Duja's own
+                            // write as an external change. Reading back our own write
+                            // yields the exact raw we wrote (±1 for panel jitter).
+                            range.current.abs_diff(pct_to_raw(known, range.max)) > 1
+                        })
+                    {
+                        // Poll read: the hardware drifted from the raw our last write
+                        // produced, so something outside Duja changed it (physical
+                        // buttons, another app). Record it (so a replug restores the
+                        // external value) and reflect it to the app. A *stale*
+                        // initial-`Get` ack (not a poll) falls through and is ignored.
+                        self.manager.record_user_level(&id, pct);
+                        self.notify(EngineNotification::LevelRead {
+                            id: id.clone(),
+                            hw_pct: pct,
+                        });
                     }
                 }
             }
@@ -481,6 +588,7 @@ impl EngineState {
             // joined; an already-exited (panicked) one just releases here.
             drop(self.workers.remove(id));
             self.clear_inflight_for(id);
+            self.poll_gets.remove(id);
             self.notify(EngineNotification::DisplayUnresponsive(id.clone()));
             self.notify_displays_changed();
         }

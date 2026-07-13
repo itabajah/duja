@@ -390,6 +390,7 @@ fn burst_yields_single_hw_write() {
         write_min_gap: Duration::from_millis(80),
         watchdog_timeout: Duration::from_secs(5),
         displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
     };
     let (engine, _notes) = Engine::spawn(
         cfg,
@@ -449,6 +450,7 @@ fn drag_burst_delivers_final_value() {
         write_min_gap: Duration::from_millis(80),
         watchdog_timeout: Duration::from_secs(5),
         displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
     };
     let (engine, _notes) = Engine::spawn(
         cfg,
@@ -498,6 +500,7 @@ fn set_input_rejects_code_not_in_probed_list() {
         write_min_gap: Duration::from_millis(10),
         watchdog_timeout: Duration::from_secs(5),
         displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
     };
     let (engine, _notes) = Engine::spawn(
         cfg,
@@ -544,6 +547,7 @@ fn stuck_controller_marks_display_unresponsive() {
         write_min_gap: Duration::from_millis(10),
         watchdog_timeout: Duration::from_millis(150),
         displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
     };
     let factory: duja_app::ControllerFactory = Box::new(|_id| {
         Box::new(|| Some(Box::new(Hang) as Box<dyn BrightnessController>))
@@ -619,6 +623,7 @@ fn recovered_display_gets_fresh_worker() {
         write_min_gap: Duration::from_millis(10),
         watchdog_timeout: Duration::from_millis(150),
         displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
     };
     let (engine, notes) = Engine::spawn(cfg, enumerator(state, calls_tx), factory, platform_rx);
     let cmds = engine.sender();
@@ -669,6 +674,7 @@ fn replug_restores_last_level() {
         write_min_gap: Duration::from_millis(10),
         watchdog_timeout: Duration::from_secs(5),
         displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
     };
     let (engine, _notes) = Engine::spawn(
         cfg,
@@ -754,6 +760,7 @@ fn reattach_of_unresponsive_display_restores_level_not_power_on_default() {
         write_min_gap: Duration::from_millis(10),
         watchdog_timeout: Duration::from_millis(150),
         displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
     };
     let (engine, notes) = Engine::spawn(
         cfg,
@@ -862,6 +869,7 @@ fn stale_get_ack_cannot_clobber_fresh_learn() {
         // Large so the deliberately-blocked Gets never trip the watchdog.
         watchdog_timeout: Duration::from_secs(30),
         displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
     };
     let (engine, notes) = Engine::spawn(
         cfg,
@@ -931,6 +939,7 @@ fn worker_panic_does_not_kill_engine() {
         write_min_gap: Duration::from_millis(10),
         watchdog_timeout: Duration::from_secs(5),
         displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
     };
     let factory: duja_app::ControllerFactory = Box::new(|_id| {
         Box::new(|| Some(Box::new(Panicky) as Box<dyn BrightnessController>))
@@ -973,6 +982,7 @@ fn displaychange_ticks_are_debounced() {
         write_min_gap: Duration::from_millis(10),
         watchdog_timeout: Duration::from_secs(5),
         displaychange_debounce: Duration::from_millis(80),
+        level_poll_interval: Duration::from_millis(50),
     };
     let (engine, _notes) = Engine::spawn(
         cfg,
@@ -1068,5 +1078,224 @@ fn drop_shuts_down() {
 
     // Dropping the handle must shut the engine down without hanging.
     within(Duration::from_secs(2), move || drop(engine));
+    let _ = platform_tx;
+}
+
+// --- Level polling / external-change reflection (PR-D) ---------------------
+//
+// A controller whose current level lives behind a shared handle a test can
+// mutate to simulate an external change (the monitor's own buttons); `set`
+// writes through it (so Duja's own writes are observable as no-drift reads).
+
+#[derive(Debug)]
+struct PollController {
+    current: Arc<Mutex<u16>>,
+    max: u16,
+}
+
+impl BrightnessController for PollController {
+    fn probe(&mut self) -> Result<Capabilities, ControlError> {
+        Ok(caps())
+    }
+    fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+        Ok(FeatureRange {
+            current: *self.current.lock().unwrap(),
+            max: self.max,
+        })
+    }
+    fn set(&mut self, _feature: Feature, value: u16) -> Result<(), ControlError> {
+        *self.current.lock().unwrap() = value;
+        Ok(())
+    }
+}
+
+fn poll_factory(current: Arc<Mutex<u16>>, max: u16) -> duja_app::ControllerFactory {
+    Box::new(move |_id| {
+        let current = current.clone();
+        Box::new(move || {
+            Some(Box::new(PollController { current, max }) as Box<dyn BrightnessController>)
+        }) as duja_app::ControllerOpener
+    })
+}
+
+/// A short-interval config so polling tests run fast.
+fn fast_poll_cfg() -> EngineConfig {
+    EngineConfig {
+        write_min_gap: Duration::from_millis(20),
+        watchdog_timeout: Duration::from_secs(5),
+        displaychange_debounce: Duration::from_millis(40),
+        level_poll_interval: Duration::from_millis(30),
+    }
+}
+
+/// Spawn an engine over a `PollController`, and wait until it has **learned** the
+/// initial level (`60`). Returns everything the test needs.
+///
+/// The learned value is deliberately not [`DEFAULT_USER_LEVEL_PCT`] (50): the
+/// pre-learn snapshot reports the default, so waiting on a distinct value blocks
+/// until the initial-learn `Get` truly completes — otherwise a test could change
+/// the hardware while that `Get` is still in flight and have it absorbed as the
+/// "learned" level (no drift, no reflection).
+fn spawn_polling(
+    current: Arc<Mutex<u16>>,
+    max: u16,
+    learned: u8,
+) -> (
+    Engine,
+    Receiver<EngineNotification>,
+    Sender<EngineCommand>,
+    Sender<()>,
+) {
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+    let (engine, notes) = Engine::spawn(
+        fast_poll_cfg(),
+        enumerator(state, calls_tx),
+        poll_factory(current, max),
+        platform_rx,
+    );
+    let cmds = engine.sender();
+    assert!(
+        wait_note(&notes, Duration::from_secs(3), |n| matches!(
+            n,
+            EngineNotification::DisplaysChanged(s)
+                if s.first().map(|d| d.user_level_pct) == Some(learned)
+        )),
+        "engine must learn the initial level {learned}"
+    );
+    (engine, notes, cmds, platform_tx)
+}
+
+#[test]
+fn polling_reflects_an_external_change() {
+    let current = Arc::new(Mutex::new(60u16));
+    let (engine, notes, cmds, platform_tx) = spawn_polling(current.clone(), 100, 60);
+
+    // Simulate the monitor's own buttons raising the brightness, then enable
+    // polling: enabling polls immediately, so the read is deterministic (no
+    // dependence on the periodic timer, which parallel test scheduling can defer).
+    *current.lock().unwrap() = 80;
+    cmds.send(EngineCommand::SetLevelPolling { on: true })
+        .unwrap();
+
+    assert!(
+        wait_note(&notes, Duration::from_secs(5), |n| matches!(
+            n,
+            EngineNotification::LevelRead { hw_pct: 80, .. }
+        )),
+        "an external change must surface as LevelRead(80)"
+    );
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn self_write_echo_is_suppressed() {
+    let current = Arc::new(Mutex::new(60u16));
+    let (engine, notes, cmds, platform_tx) = spawn_polling(current.clone(), 100, 60);
+
+    cmds.send(EngineCommand::SetLevelPolling { on: true })
+        .unwrap();
+    // Duja's own write: the hardware moves to 30 and the engine records 30, so a
+    // subsequent poll read of 30 must NOT be mistaken for an external change.
+    cmds.send(EngineCommand::SetUserLevel {
+        id: display_id(),
+        pct: 30,
+    })
+    .unwrap();
+
+    assert!(
+        !wait_note(&notes, Duration::from_millis(600), |n| matches!(
+            n,
+            EngineNotification::LevelRead { .. }
+        )),
+        "Duja's own write must not echo back as a LevelRead"
+    );
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn polling_stops_when_disabled() {
+    let current = Arc::new(Mutex::new(60u16));
+    let (engine, notes, cmds, platform_tx) = spawn_polling(current.clone(), 100, 60);
+
+    // Set the value first, then enable: the immediate poll on enable reads it
+    // deterministically (no periodic-timer dependence).
+    *current.lock().unwrap() = 80;
+    cmds.send(EngineCommand::SetLevelPolling { on: true })
+        .unwrap();
+    assert!(
+        wait_note(&notes, Duration::from_secs(5), |n| matches!(
+            n,
+            EngineNotification::LevelRead { hw_pct: 80, .. }
+        )),
+        "the first external change is reflected while polling is on"
+    );
+
+    // Disable polling, then change again: no further reflection may arrive.
+    cmds.send(EngineCommand::SetLevelPolling { on: false })
+        .unwrap();
+    *current.lock().unwrap() = 40;
+    assert!(
+        !wait_note(&notes, Duration::from_millis(600), |n| matches!(
+            n,
+            EngineNotification::LevelRead { .. }
+        )),
+        "no LevelRead may arrive once polling is disabled (zero idle wakeups)"
+    );
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn idle_engine_performs_no_polls() {
+    // Polling is never enabled, so an external change is invisible and the engine
+    // never wakes to read it — the zero-idle-wakeup guarantee.
+    let current = Arc::new(Mutex::new(60u16));
+    let (engine, notes, _cmds, platform_tx) = spawn_polling(current.clone(), 100, 60);
+
+    *current.lock().unwrap() = 80;
+    assert!(
+        !wait_note(&notes, Duration::from_millis(600), |n| matches!(
+            n,
+            EngineNotification::LevelRead { .. }
+        )),
+        "with polling off, an external change must not be observed"
+    );
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn self_write_echo_suppressed_on_a_sub_100_max_panel() {
+    // On a panel reporting brightness_max < 100 the write quantizes, so the
+    // readback pct differs from the requested pct by more than 1 — a pct-level
+    // drift check would flag Duja's OWN write as an external change. The raw-level
+    // check must still suppress it. Initial raw 18 with max 30 ⇒ learned 60.
+    let current = Arc::new(Mutex::new(18u16));
+    let (engine, notes, cmds, platform_tx) = spawn_polling(current.clone(), 30, 60);
+
+    cmds.send(EngineCommand::SetLevelPolling { on: true })
+        .unwrap();
+    // pct 5 ⇒ raw = floor(5*30/100) = 1 ⇒ readback pct = floor(1*100/30) = 3.
+    // A pct-level compare would see 3 vs the recorded 5 (delta 2 > 1) and echo;
+    // the raw-level compare sees raw 1 vs the raw we wrote (1) and suppresses.
+    cmds.send(EngineCommand::SetUserLevel {
+        id: display_id(),
+        pct: 5,
+    })
+    .unwrap();
+
+    assert!(
+        !wait_note(&notes, Duration::from_millis(600), |n| matches!(
+            n,
+            EngineNotification::LevelRead { .. }
+        )),
+        "Duja's own write must not echo back on a sub-100-max panel"
+    );
+    within(Duration::from_secs(2), move || engine.shutdown());
     let _ = platform_tx;
 }

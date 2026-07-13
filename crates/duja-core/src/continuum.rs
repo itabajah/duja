@@ -1,13 +1,30 @@
 //! The brightness continuum: one user slider mapped onto hardware backlight
-//! plus software dimming (overlay alpha or gamma), with a seamless handoff at
-//! the hardware floor.
+//! plus software dimming (overlay alpha or gamma), on a **perceptual** scale.
 //!
 //! This is the product's differentiator and the purest TDD target. The mapping
 //! is a pure function of `(user_pct, config)` — no I/O, no clock.
+//!
+//! # The perceptual scale
+//!
+//! The slider position **is** perceived brightness: slider 20 means "20% as
+//! bright as full", independent of the hardware floor or the panel. A monitor's
+//! true luminance range is not knowable over DDC, so each display carries one
+//! tunable number — [`min_perceived_pct`](ContinuumConfig::min_perceived_pct),
+//! the perceived brightness the panel shows at hardware zero (default handled by
+//! config). Call it `m`. Hardware value `h` (0..=100) therefore sits at slider
+//! position `pos(h) = m + (100 − m)·h/100`: hardware zero is at slider `m`
+//! (**line A**), hardware max at slider 100.
+//!
+//! The configured hardware floor `f` is a **write limit**, not a scale change:
+//! it only bounds how low Duja drives the panel. Its slider position
+//! `B = pos(f)` (**line B**) is where hardware hands off to software dimming.
+//! Below `B` the hardware pins at `f` and the overlay (or gamma) supplies the
+//! missing darkness so perceived brightness still equals the slider position.
+//! Changing `f` moves line B but never rescales the slider.
 
 // RATIONALE: the domain vocabulary intentionally namespaces its types
-// (ContinuumConfig / ContinuumOutput); these names are frozen by the plan and
-// read better fully qualified at call sites than shortened.
+// (ContinuumConfig / ContinuumOutput / SliderGeometry); these names are frozen
+// by the plan and read better fully qualified at call sites than shortened.
 #![allow(clippy::module_name_repetitions)]
 
 use crate::model::DimMode;
@@ -18,35 +35,52 @@ use crate::model::DimMode;
 /// opaque by default (the user can always still see the screen and Duja's UI).
 pub const MAX_ALPHA: f32 = 0.88;
 
+/// The largest `min_perceived_pct` the mapping honours. Clamping here keeps
+/// `100 − m ≥ 5`, so the hardware section never collapses and the slider→hardware
+/// inversion stays well-conditioned. (The settings UI clamps to a tighter, more
+/// sensible range; this is the defensive core bound.)
+const MAX_MIN_PERCEIVED: u8 = 95;
+
 /// Per-display configuration for the brightness continuum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContinuumConfig {
     /// The hardware brightness floor, or `None` for a software-only display.
     ///
-    /// `Some(floor)`: the lowest hardware percentage Duja will drive; below it,
-    /// software dimming takes over. `None`: the display has no hardware
-    /// brightness range at all, so [`ContinuumOutput::hardware_pct`] is always
-    /// `None` and software dimming spans the whole slider.
+    /// `Some(floor)`: the lowest hardware percentage Duja will drive; below its
+    /// slider position (`B = pos(floor)`), software dimming takes over. `None`:
+    /// the display has no hardware brightness range at all, so
+    /// [`ContinuumOutput::hardware_pct`] is always `None` and software dimming
+    /// spans the whole slider.
     pub hardware_floor: Option<u8>,
+    /// Perceived brightness (%) the panel shows at hardware zero — the `m` that
+    /// anchors the perceptual scale (see the module docs). Ignored for a
+    /// software-only display. Clamped to `..=95` at use.
+    pub min_perceived_pct: u8,
     /// How sub-floor dimming is realised.
     pub mode: DimMode,
 }
 
 impl ContinuumConfig {
-    /// A hardware-backed display with the given floor and dim mode.
+    /// A hardware-backed display with the given floor, perceptual anchor and dim
+    /// mode.
     #[must_use]
-    pub fn hardware(floor_pct: u8, mode: DimMode) -> Self {
+    pub fn hardware(floor_pct: u8, min_perceived_pct: u8, mode: DimMode) -> Self {
         ContinuumConfig {
             hardware_floor: Some(floor_pct),
+            min_perceived_pct,
             mode,
         }
     }
 
     /// A software-only display (no hardware backlight); overlay/gamma only.
+    ///
+    /// The perceptual anchor is irrelevant without hardware, so it is fixed at 0
+    /// (keeping equality between software-only configs clean).
     #[must_use]
     pub fn software_only(mode: DimMode) -> Self {
         ContinuumConfig {
             hardware_floor: None,
+            min_perceived_pct: 0,
             mode,
         }
     }
@@ -64,53 +98,100 @@ pub struct ContinuumOutput {
     pub gamma: Option<f32>,
 }
 
-/// Map a unified user brightness level (`0..=100`) to hardware + software
-/// dimming, per the display's [`ContinuumConfig`].
+/// Where the slider's reference lines sit and how low it can go, as fractions of
+/// the usable track (`0.0..=1.0`). Consumed by the flyout to draw the markers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SliderGeometry {
+    /// Fraction at which hardware zero sits (**line A**), or `None` for a
+    /// software-only display (no hardware ⇒ no markers).
+    pub hw_zero: Option<f32>,
+    /// Fraction at which hardware hands off to software dimming (**line B**, the
+    /// floor), or `None` for a software-only display. Equals
+    /// [`hw_zero`](Self::hw_zero) when the floor is 0 (the two lines coincide).
+    pub transition: Option<f32>,
+    /// The lowest reachable slider fraction: `0.0` when software dimming can take
+    /// the slider to full dark, or the transition fraction when the dim mode is
+    /// [`DimMode::Off`] (below the floor is unreachable).
+    pub min_usable: f32,
+}
+
+/// The slider position (`0.0..=100.0`) of hardware value `h` (`0..=100`) given
+/// the perceptual anchor `m`. Hardware zero maps to slider `m`, hardware max to
+/// slider 100, linearly between.
+fn pos(h: f32, m: f32) -> f32 {
+    m + (100.0 - m) * h / 100.0
+}
+
+/// Map a unified user brightness level (`0..=100`, = perceived brightness %) to
+/// hardware + software dimming, per the display's [`ContinuumConfig`].
 ///
-/// At or above the hardware floor the user level drives the hardware directly
-/// (no overlay). Below the floor the hardware pins at the floor and the chosen
-/// [`DimMode`] takes over. Values above 100 are clamped.
+/// At or above the transition `B = pos(floor)` the slider drives the hardware
+/// directly (no overlay). Below `B` the hardware pins at the floor and the
+/// chosen [`DimMode`] supplies the rest so perceived brightness still equals the
+/// slider. Values above 100 are clamped.
 ///
 /// # Examples
 /// ```
 /// use duja_core::continuum::{map_user_level, ContinuumConfig, MAX_ALPHA};
 /// use duja_core::model::DimMode;
 ///
-/// let cfg = ContinuumConfig::hardware(30, DimMode::Overlay);
-/// // Above the floor: pure hardware.
-/// assert_eq!(map_user_level(80, &cfg).hardware_pct, Some(80));
-/// // At zero: hardware pinned at the floor, overlay at full strength.
-/// let dark = map_user_level(0, &cfg);
-/// assert_eq!(dark.hardware_pct, Some(30));
-/// assert!((dark.overlay_alpha - MAX_ALPHA).abs() < 1e-6);
+/// // Floor 0, perceptual anchor 25: hardware spans slider 25..=100.
+/// let cfg = ContinuumConfig::hardware(0, 25, DimMode::Overlay);
+/// // Slider 100 is always exactly full hardware.
+/// assert_eq!(map_user_level(100, &cfg).hardware_pct, Some(100));
+/// // Below the anchor the panel is at hardware zero and the overlay dims.
+/// let dim = map_user_level(10, &cfg);
+/// assert_eq!(dim.hardware_pct, Some(0));
+/// assert!(dim.overlay_alpha > 0.0);
 /// ```
 #[must_use]
 pub fn map_user_level(user_pct: u8, cfg: &ContinuumConfig) -> ContinuumOutput {
-    let user_u8 = user_pct.min(100);
-    let user = f32::from(user_u8);
+    let p_u8 = user_pct.min(100);
+    let p = f32::from(p_u8);
 
     let Some(floor_pct) = cfg.hardware_floor else {
-        // Software-only: overlay/gamma spans the whole range; hardware is
-        // never touched.
-        let alpha_full = MAX_ALPHA * (100.0 - user) / 100.0;
+        // Software-only: overlay/gamma spans the whole slider and the mapping is
+        // direct — perceived brightness equals the slider position.
+        let alpha_full = 1.0 - p / 100.0;
         return finish(None, alpha_full, cfg.mode);
     };
     let floor_u8 = floor_pct.min(100);
-    let floor = f32::from(floor_u8);
+    let m = f32::from(cfg.min_perceived_pct.min(MAX_MIN_PERCEIVED));
+    let transition = pos(f32::from(floor_u8), m); // slider position of the floor (line B)
 
-    if user_u8 >= floor_u8 {
-        // Pure hardware: the user level maps straight onto the hardware value.
+    if p >= transition {
+        // Above the transition: pure hardware. Invert `pos` to recover the
+        // hardware value for this slider position.
+        let hardware = if p_u8 >= 100 {
+            // Structural endpoint: the top of the slider is always full hardware.
+            100
+        } else {
+            // `100 - m >= 5` (m is clamped to <= 95), so the division is safe.
+            round_clamp((p - m) * 100.0 / (100.0 - m), floor_u8, 100)
+        };
         ContinuumOutput {
-            hardware_pct: Some(user_u8),
+            hardware_pct: Some(hardware),
             overlay_alpha: 0.0,
             gamma: None,
         }
     } else {
-        // Below the floor: pin hardware, dim in software. `floor` is >= 1 here
-        // (user_u8 < floor_u8), so the division is well-defined.
-        let alpha_full = MAX_ALPHA * (floor - user) / floor;
+        // Below the transition: pin the hardware at the floor and dim in software
+        // so perceived brightness still equals the slider. `transition` is > 0
+        // here (`p < transition` and `p >= 0` ⇒ `transition > 0`), so the
+        // division is well-defined.
+        let alpha_full = 1.0 - p / transition;
         finish(Some(floor_u8), alpha_full, cfg.mode)
     }
+}
+
+/// Round `x` to the nearest integer and clamp it into `lo..=hi` as a `u8`.
+fn round_clamp(x: f32, lo: u8, hi: u8) -> u8 {
+    let r = x.round().clamp(f32::from(lo), f32::from(hi));
+    // RATIONALE: `r` is in `lo..=hi` ⊆ `0..=100` and integral after `round()`, so
+    // the cast cannot truncate a meaningful fraction, lose a sign, or overflow.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let v = r as u8;
+    v
 }
 
 /// Apply the dim mode to a computed overlay strength, producing the output for
@@ -138,22 +219,46 @@ fn finish(hardware_pct: Option<u8>, alpha_full: f32, mode: DimMode) -> Continuum
 
 /// Reflect an externally-observed hardware percentage back to a slider level.
 ///
-/// Above the floor the user slider maps 1:1 onto hardware, so this is the
-/// identity there. A reading below the floor (something else drove the panel
-/// under Duja's software floor) is **clamped up to the floor**, deliberately:
-/// slider positions below the floor semantically mean "hardware pinned at the
-/// floor plus overlay engaged", so a sub-floor hardware reading has no honest
-/// slider position to map to. Reporting the floor position is deterministic
-/// (the same reading always yields the same slider) and self-correcting — the
-/// next write through [`map_user_level`] drives the hardware back up to the
-/// floor Duja maintains.
+/// This is `pos`: an external change (physical buttons, another app) that drove
+/// the panel to `hw_pct` reflects to the slider position `pos(hw_pct)`. It is
+/// deliberately **not** clamped to the floor — the floor is a *write* policy
+/// (how low Duja drives), not a *read* policy, so a reading below the floor
+/// reflects truthfully between lines A and B rather than being snapped up.
 ///
 /// On a software-only display (`hardware_floor == None`) there is no hardware
 /// channel to reflect; the reading is passed through clamped to `0..=100`.
 #[must_use]
 pub fn reverse_map(hw_pct: u8, cfg: &ContinuumConfig) -> u8 {
-    let floor = cfg.hardware_floor.unwrap_or(0).min(100);
-    hw_pct.clamp(floor, 100)
+    let hw = hw_pct.min(100);
+    // Software-only: no hardware channel to reflect; pass through clamped.
+    if cfg.hardware_floor.is_none() {
+        return hw;
+    }
+    let m = f32::from(cfg.min_perceived_pct.min(MAX_MIN_PERCEIVED));
+    round_clamp(pos(f32::from(hw), m), 0, 100)
+}
+
+/// The slider marker geometry for `cfg` (see [`SliderGeometry`]).
+#[must_use]
+pub fn geometry(cfg: &ContinuumConfig) -> SliderGeometry {
+    let Some(floor_pct) = cfg.hardware_floor else {
+        return SliderGeometry {
+            hw_zero: None,
+            transition: None,
+            min_usable: 0.0,
+        };
+    };
+    let m = f32::from(cfg.min_perceived_pct.min(MAX_MIN_PERCEIVED));
+    let transition = pos(f32::from(floor_pct.min(100)), m) / 100.0;
+    SliderGeometry {
+        hw_zero: Some(m / 100.0),
+        transition: Some(transition),
+        min_usable: if cfg.mode == DimMode::Off {
+            transition
+        } else {
+            0.0
+        },
+    }
 }
 
 #[cfg(test)]
@@ -163,15 +268,21 @@ mod tests {
     use proptest::prelude::*;
 
     /// Effective perceived luminance in `[0, 1]` from a mapping output: the
-    /// hardware fraction attenuated by overlay alpha or gamma. Continuity and
-    /// monotonicity are asserted against this single scalar.
-    fn perceived(out: &ContinuumOutput) -> f32 {
-        let hw = out.hardware_pct.map_or(1.0, |p| f32::from(p) / 100.0);
-        let soft = match out.gamma {
-            Some(g) => g,
-            None => 1.0 - out.overlay_alpha,
+    /// hardware value's slider position attenuated by overlay alpha or gamma.
+    /// The design invariant is `perceived(map_user_level(p, cfg), cfg) == p/100`
+    /// (exact until the `MAX_ALPHA` clamp flattens the darkest tail).
+    fn perceived(out: &ContinuumOutput, cfg: ContinuumConfig) -> f32 {
+        let base = match out.hardware_pct {
+            Some(h) => {
+                pos(
+                    f32::from(h),
+                    f32::from(cfg.min_perceived_pct.min(MAX_MIN_PERCEIVED)),
+                ) / 100.0
+            }
+            None => 1.0,
         };
-        hw * soft
+        let soft = out.gamma.unwrap_or(1.0 - out.overlay_alpha);
+        base * soft
     }
 
     fn close(a: f32, b: f32) -> bool {
@@ -187,75 +298,179 @@ mod tests {
     }
 
     fn any_cfg() -> impl Strategy<Value = ContinuumConfig> {
-        (proptest::option::of(0u8..=100u8), any_mode()).prop_map(|(hardware_floor, mode)| {
-            ContinuumConfig {
+        (proptest::option::of(0u8..=100u8), 0u8..=95u8, any_mode()).prop_map(
+            |(hardware_floor, min_perceived_pct, mode)| ContinuumConfig {
                 hardware_floor,
+                min_perceived_pct,
                 mode,
-            }
+            },
+        )
+    }
+
+    /// `(m, floor, user)` where the user level is at or above the transition
+    /// `B = pos(floor)` — i.e. the pure-hardware side of the slider.
+    fn hardware_side_user() -> impl Strategy<Value = (u8, u8, u8)> {
+        (0u8..=95u8, 0u8..=100u8).prop_flat_map(|(m, floor)| {
+            let b = f32::from(m) + (100.0 - f32::from(m)) * f32::from(floor) / 100.0;
+            // RATIONALE: `b` is in `0.0..=100.0`; its ceil lands in range and is
+            // integral, so the cast cannot truncate, lose a sign, or overflow.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let lo = (b.ceil() as u8).min(100);
+            (Just(m), Just(floor), lo..=100u8)
         })
     }
 
-    /// A floor in 0..=100 paired with a user level at or above that floor.
-    fn floor_and_user() -> impl Strategy<Value = (u8, u8)> {
-        (0u8..=100u8).prop_flat_map(|floor| (Just(floor), floor..=100u8))
-    }
-
-    // --- concrete unit tests ---
+    // --- geometry ---
 
     #[test]
-    fn full_brightness_is_pure_hardware() {
-        let out = map_user_level(100, &ContinuumConfig::hardware(50, DimMode::Overlay));
+    fn geometry_markers_at_floor_zero_coincide() {
+        let g = geometry(&ContinuumConfig::hardware(0, 25, DimMode::Overlay));
+        assert!(close(g.hw_zero.unwrap(), 0.25));
+        assert!(close(g.transition.unwrap(), 0.25));
+        assert!(close(g.min_usable, 0.0));
+    }
+
+    #[test]
+    fn geometry_transition_is_pos_of_floor() {
+        // floor 20, m 25 ⇒ B = 25 + 75·0.2 = 40.
+        let g = geometry(&ContinuumConfig::hardware(20, 25, DimMode::Overlay));
+        assert!(close(g.hw_zero.unwrap(), 0.25));
+        assert!(close(g.transition.unwrap(), 0.40));
+    }
+
+    #[test]
+    fn geometry_software_only_has_no_markers() {
+        let g = geometry(&ContinuumConfig::software_only(DimMode::Overlay));
+        assert_eq!(g.hw_zero, None);
+        assert_eq!(g.transition, None);
+        assert!(close(g.min_usable, 0.0));
+    }
+
+    #[test]
+    fn geometry_min_usable_only_when_dim_off() {
+        // Off ⇒ can't go below the transition; Overlay ⇒ can reach full dark.
+        let off = geometry(&ContinuumConfig::hardware(20, 25, DimMode::Off));
+        assert!(close(off.min_usable, 0.40));
+        let overlay = geometry(&ContinuumConfig::hardware(20, 25, DimMode::Overlay));
+        assert!(close(overlay.min_usable, 0.0));
+    }
+
+    // --- forward mapping ---
+
+    #[test]
+    fn slider_100_is_hardware_100_exact() {
+        for m in [0u8, 25, 60, 95] {
+            for floor in [0u8, 30, 100] {
+                let out =
+                    map_user_level(100, &ContinuumConfig::hardware(floor, m, DimMode::Overlay));
+                assert_eq!(out.hardware_pct, Some(100), "m={m} floor={floor}");
+                assert!(close(out.overlay_alpha, 0.0));
+                assert_eq!(out.gamma, None);
+            }
+        }
+    }
+
+    #[test]
+    fn slider_position_is_perceived_above_transition() {
+        // floor 50, m 25 ⇒ B = 62.5; slider 75 ⇒ hardware = round((75-25)·100/75) = 67.
+        let cfg = ContinuumConfig::hardware(50, 25, DimMode::Overlay);
+        let out = map_user_level(75, &cfg);
+        assert_eq!(out.hardware_pct, Some(67));
+        assert!(close(out.overlay_alpha, 0.0));
+        assert!((perceived(&out, cfg) - 0.75).abs() < 0.01);
+    }
+
+    #[test]
+    fn below_transition_pins_floor_and_alpha_is_linear_perceived() {
+        // floor 0, m 25 ⇒ B = 25; slider 10 ⇒ hardware pinned 0, alpha = 1 - 10/25 = 0.6.
+        let cfg = ContinuumConfig::hardware(0, 25, DimMode::Overlay);
+        let out = map_user_level(10, &cfg);
+        assert_eq!(out.hardware_pct, Some(0));
+        assert!(close(out.overlay_alpha, 0.6));
+        assert_eq!(out.gamma, None);
+        assert!(close(perceived(&out, cfg), 0.10));
+    }
+
+    #[test]
+    fn floor_zero_still_has_software_zone() {
+        // The regression this whole change enables: at floor 0 (the default),
+        // slider positions below the perceptual anchor `m` still dim via overlay
+        // — v1 had no sub-floor zone at floor 0 (hence the old 20%-seed hack).
+        let cfg = ContinuumConfig::hardware(0, 25, DimMode::Overlay);
+        let out = map_user_level(10, &cfg);
+        assert_eq!(out.hardware_pct, Some(0));
+        assert!(
+            out.overlay_alpha > 0.0,
+            "floor-0 must still engage overlay below the anchor"
+        );
+        assert!(close(out.overlay_alpha, 0.6));
+    }
+
+    #[test]
+    fn floor_change_does_not_move_slider_geometry() {
+        // The scale (`pos`) depends only on `m`, never the floor: above both
+        // floors' transitions the same slider drives the same hardware value.
+        let low = ContinuumConfig::hardware(10, 25, DimMode::Overlay);
+        let high = ContinuumConfig::hardware(50, 25, DimMode::Overlay);
+        assert_eq!(
+            map_user_level(75, &low).hardware_pct,
+            map_user_level(75, &high).hardware_pct
+        );
+        // And line A (hardware zero) is identical regardless of floor.
+        assert_eq!(geometry(&low).hw_zero, geometry(&high).hw_zero);
+    }
+
+    #[test]
+    fn m_zero_floor_zero_degenerates_to_v1_identity() {
+        // m=0, floor=0 ⇒ B=0, so the mapping is v1's pure linear hardware
+        // identity (slider == hardware, no overlay ever).
+        let cfg = ContinuumConfig::hardware(0, 0, DimMode::Overlay);
+        for p in [0u8, 1, 37, 50, 99, 100] {
+            let out = map_user_level(p, &cfg);
+            assert_eq!(out.hardware_pct, Some(p), "p={p}");
+            assert!(close(out.overlay_alpha, 0.0), "p={p}");
+            assert_eq!(out.gamma, None);
+        }
+    }
+
+    #[test]
+    fn floor_100_is_all_software_below_100() {
+        // floor 100, m 25 ⇒ B = pos(100) = 100: every position below 100 pins
+        // hardware high and dims via overlay.
+        let cfg = ContinuumConfig::hardware(100, 25, DimMode::Overlay);
+        let out = map_user_level(50, &cfg);
         assert_eq!(out.hardware_pct, Some(100));
-        assert!(close(out.overlay_alpha, 0.0));
-        assert_eq!(out.gamma, None);
+        assert!(close(out.overlay_alpha, 0.5)); // 1 - 50/100
+        let full = map_user_level(100, &cfg);
+        assert_eq!(full.hardware_pct, Some(100));
+        assert!(close(full.overlay_alpha, 0.0));
     }
 
     #[test]
-    fn above_floor_maps_directly_to_hardware() {
-        let out = map_user_level(75, &ContinuumConfig::hardware(50, DimMode::Overlay));
-        assert_eq!(out.hardware_pct, Some(75));
-        assert!(close(out.overlay_alpha, 0.0));
-    }
-
-    #[test]
-    fn at_floor_overlay_alpha_is_zero() {
-        let out = map_user_level(50, &ContinuumConfig::hardware(50, DimMode::Overlay));
-        assert_eq!(out.hardware_pct, Some(50));
-        assert!(close(out.overlay_alpha, 0.0));
-    }
-
-    #[test]
-    fn below_floor_engages_overlay_and_pins_hardware() {
-        let out = map_user_level(25, &ContinuumConfig::hardware(50, DimMode::Overlay));
-        assert_eq!(out.hardware_pct, Some(50));
-        // alpha = MAX_ALPHA * (50 - 25) / 50 = MAX_ALPHA / 2
-        assert!(close(out.overlay_alpha, MAX_ALPHA * 0.5));
-        assert_eq!(out.gamma, None);
-    }
-
-    #[test]
-    fn zero_reaches_max_alpha() {
-        let out = map_user_level(0, &ContinuumConfig::hardware(50, DimMode::Overlay));
-        assert!(close(out.overlay_alpha, MAX_ALPHA));
-        assert_eq!(out.hardware_pct, Some(50));
-    }
-
-    #[test]
-    fn off_mode_clamps_at_floor_without_overlay() {
-        let out = map_user_level(20, &ContinuumConfig::hardware(50, DimMode::Off));
+    fn off_mode_pins_floor_without_software() {
+        // floor 50, m 25 ⇒ B = 62.5; slider 20 < B with Off ⇒ hardware pinned, no dim.
+        let out = map_user_level(20, &ContinuumConfig::hardware(50, 25, DimMode::Off));
         assert_eq!(out.hardware_pct, Some(50));
         assert!(close(out.overlay_alpha, 0.0));
         assert_eq!(out.gamma, None);
     }
 
     #[test]
-    fn gamma_mode_reduces_gamma_below_floor() {
-        let out = map_user_level(0, &ContinuumConfig::hardware(50, DimMode::Gamma));
+    fn gamma_mode_reduces_gamma_below_transition() {
+        let out = map_user_level(0, &ContinuumConfig::hardware(50, 25, DimMode::Gamma));
         assert!(close(out.overlay_alpha, 0.0));
         match out.gamma {
             Some(g) => assert!(close(g, 1.0 - MAX_ALPHA)),
             None => panic!("expected gamma to be engaged"),
         }
+    }
+
+    #[test]
+    fn zero_reaches_max_alpha() {
+        let cfg = ContinuumConfig::hardware(50, 25, DimMode::Overlay);
+        let out = map_user_level(0, &cfg);
+        assert!(close(out.overlay_alpha, MAX_ALPHA));
+        assert_eq!(out.hardware_pct, Some(50));
     }
 
     #[test]
@@ -271,31 +486,44 @@ mod tests {
     }
 
     #[test]
-    fn floor_100_pins_hardware_high_and_dims_via_overlay() {
-        let out = map_user_level(50, &ContinuumConfig::hardware(100, DimMode::Overlay));
+    fn out_of_range_user_is_clamped() {
+        let out = map_user_level(200, &ContinuumConfig::hardware(50, 25, DimMode::Overlay));
         assert_eq!(out.hardware_pct, Some(100));
-        // alpha = MAX_ALPHA * (100 - 50) / 100 = MAX_ALPHA / 2
-        assert!(close(out.overlay_alpha, MAX_ALPHA * 0.5));
+        assert!(close(out.overlay_alpha, 0.0));
+    }
+
+    // --- reverse mapping ---
+
+    #[test]
+    fn reverse_map_is_pos_of_reading() {
+        let cfg = ContinuumConfig::hardware(50, 25, DimMode::Overlay);
+        // Hardware zero reflects to line A = m; hardware max to slider 100.
+        assert_eq!(reverse_map(0, &cfg), 25);
+        assert_eq!(reverse_map(100, &cfg), 100);
+        // Hardware 40 with m 25 ⇒ pos = 25 + 75·0.4 = 55.
+        assert_eq!(
+            reverse_map(40, &ContinuumConfig::hardware(0, 25, DimMode::Overlay)),
+            55
+        );
     }
 
     #[test]
-    fn reverse_map_is_identity_above_floor() {
-        assert_eq!(
-            reverse_map(70, &ContinuumConfig::hardware(50, DimMode::Overlay)),
-            70
-        );
-        assert_eq!(
-            reverse_map(100, &ContinuumConfig::hardware(50, DimMode::Overlay)),
-            100
-        );
+    fn reverse_map_does_not_clamp_below_floor() {
+        // A reading below Duja's floor reflects truthfully (between A and B),
+        // never snapped up. floor 50, m 25, reading 20 ⇒ pos = 40.
+        let cfg = ContinuumConfig::hardware(50, 25, DimMode::Overlay);
+        assert_eq!(reverse_map(20, &cfg), 40);
+        // 40 is below the transition B = pos(50) = 62.5, proving no floor clamp.
+        assert!(40.0 < pos(50.0, 25.0));
     }
 
     #[test]
-    fn reverse_map_clamps_below_floor_to_floor() {
-        assert_eq!(
-            reverse_map(30, &ContinuumConfig::hardware(50, DimMode::Overlay)),
-            50
-        );
+    fn reverse_map_endpoints_exact() {
+        for (floor, m) in [(0u8, 25u8), (50, 10), (100, 60), (0, 0)] {
+            let cfg = ContinuumConfig::hardware(floor, m, DimMode::Overlay);
+            assert_eq!(reverse_map(100, &cfg), 100);
+            assert_eq!(reverse_map(0, &cfg), m);
+        }
     }
 
     #[test]
@@ -304,13 +532,6 @@ mod tests {
         assert_eq!(reverse_map(0, &cfg), 0);
         assert_eq!(reverse_map(42, &cfg), 42);
         assert_eq!(reverse_map(255, &cfg), 100);
-    }
-
-    #[test]
-    fn out_of_range_user_is_clamped() {
-        let out = map_user_level(200, &ContinuumConfig::hardware(50, DimMode::Overlay));
-        assert_eq!(out.hardware_pct, Some(100));
-        assert!(close(out.overlay_alpha, 0.0));
     }
 
     // --- property tests (plan §4.2) ---
@@ -322,7 +543,7 @@ mod tests {
         #[test]
         fn continuum_monotonic_over_full_range(cfg in any_cfg()) {
             let levels: Vec<f32> = (0u8..=100)
-                .map(|u| perceived(&map_user_level(u, &cfg)))
+                .map(|u| perceived(&map_user_level(u, &cfg), cfg))
                 .collect();
             for pair in levels.windows(2) {
                 if let [a, b] = pair {
@@ -331,13 +552,21 @@ mod tests {
             }
         }
 
-        /// No visible jump in perceived output at the hardware-floor handoff.
+        /// No visible jump in perceived output across the hardware/software
+        /// handoff at `B = pos(floor)`.
         #[test]
-        fn continuum_continuous_at_hw_floor(floor in 1u8..=100, mode in any_mode()) {
-            let cfg = ContinuumConfig::hardware(floor, mode);
-            let at = perceived(&map_user_level(floor, &cfg));
-            let below = perceived(&map_user_level(floor.saturating_sub(1), &cfg));
-            prop_assert!((at - below).abs() < 0.02, "jump at floor {floor}: {below} -> {at}");
+        fn continuum_continuous_at_transition(m in 0u8..=95, floor in 1u8..=100, mode in any_mode()) {
+            let cfg = ContinuumConfig::hardware(floor, m, mode);
+            let b = f32::from(m) + (100.0 - f32::from(m)) * f32::from(floor) / 100.0;
+            // RATIONALE: `b` in `0.0..=100.0`; floor()/ceil() land in range and are
+            // integral, so the casts cannot truncate, lose a sign, or overflow.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let below = b.floor() as u8;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let above = (b.ceil() as u8).min(100);
+            let pb = perceived(&map_user_level(below, &cfg), cfg);
+            let pa = perceived(&map_user_level(above, &cfg), cfg);
+            prop_assert!((pa - pb).abs() < 0.03, "jump at B={b}: {pb} -> {pa} for {cfg:?}");
         }
 
         /// 100% is exactly full brightness for every configuration.
@@ -345,7 +574,7 @@ mod tests {
         fn continuum_endpoints_exact(cfg in any_cfg()) {
             let out = map_user_level(100, &cfg);
             prop_assert!(out.overlay_alpha.abs() <= f32::EPSILON);
-            prop_assert!((perceived(&out) - 1.0).abs() < 1e-4);
+            prop_assert!((perceived(&out, cfg) - 1.0).abs() < 1e-4);
             if cfg.hardware_floor.is_some() {
                 prop_assert_eq!(out.hardware_pct, Some(100));
             } else {
@@ -355,28 +584,29 @@ mod tests {
 
         /// The darkest overlay level is exactly MAX_ALPHA (hardware pinned).
         #[test]
-        fn continuum_dark_endpoint_is_max_alpha(floor in 1u8..=100) {
-            let cfg = ContinuumConfig::hardware(floor, DimMode::Overlay);
+        fn continuum_dark_endpoint_is_max_alpha(m in 0u8..=95, floor in 1u8..=100) {
+            let cfg = ContinuumConfig::hardware(floor, m, DimMode::Overlay);
             let out = map_user_level(0, &cfg);
             prop_assert!((out.overlay_alpha - MAX_ALPHA).abs() <= f32::EPSILON);
             prop_assert_eq!(out.hardware_pct, Some(floor));
         }
 
-        /// Above the floor the hardware value equals the user level, and
-        /// reflecting it back reproduces the slider within ±1.
+        /// Above the transition, mapping to hardware then reflecting it back
+        /// reproduces the slider within ±1 (u8 quantization through `pos` and its
+        /// inverse).
         #[test]
-        fn continuum_reverse_map_roundtrip((floor, user) in floor_and_user(), mode in any_mode()) {
-            let cfg = ContinuumConfig::hardware(floor, mode);
-            prop_assert_eq!(map_user_level(user, &cfg).hardware_pct, Some(user));
-            prop_assert!(reverse_map(user, &cfg).abs_diff(user) <= 1);
+        fn continuum_reverse_map_roundtrip((m, floor, user) in hardware_side_user(), mode in any_mode()) {
+            let cfg = ContinuumConfig::hardware(floor, m, mode);
+            let hw = map_user_level(user, &cfg).hardware_pct.expect("hardware display");
+            let back = reverse_map(hw, &cfg);
+            prop_assert!(back.abs_diff(user) <= 1, "user={user} hw={hw} back={back} for {cfg:?}");
         }
 
-        /// Software-only displays never touch hardware and stay monotonic.
+        /// Software-only displays never touch hardware.
         #[test]
         fn continuum_degenerate_hw_range(user in 0u8..=100, mode in any_mode()) {
             let cfg = ContinuumConfig::software_only(mode);
-            let out = map_user_level(user, &cfg);
-            prop_assert_eq!(out.hardware_pct, None);
+            prop_assert_eq!(map_user_level(user, &cfg).hardware_pct, None);
         }
     }
 }

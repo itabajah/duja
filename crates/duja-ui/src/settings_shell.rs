@@ -228,6 +228,19 @@ impl SettingsShell {
             let vm = self.vm.clone();
             let render = self.render_closure();
             let handler = handler.clone();
+            self.ui.on_monitor_min_perceived_changed(move |idx, pct| {
+                apply_command(
+                    &vm,
+                    |v| v.set_monitor_min_perceived(to_index(idx), clamp_pct(pct)),
+                    &render,
+                    &handler,
+                );
+            });
+        }
+        {
+            let vm = self.vm.clone();
+            let render = self.render_closure();
+            let handler = handler.clone();
             self.ui.on_monitor_dim_mode_selected(move |idx, option| {
                 let command = vm
                     .borrow_mut()
@@ -372,6 +385,7 @@ fn monitor_to_data(section: &MonitorSection) -> SettingsMonitorData {
     SettingsMonitorData {
         name: SharedString::from(section.name.as_str()),
         floor_pct: i32::from(section.floor_pct),
+        min_perceived_pct: i32::from(section.min_perceived_pct),
         dim_mode_index: i32::try_from(section.dim_mode_index()).unwrap_or(0),
         gamma_available: section.gamma_available,
         has_inputs: !inputs.is_empty(),
@@ -539,6 +553,47 @@ mod tests {
 mod binding_tests {
     use super::*;
     use crate::command::ThemeChoice;
+    use duja_core::config::Config;
+    use duja_core::id::StableDisplayId;
+    use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
+    use i_slint_backend_testing::ElementHandle;
+
+    fn snapshot(serial: &str) -> DisplaySnapshot {
+        DisplaySnapshot {
+            id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap(),
+            name: format!("Monitor {serial}"),
+            kind: DisplayKind::ExternalDdc,
+            user_level_pct: 50,
+            capabilities: Capabilities::default(),
+        }
+    }
+
+    // The perceptual-anchor calibration slider must render in each per-monitor
+    // section — proving the SettingsMonitorData `min-perceived-pct` field, the
+    // FieldRow, and the `value: monitor.min-perceived-pct` binding all compiled and
+    // bound (a pure `SettingsVm` test cannot see the `.slint` seam). Proven red
+    // before the field + FieldRow existed. Its emit/clamp logic is covered by the
+    // pure `set_monitor_min_perceived_clamps_and_emits` test.
+    #[test]
+    fn settings_min_perceived_slider_is_rendered_per_monitor() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let mut vm = SettingsVm::new();
+        vm.set_displays(&[snapshot("A"), snapshot("B")], &Config::default(), true);
+        let vm = Rc::new(RefCell::new(vm));
+        let shell = SettingsShell::new(vm).expect("settings shell instantiates");
+
+        // Each per-monitor section contributes two elements carrying this label:
+        // the FieldRow's caption Text and the Slider itself. Two monitors ⇒ four —
+        // proving the calibration control renders once per display.
+        let matches =
+            ElementHandle::find_by_accessible_label(&shell.ui, "Brightness at hardware minimum")
+                .count();
+        assert_eq!(
+            matches, 4,
+            "each per-monitor section must render its calibration slider"
+        );
+    }
 
     // The settings window must follow the resolved theme. Before the fix,
     // `render_into` never called `set_dark`, so the window stayed pinned to

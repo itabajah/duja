@@ -219,6 +219,42 @@ after `show()`: the flip marks the whole window dirty, so the next present cover
 it completely. Applied symmetrically to the flyout and settings windows, each
 covered by a binding test (proven red against a non-flipping present).
 
+### Perceptual brightness continuum (v2, ADR-0014)
+
+The slider is now **perceptual**: the position *is* perceived brightness, so
+"20 % looks 20 % bright" regardless of the hardware floor or panel. Each hardware
+display carries a per-display `min_perceived_pct` anchor (default 25, tunable
+5–60 in Settings) that sets where hardware zero sits on the slider (line A) and
+where hardware hands off to software dimming (line B, at the floor). The floor is
+now a **write limit**, not a scale change, so a mid-run floor/anchor change
+retargets the hardware without moving the thumb. Consequences: the old
+20 %-seed hack behind the "Software dimming" toggle is gone (floor 0 now has a
+real software zone below the anchor); the toggle just switches the dim mode; and
+launch adoption reflects the live hardware reading through `reverse_map` so the
+slider mirrors reality with no first-touch jump.
+
+**External-change reflection.** While the flyout is open the engine polls each
+responsive display's hardware level (a new `SetLevelPolling` command; off by
+default, so the idle engine keeps its zero-wakeup guarantee), and a reading that
+drifts from what Duja last recorded surfaces as `EngineNotification::LevelRead`.
+The app reflects it onto the perceptual slider via `reverse_map`, so turning the
+monitor's own buttons (or another app changing brightness) moves the thumb
+within ~2 s. Two echo gates keep Duja's own writes from bouncing back: the engine
+suppresses readings that match its recorded level (and skips a display with a
+write in flight), and the app suppresses a reading that matches the hardware the
+current slider already drives — which also covers the pinned-floor/overlay case,
+so the thumb never jumps to the transition. The reflection path writes no DDC.
+
+**Premium slider.** The flyout slider now draws **two reference lines** — line A
+(hardware zero, quiet) and line B (the hardware/software handoff, primary) — which
+collapse to one when the floor is 0. It has a gradient accent fill, an accent
+thumb glow on hover/press, a value bubble while dragging, hover labels on the two
+lines, and a **glide** animation when the level changes externally (the reflection
+path). The glide honours the OS "animation effects" accessibility setting
+(`SPI_GETCLIENTAREAANIMATION`) and is forced to 0 while the window is hidden or
+during a drag; only the rendered thumb glides, so the DDC-never-animates rule is
+untouched.
+
 ## P5 gate results
 
 **Security checklist §6** — every item PASS, each with a proving test: pipe

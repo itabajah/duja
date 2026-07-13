@@ -43,7 +43,7 @@ use tracing::{debug, error, info, warn};
 
 use duja_app::{Engine, EngineCommand, EngineConfig, EngineNotification, Enumeration};
 use duja_core::config::Config;
-use duja_core::continuum::map_user_level;
+use duja_core::continuum::{ContinuumConfig, map_user_level, reverse_map};
 use duja_core::dimmer::{DimCommand, Dimmer};
 use duja_core::id::StableDisplayId;
 use duja_core::manager::DEFAULT_USER_LEVEL_PCT;
@@ -61,27 +61,12 @@ use crate::bin_support::hotkey::{self, Accelerator, HotkeyAction, Modifiers as A
 use crate::bin_support::paths::DujaPaths;
 use crate::bin_support::state_store::StateStore;
 use crate::bin_support::updates::{self, HttpsTransport, UpdateOutcome};
-use crate::bin_support::{backend, gamma, ipc, run, settings, settings_apply, startup};
+use crate::bin_support::{backend, gamma, ipc, motion, run, settings, settings_apply, startup};
 
 /// The brightness step (percentage points) a `brightness_up` / `brightness_down`
 /// hotkey applies to every display. Fixed in P5; a configurable step is a
 /// settings-UI follow-up.
 const HOTKEY_BRIGHTNESS_STEP: i16 = 5;
-
-/// The hardware floor (%) the flyout's "Software dimming" toggle establishes when
-/// it is switched on for a display that has none set.
-///
-/// Software dimming (an overlay/gamma sub-floor) only has a region to act in when
-/// there is a non-zero hardware floor — below it the hardware is pinned and the
-/// overlay takes over. The schema default is `hw_floor_pct = 0` (ADR-0007: "no
-/// artificial floor until the user sets one"), so a fresh display's toggle would
-/// otherwise be a visual no-op. Turning the toggle *on* is the user opting into
-/// that sub-floor regime, so we seed a sensible floor here; the Settings window's
-/// per-monitor slider then fine-tunes it, and setting the floor back to 0 there
-/// restores the full hardware range. Turning the toggle off leaves the floor
-/// (the slider still bottoms out at it, communicating the range) — it is
-/// re-tunable in Settings.
-const DEFAULT_SOFTWARE_DIM_FLOOR_PCT: u8 = 20;
 
 /// How long after the flyout is hidden a tray-icon click is treated as the same
 /// dismissing gesture (rather than a fresh open), closing the click-outside race.
@@ -99,37 +84,45 @@ enum ToggleDecision {
     Ignore,
 }
 
-/// The floor to seed when the flyout "Software dimming" toggle is switched on,
-/// given the display's current floor.
+/// The perceived slider level to adopt for a freshly-sighted display the user has
+/// not yet taken control of, choosing between the live hardware reading and the
+/// persisted value.
 ///
-/// Returns [`DEFAULT_SOFTWARE_DIM_FLOOR_PCT`] only when dimming is being turned
-/// *on* for a display with no floor (`0`) — enabling the toggle is the user
-/// opting into a sub-floor regime, which needs a non-zero floor to be visible.
-/// Turning it off, or a display that already has a floor, seeds nothing.
-fn floor_to_seed_on_dimming(on: bool, current_floor: u8) -> Option<u8> {
-    (on && current_floor == 0).then_some(DEFAULT_SOFTWARE_DIM_FLOOR_PCT)
-}
-
-/// The user level to seed for a freshly-sighted display the user has not yet taken
-/// control of, choosing between the live hardware reading and the persisted value.
-///
-/// Item 5 — Duja adopts the monitor's CURRENT brightness on launch. This prefers
-/// the hardware reading (`reading_pct`, from the engine's initial Get) so the
-/// slider mirrors reality and nothing moves. It falls back to the persisted
-/// last-known only when the reading is still the pre-probe placeholder
-/// ([`DEFAULT_USER_LEVEL_PCT`] — before the Get lands, or when it fails) and a
-/// persisted value exists: the documented fallback for a failed hardware read.
-/// It never itself writes to hardware — adoption reflects reality, it does not
-/// restore a saved level.
-fn level_to_adopt(reading_pct: u8, persisted: Option<u8>) -> u8 {
+/// Item 5 — Duja adopts the monitor's CURRENT brightness on launch. The engine's
+/// reading (`reading_pct`, from the initial Get) is a **hardware** percentage,
+/// but the slider is **perceived** (ADR-0014), so a real reading is reflected
+/// through [`reverse_map`] to its slider position — the slider then mirrors
+/// reality and the first interaction causes no jump. It falls back to the
+/// persisted last-known (already a perceived level) only when the reading is
+/// still the pre-probe placeholder ([`DEFAULT_USER_LEVEL_PCT`] — before the Get
+/// lands, or when it fails) and a persisted value exists. It never itself writes
+/// to hardware — adoption reflects reality, it does not restore a saved level.
+fn adopt_position(reading_pct: u8, persisted: Option<u8>, cfg: ContinuumConfig) -> u8 {
     match persisted {
         Some(saved) if reading_pct == DEFAULT_USER_LEVEL_PCT => saved,
-        _ => reading_pct,
+        _ => reverse_map(reading_pct, &cfg),
+    }
+}
+
+/// The perceptual gate for a poll reading: `Some(new_slider)` to reflect a
+/// genuine external change, or `None` when the reading matches what the current
+/// slider position already drives.
+///
+/// The `None` case covers our own state and, crucially, the pinned-floor/overlay
+/// case: below the transition the hardware sits at the floor and the reading
+/// matches it, so the reflection never yanks the thumb up to the transition even
+/// though `reverse_map` (alpha-agnostic) would map the floor reading there. A
+/// software-only display (no hardware channel) never reflects.
+fn reflected_level(current_perceived: u8, hw_pct: u8, cfg: ContinuumConfig) -> Option<u8> {
+    match map_user_level(current_perceived, &cfg).hardware_pct {
+        None => None,
+        Some(intended) if intended.abs_diff(hw_pct) <= 1 => None,
+        Some(_) => Some(reverse_map(hw_pct, &cfg)),
     }
 }
 
 /// Adopt a fresh enumeration into the state book: record each display's adopted
-/// user level (see [`level_to_adopt`]) for every display the user has **not** taken
+/// user level (see [`adopt_position`]) for every display the user has **not** taken
 /// control of this session.
 ///
 /// This is the startup/hot-plug "adopt reality" step (item 5). It has **no engine
@@ -142,14 +135,15 @@ fn level_to_adopt(reading_pct: u8, persisted: Option<u8>) -> u8 {
 fn adopt_enumeration(
     snapshots: &[DisplaySnapshot],
     user_controlled: &BTreeSet<String>,
+    cfgs: &[ContinuumConfig],
     state: &mut StateStore,
     now_unix: i64,
 ) {
-    for snap in snapshots {
+    for (snap, cfg) in snapshots.iter().zip(cfgs) {
         if user_controlled.contains(snap.id.as_str()) {
             continue;
         }
-        let level = level_to_adopt(snap.user_level_pct, state.level(snap.id.as_str()));
+        let level = adopt_position(snap.user_level_pct, state.level(snap.id.as_str()), *cfg);
         state.record(snap.id.as_str(), level, now_unix);
     }
 }
@@ -564,6 +558,18 @@ impl AppState {
             .present_at(FLYOUT_LOGICAL_WIDTH, logical_height, x, y);
         self.flyout_visible = true;
 
+        // Reflect external brightness changes while the flyout is open: poll the
+        // hardware level so the monitor's own buttons move the slider. Disabled
+        // again on hide, keeping the idle engine at zero wakeups.
+        let _ = self
+            .engine_tx
+            .send(EngineCommand::SetLevelPolling { on: true });
+
+        // Arm the external-change glide per the OS animation setting (queried now
+        // so an accessibility change is picked up on the next open).
+        self.shell
+            .set_glide_ms(motion::glide_for(true, motion::os_animations_enabled()));
+
         // Keep the flyout above other windows while visible and focus it so
         // Esc/keyboard work immediately (user-reported: it opened underneath).
         // This never resizes/moves the window; its redraw request just forces the
@@ -595,6 +601,12 @@ impl AppState {
         self.shell.hide();
         self.flyout_visible = false;
         self.last_hidden = Some(Instant::now());
+        // Stop level polling so the idle engine parks with zero wakeups, and force
+        // the glide off so a hidden window can never schedule an animation frame.
+        let _ = self
+            .engine_tx
+            .send(EngineCommand::SetLevelPolling { on: false });
+        self.shell.set_glide_ms(0);
     }
 
     /// Dismiss the flyout when it loses focus (the user clicked outside it).
@@ -648,6 +660,11 @@ impl AppState {
             UiCommand::SetLevel { id, pct } => self.set_user_level(&id, pct),
             UiCommand::Refresh => {
                 let _ = self.engine_tx.send(EngineCommand::RefreshNow);
+                // Re-arm polling to re-read levels at once (idempotent while the
+                // flyout is already polling).
+                let _ = self
+                    .engine_tx
+                    .send(EngineCommand::SetLevelPolling { on: true });
             }
             UiCommand::OpenSettings => self.open_settings(),
             UiCommand::SetDimmingEnabled { id, on } => self.set_dimming_enabled(&id, on),
@@ -660,23 +677,10 @@ impl AppState {
     /// Routed through the same config-write + re-apply path a settings dim-mode
     /// change uses, so the flyout toggle and the settings picker stay consistent.
     fn set_dimming_enabled(&mut self, id: &StableDisplayId, on: bool) {
-        // Turning dimming on for a display with no floor set would have no visible
-        // effect (no sub-floor region), so seed a sensible floor first — the user
-        // is opting into the sub-floor regime by enabling the toggle. See
-        // [`DEFAULT_SOFTWARE_DIM_FLOOR_PCT`] / [`floor_to_seed_on_dimming`].
-        let current_floor = settings::monitor_config(&self.config, id.as_str()).hw_floor_pct;
-        if let Some(pct) = floor_to_seed_on_dimming(on, current_floor) {
-            let floor = SettingsCommand::SetMonitorFloor {
-                id: id.clone(),
-                pct,
-            };
-            match settings_apply::persist_config_change(&self.config_path, &floor) {
-                Ok(true) => self.reload_config(),
-                Ok(false) => {}
-                Err(e) => warn!(error = %e, "failed to seed a software-dimming floor"),
-            }
-        }
-
+        // The toggle just switches the sub-floor dim mode. With the perceptual
+        // continuum (ADR-0014) every hardware display already has a software zone
+        // below its perceptual anchor even at floor 0, so no floor seeding is
+        // needed (the old DEFAULT_SOFTWARE_DIM_FLOOR_PCT hack is gone).
         let mode = if on { DimMode::Overlay } else { DimMode::Off };
         let command = SettingsCommand::SetMonitorDimMode {
             id: id.clone(),
@@ -714,6 +718,7 @@ impl AppState {
                     id.clone(),
                     duja_ui::DimmingInfo {
                         hardware_floor: cfg.hardware_floor,
+                        min_perceived_pct: cfg.min_perceived_pct,
                         // Reflect the *configured* mode (not the HDR-guarded one)
                         // so the toggle shows what the user chose.
                         dimming_on: monitor.dim_mode != ConfigDimMode::Off,
@@ -826,7 +831,11 @@ impl AppState {
             SettingsCommand::CheckUpdates => self.start_update_check(),
             SettingsCommand::OpenReleasesPage => open_url(updates::RELEASES_PAGE_URL),
             SettingsCommand::SetMonitorFloor { id, .. }
+            | SettingsCommand::SetMonitorMinPerceived { id, .. }
             | SettingsCommand::SetMonitorDimMode { id, .. } => {
+                // Re-drive the display's current level through the new continuum:
+                // the hardware target and overlay retarget while the slider thumb
+                // stays put (the floor/anchor are write policy, not a rescale).
                 self.reapply_display(&id);
                 self.refresh_flyout_dimming();
                 self.render();
@@ -899,12 +908,29 @@ impl AppState {
         )
     }
 
-    /// Re-apply a display's dimming after a floor/dim-mode change by re-driving
-    /// its current user level through the normal path (recomputes the hardware
-    /// target against the new continuum and re-plans overlays/gamma).
+    /// Re-apply a display's dimming after a floor/anchor/dim-mode change by
+    /// re-driving its current user level through the normal path (recomputes the
+    /// hardware target against the new continuum and re-plans overlays/gamma).
+    ///
+    /// The level is first re-clamped to the reachable range under the new config:
+    /// turning software dimming **off** (or raising the floor) lifts the slider's
+    /// minimum to the transition, so a level that was below it would otherwise
+    /// strand the thumb below the new minimum while the screen jumps up to the
+    /// transition brightness. Clamping keeps the thumb and the screen in sync.
     fn reapply_display(&mut self, id: &StableDisplayId) {
         let level = self.state.level(id.as_str()).unwrap_or(100);
-        self.set_user_level(id, level);
+        let clamped = match self.kind_of(id) {
+            Some(kind) => {
+                let cfg = settings::continuum_for(
+                    kind,
+                    &settings::monitor_config(&self.config, id.as_str()),
+                    self.gamma_allowed,
+                );
+                level.max(settings::min_reachable_pct(cfg))
+            }
+            None => level,
+        };
+        self.set_user_level(id, clamped);
     }
 
     /// Kick off the opt-in update check on a background thread (never blocks the
@@ -966,7 +992,44 @@ impl AppState {
                 self.vm.borrow_mut().set_unresponsive(&id, false);
                 self.render();
             }
+            EngineNotification::LevelRead { id, hw_pct } => self.on_level_read(&id, hw_pct),
         }
+    }
+
+    /// Reflect an externally-observed hardware level onto the perceptual slider.
+    ///
+    /// A poll saw the display's hardware brightness change from outside Duja. The
+    /// engine already suppressed our own writes (it only emits `LevelRead` on a
+    /// drift from what it last recorded); this second, perceptual gate additionally
+    /// suppresses a reading that merely matches the hardware our *current* slider
+    /// position already intends — which also covers the pinned-floor/overlay case
+    /// (below the floor the hardware sits at the floor and the reading matches it),
+    /// so the reflection never yanks the thumb up to the transition. A genuine
+    /// external change is reflected via [`reverse_map`] and updates the slider +
+    /// overlays; it **never writes to hardware**.
+    fn on_level_read(&mut self, id: &StableDisplayId, hw_pct: u8) {
+        let Some(kind) = self.kind_of(id) else {
+            return;
+        };
+        let cfg = settings::continuum_for(
+            kind,
+            &settings::monitor_config(&self.config, id.as_str()),
+            self.gamma_allowed,
+        );
+        let current = self
+            .state
+            .level(id.as_str())
+            .unwrap_or(DEFAULT_USER_LEVEL_PCT);
+        let Some(perceived) = reflected_level(current, hw_pct, cfg) else {
+            return;
+        };
+        self.state.record(id.as_str(), perceived, unix_now());
+        self.vm.borrow_mut().set_level(id, perceived);
+        self.render();
+        // Re-plan overlays: an external change that crosses the transition must
+        // clear/adjust any overlay a user-controlled display was showing.
+        self.apply_overlays();
+        let _ = self.state.maybe_flush(Instant::now());
     }
 
     /// Adopt a fresh enumeration: mirror each display's CURRENT hardware brightness
@@ -978,7 +1041,7 @@ impl AppState {
     /// monitor is actually at (`snap.user_level_pct`, from the engine's initial
     /// Get), not the persisted file, and pushes no `SetUserLevel`. Persisted state
     /// only seeds the UI as a fallback while that reading is still the pre-probe
-    /// placeholder (see [`level_to_adopt`]). Only a genuine user action
+    /// placeholder (see [`adopt_position`]). Only a genuine user action
     /// ([`set_user_level`](Self::set_user_level)) writes to hardware thereafter.
     fn on_displays_changed(&mut self, snapshots: Vec<DisplaySnapshot>) {
         self.displays = snapshots.iter().map(|s| (s.id.clone(), s.kind)).collect();
@@ -999,9 +1062,22 @@ impl AppState {
         // displays the user has not taken control of. This writes NOTHING to the
         // hardware — the former `SetUserLevel` push here is what dimmed the monitor
         // to the last-saved level on every launch (item 5).
+        // Precompute each display's continuum config before the mutable `state`
+        // borrow (a closure capturing `&self` would conflict with `&mut state`).
+        let cfgs: Vec<ContinuumConfig> = snapshots
+            .iter()
+            .map(|s| {
+                settings::continuum_for(
+                    s.kind,
+                    &settings::monitor_config(&self.config, s.id.as_str()),
+                    self.gamma_allowed,
+                )
+            })
+            .collect();
         adopt_enumeration(
             &snapshots,
             &self.user_controlled,
+            &cfgs,
             &mut self.state,
             unix_now(),
         );
@@ -1600,12 +1676,10 @@ mod tests {
     //! weak and synthesising `WM_HOTKEY` does not reliably reach its handler); it
     //! is covered by the P1 `spike/eventloop` proof and manual hardware QA.
     use super::{Accelerator, Action, Code, GhkModifiers, HotkeyAction};
-    use super::{
-        DEFAULT_SOFTWARE_DIM_FLOOR_PCT, TOGGLE_GUARD, floor_to_seed_on_dimming, toggle_decision,
-    };
+    use super::{ContinuumConfig, DimMode, TOGGLE_GUARD, toggle_decision};
     use super::{
         DEFAULT_USER_LEVEL_PCT, ToggleDecision, accel_to_hotkey, action_for, adopt_enumeration,
-        code_for_key, ghk_modifiers, level_to_adopt,
+        adopt_position, code_for_key, ghk_modifiers, reflected_level,
     };
     use crate::bin_support::state_store::StateStore;
     use duja_core::id::StableDisplayId;
@@ -1638,24 +1712,45 @@ mod tests {
         (StateStore::load(dir.path().join("state.toml")), dir)
     }
 
-    #[test]
-    fn level_to_adopt_prefers_the_live_hardware_reading_over_persisted() {
-        // A real reading is adopted verbatim, even against a different (low — the
-        // bug's trigger) persisted level: the slider mirrors reality, nothing moves.
-        assert_eq!(level_to_adopt(70, Some(20)), 70);
-        assert_eq!(level_to_adopt(70, None), 70);
+    /// An identity continuum (m=0, floor=0): `reverse_map` is the identity, so the
+    /// adoption tests below stay focused on the reading-vs-persisted logic.
+    fn identity_cfg() -> ContinuumConfig {
+        ContinuumConfig::hardware(0, 0, DimMode::Overlay)
     }
 
     #[test]
-    fn level_to_adopt_falls_back_to_persisted_only_for_the_pre_probe_placeholder() {
+    fn adopt_position_prefers_the_live_hardware_reading_over_persisted() {
+        // A real reading is adopted, even against a different (low — the bug's
+        // trigger) persisted level: the slider mirrors reality, nothing moves.
+        assert_eq!(adopt_position(70, Some(20), identity_cfg()), 70);
+        assert_eq!(adopt_position(70, None, identity_cfg()), 70);
+    }
+
+    #[test]
+    fn adopt_position_falls_back_to_persisted_only_for_the_pre_probe_placeholder() {
         // While the reading is still the pre-probe placeholder, the persisted
         // last-known seeds the UI (the documented fallback for a failed/pending read)…
-        assert_eq!(level_to_adopt(DEFAULT_USER_LEVEL_PCT, Some(20)), 20);
+        assert_eq!(
+            adopt_position(DEFAULT_USER_LEVEL_PCT, Some(20), identity_cfg()),
+            20
+        );
         // …but with nothing persisted there is nothing better than the placeholder.
         assert_eq!(
-            level_to_adopt(DEFAULT_USER_LEVEL_PCT, None),
+            adopt_position(DEFAULT_USER_LEVEL_PCT, None, identity_cfg()),
             DEFAULT_USER_LEVEL_PCT
         );
+    }
+
+    #[test]
+    fn adopt_position_reflects_a_real_reading_through_the_perceptual_scale() {
+        // The engine's reading is a hardware %, but the slider is perceived
+        // (ADR-0014): a real reading is reflected through reverse_map so the slider
+        // shows the true perceived position and the first interaction never jumps.
+        // hardware 70 with anchor 25 ⇒ pos(70) = 25 + 75·0.7 = 77.5 → 78.
+        let cfg = ContinuumConfig::hardware(0, 25, DimMode::Overlay);
+        assert_eq!(adopt_position(70, None, cfg), 78);
+        // A low persisted value must not be preferred over a real reading.
+        assert_eq!(adopt_position(70, Some(20), cfg), 78);
     }
 
     #[test]
@@ -1667,12 +1762,49 @@ mod tests {
         let id = snap.id.as_str().to_owned();
         let (mut state, _dir) = temp_state();
         state.record(&id, 48, 1); // low persisted level, as on the live box
-        adopt_enumeration(&[snap], &BTreeSet::new(), &mut state, 2);
+        adopt_enumeration(&[snap], &BTreeSet::new(), &[identity_cfg()], &mut state, 2);
         assert_eq!(
             state.level(&id),
             Some(70),
             "must adopt the live hardware reading, not the persisted 48"
         );
+    }
+
+    // --- external-change reflection: the perceptual gate ---
+
+    #[test]
+    fn reflected_level_ignores_a_reading_matching_the_current_slider() {
+        // Identity continuum: current slider 50 drives hardware 50; a reading of 50
+        // (± rounding) is our own state, not an external change.
+        let cfg = ContinuumConfig::hardware(0, 0, DimMode::Overlay);
+        assert_eq!(reflected_level(50, 50, cfg), None);
+        assert_eq!(reflected_level(50, 51, cfg), None); // within tolerance
+    }
+
+    #[test]
+    fn reflected_level_reflects_a_genuine_external_change() {
+        // A reading that differs from what the slider drives is reflected via
+        // reverse_map (identity here ⇒ 80).
+        let cfg = ContinuumConfig::hardware(0, 0, DimMode::Overlay);
+        assert_eq!(reflected_level(50, 80, cfg), Some(80));
+    }
+
+    #[test]
+    fn reflected_level_does_not_jump_when_pinned_below_the_floor() {
+        // floor 30, anchor 25 ⇒ transition B = 47.5. At slider 10 (below B) the
+        // hardware is pinned at the floor 30; a reading of 30 matches, so the gate
+        // returns None — the thumb must NOT jump up to pos(30) = 47.5 even though
+        // reverse_map(30) would map there.
+        let cfg = ContinuumConfig::hardware(30, 25, DimMode::Overlay);
+        assert_eq!(reflected_level(10, 30, cfg), None);
+        // But a reading well above the floor is a real external change.
+        assert!(reflected_level(10, 70, cfg).is_some());
+    }
+
+    #[test]
+    fn reflected_level_never_reflects_on_software_only() {
+        let cfg = ContinuumConfig::software_only(DimMode::Overlay);
+        assert_eq!(reflected_level(50, 80, cfg), None);
     }
 
     #[test]
@@ -1684,34 +1816,12 @@ mod tests {
         let (mut state, _dir) = temp_state();
         state.record(&id, 35, 1); // the user's chosen level
         let controlled: BTreeSet<String> = std::iter::once(id.clone()).collect();
-        adopt_enumeration(&[snap], &controlled, &mut state, 2);
+        adopt_enumeration(&[snap], &controlled, &[identity_cfg()], &mut state, 2);
         assert_eq!(
             state.level(&id),
             Some(35),
             "a user-controlled level must survive an enumeration echo"
         );
-    }
-
-    // --- Defect 2: the flyout "Software dimming" toggle must actually engage ---
-    //
-    // The schema default `hw_floor_pct = 0` leaves no sub-floor region, so
-    // `map_user_level` never produces an overlay and the toggle was a visual
-    // no-op. Turning it on now seeds a floor so dimming has a region to act in;
-    // the pure `dimming::plan` tests then prove an overlay engages below a
-    // non-zero floor.
-    #[test]
-    fn dimming_toggle_seeds_a_floor_only_when_turned_on_without_one() {
-        // Turned on with no floor → seed the default so the overlay can engage.
-        assert_eq!(
-            floor_to_seed_on_dimming(true, 0),
-            Some(DEFAULT_SOFTWARE_DIM_FLOOR_PCT)
-        );
-        // Turned on with a floor already set → leave the user's floor alone.
-        assert_eq!(floor_to_seed_on_dimming(true, 25), None);
-        // Turned off → never seed (this was the pre-fix behaviour for *every*
-        // case, which is exactly why the on-with-no-floor toggle did nothing).
-        assert_eq!(floor_to_seed_on_dimming(false, 0), None);
-        assert_eq!(floor_to_seed_on_dimming(false, 25), None);
     }
 
     #[test]

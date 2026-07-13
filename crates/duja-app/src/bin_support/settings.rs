@@ -41,7 +41,7 @@ pub(crate) fn continuum_for(
     match kind {
         DisplayKind::SoftwareOnly => ContinuumConfig::software_only(mode),
         DisplayKind::ExternalDdc | DisplayKind::InternalPanel => {
-            ContinuumConfig::hardware(monitor.hw_floor_pct, mode)
+            ContinuumConfig::hardware(monitor.hw_floor_pct, monitor.min_perceived_pct, mode)
         }
     }
 }
@@ -61,6 +61,21 @@ pub(crate) fn effective_mode(mode: DimMode, gamma_allowed: bool) -> DimMode {
 /// entry for it.
 pub(crate) fn monitor_config(config: &Config, id: &str) -> MonitorConfig {
     config.monitors.get(id).cloned().unwrap_or_default()
+}
+
+/// The lowest perceived slider level reachable under `cfg`: the transition (line
+/// B) when software dimming is off ([`DimMode::Off`], below which nothing dims),
+/// else 0 (overlay/gamma can reach full dark). Used to re-clamp a stored level
+/// after a mode/floor change so the thumb is never stranded below the slider's
+/// new minimum.
+pub(crate) fn min_reachable_pct(cfg: ContinuumConfig) -> u8 {
+    let fraction = duja_core::continuum::geometry(&cfg).min_usable;
+    // RATIONALE: `min_usable` ∈ [0.0, 1.0] ⇒ the product ∈ [0.0, 100.0] and is
+    // integral after `round()`, so the cast cannot truncate, lose a sign, or
+    // overflow — clippy's cast lints cannot see the numeric bounds.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let pct = (fraction * 100.0).round() as u8;
+    pct
 }
 
 /// Map the config's [`ConfigTheme`] preference onto the flyout's [`UiTheme`].
@@ -144,6 +159,34 @@ mod tests {
         let config = Config::default();
         let m = monitor_config(&config, "GSM-5B09-unknown");
         assert_eq!(m, MonitorConfig::default());
+    }
+
+    #[test]
+    fn min_reachable_pct_is_the_transition_only_when_dimming_off() {
+        use duja_core::continuum::ContinuumConfig;
+        // Dimming OFF ⇒ the slider bottoms out at line B (the transition).
+        // floor 0, anchor 25 ⇒ B = 25; floor 20, anchor 25 ⇒ B = pos(20) = 40.
+        assert_eq!(
+            min_reachable_pct(ContinuumConfig::hardware(0, 25, DimMode::Off)),
+            25
+        );
+        assert_eq!(
+            min_reachable_pct(ContinuumConfig::hardware(20, 25, DimMode::Off)),
+            40
+        );
+        // Overlay / Gamma can reach full dark ⇒ 0; software-only ⇒ 0.
+        assert_eq!(
+            min_reachable_pct(ContinuumConfig::hardware(0, 25, DimMode::Overlay)),
+            0
+        );
+        assert_eq!(
+            min_reachable_pct(ContinuumConfig::hardware(20, 25, DimMode::Gamma)),
+            0
+        );
+        assert_eq!(
+            min_reachable_pct(ContinuumConfig::software_only(DimMode::Off)),
+            0
+        );
     }
 
     #[test]

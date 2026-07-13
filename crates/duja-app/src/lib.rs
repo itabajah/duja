@@ -95,6 +95,11 @@ pub struct EngineConfig {
     /// Trailing-edge quiet period applied to raw platform display-change ticks
     /// before an enumeration is run.
     pub displaychange_debounce: Duration,
+    /// How often the engine re-reads each responsive display's hardware level
+    /// **while level polling is enabled** (the flyout is open). Polling is off by
+    /// default, so an idle engine still parks with zero wakeups; see
+    /// [`EngineCommand::SetLevelPolling`].
+    pub level_poll_interval: Duration,
 }
 
 impl Default for EngineConfig {
@@ -103,6 +108,7 @@ impl Default for EngineConfig {
             write_min_gap: Duration::from_millis(100),
             watchdog_timeout: Duration::from_secs(5),
             displaychange_debounce: Duration::from_millis(750),
+            level_poll_interval: Duration::from_secs(2),
         }
     }
 }
@@ -170,6 +176,18 @@ pub enum EngineCommand {
     },
     /// Run one enumeration pass immediately, bypassing the debounce.
     RefreshNow,
+    /// Turn periodic hardware-level polling on or off.
+    ///
+    /// The app enables it while the flyout is visible so external brightness
+    /// changes (the monitor's own buttons, another app) are reflected into the
+    /// slider, and disables it on hide so the idle engine parks with zero
+    /// wakeups. Enabling polls once immediately and then every
+    /// [`EngineConfig::level_poll_interval`]; re-sending `on: true` re-polls at
+    /// once (the flyout's refresh affordance reuses it).
+    SetLevelPolling {
+        /// Whether periodic level polling should be active.
+        on: bool,
+    },
     /// Request the current UI-facing snapshots, delivered on `reply`.
     Snapshot {
         /// Where the engine sends the snapshot vector.
@@ -189,6 +207,17 @@ pub enum EngineNotification {
     DisplayUnresponsive(StableDisplayId),
     /// A previously-unresponsive display was sighted again and re-armed.
     DisplayResponsive(StableDisplayId),
+    /// A poll observed a display's hardware brightness change from outside Duja
+    /// (physical buttons, another app). Carries the raw hardware percentage
+    /// (0–100); the app reflects it onto the perceptual slider. Emitted only when
+    /// the reading drifts from what the engine last recorded, so Duja's own
+    /// writes are never echoed back.
+    LevelRead {
+        /// The display whose level was read.
+        id: StableDisplayId,
+        /// The observed hardware brightness percentage (0–100).
+        hw_pct: u8,
+    },
 }
 
 /// A handle to a running [`Engine`] actor: a command sender plus the join

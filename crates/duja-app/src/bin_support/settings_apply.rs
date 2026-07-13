@@ -49,6 +49,10 @@ pub(crate) fn apply_to_document(doc: &mut ConfigDocument, command: &SettingsComm
             doc.set_monitor_dim_mode(id.as_str(), dim_mode_to_config(*mode));
             true
         }
+        SettingsCommand::SetMonitorMinPerceived { id, pct } => {
+            doc.set_monitor_min_perceived_pct(id.as_str(), *pct);
+            true
+        }
         SettingsCommand::SetHotkey {
             action_key,
             binding,
@@ -159,6 +163,27 @@ mod tests {
         let monitor = cfg.monitors.get(display.as_str()).expect("entry");
         assert_eq!(monitor.hw_floor_pct, 15);
         assert_eq!(monitor.dim_mode, ConfigDimMode::Gamma);
+    }
+
+    #[test]
+    fn set_monitor_min_perceived_writes_the_anchor_key() {
+        let mut doc = ConfigDocument::defaults();
+        let display = id("A");
+        assert!(apply_to_document(
+            &mut doc,
+            &SettingsCommand::SetMonitorMinPerceived {
+                id: display.clone(),
+                pct: 35,
+            }
+        ));
+        let cfg = doc.config().expect("typed");
+        assert_eq!(
+            cfg.monitors
+                .get(display.as_str())
+                .expect("entry")
+                .min_perceived_pct,
+            35
+        );
     }
 
     #[test]

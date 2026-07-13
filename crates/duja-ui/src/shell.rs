@@ -185,6 +185,15 @@ impl FlyoutShell {
         }
     }
 
+    /// Set the external-change glide duration (ms) pushed into every slider.
+    ///
+    /// The app derives it from the OS animation setting and window visibility
+    /// (0 = instant / reduced motion / hidden); a user drag never animates
+    /// regardless (the `.slint` forces the drag duration to 0).
+    pub fn set_glide_ms(&self, ms: i32) {
+        self.ui.set_glide_ms(ms);
+    }
+
     /// Set the flyout's desired window height (logical px). A no-frame top-level
     /// window is not auto-grown to its content preferred height after the rows
     /// populate asynchronously, so the app drives it from the row count.
@@ -327,7 +336,9 @@ fn row_to_data(row: &FlyoutRow) -> FlyoutRowData {
         slider_enabled: row.slider_enabled,
         dimming_on: row.dimming_on,
         has_floor: row.has_hardware_floor(),
-        marker_fraction: row.floor_fraction(),
+        marker_fraction: row.transition_fraction(),
+        marker_a_fraction: row.hw_zero_fraction(),
+        markers_coincide: row.markers_coincide(),
     }
 }
 
