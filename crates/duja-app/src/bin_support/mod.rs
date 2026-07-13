@@ -48,6 +48,7 @@ pub(crate) mod gamma;
 pub(crate) mod hotkey;
 pub(crate) mod ipc;
 pub(crate) mod logging;
+pub(crate) mod motion;
 pub(crate) mod num;
 pub(crate) mod paths;
 pub(crate) mod positioning;
