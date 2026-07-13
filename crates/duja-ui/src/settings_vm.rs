@@ -29,6 +29,13 @@ use crate::command::{SettingsCommand, ThemeChoice};
 /// hardware floor, which is not a useful configuration; 50 % is the plan's cap.
 pub const MAX_FLOOR_PCT: u8 = 50;
 
+/// The inclusive range the perceptual-anchor (`min_perceived_pct`) slider offers.
+///
+/// Below 5 % the panel would be claimed near-black at hardware zero (unrealistic);
+/// above 60 % the hardware section would shrink too far. The core clamps more
+/// loosely (`..=95`); this is the sensible UI band.
+pub const MIN_PERCEIVED_RANGE: (u8, u8) = (5, 60);
+
 /// The dim-mode options a per-monitor selector offers, in display order.
 ///
 /// Fixed so the selector index maps deterministically onto a [`DimMode`].
@@ -77,6 +84,9 @@ pub struct MonitorSection {
     pub name: String,
     /// Current hardware-floor percentage, `0..=`[`MAX_FLOOR_PCT`].
     pub floor_pct: u8,
+    /// Current perceptual-scale anchor (perceived brightness at hardware zero),
+    /// clamped to [`MIN_PERCEIVED_RANGE`].
+    pub min_perceived_pct: u8,
     /// Current sub-floor dim mode.
     pub dim_mode: DimMode,
     /// Whether gamma is offered: `false` under the HDR guard, where the gamma
@@ -416,6 +426,22 @@ impl SettingsVm {
         })
     }
 
+    /// Set a monitor's perceptual anchor (`min_perceived_pct`), clamped to
+    /// [`MIN_PERCEIVED_RANGE`], by section index. Out-of-range indices are ignored.
+    pub fn set_monitor_min_perceived(
+        &mut self,
+        monitor_index: usize,
+        pct: u8,
+    ) -> Option<SettingsCommand> {
+        let section = self.monitors.get_mut(monitor_index)?;
+        let clamped = pct.clamp(MIN_PERCEIVED_RANGE.0, MIN_PERCEIVED_RANGE.1);
+        section.min_perceived_pct = clamped;
+        Some(SettingsCommand::SetMonitorMinPerceived {
+            id: section.id.clone(),
+            pct: clamped,
+        })
+    }
+
     /// Choose a monitor's dim mode by section index and option index (into
     /// [`DIM_MODE_ORDER`]). A gamma choice on a section where gamma is
     /// unavailable is rejected (returns `None`, leaving the mode unchanged).
@@ -510,6 +536,9 @@ fn build_section(
         id: snap.id.clone(),
         name: monitor.name.clone().unwrap_or_else(|| snap.name.clone()),
         floor_pct: monitor.hw_floor_pct.min(MAX_FLOOR_PCT),
+        min_perceived_pct: monitor
+            .min_perceived_pct
+            .clamp(MIN_PERCEIVED_RANGE.0, MIN_PERCEIVED_RANGE.1),
         dim_mode: monitor.dim_mode.into(),
         gamma_available: gamma_allowed,
         inputs,
@@ -709,6 +738,38 @@ mod tests {
             Some(MAX_FLOOR_PCT)
         );
         assert_eq!(vm.set_monitor_floor(9, 10), None);
+    }
+
+    #[test]
+    fn set_monitor_min_perceived_clamps_and_emits() {
+        let mut vm = SettingsVm::new();
+        let config = config_with_monitor("A", 0, ConfigDimMode::Overlay);
+        vm.set_displays(&[snap("A", "Left", vec![])], &config, true);
+        let id = snap("A", "Left", vec![]).id;
+        // The default anchor is the schema's 25.
+        assert_eq!(vm.monitors().first().map(|s| s.min_perceived_pct), Some(25));
+        // Above the UI band ⇒ clamped to the max (60).
+        assert_eq!(
+            vm.set_monitor_min_perceived(0, 90),
+            Some(SettingsCommand::SetMonitorMinPerceived {
+                id: id.clone(),
+                pct: MIN_PERCEIVED_RANGE.1,
+            })
+        );
+        assert_eq!(
+            vm.monitors().first().map(|s| s.min_perceived_pct),
+            Some(MIN_PERCEIVED_RANGE.1)
+        );
+        // Below the band ⇒ clamped to the min (5).
+        assert_eq!(
+            vm.set_monitor_min_perceived(0, 1),
+            Some(SettingsCommand::SetMonitorMinPerceived {
+                id,
+                pct: MIN_PERCEIVED_RANGE.0,
+            })
+        );
+        // Out-of-range index ⇒ no command.
+        assert_eq!(vm.set_monitor_min_perceived(9, 30), None);
     }
 
     #[test]

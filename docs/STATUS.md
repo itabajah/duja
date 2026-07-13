@@ -204,6 +204,22 @@ the Light/Dark theme (the shell never pushed the resolved palette to it — now
 covered by a settings binding test), removed three unused dependencies, and
 reconciled the docs in this file and the ADR index with the code.
 
+### Perceptual brightness continuum (v2, ADR-0014)
+
+The slider is now **perceptual**: the position *is* perceived brightness, so
+"20 % looks 20 % bright" regardless of the hardware floor or panel. Each hardware
+display carries a per-display `min_perceived_pct` anchor (default 25, tunable
+5–60 in Settings) that sets where hardware zero sits on the slider (line A) and
+where hardware hands off to software dimming (line B, at the floor). The floor is
+now a **write limit**, not a scale change, so a mid-run floor/anchor change
+retargets the hardware without moving the thumb. Consequences: the old
+20 %-seed hack behind the "Software dimming" toggle is gone (floor 0 now has a
+real software zone below the anchor); the toggle just switches the dim mode; and
+launch adoption reflects the live hardware reading through `reverse_map` so the
+slider mirrors reality with no first-touch jump. `reverse_map` (dead in v1) now
+has a runtime consumer; the external-button reflection that fully exercises it is
+the next PR.
+
 ## P5 gate results
 
 **Security checklist §6** — every item PASS, each with a proving test: pipe

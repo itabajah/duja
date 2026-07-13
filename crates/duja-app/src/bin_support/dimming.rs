@@ -133,16 +133,40 @@ mod tests {
     #[test]
     fn above_floor_has_no_overlay() {
         let displays = [input("A", DisplayKind::ExternalDdc, 80)];
-        let mon = monitor(30, ConfigDimMode::Overlay);
+        let mon = monitor(30, ConfigDimMode::Overlay); // default anchor 25
         let plan = plan(
             &displays,
             |_| continuum_for(DisplayKind::ExternalDdc, &mon, true),
             |_| Some(bounds()),
         );
-        assert_eq!(plan.hardware, vec![(id("A"), 80)]);
+        // Above the transition B = pos(30) = 47.5, slider 80 maps to hardware
+        // round((80-25)·100/75) = 73 (perceptual inverse), no overlay.
+        assert_eq!(plan.hardware, vec![(id("A"), 73)]);
         // Still emitted (declarative full state) but with no visible overlay.
         let cmd = plan.commands.first().expect("one command");
         assert!(!cmd.has_overlay());
+    }
+
+    #[test]
+    fn floor_zero_toggle_engages_overlay_below_min_perceived() {
+        // The seed-hack replacement: with the default floor 0 and dimming on, a
+        // slider below the perceptual anchor still engages the overlay. v1 had no
+        // sub-floor zone at floor 0 (hence the deleted 20%-seed hack); v2's
+        // perceptual anchor gives floor-0 displays a real software zone.
+        let displays = [input("A", DisplayKind::ExternalDdc, 10)];
+        let mon = monitor(0, ConfigDimMode::Overlay); // floor 0, default anchor 25
+        let plan = plan(
+            &displays,
+            |_| continuum_for(DisplayKind::ExternalDdc, &mon, true),
+            |_| Some(bounds()),
+        );
+        // Hardware pinned at the floor 0; the overlay supplies the sub-anchor dim.
+        assert_eq!(plan.hardware, vec![(id("A"), 0)]);
+        let cmd = plan.commands.first().expect("one command");
+        assert!(
+            cmd.has_overlay(),
+            "floor-0 dimming must engage the overlay below the perceptual anchor"
+        );
     }
 
     #[test]
