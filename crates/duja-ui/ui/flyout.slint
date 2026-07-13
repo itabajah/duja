@@ -48,6 +48,10 @@ export global Palette {
     out property <color> marker: dark ? #f3f3f6 : #3a3a43;
     out property <color> focus-ring: dark ? #6a9ef8 : #2f6fed;
     out property <color> danger: dark ? #f07a7a : #d64545;
+    // A crisp 1px window-edge stroke so a borderless (no-frame) window still reads
+    // as a distinct window against a same-coloured app behind it (item 4). Tuned
+    // to contrast against the window's own bg in each theme.
+    out property <color> window-edge: dark ? #4a4a56 : #c4c6cc;
 }
 
 // A square, keyboard-focusable icon button (header/footer chrome).
@@ -346,6 +350,17 @@ export component FlyoutWindow inherits Window {
             return reject;
         }
 
+        // 1px window-edge border (item 4): a no-frame window otherwise blends into
+        // a same-coloured app behind it. Drawn behind the content (fills the
+        // window; the 14px content padding leaves the 1px rim visible), so it never
+        // intercepts pointer input. Square corners keep the opaque, software-
+        // rendered window free of transparent-corner artifacts.
+        Rectangle {
+            background: transparent;
+            border-width: 1px;
+            border-color: Palette.window-edge;
+        }
+
         VerticalLayout {
             padding: 14px;
             spacing: 10px;
@@ -516,16 +531,25 @@ export component FlyoutWindow inherits Window {
             // Footer: link-all toggle (stretch) + refresh.
             HorizontalLayout {
                 spacing: 8px;
-                PillToggle {
-                    // One-way (not `<=>`): the shell owns the state — it updates
-                    // the VM and re-renders `link-all`, exactly like the per-row
-                    // dimming toggle. A two-way binding here left `checked` frozen
-                    // (nothing wrote it), so the pill never moved and every click
-                    // re-sent the same value (P0 live-QA: "Link all does nothing").
-                    checked: root.link-all;
-                    label: @tr("Link all displays");
-                    toggled(on) => {
-                        root.link-toggled(on);
+                // Centre the pill at its natural 21px height instead of letting the
+                // footer row (30px tall because of the refresh IconButton) stretch
+                // it — it was rendering ~30px, visibly taller than the identical
+                // in-card dimming pill (item 3). A HorizontalLayout stretches a
+                // child to the row height; this wrapper pins the pill to its
+                // preferred size, vertically centred, matching the other rows.
+                VerticalLayout {
+                    alignment: center;
+                    PillToggle {
+                        // One-way (not `<=>`): the shell owns the state — it updates
+                        // the VM and re-renders `link-all`, exactly like the per-row
+                        // dimming toggle. A two-way binding here left `checked` frozen
+                        // (nothing wrote it), so the pill never moved and every click
+                        // re-sent the same value (P0 live-QA: "Link all does nothing").
+                        checked: root.link-all;
+                        label: @tr("Link all displays");
+                        toggled(on) => {
+                            root.link-toggled(on);
+                        }
                     }
                 }
                 Text {

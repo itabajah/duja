@@ -25,7 +25,7 @@
 //! `set_displays` / `set_unresponsive`, calls `FlyoutShell::update_from_vm`,
 //! and maps each [`UiCommand`] onto an `EngineCommand`
 //! (`SetLevel` ⇒ `SetUserLevel`, `Refresh` ⇒ `RefreshNow`). It also owns the
-//! tray icon and the flyout positioning (`show_at` / `hide`). Every slider
+//! tray icon and the flyout positioning (`present_at` / `hide`). Every slider
 //! change is forwarded — there is no UI-side throttle; the engine worker's
 //! `write_min_gap` last-wins coalescer bounds the hardware write rate and
 //! guarantees a drag's final value lands (P4 gate Finding 1).
