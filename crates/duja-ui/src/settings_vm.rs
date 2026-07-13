@@ -174,11 +174,17 @@ pub fn accelerator_string(mods: CaptureModifiers, key: Option<&str>) -> Option<S
 }
 
 /// The settings view-model.
+// RATIONALE: four independent boolean flags — autostart on / supported, update
+// check on, and the resolved-dark palette — not a state machine an enum would
+// model (a bitflag would only re-encode the same four bits). Same shape as
+// `CaptureModifiers`.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsVm {
     autostart_on: bool,
     autostart_supported: bool,
     theme: ThemeChoice,
+    dark: bool,
     update_check_on: bool,
     update_status: UpdateStatus,
     monitors: Vec<MonitorSection>,
@@ -200,6 +206,7 @@ impl SettingsVm {
             autostart_on: false,
             autostart_supported: true,
             theme: ThemeChoice::Auto,
+            dark: true,
             update_check_on: false,
             update_status: UpdateStatus::Disabled,
             monitors: Vec::new(),
@@ -215,16 +222,28 @@ impl SettingsVm {
     /// `Autostart` trait), which may differ from the config mirror; passing the
     /// live value keeps the toggle honest. `autostart_supported` is `false` where
     /// the platform has no autostart backend, disabling the toggle.
+    ///
+    /// `dark` is the **resolved** palette (`true` = dark) the app computes from
+    /// the theme preference and the OS setting — the same value it pushes to the
+    /// flyout — so the settings window renders the identical light/dark palette.
+    /// It is distinct from `theme` (the raw Auto/Light/Dark *preference* the
+    /// selector shows), which cannot resolve `Auto` without the OS state.
+    // RATIONALE: seeds the four independent general-section flags in one call
+    // (autostart on / supported, update-check on, resolved-dark); grouping them
+    // into a struct would only move the same four bools behind a name.
+    #[allow(clippy::fn_params_excessive_bools)]
     pub fn set_general(
         &mut self,
         autostart_on: bool,
         autostart_supported: bool,
         theme: ThemeChoice,
         update_check_on: bool,
+        dark: bool,
     ) {
         self.autostart_on = autostart_on;
         self.autostart_supported = autostart_supported;
         self.theme = theme;
+        self.dark = dark;
         self.update_check_on = update_check_on;
         // Keep the status consistent with the toggle: turning the check off
         // shows "disabled"; turning it on (from disabled) shows "idle".
@@ -295,6 +314,16 @@ impl SettingsVm {
             .iter()
             .position(|t| *t == self.theme)
             .unwrap_or(0)
+    }
+
+    /// The resolved palette to render: `true` for the dark palette. Distinct from
+    /// [`theme`](Self::theme) (the raw Auto/Light/Dark *preference* the selector
+    /// shows) — the app resolves `Auto` against the OS and passes the result in
+    /// via [`set_general`](Self::set_general) so the settings window's palette
+    /// tracks the flyout's.
+    #[must_use]
+    pub fn dark(&self) -> bool {
+        self.dark
     }
 
     /// Whether the opt-in update check is on.
@@ -541,14 +570,19 @@ mod tests {
     #[test]
     fn set_general_seeds_state_and_status() {
         let mut vm = SettingsVm::new();
-        vm.set_general(true, true, ThemeChoice::Dark, true);
+        // A fresh VM defaults to the dark palette (matches Palette.dark's default).
+        assert!(vm.dark());
+        vm.set_general(true, true, ThemeChoice::Light, true, false);
         assert!(vm.autostart_on());
-        assert_eq!(vm.theme(), ThemeChoice::Dark);
+        assert_eq!(vm.theme(), ThemeChoice::Light);
+        // The resolved palette is carried independently of the raw preference.
+        assert!(!vm.dark());
         assert!(vm.update_check_on());
         // Enabling the check from disabled moves to idle.
         assert_eq!(vm.update_status(), &UpdateStatus::Idle);
-        // Disabling shows disabled again.
-        vm.set_general(true, true, ThemeChoice::Dark, false);
+        // Disabling shows disabled again; a dark resolution is carried through.
+        vm.set_general(true, true, ThemeChoice::Dark, false, true);
+        assert!(vm.dark());
         assert_eq!(vm.update_status(), &UpdateStatus::Disabled);
     }
 
@@ -565,7 +599,7 @@ mod tests {
     #[test]
     fn toggle_autostart_inert_when_unsupported() {
         let mut vm = SettingsVm::new();
-        vm.set_general(false, false, ThemeChoice::Auto, false);
+        vm.set_general(false, false, ThemeChoice::Auto, false, true);
         assert_eq!(vm.toggle_autostart(true), None);
         assert!(!vm.autostart_on());
     }

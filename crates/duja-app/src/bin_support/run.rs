@@ -235,7 +235,7 @@ fn wait_for_quit() {
 /// Overlay windows die with their owning process, so a separate `--restore`
 /// invocation cannot touch a running tray instance's overlays; what it *can*
 /// undo is the one piece of screen state that outlives a process — the gamma
-/// ramp — via [`duja_dimmer::restore_all`]. Exit is non-zero if any display
+/// ramp — via `duja_dimmer::restore_all`. Exit is non-zero if any display
 /// could not be reset.
 #[cfg(windows)]
 pub(crate) fn restore() -> ExitCode {

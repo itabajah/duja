@@ -9,12 +9,13 @@ MADR-lite format. Accepted ADRs are changed by superseding, not editing.
 | [0003](0003-overlay-first-dimming.md) | Software dimming: overlay primary, gamma opt-in | accepted, spike-verified |
 | [0004](0004-stable-edid-identity.md) | Display identity: stable EDID-derived IDs | accepted |
 | [0005](0005-threads-not-tokio.md) | Concurrency: std threads + channels, no async runtime | accepted |
-| 0006 | IPC design | pending (P5) |
+| [0006](0006-ipc-transport-and-protocol.md) | IPC transport & protocol | accepted |
 | [0007](0007-config-schema-and-migrations.md) | Config schema, migrations, and persistence | accepted |
-| 0008 | Licensing (MIT OR Apache-2.0; Slint royalty-free) | pending (P4, when Slint lands) |
+| [0008](0008-licensing.md) | Licensing (MIT OR Apache-2.0; Slint royalty-free) | accepted |
 | [0009](0009-software-renderer-default.md) | Slint renderer: software renderer default | accepted |
 | 0010 | Linux tray: tray-icon vs ksni | pending (P7) |
 | 0011 | GNOME Wayland dimming strategy | pending (P7 spike) |
+| [0012](0012-binary-size-budget-variance.md) | Binary-size budget raised 12 → 16 MB | accepted |
 | [0013](0013-macos-ddc-wrap-vs-vendor.md) | macOS DDC/CI: own thin backend (don't wrap ddc-macos) | accepted |
 
 Spike evidence lives on branches `spike/eventloop`, `spike/ddc`,

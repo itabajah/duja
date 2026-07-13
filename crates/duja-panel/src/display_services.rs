@@ -208,7 +208,7 @@ pub trait DisplayServicesApi: Send + Debug {
 /// A [`PanelTransport`] over a [`DisplayServicesApi`], bound to one
 /// `CGDirectDisplayID`.
 ///
-/// Generic over the operation table so the macOS [`RealDisplayServices`] backend
+/// Generic over the operation table so the macOS `RealDisplayServices` backend
 /// and the test fake share one adapter (and one contract run). The transport
 /// converts between the framework's `0.0..=1.0` floats and the seam's integer
 /// levels; see this module's documentation on round-trip precision.

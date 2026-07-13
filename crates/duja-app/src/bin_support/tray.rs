@@ -779,12 +779,19 @@ impl AppState {
             .and_then(|a| a.is_enabled().ok())
             .unwrap_or(false);
         let theme = settings_apply::theme_to_choice(self.config.general.theme);
+        let dark = self.resolved_dark();
         let update_check_on = self.config.general.update_check;
 
         let hotkeys = resolved_hotkey_rows(&self.config, &self.hotkey_outcomes);
         {
             let mut vm = self.settings_vm.borrow_mut();
-            vm.set_general(autostart_on, autostart_supported, theme, update_check_on);
+            vm.set_general(
+                autostart_on,
+                autostart_supported,
+                theme,
+                update_check_on,
+                dark,
+            );
             vm.set_displays(&self.snapshots, &self.config, self.gamma_allowed);
             vm.set_hotkeys(hotkeys);
         }
@@ -860,19 +867,36 @@ impl AppState {
         let actual = autostart.is_enabled().unwrap_or(on);
         let supported = true;
         let theme = settings_apply::theme_to_choice(self.config.general.theme);
+        // `autostart`'s &mut borrow ends above (last used for `actual`), so the
+        // whole-`self` `resolved_dark` call is free of a borrow conflict here.
+        let dark = self.resolved_dark();
         self.settings_vm.borrow_mut().set_general(
             actual,
             supported,
             theme,
             self.config.general.update_check,
+            dark,
         );
     }
 
-    /// Re-resolve the flyout palette after a theme change and re-render it.
+    /// Re-resolve the flyout palette after a theme change and re-render it. Also
+    /// refreshes the settings view-model so its window follows the same palette
+    /// (the caller re-renders the settings shell after this returns).
     fn apply_theme(&mut self, _choice: ThemeChoice) {
         let theme = settings::ui_theme(self.config.general.theme, os_dark_theme());
         self.vm.borrow_mut().set_theme(theme);
+        self.rebuild_settings();
         self.render();
+    }
+
+    /// The resolved palette (`true` = dark) for the current theme preference — the
+    /// same resolution the flyout uses (`settings::ui_theme`), so the settings
+    /// window renders the identical light/dark palette rather than a fixed one.
+    fn resolved_dark(&self) -> bool {
+        matches!(
+            settings::ui_theme(self.config.general.theme, os_dark_theme()),
+            duja_ui::Theme::Dark
+        )
     }
 
     /// Re-apply a display's dimming after a floor/dim-mode change by re-driving

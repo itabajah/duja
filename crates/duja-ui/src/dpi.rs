@@ -13,8 +13,11 @@
 //! real factor, and we re-assert the physical inner size so the buffer tracks
 //! it (the standard winit remedy). The same single hook — only one is allowed
 //! per window — also forwards focus-loss to the flyout's click-outside
-//! dismissal. A best-effort immediate pass at show time covers a window that was
-//! somehow born before its scale settled.
+//! dismissal. A best-effort re-assert (`enforce_physical_buffer`) also runs when
+//! the flyout's content is resized *while it is already visible* — a hot-plug
+//! changing the row count — which is now the only path that calls it; the show
+//! path deliberately does not (a show-time resize aged the software renderer into
+//! a partial first frame — see the flyout shell's one-shot present).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -65,10 +68,12 @@ pub(crate) fn install_window_hook(
     });
 }
 
-/// Best-effort immediate buffer enforce at show time, using the monitor's
-/// OS-queried scale (more current than the window's cached one right after
-/// `show()`). The scale-change hook is the authoritative cure; this handles the
-/// already-settled cases (integer scale, or a re-open).
+/// Best-effort physical-buffer re-assert for a window whose logical content size
+/// changed **while it is already visible** (e.g. a hot-plug growing/shrinking the
+/// flyout's row count), using the monitor's OS-queried scale. It is deliberately
+/// *not* called on the show path — a show-time resize aged the software renderer
+/// into a partial first frame (see the flyout shell's one-shot present). The
+/// `ScaleFactorChanged` hook remains the authoritative cure for scale moves.
 pub(crate) fn enforce_physical_buffer(
     window: &slint::Window,
     logical_width: f32,

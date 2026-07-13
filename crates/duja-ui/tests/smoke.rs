@@ -66,7 +66,7 @@ fn settings_shell_instantiates_and_renders() {
 
     let mut vm = SettingsVm::new();
     let config = Config::default();
-    vm.set_general(true, true, duja_ui::ThemeChoice::Auto, true);
+    vm.set_general(true, true, duja_ui::ThemeChoice::Auto, true, true);
     vm.set_displays(&[snapshot("A", 40), snapshot("B", 70)], &config, false);
     let vm = Rc::new(RefCell::new(vm));
 

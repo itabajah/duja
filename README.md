@@ -4,14 +4,17 @@
 (DDC/CI + native panel APIs), a seamless software floor down to true black, native
 tray UI on Windows, macOS, and Linux — and no Electron anywhere.
 
-> Status: **pre-alpha scaffold.** The architecture is decided and documented
-> ([docs/adr/](docs/adr/)); implementation is underway, Windows first.
+> Status: **Windows feature-complete; `v0.1.0-alpha` pending visual QA.** Hardware
+> control, software dimming, tray + flyout, settings, global hotkeys, input
+> switching, and the `dujactl` CLI all work on Windows (phases P0–P5); the macOS
+> port has landed its backend crates (P6 wave 1). Linux and packaging are next.
+> See [docs/STATUS.md](docs/STATUS.md) for the live picture.
 
 ## Why Duja
 
 - **Ultra-lightweight.** Rust + [Slint](https://slint.dev), no webview, no
-  runtime. Budgets: ≤ 35 MB idle RSS, zero idle CPU wakeups, ≤ 12 MB binary
-  ([docs/perf-budgets.md](docs/perf-budgets.md)).
+  runtime. Budgets: ≤ 35 MB idle RSS, zero idle CPU wakeups, ≤ 16 MB binary
+  (aspiration 12; [docs/perf-budgets.md](docs/perf-budgets.md)).
 - **Hardware control first.** External monitors via DDC/CI (brightness,
   contrast, input source); laptop panels via each OS's native backlight API.
 - **Seamless software floor.** Displays without hardware control (TVs, docks,

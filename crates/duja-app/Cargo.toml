@@ -30,7 +30,6 @@ ureq.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tracing-appender.workspace = true
 # The tray app drives the Slint event loop directly (run_event_loop_until_quit,
 # invoke_from_event_loop). Same version/features as duja-ui so one Slint backend
 # is shared across the process.

@@ -84,6 +84,9 @@ unsafe extern "C" {
     ) -> CGError;
 }
 
+// RATIONALE (non_snake_case): foreign symbol names, matched verbatim (same as
+// the CoreGraphics extern block above; repeated because the attribute does not
+// inherit onto the extern block on some toolchains).
 #[allow(non_snake_case)]
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {

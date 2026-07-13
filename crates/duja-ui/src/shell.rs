@@ -200,22 +200,23 @@ impl FlyoutShell {
     /// Force the window's physical buffer to `logical × scale`, sizing it from
     /// the winit-reported (OS-true) scale factor rather than Slint's.
     ///
-    /// A borderless (`no-frame`) window created while its scale factor is still
-    /// the provisional `1.0` allocates a design-px *physical* buffer; when it is
-    /// then shown on a fractional-DPI monitor the winit `ScaleFactorChanged`
-    /// buffer grow to `logical × scale` is **permanently** lost — Slint then lays
-    /// content out at the real scale (needing `logical × scale` physical) into a
-    /// buffer that stayed design-px physical, clipping the right/bottom edge (the
-    /// live-QA dead space / clip). `slint::Window::set_size(LogicalSize)` cannot
-    /// cure it because it multiplies by Slint's *own* (still-stale) scale.
+    /// Called when the flyout's content is resized **while it is already visible**
+    /// — a hot-plug changing the row count (see the tray's re-enumeration path).
+    /// It is deliberately *not* on the show path: a show-time resize aged the
+    /// software renderer into a partial first frame (see
+    /// [`present_at`](Self::present_at)), so presentation now happens in one shot
+    /// with no resize after `show()`.
     ///
-    /// Driving winit's `request_inner_size` with an explicit **physical** size
-    /// derived from winit's scale factor grows the OS buffer directly, on a code
-    /// path the lost `ScaleFactorChanged` never touched. Idempotent; on an
-    /// integer scale it requests the design size unchanged.
+    /// The failure it guards: a borderless (`no-frame`) window whose physical
+    /// buffer was allocated at one scale but is then laid out at another keeps the
+    /// stale buffer and clips the right/bottom edge.
+    /// `slint::Window::set_size(LogicalSize)` cannot cure it (it multiplies by
+    /// Slint's *own*, possibly stale, scale); driving winit's `request_inner_size`
+    /// with an explicit **physical** size grows the OS buffer directly. Idempotent;
+    /// on an integer scale it requests the design size unchanged.
     pub fn enforce_logical_size(&self, logical_width: f32, logical_height: f32) {
         // Record the target so the scale-change hook can re-assert it, then make
-        // an immediate best-effort pass for the already-settled cases.
+        // an immediate best-effort pass now.
         self.desired.set((logical_width, logical_height));
         crate::dpi::enforce_physical_buffer(self.ui.window(), logical_width, logical_height);
     }

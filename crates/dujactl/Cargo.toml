@@ -19,7 +19,6 @@ duja-ipc.workspace = true
 duja-platform.workspace = true
 duja-ddc.workspace = true
 duja-panel.workspace = true
-anyhow.workspace = true
 
 [lints]
 workspace = true
