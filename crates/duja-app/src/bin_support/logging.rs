@@ -2,8 +2,8 @@
 //! `--verbose`.
 //!
 //! `tracing` is the facade; the default sink is a size-rotated file under the
-//! data dir (`logs/duja.log`, 3 × 5 MB). `tracing-appender` only rotates on a
-//! time schedule, so this module carries a tiny size-based rotator instead
+//! data dir (`logs/duja.log`, 3 × 5 MB). The `tracing-appender` crate only
+//! rotates on a time schedule, so this module carries its own size-based rotator
 //! (rename `duja.log` → `duja.log.1` → `duja.log.2`, drop the oldest). The
 //! rotation *decision* is a pure, unit-tested helper; the file plumbing is
 //! best-effort (a logging failure never takes down the app).

@@ -17,6 +17,12 @@ thiserror = { workspace = true }
 # workspace root) because it is platform- and crate-specific; keeping it here
 # leaves the shared release lockfile and the root `[workspace.dependencies]`
 # untouched for the other crates.
+#
+# NOTE: stays on 0.58 while the rest of the workspace is on 0.62 (a cargo-deny
+# `multiple-versions = "warn"`, not an error). The 0.58→0.62 VARIANT API changed
+# (`as_raw`, `BSTR: TryFrom<VARIANT>` removed), so unifying needs a real WMI
+# rewrite — deferred to the P8 pass that also runs this path on real hardware
+# (see docs/debt.md).
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
 features = [

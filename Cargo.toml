@@ -126,7 +126,6 @@ rustix = { version = "1", features = ["fs", "process"] }
 # DEBUG-to-stderr under `--verbose`. EnvFilter for level control.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
 # Build-only (duja-app build.rs, P4): embeds the PerMonitorV2 DPI-awareness
 # application manifest into the executable.
 embed-manifest = "1"
@@ -158,7 +157,7 @@ indexing_slicing = "warn"
 arithmetic_side_effects = "warn"
 
 [profile.release]
-# Budget: stripped binary <= 12 MB (docs/perf-budgets.md).
+# Budget: stripped binary <= 16 MB (aspiration 12; ADR-0012 / docs/perf-budgets.md).
 lto = "thin"        # try "fat" at P8 hardening
 codegen-units = 1
 strip = true

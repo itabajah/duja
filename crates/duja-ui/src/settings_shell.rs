@@ -46,8 +46,8 @@ impl SettingsShell {
             .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
 
         // Install the fractional-DPI buffer keeper (no focus-loss dismissal for
-        // the settings window). `desired` seeds to the design size; the app
-        // updates it via `enforce_logical_size`.
+        // the settings window). `desired` seeds to the design size; the app keeps
+        // it current via `set_content_height` / `present_at`.
         let desired: crate::dpi::DesiredSize = Rc::new(std::cell::Cell::new((440.0, 600.0)));
         let focus_lost: crate::dpi::FocusLostCb = Rc::new(RefCell::new(None));
         crate::dpi::install_window_hook(ui.window(), desired.clone(), focus_lost);
@@ -331,6 +331,10 @@ fn render_into(
     ui.set_autostart_on(vm.autostart_on());
     ui.set_autostart_supported(vm.autostart_supported());
     ui.set_theme_index(i32::try_from(vm.theme_index()).unwrap_or(0));
+    // The resolved palette (`Palette.dark <=> dark` in settings.slint). Without
+    // this the settings window stayed pinned to the default dark palette and
+    // ignored the user's Light/Dark choice, even as the selector moved.
+    ui.set_dark(vm.dark());
     ui.set_update_check_on(vm.update_check_on());
     ui.set_update_status(SharedString::from(status_line(vm.update_status())));
     ui.set_update_available(vm.update_available());
@@ -519,4 +523,49 @@ mod tests {
     // Instantiating the Slint window needs a real backend/event loop, which is
     // unavailable in this disconnected session and in headless CI. The smoke
     // test that exercises it lives behind `#[ignore]` in tests/smoke.rs.
+}
+
+/// Binding-layer regression tests driving the real settings `.slint` widgets
+/// through the headless `i-slint-backend-testing` backend — catching wiring bugs
+/// the pure view-model tests cannot see (they live in the `.slint` ↔ shell seam).
+///
+/// Gated behind the `smoke` feature (which pulls the testing backend) so the
+/// default test build stays backend-free; run under `--all-features`.
+#[cfg(all(test, feature = "smoke"))]
+mod binding_tests {
+    use super::*;
+    use crate::command::ThemeChoice;
+
+    // The settings window must follow the resolved theme. Before the fix,
+    // `render_into` never called `set_dark`, so the window stayed pinned to
+    // `Palette.dark`'s default (`true`) regardless of the user's Light/Dark choice
+    // — the selector moved but the palette did not (STATUS.md's settings QA
+    // promises "palette matches the flyout"). This drives the real `dark` property
+    // through the `.slint` binding, which a pure `SettingsVm` test cannot. Proven
+    // red against the pre-fix shell: `get_dark()` stayed `true` under a light
+    // resolution.
+    #[test]
+    fn settings_palette_follows_the_resolved_theme() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let mut vm = SettingsVm::new();
+        // A light resolution: raw preference Light, resolved palette dark = false.
+        vm.set_general(true, true, ThemeChoice::Light, false, false);
+        let vm = Rc::new(RefCell::new(vm));
+        let shell = SettingsShell::new(vm.clone()).expect("settings shell instantiates");
+
+        assert!(
+            !shell.ui.get_dark(),
+            "settings palette must follow the resolved light theme (set_dark missing in render_into)"
+        );
+
+        // Flip to a dark resolution and re-render: the palette must track it.
+        vm.borrow_mut()
+            .set_general(true, true, ThemeChoice::Dark, false, true);
+        shell.update_from_vm(&vm.borrow());
+        assert!(
+            shell.ui.get_dark(),
+            "settings palette must follow the resolved dark theme"
+        );
+    }
 }

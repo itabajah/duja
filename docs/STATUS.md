@@ -1,6 +1,6 @@
 # Duja — Project Status
 
-_Last updated: 2026-07-11 (P6 wave 1 — macOS backends landed)._
+_Last updated: 2026-07-13 (repo audit cleanup; Windows UI hardening #27–#30)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -27,8 +27,8 @@ sign-off now PASSES on real hardware** (live console-session QA, 2026-07-11 —
 see "Live hardware QA"); the alpha tag is gated only on the remaining
 **pure-visual** checks (tray/flyout/overlay appearance), which need human eyes.
 
-Health: **570 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
-`cargo-deny` clean (advisories/bans/licenses/sources), 4 fuzz targets building
+Health: **669 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
+`cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
 on stable, adversarial gate reviews at **P2, P3, P4, P5** with every confirmed
 finding fixed test-first before tagging.
 
@@ -173,6 +173,36 @@ capture on macOS 15+ (best-effort on mac, unlike the guaranteed Windows
 universal2 packaging, UI-launch CI smoke) is **wave 2**, not yet started, so
 `duja-app`/`duja-ui` still use their non-Windows stubs on macOS and there is no
 `m6-macos` tag or `v0.3.0-beta` yet.
+
+### Windows UI hardening (#27–#30, live-QA driven)
+
+Four rounds of on-hardware visual QA (real console session, external monitor)
+hardened the flyout and settings windows past what the automated suites could
+see — each fix landed with a red-first regression test:
+
+- **#27** — five P0 defects: window placement at fractional DPI; a slider that
+  would not drag (the row model was rebuilt every render, destroying the mid-drag
+  element — now diffed in place, never `set_vec`); theme/floor changes crashing (an
+  edition-2024 borrow held across a re-render double-borrowed the view-model and
+  aborted — now a re-entrancy-safe `with_app` dispatcher); missing dimming toggle
+  and close affordances.
+- **#28** — premium redesign: custom brightness slider, dimming pill toggle,
+  gear/close buttons, functional editable hotkey rows.
+- **#29** — root-caused the fractional-DPI "dead space" to a DPI-unaware
+  `GetClientRect` measurement artifact (the "compensated layout" that chased it
+  *was* the bug) and removed it; closed four live-QA regressions incl. the frozen
+  "Link all" pill (now covered by a binding-layer test on the real widget).
+- **#30** — the partial first paint: the winit software renderer presents only a
+  non-empty damage region, and a post-`show()` resize aged an empty region that
+  never presented (a transparent frame until clicked). Fixed by sizing + anchoring
+  while hidden and showing once (**60/60 clean** vs 3-in-20 failing). The app now
+  **adopts** the panel's current hardware brightness on launch and writes nothing
+  (no launch-time dimming); slimmer footer pill; 1 px window-edge borders.
+
+A follow-up repo audit (2026-07-13) then fixed the settings window not following
+the Light/Dark theme (the shell never pushed the resolved palette to it — now
+covered by a settings binding test), removed three unused dependencies, and
+reconciled the docs in this file and the ADR index with the code.
 
 ## P5 gate results
 

@@ -28,5 +28,6 @@ Local attack surface and mitigations:
 ## Supply chain
 
 Pinned lockfile; `cargo-deny` (advisories + license allowlist) on every PR;
-GitHub Actions pinned by commit SHA; releases ship SHA256SUMS with build
-provenance attestation and a minisign signature.
+GitHub Actions pinned by commit SHA. Planned for the first tagged release (the
+release workflow lands with `v0.1.0-alpha`; nothing is published yet): SHA256SUMS
+with a build-provenance attestation and a minisign signature.
