@@ -25,8 +25,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use duja_core::continuum::{self, ContinuumConfig, SliderGeometry};
 use duja_core::id::StableDisplayId;
-use duja_core::model::{DisplayKind, DisplaySnapshot};
+use duja_core::model::{DimMode, DisplayKind, DisplaySnapshot};
 
 use crate::command::UiCommand;
 
@@ -53,6 +54,9 @@ pub struct DimmingInfo {
     /// The hardware brightness floor percentage, or `None` for a software-only
     /// display (no hardware backlight, so no handoff marker).
     pub hardware_floor: Option<u8>,
+    /// The perceptual-scale anchor (`min_perceived_pct`): the perceived brightness
+    /// the panel shows at hardware zero. Sets where the handoff marker sits.
+    pub min_perceived_pct: u8,
     /// Whether software dimming is currently engaged (the configured dim mode is
     /// not `Off`).
     pub dimming_on: bool,
@@ -80,8 +84,10 @@ pub struct FlyoutRow {
     /// Whether software dimming is engaged for this display (drives the toggle).
     pub dimming_on: bool,
     /// The hardware brightness floor percentage, or `None` for a software-only
-    /// display. Drives the slider's handoff marker.
+    /// display. Feeds the slider's handoff marker via [`slider_geometry`](Self::slider_geometry).
     pub hardware_floor_pct: Option<u8>,
+    /// The perceptual-scale anchor for this display (see [`DimmingInfo`]).
+    pub min_perceived_pct: u8,
 }
 
 impl FlyoutRow {
@@ -92,27 +98,33 @@ impl FlyoutRow {
         self.hardware_floor_pct.is_some()
     }
 
-    /// The handoff fraction on the `0.0..=1.0` slider track: where hardware
-    /// brightness reaches its floor and software dimming takes over.
-    ///
-    /// This is the marker position the `.slint` layer renders. A floor of `20`
-    /// yields `0.2`; the degenerate floors `0` and `100` yield `0.0` and `1.0`.
-    /// A software-only display (no floor) yields `0.0` and no marker is drawn.
-    #[must_use]
-    pub fn floor_fraction(&self) -> f32 {
-        marker_fraction(self.hardware_floor_pct)
+    /// The continuum config that determines this row's slider geometry. The dim
+    /// mode is `Overlay` when dimming is on (the sub-floor zone is reachable) and
+    /// `Off` when it is not (the slider bottoms out at the transition).
+    fn continuum_cfg(&self) -> ContinuumConfig {
+        let mode = if self.dimming_on {
+            DimMode::Overlay
+        } else {
+            DimMode::Off
+        };
+        match self.hardware_floor_pct {
+            Some(floor) => ContinuumConfig::hardware(floor, self.min_perceived_pct, mode),
+            None => ContinuumConfig::software_only(mode),
+        }
     }
-}
 
-/// The handoff fraction (`0.0..=1.0`) for a hardware floor percentage.
-///
-/// `None` (software-only) and `Some(0)` both map to `0.0`; `Some(100)` maps to
-/// `1.0`; anything above 100 is clamped.
-#[must_use]
-fn marker_fraction(hardware_floor: Option<u8>) -> f32 {
-    match hardware_floor {
-        Some(pct) => f32::from(pct.min(100)) / 100.0,
-        None => 0.0,
+    /// The slider marker geometry (line A/B fractions + minimum usable fraction)
+    /// the `.slint` layer renders. Delegates to [`continuum::geometry`].
+    #[must_use]
+    pub fn slider_geometry(&self) -> SliderGeometry {
+        continuum::geometry(&self.continuum_cfg())
+    }
+
+    /// The handoff fraction on the `0.0..=1.0` track: where hardware hands off to
+    /// software dimming (line B). `0.0` for a software-only display (no marker).
+    #[must_use]
+    pub fn transition_fraction(&self) -> f32 {
+        self.slider_geometry().transition.unwrap_or(0.0)
     }
 }
 
@@ -170,6 +182,7 @@ impl FlyoutVm {
                     slider_enabled: !greyed,
                     dimming_on: dim.dimming_on,
                     hardware_floor_pct: dim.hardware_floor,
+                    min_perceived_pct: dim.min_perceived_pct,
                 }
             })
             .collect();
@@ -187,6 +200,7 @@ impl FlyoutVm {
             let dim = self.dimming.get(&row.id).copied().unwrap_or_default();
             row.dimming_on = dim.dimming_on;
             row.hardware_floor_pct = dim.hardware_floor;
+            row.min_perceived_pct = dim.min_perceived_pct;
         }
     }
 
@@ -557,23 +571,77 @@ mod tests {
 
     // --- dimming toggle + floor marker (feature 1) ---
 
-    fn dim(floor: Option<u8>, on: bool) -> DimmingInfo {
+    fn dim(floor: Option<u8>, min_perceived: u8, on: bool) -> DimmingInfo {
         DimmingInfo {
             hardware_floor: floor,
+            min_perceived_pct: min_perceived,
             dimming_on: on,
         }
     }
 
     #[test]
-    fn marker_fraction_maps_floor_to_track_position() {
-        // The canonical case and both degenerate floors.
-        assert!((marker_fraction(Some(20)) - 0.2).abs() < 1e-6);
-        assert!((marker_fraction(Some(0)) - 0.0).abs() < 1e-6);
-        assert!((marker_fraction(Some(100)) - 1.0).abs() < 1e-6);
-        // Over-range floor is clamped to 1.0.
-        assert!((marker_fraction(Some(250)) - 1.0).abs() < 1e-6);
-        // Software-only (no floor) sits at 0.0 (and draws no marker).
-        assert!((marker_fraction(None) - 0.0).abs() < 1e-6);
+    fn transition_fraction_is_the_pos_of_the_floor() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![snap("A", "Ext", 60, DisplayKind::ExternalDdc)]);
+        let mut info = BTreeMap::new();
+        // floor 20, anchor 25 ⇒ line B = pos(20) = 25 + 75·0.2 = 40 ⇒ 0.40.
+        info.insert(id_of("A"), dim(Some(20), 25, true));
+        vm.set_dimming_info(info);
+        let row = vm.rows().first().unwrap();
+        assert!((row.transition_fraction() - 0.40).abs() < 1e-6);
+        // Line A (hardware zero) sits at the anchor, 0.25.
+        assert!((row.slider_geometry().hw_zero.unwrap() - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn markers_coincide_at_floor_zero() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![snap("A", "Ext", 60, DisplayKind::ExternalDdc)]);
+        let mut info = BTreeMap::new();
+        info.insert(id_of("A"), dim(Some(0), 25, true));
+        vm.set_dimming_info(info);
+        let g = vm.rows().first().unwrap().slider_geometry();
+        // floor 0 ⇒ lines A and B coincide at the anchor (0.25).
+        assert_eq!(g.hw_zero, g.transition);
+        assert!((g.transition.unwrap() - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn transition_moves_with_floor_but_line_a_does_not() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![
+            snap("A", "Low", 60, DisplayKind::ExternalDdc),
+            snap("B", "High", 60, DisplayKind::ExternalDdc),
+        ]);
+        let mut info = BTreeMap::new();
+        info.insert(id_of("A"), dim(Some(0), 25, true)); // B = 0.25
+        info.insert(id_of("B"), dim(Some(40), 25, true)); // B = pos(40) = 0.55
+        vm.set_dimming_info(info);
+        let low = vm.rows().iter().find(|r| r.id == id_of("A")).unwrap();
+        let high = vm.rows().iter().find(|r| r.id == id_of("B")).unwrap();
+        assert!((low.transition_fraction() - 0.25).abs() < 1e-6);
+        assert!((high.transition_fraction() - 0.55).abs() < 1e-6);
+        // Line A (hardware zero) is floor-independent.
+        assert_eq!(
+            low.slider_geometry().hw_zero,
+            high.slider_geometry().hw_zero
+        );
+    }
+
+    #[test]
+    fn min_usable_is_the_transition_only_when_dimming_off() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![snap("A", "Ext", 60, DisplayKind::ExternalDdc)]);
+        // Dimming OFF ⇒ the slider bottoms out at the transition B = 0.40.
+        let mut off = BTreeMap::new();
+        off.insert(id_of("A"), dim(Some(20), 25, false));
+        vm.set_dimming_info(off);
+        assert!((vm.rows().first().unwrap().slider_geometry().min_usable - 0.40).abs() < 1e-6);
+        // Dimming ON ⇒ it can reach full dark (0).
+        let mut on = BTreeMap::new();
+        on.insert(id_of("A"), dim(Some(20), 25, true));
+        vm.set_dimming_info(on);
+        assert!((vm.rows().first().unwrap().slider_geometry().min_usable - 0.0).abs() < 1e-6);
     }
 
     #[test]
@@ -584,18 +652,21 @@ mod tests {
             snap("B", "Sw", 60, DisplayKind::SoftwareOnly),
         ]);
         let mut info = BTreeMap::new();
-        info.insert(id_of("A"), dim(Some(20), true));
-        info.insert(id_of("B"), dim(None, false));
+        info.insert(id_of("A"), dim(Some(20), 25, true));
+        info.insert(id_of("B"), dim(None, 25, false));
         vm.set_dimming_info(info);
 
         let ext = vm.rows().first().expect("row A");
         assert!(ext.has_hardware_floor());
-        assert!((ext.floor_fraction() - 0.2).abs() < 1e-6);
+        // B = pos(20) with anchor 25 = 0.40.
+        assert!((ext.transition_fraction() - 0.40).abs() < 1e-6);
         assert!(ext.dimming_on);
 
         let sw = vm.rows().get(1).expect("row B");
         assert!(!sw.has_hardware_floor());
         assert!(!sw.dimming_on);
+        // Software-only: no handoff marker.
+        assert_eq!(sw.slider_geometry().transition, None);
     }
 
     #[test]
@@ -603,12 +674,13 @@ mod tests {
         let mut vm = FlyoutVm::new();
         vm.set_displays(vec![snap("A", "Ext", 60, DisplayKind::ExternalDdc)]);
         let mut info = BTreeMap::new();
-        info.insert(id_of("A"), dim(Some(30), true));
+        info.insert(id_of("A"), dim(Some(0), 25, true));
         vm.set_dimming_info(info);
         // A fresh snapshot batch must not clear the marker/toggle state.
         vm.set_displays(vec![snap("A", "Ext", 55, DisplayKind::ExternalDdc)]);
         let row = vm.rows().first().unwrap();
-        assert!((row.floor_fraction() - 0.3).abs() < 1e-6);
+        // floor 0, anchor 25 ⇒ transition at 0.25.
+        assert!((row.transition_fraction() - 0.25).abs() < 1e-6);
         assert!(row.dimming_on);
         assert_eq!(row.level_pct, 55);
     }
@@ -618,7 +690,7 @@ mod tests {
         let mut vm = FlyoutVm::new();
         vm.set_displays(vec![snap("A", "Ext", 60, DisplayKind::ExternalDdc)]);
         let mut info = BTreeMap::new();
-        info.insert(id_of("A"), dim(Some(20), true));
+        info.insert(id_of("A"), dim(Some(20), 25, true));
         vm.set_dimming_info(info);
 
         assert_eq!(

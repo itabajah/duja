@@ -315,7 +315,7 @@ fn row_to_data(row: &FlyoutRow) -> FlyoutRowData {
         slider_enabled: row.slider_enabled,
         dimming_on: row.dimming_on,
         has_floor: row.has_hardware_floor(),
-        marker_fraction: row.floor_fraction(),
+        marker_fraction: row.transition_fraction(),
     }
 }
 

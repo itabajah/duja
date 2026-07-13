@@ -41,11 +41,7 @@ pub(crate) fn continuum_for(
     match kind {
         DisplayKind::SoftwareOnly => ContinuumConfig::software_only(mode),
         DisplayKind::ExternalDdc | DisplayKind::InternalPanel => {
-            // The perceptual anchor is wired through in PR-C together with the
-            // slider markers and the settings control; passing 0 here keeps the
-            // v2 mapping identical to v1 for the default (floor-0) display until
-            // then.
-            ContinuumConfig::hardware(monitor.hw_floor_pct, 0, mode)
+            ContinuumConfig::hardware(monitor.hw_floor_pct, monitor.min_perceived_pct, mode)
         }
     }
 }

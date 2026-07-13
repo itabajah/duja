@@ -14,6 +14,7 @@ import { Palette, IconButton, PillToggle } from "flyout.slint";
 export struct SettingsMonitorData {
     name: string,
     floor-pct: int,
+    min-perceived-pct: int,
     dim-mode-index: int,
     gamma-available: bool,
     inputs: [string],
@@ -143,6 +144,7 @@ export component SettingsWindow inherits Window {
     callback check-updates-clicked();
     callback open-releases-clicked();
     callback monitor-floor-changed(/* monitor-index */ int, /* percent */ float);
+    callback monitor-min-perceived-changed(/* monitor-index */ int, /* percent */ float);
     callback monitor-dim-mode-selected(/* monitor-index */ int, /* option */ int);
     callback monitor-input-selected(/* monitor-index */ int, /* option */ int);
     // Feature 3: hotkey record / clear.
@@ -293,6 +295,27 @@ export component SettingsWindow inherits Window {
                                     }
                                     Text {
                                         text: monitor.floor-pct + "%";
+                                        color: Palette.text-subtle;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        width: 34px;
+                                        horizontal-alignment: right;
+                                    }
+                                }
+                                FieldRow {
+                                    label: @tr("Brightness at hardware minimum");
+                                    Slider {
+                                        width: 160px;
+                                        minimum: 5;
+                                        maximum: 60;
+                                        value: monitor.min-perceived-pct;
+                                        accessible-label: @tr("Brightness at hardware minimum");
+                                        changed(v) => {
+                                            root.monitor-min-perceived-changed(idx, v);
+                                        }
+                                    }
+                                    Text {
+                                        text: monitor.min-perceived-pct + "%";
                                         color: Palette.text-subtle;
                                         font-size: 12px;
                                         vertical-alignment: center;
