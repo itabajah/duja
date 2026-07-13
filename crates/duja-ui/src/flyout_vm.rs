@@ -126,6 +126,24 @@ impl FlyoutRow {
     pub fn transition_fraction(&self) -> f32 {
         self.slider_geometry().transition.unwrap_or(0.0)
     }
+
+    /// The hardware-zero fraction on the `0.0..=1.0` track (line A, the perceptual
+    /// anchor). `0.0` for a software-only display (no marker).
+    #[must_use]
+    pub fn hw_zero_fraction(&self) -> f32 {
+        self.slider_geometry().hw_zero.unwrap_or(0.0)
+    }
+
+    /// Whether lines A and B coincide (a floor of 0), so the UI draws just one.
+    /// `true` for a software-only display (no distinct markers either way).
+    #[must_use]
+    pub fn markers_coincide(&self) -> bool {
+        let geometry = self.slider_geometry();
+        match (geometry.hw_zero, geometry.transition) {
+            (Some(a), Some(b)) => (a - b).abs() < 0.005,
+            _ => true,
+        }
+    }
 }
 
 /// The flyout's view-model: ordered rows, a link-all toggle, and a theme.
@@ -659,6 +677,34 @@ mod tests {
         on.insert(id_of("A"), dim(Some(20), 25, true));
         vm.set_dimming_info(on);
         assert!((vm.rows().first().unwrap().slider_geometry().min_usable - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn row_marker_methods_expose_both_lines_when_distinct() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![snap("A", "Ext", 60, DisplayKind::ExternalDdc)]);
+        let mut info = BTreeMap::new();
+        info.insert(id_of("A"), dim(Some(20), 25, true)); // floor 20, anchor 25
+        vm.set_dimming_info(info);
+        let row = vm.rows().first().unwrap();
+        // Line A = anchor 0.25; line B = pos(20) = 0.40; distinct ⇒ draw both.
+        assert!((row.hw_zero_fraction() - 0.25).abs() < 1e-6);
+        assert!((row.transition_fraction() - 0.40).abs() < 1e-6);
+        assert!(!row.markers_coincide());
+    }
+
+    #[test]
+    fn row_markers_coincide_at_floor_zero_and_software_only() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![
+            snap("A", "Ext", 60, DisplayKind::ExternalDdc),
+            snap("B", "Sw", 60, DisplayKind::SoftwareOnly),
+        ]);
+        let mut info = BTreeMap::new();
+        info.insert(id_of("A"), dim(Some(0), 25, true)); // floor 0 ⇒ A == B
+        info.insert(id_of("B"), dim(None, 25, true)); // software-only ⇒ no markers
+        vm.set_dimming_info(info);
+        assert!(vm.rows().iter().all(FlyoutRow::markers_coincide));
     }
 
     #[test]

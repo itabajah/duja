@@ -20,7 +20,12 @@ export struct FlyoutRowData {
     // Feature 1: software-dimming toggle + floor marker.
     dimming-on: bool,
     has-floor: bool,
+    // Line B: where hardware hands off to software dimming (the floor). 0..=1.
     marker-fraction: float,
+    // Line A: where hardware brightness reaches zero (the perceptual anchor). 0..=1.
+    marker-a-fraction: float,
+    // Whether lines A and B coincide (floor 0) — then only one line is drawn.
+    markers-coincide: bool,
 }
 
 // Both palettes in one place; `dark` selects between them at render time. Tuned
@@ -46,6 +51,13 @@ export global Palette {
     out property <color> track-dead: dark ? #2a2a31 : #d0d1d7;
     out property <color> thumb: #ffffff;
     out property <color> marker: dark ? #f3f3f6 : #3a3a43;
+    // Line A (hardware zero) reads quieter than line B (the transition).
+    out property <color> marker-soft: dark ? #f3f3f680 : #3a3a4359;
+    // The accent glow around the thumb on hover/press (premium touch).
+    out property <color> thumb-glow: dark ? #4f8cf7 : #2f6fed;
+    // The value bubble shown while dragging.
+    out property <color> bubble-bg: dark ? #2b2b33 : #ffffff;
+    out property <color> bubble-border: dark ? #45454f : #cfd0d6;
     out property <color> focus-ring: dark ? #6a9ef8 : #2f6fed;
     out property <color> danger: dark ? #f07a7a : #d64545;
     // A crisp 1px window-edge stroke so a borderless (no-frame) window still reads
@@ -168,8 +180,13 @@ export component BrightnessSlider inherits Rectangle {
     in property <float> value;            // 0..=100 user level
     in property <bool> enabled: true;
     in property <bool> marker-visible;
-    in property <float> marker-fraction;  // 0..=1 handoff position
+    in property <float> marker-fraction;  // 0..=1 line B (hardware/software handoff)
+    in property <float> marker-a-fraction; // 0..=1 line A (hardware zero)
+    in property <bool> markers-coincide;  // A == B (floor 0) ⇒ draw one line
     in property <bool> dimming-on;
+    // Glide duration (ms) for an external value change; 0 = instant (drag / hidden
+    // / reduced-motion). Driven by the app from the OS animation setting.
+    in property <int> glide-ms;
     callback changed(float);
 
     min-width: 120px;
@@ -194,6 +211,15 @@ export component BrightnessSlider inherits Rectangle {
     property <float> drag-value: value;
     property <float> shown: active ? drag-value : value;
     property <float> shown-frac: shown / 100;
+    // Glide only an external change: never while dragging (0), never on a hidden
+    // window / reduced motion (the app passes glide-ms 0 then).
+    property <duration> glide: (root.active ? 0 : root.glide-ms) * 1ms;
+    // Hover-near-a-marker, derived from the main touch area's pointer position so
+    // no overlapping TouchArea steals the drag. Off while dragging.
+    property <bool> hover-a: touch.has-hover && !root.active
+        && abs(touch.mouse-x - (root.thumb-size / 2 + root.usable * root.marker-a-fraction)) < 8px;
+    property <bool> hover-b: touch.has-hover && !root.active
+        && abs(touch.mouse-x - (root.thumb-size / 2 + root.usable * root.marker-fraction)) < 8px;
 
     function set-from-pointer() {
         if (!root.enabled) {
@@ -215,7 +241,7 @@ export component BrightnessSlider inherits Rectangle {
         border-radius: self.height / 2;
         background: Palette.track;
 
-        // Sub-floor zone (0..marker): dimming on ⇒ soft accent tint (the
+        // Sub-floor zone (0..line B): dimming on ⇒ soft accent tint (the
         // software-dimming range); dimming off ⇒ dead/greyed zone.
         if root.marker-visible: Rectangle {
             x: 0;
@@ -226,17 +252,19 @@ export component BrightnessSlider inherits Rectangle {
         }
     }
 
-    // Filled portion above the floor (hardware regime): solid accent.
+    // Filled portion above line B (hardware regime): an accent gradient that
+    // brightens toward full, for a premium sheen.
     Rectangle {
         x: root.thumb-size / 2;
         width: root.usable * root.shown-frac;
         height: root.track-h;
         y: (parent.height - self.height) / 2;
         border-radius: self.height / 2;
-        background: Palette.accent;
+        background: @linear-gradient(90deg, Palette.accent 0%, Palette.accent-hover 100%);
+        animate width { duration: root.glide; easing: ease-out; }
     }
-    // The part of the fill that sits below the marker reads dimmer (software
-    // regime) so the two regimes are legible.
+    // The part of the fill that sits below line B reads dimmer (software regime)
+    // so the two regimes are legible.
     if root.marker-visible && root.dimming-on: Rectangle {
         x: root.thumb-size / 2;
         width: root.usable * clamp(root.shown-frac, 0, root.marker-fraction);
@@ -244,9 +272,21 @@ export component BrightnessSlider inherits Rectangle {
         y: (parent.height - self.height) / 2;
         border-radius: self.height / 2;
         background: Palette.accent-soft;
+        animate width { duration: root.glide; easing: ease-out; }
     }
 
-    // Handoff marker tick.
+    // Line A (hardware zero): a quieter tick, drawn only when it is distinct from
+    // line B (a non-zero floor). At floor 0 the two coincide and only B is drawn.
+    if root.marker-visible && !root.markers-coincide: Rectangle {
+        x: root.thumb-size / 2 + root.usable * root.marker-a-fraction - self.width / 2;
+        width: 2px;
+        height: root.track-h + 6px;
+        y: (parent.height - self.height) / 2;
+        border-radius: 1px;
+        background: Palette.marker-soft;
+    }
+
+    // Line B (hardware ⇄ software handoff): the primary marker.
     if root.marker-visible: Rectangle {
         x: root.thumb-size / 2 + root.usable * root.marker-fraction - self.width / 2;
         width: 2px;
@@ -256,7 +296,44 @@ export component BrightnessSlider inherits Rectangle {
         background: Palette.marker;
     }
 
-    // Thumb.
+    // Hover-a-marker label chips (hovering the line explains it). Positioned below
+    // the track; only one shows at a time and never while dragging.
+    if root.hover-a && !root.markers-coincide: Rectangle {
+        x: clamp(root.thumb-size / 2 + root.usable * root.marker-a-fraction - self.width / 2, 0px, root.width - self.width);
+        y: root.height - 2px;
+        width: label-a.preferred-width + 12px;
+        height: 18px;
+        border-radius: 5px;
+        background: Palette.bubble-bg;
+        border-width: 1px;
+        border-color: Palette.bubble-border;
+        label-a := Text {
+            text: @tr("Hardware minimum");
+            font-size: 10px;
+            color: Palette.text-subtle;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    if root.hover-b: Rectangle {
+        x: clamp(root.thumb-size / 2 + root.usable * root.marker-fraction - self.width / 2, 0px, root.width - self.width);
+        y: root.height - 2px;
+        width: label-b.preferred-width + 12px;
+        height: 18px;
+        border-radius: 5px;
+        background: Palette.bubble-bg;
+        border-width: 1px;
+        border-color: Palette.bubble-border;
+        label-b := Text {
+            text: root.markers-coincide ? @tr("Hardware minimum") : @tr("Software dimming starts");
+            font-size: 10px;
+            color: Palette.text-subtle;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    // Thumb, with an accent glow that intensifies on hover / press.
     Rectangle {
         width: root.thumb-size;
         height: root.thumb-size;
@@ -266,9 +343,33 @@ export component BrightnessSlider inherits Rectangle {
         background: Palette.thumb;
         border-width: 1px;
         border-color: Palette.border-strong;
-        drop-shadow-blur: root.active ? 6px : 3px;
-        drop-shadow-color: #00000040;
-        animate drop-shadow-blur { duration: 100ms; }
+        drop-shadow-blur: (root.active || touch.has-hover) ? 10px : 3px;
+        drop-shadow-color: (root.active || touch.has-hover) ? Palette.thumb-glow : #00000040;
+        animate drop-shadow-blur { duration: 120ms; }
+        animate drop-shadow-color { duration: 120ms; }
+        animate x { duration: root.glide; easing: ease-out; }
+    }
+
+    // Value bubble: a floating readout above the thumb while dragging.
+    if root.active: Rectangle {
+        x: clamp(root.usable * root.shown-frac + root.thumb-size / 2 - self.width / 2, 0px, root.width - self.width);
+        y: -28px;
+        width: 46px;
+        height: 22px;
+        border-radius: 7px;
+        background: Palette.bubble-bg;
+        border-width: 1px;
+        border-color: Palette.bubble-border;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000033;
+        Text {
+            text: "\{round(root.shown)}%";
+            font-size: 12px;
+            font-weight: 700;
+            color: (root.marker-visible && root.shown-frac < root.marker-fraction) ? Palette.text-subtle : Palette.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
     }
 
     // Focus ring around the whole track when keyboard-focused.
@@ -329,6 +430,9 @@ export component FlyoutWindow inherits Window {
     // The desired window height (logical px), computed by the app from the row
     // count (a no-frame window is not auto-grown to its content preferred size).
     in property <length> content-height: 260px;
+    // Glide duration (ms) for external brightness changes; the app sets it from
+    // the OS animation preference (0 = reduced motion / instant).
+    in property <int> glide-ms;
 
     // --- outputs to the Rust shell (mapped onto FlyoutVm calls) ---
     callback slider-changed(/* row-index */ int, /* percent */ float);
@@ -501,6 +605,9 @@ export component FlyoutWindow inherits Window {
                                 dimming-on: row.dimming-on;
                                 marker-visible: row.has-floor;
                                 marker-fraction: row.marker-fraction;
+                                marker-a-fraction: row.marker-a-fraction;
+                                markers-coincide: row.markers-coincide;
+                                glide-ms: root.glide-ms;
                                 changed(v) => {
                                     root.slider-changed(idx, v);
                                 }

@@ -61,7 +61,7 @@ use crate::bin_support::hotkey::{self, Accelerator, HotkeyAction, Modifiers as A
 use crate::bin_support::paths::DujaPaths;
 use crate::bin_support::state_store::StateStore;
 use crate::bin_support::updates::{self, HttpsTransport, UpdateOutcome};
-use crate::bin_support::{backend, gamma, ipc, run, settings, settings_apply, startup};
+use crate::bin_support::{backend, gamma, ipc, motion, run, settings, settings_apply, startup};
 
 /// The brightness step (percentage points) a `brightness_up` / `brightness_down`
 /// hotkey applies to every display. Fixed in P5; a configurable step is a
@@ -565,6 +565,11 @@ impl AppState {
             .engine_tx
             .send(EngineCommand::SetLevelPolling { on: true });
 
+        // Arm the external-change glide per the OS animation setting (queried now
+        // so an accessibility change is picked up on the next open).
+        self.shell
+            .set_glide_ms(motion::glide_for(true, motion::os_animations_enabled()));
+
         // Keep the flyout above other windows while visible and focus it so
         // Esc/keyboard work immediately (user-reported: it opened underneath).
         // This never resizes/moves the window; its redraw request just forces the
@@ -596,10 +601,12 @@ impl AppState {
         self.shell.hide();
         self.flyout_visible = false;
         self.last_hidden = Some(Instant::now());
-        // Stop level polling so the idle engine parks with zero wakeups.
+        // Stop level polling so the idle engine parks with zero wakeups, and force
+        // the glide off so a hidden window can never schedule an animation frame.
         let _ = self
             .engine_tx
             .send(EngineCommand::SetLevelPolling { on: false });
+        self.shell.set_glide_ms(0);
     }
 
     /// Dismiss the flyout when it loses focus (the user clicked outside it).

@@ -230,6 +230,16 @@ write in flight), and the app suppresses a reading that matches the hardware the
 current slider already drives — which also covers the pinned-floor/overlay case,
 so the thumb never jumps to the transition. The reflection path writes no DDC.
 
+**Premium slider.** The flyout slider now draws **two reference lines** — line A
+(hardware zero, quiet) and line B (the hardware/software handoff, primary) — which
+collapse to one when the floor is 0. It has a gradient accent fill, an accent
+thumb glow on hover/press, a value bubble while dragging, hover labels on the two
+lines, and a **glide** animation when the level changes externally (the reflection
+path). The glide honours the OS "animation effects" accessibility setting
+(`SPI_GETCLIENTAREAANIMATION`) and is forced to 0 while the window is hidden or
+during a drag; only the rendered thumb glides, so the DDC-never-animates rule is
+untouched.
+
 ## P5 gate results
 
 **Security checklist §6** — every item PASS, each with a proving test: pipe
