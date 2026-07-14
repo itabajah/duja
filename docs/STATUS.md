@@ -1,6 +1,6 @@
 # Duja — Project Status
 
-_Last updated: 2026-07-14 (UI layout & ruby theme pass; continuum v2 landed)._
+_Last updated: 2026-07-14 (UI layout & ruby theme overhaul merged — PR #39)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -27,7 +27,7 @@ sign-off now PASSES on real hardware** (live console-session QA, 2026-07-11 —
 see "Live hardware QA"); the alpha tag is gated only on the remaining
 **pure-visual** checks (tray/flyout/overlay appearance), which need human eyes.
 
-Health: **669 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
+Health: **709 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
 on stable, adversarial gate reviews at **P2, P3, P4, P5** with every confirmed
 finding fixed test-first before tagging.
@@ -284,6 +284,15 @@ A visual/layout pass driven by direct user requests, in four small PRs:
   user's chosen size. The frameless-resize *behaviour* and all the theme/layout
   aesthetics are the pending visual-QA items (below); the code compiles, lints,
   and its binding/geometry logic is unit-covered.
+
+All four areas landed as a single squashed PR (**#39**), following several rounds
+of live-QA refinement (the per-row dimming toggle now sits level with the slider;
+a light-theme contrast pass deepens the light neutrals so white cards, hairline
+borders and off-state pills separate cleanly) and a three-way adversarial
+pre-merge review (Slint/UI, Rust lint-wall, cross-file regression). The one Medium
+finding — a fractional-DPI scale race in the settings `Resized` capture, which
+read the window's provisional scale instead of the monitor's — was fixed (it now
+queries the monitor scale, as `enforce_physical_buffer` does).
 
 ## P5 gate results
 
