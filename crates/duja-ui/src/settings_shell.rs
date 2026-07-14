@@ -24,6 +24,10 @@ pub struct SettingsShell {
     hotkeys: Rc<VecModel<SettingsHotkeyData>>,
     /// The design logical size the buffer keeper enforces (see [`crate::dpi`]).
     desired: crate::dpi::DesiredSize,
+    /// The colour of the taskbar/alt-tab icon, following the user's accent. A
+    /// `Cell` for the same reason as the flyout's: `present_at` must not borrow the
+    /// view-model (see [`crate::shell::FlyoutShell`]).
+    icon_rgb: std::cell::Cell<[u8; 3]>,
 }
 
 impl SettingsShell {
@@ -59,9 +63,29 @@ impl SettingsShell {
             monitors,
             hotkeys,
             desired,
+            icon_rgb: std::cell::Cell::new(crate::accent::icon_rgb(
+                crate::accent::AccentChoice::default(),
+            )),
         };
         shell.update_from_vm(&shell.vm.borrow());
         Ok(shell)
+    }
+
+    /// Recolour the taskbar/alt-tab icon (the app calls this when the accent
+    /// changes, so the open settings window's own icon updates immediately).
+    pub fn set_icon_rgb(&self, rgb: [u8; 3]) {
+        self.icon_rgb.set(rgb);
+        self.apply_window_icon();
+    }
+
+    /// Push the current icon colour at the winit window. A no-op before the window
+    /// is realised; re-applied on every present so it self-heals.
+    fn apply_window_icon(&self) {
+        use i_slint_backend_winit::WinitWindowAccessor;
+        let rgb = self.icon_rgb.get();
+        self.ui.window().with_winit_window(|w| {
+            w.set_window_icon(crate::icon::app_icon(rgb));
+        });
     }
 
     /// Render `vm`'s state into the Slint component. Call after any external
@@ -343,10 +367,10 @@ impl SettingsShell {
                 // below the size its controls need (belt-and-suspenders to Slint's
                 // own min-constraint propagation).
                 w.set_min_inner_size(Some(LogicalSize::new(380.0_f64, 360.0_f64)));
-                // Give the taskbar button a real icon (see `crate::window_icon`).
-                w.set_window_icon(crate::window_icon::app_icon());
             });
         }
+        // Give the taskbar button a real icon (see `crate::icon`).
+        self.apply_window_icon();
         // Flip the repaint anchor so the whole window is marked dirty and the
         // software renderer presents a complete frame (see the flyout's
         // `present_at` for the full root cause).

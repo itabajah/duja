@@ -51,8 +51,8 @@ use duja_core::model::{DimMode, DisplayKind, DisplaySnapshot};
 use duja_dimmer::PlatformDimmer;
 use duja_platform::Autostart;
 use duja_ui::{
-    FlyoutShell, FlyoutVm, HotkeyRow, SettingsCommand, SettingsShell, SettingsVm, ThemeChoice,
-    UiCommand, UpdateStatus,
+    AccentChoice, FlyoutShell, FlyoutVm, HotkeyRow, SettingsCommand, SettingsShell, SettingsVm,
+    ThemeChoice, UiCommand, UpdateStatus,
 };
 
 use crate::bin_support::bounds::BoundsMap;
@@ -336,8 +336,9 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
     // 4b. Settings window + autostart backend (window stays hidden until opened).
     let (settings_shell, settings_vm, autostart) = build_settings_window()?;
 
-    // 5. Tray icon + menu on the same thread.
-    let tray = build_tray().context("creating the tray icon")?;
+    // 5. Tray icon + menu on the same thread. The glyph and colour are shared with
+    //    the taskbar/alt-tab window icon (`duja_ui::icon`); the accent drives both.
+    let tray = build_tray(AccentChoice::default()).context("creating the tray icon")?;
 
     // 6. Async pipeline: engine (with a bounds-updating enumerator) + event pump
     //    + overlay dimmer. The dimmer is optional — its absence only disables
@@ -1588,7 +1589,10 @@ struct MenuIds {
 
 /// Build the tray icon with its right-click menu (Open / Settings / Restore
 /// screen / Quit).
-fn build_tray() -> anyhow::Result<tray_icon::TrayIcon> {
+///
+/// The icon is the accent-coloured display silhouette — the same glyph and colour
+/// the taskbar button carries (see [`duja_ui::icon`]).
+fn build_tray(accent: AccentChoice) -> anyhow::Result<tray_icon::TrayIcon> {
     use tray_icon::menu::{Menu, MenuItem};
     use tray_icon::{TrayIconBuilder, menu::PredefinedMenuItem};
 
@@ -1618,7 +1622,7 @@ fn build_tray() -> anyhow::Result<tray_icon::TrayIcon> {
     TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_tooltip("Duja")
-        .with_icon(icon::sun_icon()?)
+        .with_icon(icon::tray_icon(duja_ui::accent::icon_rgb(accent))?)
         .build()
         .map_err(|e| anyhow::anyhow!("failed to create the tray icon: {e}"))
 }

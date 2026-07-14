@@ -39,6 +39,13 @@ pub struct FlyoutShell {
     desired: crate::dpi::DesiredSize,
     /// The click-outside dismissal callback, invoked by the shared winit hook.
     focus_lost: crate::dpi::FocusLostCb,
+    /// The colour of the taskbar/alt-tab icon, following the user's accent.
+    ///
+    /// A `Cell`, not a read of the view-model: [`present_at`](Self::present_at)
+    /// runs inside the app's re-entrancy-safe dispatcher, and taking a fresh
+    /// `borrow()` there is the double-borrow-through-Slint's-FFI abort this
+    /// codebase already carries scars from. A `Cell` borrows nothing.
+    icon_rgb: std::cell::Cell<[u8; 3]>,
 }
 
 impl FlyoutShell {
@@ -72,9 +79,31 @@ impl FlyoutShell {
             rows,
             desired,
             focus_lost,
+            icon_rgb: std::cell::Cell::new(crate::accent::icon_rgb(
+                crate::accent::AccentChoice::default(),
+            )),
         };
         shell.update_from_vm(&shell.vm.borrow());
         Ok(shell)
+    }
+
+    /// Recolour the taskbar/alt-tab icon (the app calls this when the accent
+    /// changes, so an open window's icon updates without waiting for a re-present).
+    pub fn set_icon_rgb(&self, rgb: [u8; 3]) {
+        self.icon_rgb.set(rgb);
+        self.apply_window_icon();
+    }
+
+    /// Push the current icon colour at the winit window. A no-op before the window
+    /// is realised, and re-applied on every present so it self-heals if Slint ever
+    /// recreates the underlying window. Never called from a render — it rebuilds a
+    /// 16 KB buffer.
+    fn apply_window_icon(&self) {
+        use i_slint_backend_winit::WinitWindowAccessor;
+        let rgb = self.icon_rgb.get();
+        self.ui.window().with_winit_window(|w| {
+            w.set_window_icon(crate::icon::app_icon(rgb));
+        });
     }
 
     /// Render `vm`'s state into the Slint component.
@@ -257,12 +286,7 @@ impl FlyoutShell {
         self.set_position(x, y);
         let _ = self.ui.show();
         // Give the taskbar button a real icon once the winit window exists.
-        {
-            use i_slint_backend_winit::WinitWindowAccessor;
-            self.ui.window().with_winit_window(|w| {
-                w.set_window_icon(crate::window_icon::app_icon());
-            });
-        }
+        self.apply_window_icon();
         self.ui.set_present_nonce(!self.ui.get_present_nonce());
     }
 

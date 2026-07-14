@@ -50,7 +50,7 @@ export global Palette {
     out property <color> border: dark ? #3a353a : #d8d1d5;
     out property <color> border-strong: dark ? #4c464c : #c4bcc0;
     // A single ruby accent, tuned to read on both surfaces.
-    out property <color> accent: dark ? #f2555a : #e5484d;
+    in property <color> accent: #f2555a;
     out property <color> accent-hover: dark ? #ff6d72 : #ef5b60;
     // Low-opacity accent used for the sub-floor (software-dimming) track zone.
     out property <color> accent-soft: dark ? #f2555a4d : #e5484d33;
@@ -438,6 +438,7 @@ export component FlyoutWindow inherits Window {
     in property <[FlyoutRowData]> rows;
     in property <bool> no-displays;
     in property <bool> dark <=> Palette.dark;
+    in property <color> accent <=> Palette.accent;
     in-out property <bool> link-all;
     // The desired window height (logical px), computed by the app from the row
     // count (a no-frame window is not auto-grown to its content preferred size).

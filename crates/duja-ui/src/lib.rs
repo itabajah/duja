@@ -45,8 +45,12 @@
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod accent;
 pub mod command;
 pub mod flyout_vm;
+// Public so `duja-app` can render the tray icon from the same art as the window
+// icon — the raw RGBA buffer is the only thing the two crates can share.
+pub mod icon;
 pub mod settings_shell;
 pub mod settings_vm;
 pub mod shell;
@@ -54,8 +58,8 @@ pub mod shell;
 pub(crate) mod dpi;
 pub(crate) mod generated;
 pub(crate) mod model_sync;
-pub(crate) mod window_icon;
 
+pub use accent::{ACCENT_ORDER, AccentChoice, AccentColors};
 pub use command::{SettingsCommand, ThemeChoice, UiCommand};
 pub use flyout_vm::{DimmingInfo, FlyoutRow, FlyoutVm, Theme};
 pub use settings_shell::SettingsShell;
