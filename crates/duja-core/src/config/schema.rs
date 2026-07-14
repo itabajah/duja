@@ -102,6 +102,28 @@ pub enum Theme {
     Dark,
 }
 
+/// The accent colour the UI (and both icons) are painted in.
+///
+/// There is no "black" or "white": an accent paints the slider fill, the toggles
+/// and the focus rings, so a black one would vanish on the dark theme and a white
+/// one on the light theme. [`Onyx`](Accent::Onyx) is the monochrome option, and it
+/// adapts — near-black on light, near-white on dark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Accent {
+    /// A warm coral red (default — the original).
+    #[default]
+    Ruby,
+    /// Deep bronze on light, warm amber on dark.
+    Gold,
+    /// A deep green; mint on dark.
+    Emerald,
+    /// Navy on light, lifted to azure on dark.
+    Sapphire,
+    /// Adaptive monochrome.
+    Onyx,
+}
+
 /// Application-wide settings (the `[general]` table).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -115,6 +137,8 @@ pub struct General {
     pub update_check: bool,
     /// Which UI theme to use.
     pub theme: Theme,
+    /// Which accent colour to paint the UI and icons in.
+    pub accent: Accent,
 }
 
 impl Default for General {
@@ -123,6 +147,7 @@ impl Default for General {
             autostart: true,
             update_check: false,
             theme: Theme::System,
+            accent: Accent::Ruby,
         }
     }
 }
@@ -234,6 +259,7 @@ mod tests {
         assert!(cfg.general.autostart, "autostart defaults on");
         assert!(!cfg.general.update_check, "update check is opt-in (off)");
         assert_eq!(cfg.general.theme, Theme::System);
+        assert_eq!(cfg.general.accent, Accent::Ruby);
         assert!(cfg.hotkeys.is_empty());
         assert!(cfg.monitors.is_empty());
     }
@@ -253,12 +279,43 @@ mod tests {
 
     #[test]
     fn partial_section_fills_missing_keys_with_defaults() {
-        // Only autostart is set; update_check and theme must default.
+        // Only autostart is set; update_check, theme and accent must default.
         let cfg: Config = toml_edit::de::from_str("[general]\nautostart = false\n")
             .expect("valid partial config");
         assert!(!cfg.general.autostart);
         assert!(!cfg.general.update_check);
         assert_eq!(cfg.general.theme, Theme::System);
+        assert_eq!(cfg.general.accent, Accent::Ruby);
+    }
+
+    #[test]
+    fn accent_absent_defaults_to_ruby() {
+        // Proves the "no migration needed" claim: a config written before the
+        // accent existed still loads, and lands on the colour it was painted in.
+        let cfg: Config =
+            toml_edit::de::from_str("[general]\ntheme = \"dark\"\n").expect("pre-accent config");
+        assert_eq!(cfg.general.theme, Theme::Dark);
+        assert_eq!(cfg.general.accent, Accent::Ruby);
+    }
+
+    #[test]
+    fn accent_round_trips_each_variant() {
+        for (accent, token) in [
+            (Accent::Ruby, "ruby"),
+            (Accent::Gold, "gold"),
+            (Accent::Emerald, "emerald"),
+            (Accent::Sapphire, "sapphire"),
+            (Accent::Onyx, "onyx"),
+        ] {
+            let toml = toml_edit::ser::to_string(&General {
+                accent,
+                ..General::default()
+            })
+            .expect("ser");
+            assert!(toml.contains(&format!("accent = \"{token}\"")), "{toml}");
+            let back: General = toml_edit::de::from_str(&toml).expect("de");
+            assert_eq!(back.accent, accent);
+        }
     }
 
     #[test]
@@ -343,14 +400,25 @@ mod tests {
         proptest::string::string_regex("[A-Za-z0-9 ._+#/-]{0,24}").expect("valid regex")
     }
 
+    fn any_accent() -> impl Strategy<Value = Accent> {
+        prop_oneof![
+            Just(Accent::Ruby),
+            Just(Accent::Gold),
+            Just(Accent::Emerald),
+            Just(Accent::Sapphire),
+            Just(Accent::Onyx),
+        ]
+    }
+
     fn any_general() -> impl Strategy<Value = General> {
-        (any::<bool>(), any::<bool>(), any_theme()).prop_map(|(autostart, update_check, theme)| {
-            General {
+        (any::<bool>(), any::<bool>(), any_theme(), any_accent()).prop_map(
+            |(autostart, update_check, theme, accent)| General {
                 autostart,
                 update_check,
                 theme,
-            }
-        })
+                accent,
+            },
+        )
     }
 
     fn any_monitor() -> impl Strategy<Value = MonitorConfig> {

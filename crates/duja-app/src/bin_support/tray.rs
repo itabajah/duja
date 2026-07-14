@@ -326,19 +326,17 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
         duja_dimmer::gamma_support_from_hdr(duja_dimmer::is_hdr_active()).allows_gamma();
     debug!(gamma_allowed, "resolved HDR gamma verdict");
     let theme = settings::ui_theme(config.general.theme, os_dark_theme());
+    let accent = settings_apply::accent_to_choice(config.general.accent);
 
     // 4. Flyout window FIRST (icon-first: the UI must exist or there is no app).
-    let vm = Rc::new(RefCell::new(FlyoutVm::new()));
-    vm.borrow_mut().set_theme(theme);
-    let shell = FlyoutShell::new(vm.clone())
-        .map_err(|e| anyhow::anyhow!("failed to create the flyout window: {e}"))?;
+    let (shell, vm) = build_flyout(theme, accent)?;
 
     // 4b. Settings window + autostart backend (window stays hidden until opened).
-    let (settings_shell, settings_vm, autostart) = build_settings_window()?;
+    let (settings_shell, settings_vm, autostart) = build_settings_window(accent)?;
 
-    // 5. Tray icon + menu on the same thread. The glyph and colour are shared with
-    //    the taskbar/alt-tab window icon (`duja_ui::icon`); the accent drives both.
-    let tray = build_tray(AccentChoice::default()).context("creating the tray icon")?;
+    // 5. Tray icon + menu on the same thread. Its glyph and colour are shared with
+    //    the taskbar/alt-tab window icons (`duja_ui::icon`); the accent drives all.
+    let tray = build_tray(accent).context("creating the tray icon")?;
 
     // 6. Async pipeline: engine (with a bounds-updating enumerator) + event pump
     //    + overlay dimmer. The dimmer is optional — its absence only disables
@@ -398,6 +396,7 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
             last_hidden: None,
             hotkeys,
             hotkey_outcomes,
+            tray,
         }));
     });
     wire_ui_commands();
@@ -422,10 +421,10 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
     engine.shutdown();
     forwarder.shutdown();
     APP.with(|cell| {
-        // Dropping the AppState clears overlays via the dimmer's own teardown.
+        // Dropping the AppState clears overlays via the dimmer's own teardown, and
+        // drops the tray icon it now owns (same ordering as the old `drop(tray)`).
         cell.set(None);
     });
-    drop(tray);
     drop(instance);
     Ok(ExitCode::SUCCESS)
 }
@@ -441,14 +440,42 @@ type SettingsSetup = (
 /// Create the settings window shell + view-model and resolve the platform
 /// autostart backend.
 ///
+/// Build the flyout window, seeded with the resolved theme and accent.
+///
+/// The view-model carries both, so the shell's first render already paints the
+/// right palette; the taskbar icon is seeded here too, since it is a raster buffer
+/// rather than a palette property.
+///
+/// # Errors
+/// Returns an error if the flyout window cannot be created (fatal — without a UI
+/// there is no app).
+fn build_flyout(
+    theme: duja_ui::Theme,
+    accent: AccentChoice,
+) -> anyhow::Result<(FlyoutShell, Rc<RefCell<FlyoutVm>>)> {
+    let vm = Rc::new(RefCell::new(FlyoutVm::new()));
+    {
+        let mut v = vm.borrow_mut();
+        v.set_theme(theme);
+        v.set_accent(accent);
+    }
+    let shell = FlyoutShell::new(vm.clone())
+        .map_err(|e| anyhow::anyhow!("failed to create the flyout window: {e}"))?;
+    shell.set_icon_rgb(duja_ui::accent::icon_rgb(accent));
+    Ok((shell, vm))
+}
+
 /// # Errors
 /// Returns an error if the settings window cannot be created (fatal, like the
 /// flyout). An autostart resolve failure is *not* fatal — it only disables the
 /// launch-at-login toggle.
-fn build_settings_window() -> anyhow::Result<SettingsSetup> {
+fn build_settings_window(accent: AccentChoice) -> anyhow::Result<SettingsSetup> {
     let settings_vm = Rc::new(RefCell::new(SettingsVm::new()));
     let settings_shell = SettingsShell::new(settings_vm.clone())
         .map_err(|e| anyhow::anyhow!("failed to create the settings window: {e}"))?;
+    // Seed the taskbar icon; the palette itself follows on the first
+    // `rebuild_settings`, which pushes the accent through the view-model.
+    settings_shell.set_icon_rgb(duja_ui::accent::icon_rgb(accent));
     let autostart: Option<Box<dyn Autostart>> = match duja_platform::autostart::system() {
         Ok(a) => Some(Box::new(a)),
         Err(e) => {
@@ -503,6 +530,10 @@ struct AppState {
     /// The last live-registration result per action, for settings-row feedback
     /// (conflict / OS-rejected).
     hotkey_outcomes: BTreeMap<HotkeyAction, hotkey::RegisterResult>,
+    /// The tray icon itself — owned here (rather than as a `run()` local) so an
+    /// accent change can swap its glyph colour live via `TrayIcon::set_icon`.
+    /// Dropping `AppState` at teardown drops it, exactly as the old local did.
+    tray: tray_icon::TrayIcon,
 }
 
 impl AppState {
@@ -794,6 +825,7 @@ impl AppState {
             .and_then(|a| a.is_enabled().ok())
             .unwrap_or(false);
         let theme = settings_apply::theme_to_choice(self.config.general.theme);
+        let accent = settings_apply::accent_to_choice(self.config.general.accent);
         let dark = self.resolved_dark();
         let update_check_on = self.config.general.update_check;
 
@@ -804,6 +836,7 @@ impl AppState {
                 autostart_on,
                 autostart_supported,
                 theme,
+                accent,
                 update_check_on,
                 dark,
             );
@@ -835,6 +868,7 @@ impl AppState {
         match command {
             SettingsCommand::SetAutostart(on) => self.apply_autostart(on),
             SettingsCommand::SetTheme(choice) => self.apply_theme(choice),
+            SettingsCommand::SetAccent(_) => self.apply_accent(),
             SettingsCommand::SetUpdateCheck(_) => {
                 // Config-only; the VM already reflects the toggle.
             }
@@ -886,6 +920,7 @@ impl AppState {
         let actual = autostart.is_enabled().unwrap_or(on);
         let supported = true;
         let theme = settings_apply::theme_to_choice(self.config.general.theme);
+        let accent = settings_apply::accent_to_choice(self.config.general.accent);
         // `autostart`'s &mut borrow ends above (last used for `actual`), so the
         // whole-`self` `resolved_dark` call is free of a borrow conflict here.
         let dark = self.resolved_dark();
@@ -893,6 +928,7 @@ impl AppState {
             actual,
             supported,
             theme,
+            accent,
             self.config.general.update_check,
             dark,
         );
@@ -905,6 +941,32 @@ impl AppState {
         let theme = settings::ui_theme(self.config.general.theme, os_dark_theme());
         self.vm.borrow_mut().set_theme(theme);
         self.rebuild_settings();
+        self.render();
+    }
+
+    /// Repaint everything in the newly-chosen accent: both windows' palettes, both
+    /// windows' taskbar icons, and the tray icon.
+    ///
+    /// The palettes need no special handling — each shell re-resolves the accent
+    /// against its theme on the next render — but the icons are raster buffers, so
+    /// they are rebuilt and pushed explicitly.
+    fn apply_accent(&mut self) {
+        let accent = settings_apply::accent_to_choice(self.config.general.accent);
+        self.vm.borrow_mut().set_accent(accent);
+        self.rebuild_settings();
+
+        let rgb = duja_ui::accent::icon_rgb(accent);
+        match icon::tray_icon(rgb) {
+            Ok(built) => {
+                if let Err(e) = self.tray.set_icon(Some(built)) {
+                    warn!(error = %e, "could not swap the tray icon to the new accent");
+                }
+            }
+            Err(e) => warn!(error = %e, "could not build the tray icon for the new accent"),
+        }
+        self.shell.set_icon_rgb(rgb);
+        self.settings_shell.set_icon_rgb(rgb);
+
         self.render();
     }
 

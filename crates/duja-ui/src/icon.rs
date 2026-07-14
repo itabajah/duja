@@ -4,7 +4,7 @@
 //! an icon:
 //!
 //! * the **taskbar / alt-tab window icon** (here, wrapped into a `winit::Icon` by
-//!   [`app_icon`] and set by each window shell), and
+//!   `app_icon` and set by each window shell), and
 //! * the **notification-area tray icon** (over in `duja-app`, which wraps the same
 //!   buffer into a `tray_icon::Icon`).
 //!

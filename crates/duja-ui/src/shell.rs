@@ -346,6 +346,15 @@ impl FlyoutShell {
     }
 }
 
+/// An RGBA byte quad as a Slint colour.
+///
+/// The whole boundary between [`crate::accent`]'s plain-bytes table and Slint's
+/// colour type — which is why the table itself needs no Slint dependency.
+pub(crate) fn to_slint(rgba: crate::accent::Rgba) -> slint::Color {
+    let [r, g, b, a] = rgba;
+    slint::Color::from_argb_u8(a, r, g, b)
+}
+
 /// Copy the view-model's state into the Slint component's properties.
 fn render_into(ui: &FlyoutWindow, rows: &VecModel<FlyoutRowData>, vm: &FlyoutVm) {
     let data: Vec<FlyoutRowData> = vm.rows().iter().map(row_to_data).collect();
@@ -354,7 +363,17 @@ fn render_into(ui: &FlyoutWindow, rows: &VecModel<FlyoutRowData>, vm: &FlyoutVm)
     crate::model_sync::sync(rows, data);
     ui.set_link_all(vm.link_all());
     ui.set_no_displays(vm.no_displays());
-    ui.set_dark(matches!(vm.theme(), Theme::Dark));
+    let dark = matches!(vm.theme(), Theme::Dark);
+    ui.set_dark(dark);
+    // Resolve the accent against the theme on every render, so a *theme* change
+    // re-pushes the right variants through this same path with no extra wiring.
+    // This window owns its own `Palette` instance — the settings shell must push
+    // independently (see `settings_shell::render_into`).
+    let accent = crate::accent::resolve(vm.accent(), dark);
+    ui.set_accent(to_slint(accent.base));
+    ui.set_accent_hover(to_slint(accent.bright));
+    ui.set_accent_soft(to_slint(accent.wash));
+    ui.set_accent_on(to_slint(accent.on));
 }
 
 /// Map one pure [`FlyoutRow`] to its Slint counterpart.
@@ -441,9 +460,69 @@ mod tests {
 #[cfg(all(test, feature = "smoke"))]
 mod binding_tests {
     use super::*;
+    use crate::accent::AccentChoice;
     use duja_core::id::StableDisplayId;
     use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
     use i_slint_backend_testing::ElementHandle;
+
+    // The flyout must repaint in the selected accent.
+    //
+    // This is the guard on the riskiest property of the accent work: a Slint global
+    // is instantiated once per component tree, so the flyout and settings windows
+    // own *independent* `Palette`s. Every accent input has to be pushed twice, and
+    // a bug where only the settings window recolours is invisible to every other
+    // test — there was no flyout palette test at all before this one. Goes red if
+    // `render_into` here drops the accent push.
+    #[test]
+    fn flyout_palette_follows_the_selected_accent() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let mut vm = FlyoutVm::new();
+        vm.set_theme(Theme::Dark);
+        vm.set_accent(AccentChoice::Sapphire);
+        let vm = Rc::new(RefCell::new(vm));
+        let shell = FlyoutShell::new(vm.clone()).expect("flyout shell instantiates");
+
+        let sapphire = crate::accent::resolve(AccentChoice::Sapphire, true);
+        assert_eq!(shell.ui.get_accent(), to_slint(sapphire.base));
+        assert_eq!(shell.ui.get_accent_hover(), to_slint(sapphire.bright));
+        assert_eq!(shell.ui.get_accent_soft(), to_slint(sapphire.wash));
+        assert_eq!(shell.ui.get_accent_on(), to_slint(sapphire.on));
+
+        // A *theme* change must re-resolve the accent through the same render path,
+        // with no accent-specific wiring of its own.
+        vm.borrow_mut().set_theme(Theme::Light);
+        shell.update_from_vm(&vm.borrow());
+        let sapphire_light = crate::accent::resolve(AccentChoice::Sapphire, false);
+        assert_eq!(shell.ui.get_accent(), to_slint(sapphire_light.base));
+        assert_ne!(
+            shell.ui.get_accent(),
+            to_slint(sapphire.base),
+            "the accent must track the theme, not stay pinned to its dark variant"
+        );
+    }
+
+    // Ruby is the default, and it must still render exactly the palette that
+    // shipped before the accent work — the no-visual-regression fence at the
+    // `.slint` seam (the pure table has its own fence in `accent.rs`).
+    #[test]
+    fn default_flyout_accent_is_todays_ruby() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let mut vm = FlyoutVm::new();
+        vm.set_theme(Theme::Dark);
+        let vm = Rc::new(RefCell::new(vm));
+        let shell = FlyoutShell::new(vm).expect("flyout shell instantiates");
+
+        assert_eq!(
+            shell.ui.get_accent(),
+            slint::Color::from_argb_u8(0xff, 0xf2, 0x55, 0x5a)
+        );
+        assert_eq!(
+            shell.ui.get_accent_hover(),
+            slint::Color::from_argb_u8(0xff, 0xff, 0x6d, 0x72)
+        );
+    }
 
     fn snapshot(serial: &str, level: u8) -> DisplaySnapshot {
         DisplaySnapshot {

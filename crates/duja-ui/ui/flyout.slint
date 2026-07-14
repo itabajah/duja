@@ -49,11 +49,21 @@ export global Palette {
     out property <color> text-faint: dark ? #706d72 : #837f86;
     out property <color> border: dark ? #3a353a : #d8d1d5;
     out property <color> border-strong: dark ? #4c464c : #c4bcc0;
-    // A single ruby accent, tuned to read on both surfaces.
+    // The accent family. Unlike the neutrals these are *inputs*, pushed from Rust
+    // by both shells (`duja_ui::accent` is the single source of truth, and the same
+    // table colours the tray/taskbar icons). They are resolved against the theme on
+    // the Rust side, so — unlike every `dark ? … : …` below — they carry no
+    // conditional here. The defaults are ruby-dark, so the frame before the first
+    // render already looks right.
     in property <color> accent: #f2555a;
-    out property <color> accent-hover: dark ? #ff6d72 : #ef5b60;
+    in property <color> accent-hover: #ff6d72;
     // Low-opacity accent used for the sub-floor (software-dimming) track zone.
-    out property <color> accent-soft: dark ? #f2555a4d : #e5484d33;
+    in property <color> accent-soft: #f2555a4d;
+    // The foreground drawn ON TOP of an `accent` fill (the pill knob, a primary
+    // button's label). White is unreadable on a light-luminance accent — it scores
+    // under 2:1 on Gold, Emerald and Onyx in dark — so Rust picks white or ink per
+    // accent and theme rather than it being hardcoded at the call sites.
+    in property <color> accent-on: #ffffff;
     out property <color> track: dark ? #403a40 : #d4ccd0;
     out property <color> track-dead: dark ? #2f2a2f : #c5bdc1;
     out property <color> thumb: #ffffff;
@@ -61,11 +71,13 @@ export global Palette {
     // Line A (hardware zero) reads quieter than line B (the transition).
     out property <color> marker-soft: dark ? #f4f2f480 : #403a4059;
     // The accent glow around the thumb on hover/press (premium touch).
-    out property <color> thumb-glow: dark ? #f2555a : #e5484d;
+    out property <color> thumb-glow: accent;
     // The value bubble shown while dragging.
     out property <color> bubble-bg: dark ? #2e2a2e : #ffffff;
     out property <color> bubble-border: dark ? #4c464c : #c4bcc0;
-    out property <color> focus-ring: dark ? #ff6d72 : #e5484d;
+    // Asymmetric by design: the ring lifts to the bright accent on dark, but stays
+    // the base accent on light (where the bright end is too pale to read).
+    out property <color> focus-ring: dark ? accent-hover : accent;
     // A distinct red for error/unresponsive states, kept clearly apart from the
     // ruby accent in both themes: in dark it reads lighter/pinker than the accent;
     // in light the accent is already a bright coral, so danger separates by going
@@ -159,7 +171,11 @@ export component PillToggle inherits Rectangle {
         y: 3px;
         x: checked ? parent.width - self.width - 3px : 3px;
         animate x { duration: 130ms; easing: ease-out; }
-        background: Palette.thumb;
+        // When checked the knob sits ON the accent fill, so it must contrast with
+        // the accent, not the track — a white knob disappears on a light accent
+        // (Onyx-dark scores 1.2:1). `accent-on` is white for every accent that can
+        // carry it, so this is a no-op for ruby.
+        background: root.checked ? Palette.accent-on : Palette.thumb;
     }
 
     fs := FocusScope {
@@ -438,7 +454,14 @@ export component FlyoutWindow inherits Window {
     in property <[FlyoutRowData]> rows;
     in property <bool> no-displays;
     in property <bool> dark <=> Palette.dark;
+    // The accent family, pushed by the shell. A Slint global is instantiated once
+    // per component tree, so the flyout and settings windows own *independent*
+    // `Palette`s — both must alias and both shells must push, or only one window
+    // recolours (see `flyout_palette_follows_the_selected_accent`).
     in property <color> accent <=> Palette.accent;
+    in property <color> accent-hover <=> Palette.accent-hover;
+    in property <color> accent-soft <=> Palette.accent-soft;
+    in property <color> accent-on <=> Palette.accent-on;
     in-out property <bool> link-all;
     // The desired window height (logical px), computed by the app from the row
     // count (a no-frame window is not auto-grown to its content preferred size).

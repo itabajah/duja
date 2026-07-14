@@ -27,5 +27,5 @@ pub mod state;
 pub use document::ConfigDocument;
 pub use error::ConfigError;
 pub use migrate::{CURRENT_VERSION, migrate};
-pub use schema::{Config, DimMode, General, MonitorConfig, Theme};
+pub use schema::{Accent, Config, DimMode, General, MonitorConfig, Theme};
 pub use state::{STATE_WRITE_DEBOUNCE, StateFile, should_write};

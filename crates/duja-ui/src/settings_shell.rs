@@ -237,6 +237,20 @@ impl SettingsShell {
         }
         {
             let vm = self.vm.clone();
+            let handler = handler.clone();
+            self.ui.on_accent_selected(move |index| {
+                // Bind the command to a local *before* the `if let`, releasing the
+                // VM borrow: the handler re-renders from the same VM, and a borrow
+                // still held across that re-render double-borrows through Slint's
+                // FFI and aborts (P0 bugs 1 & 2). Same shape as `on_theme_selected`.
+                let command = vm.borrow_mut().select_accent(to_index(index));
+                if let Some(command) = command {
+                    (handler.borrow_mut())(command);
+                }
+            });
+        }
+        {
+            let vm = self.vm.clone();
             let render = self.render_closure();
             let handler = handler.clone();
             self.ui.on_update_check_toggled(move |on| {
@@ -425,10 +439,19 @@ fn render_into(
     ui.set_autostart_on(vm.autostart_on());
     ui.set_autostart_supported(vm.autostart_supported());
     ui.set_theme_index(i32::try_from(vm.theme_index()).unwrap_or(0));
+    ui.set_accent_index(i32::try_from(vm.accent_index()).unwrap_or(0));
     // The resolved palette (`Palette.dark <=> dark` in settings.slint). Without
     // this the settings window stayed pinned to the default dark palette and
     // ignored the user's Light/Dark choice, even as the selector moved.
     ui.set_dark(vm.dark());
+    // Same story for the accent: this window owns its *own* `Palette` instance, so
+    // the flyout shell's push does not reach it and it must resolve and push here
+    // too (guarded by `settings_palette_follows_the_selected_accent`).
+    let accent = crate::accent::resolve(vm.accent(), vm.dark());
+    ui.set_accent(crate::shell::to_slint(accent.base));
+    ui.set_accent_hover(crate::shell::to_slint(accent.bright));
+    ui.set_accent_soft(crate::shell::to_slint(accent.wash));
+    ui.set_accent_on(crate::shell::to_slint(accent.on));
     ui.set_update_check_on(vm.update_check_on());
     ui.set_update_status(SharedString::from(status_line(vm.update_status())));
     ui.set_update_available(vm.update_available());
@@ -629,6 +652,7 @@ mod tests {
 #[cfg(all(test, feature = "smoke"))]
 mod binding_tests {
     use super::*;
+    use crate::accent::AccentChoice;
     use crate::command::ThemeChoice;
     use duja_core::config::Config;
     use duja_core::id::StableDisplayId;
@@ -686,7 +710,14 @@ mod binding_tests {
 
         let mut vm = SettingsVm::new();
         // A light resolution: raw preference Light, resolved palette dark = false.
-        vm.set_general(true, true, ThemeChoice::Light, false, false);
+        vm.set_general(
+            true,
+            true,
+            ThemeChoice::Light,
+            AccentChoice::Ruby,
+            false,
+            false,
+        );
         let vm = Rc::new(RefCell::new(vm));
         let shell = SettingsShell::new(vm.clone()).expect("settings shell instantiates");
 
@@ -696,13 +727,96 @@ mod binding_tests {
         );
 
         // Flip to a dark resolution and re-render: the palette must track it.
-        vm.borrow_mut()
-            .set_general(true, true, ThemeChoice::Dark, false, true);
+        vm.borrow_mut().set_general(
+            true,
+            true,
+            ThemeChoice::Dark,
+            AccentChoice::Ruby,
+            false,
+            true,
+        );
         shell.update_from_vm(&vm.borrow());
         assert!(
             shell.ui.get_dark(),
             "settings palette must follow the resolved dark theme"
         );
+    }
+
+    /// An RGBA quad as the `slint::Color` the palette should be carrying.
+    fn colour(rgba: crate::accent::Rgba) -> slint::Color {
+        crate::shell::to_slint(rgba)
+    }
+
+    // The settings window must repaint in the selected accent. It owns its *own*
+    // `Palette` instance (a Slint global is per component tree), so the flyout
+    // shell's push does not reach it — this goes red if `render_into` forgets to
+    // push the accent family here. Drives the real `.slint` properties, which a
+    // pure `SettingsVm` test cannot see.
+    #[test]
+    fn settings_palette_follows_the_selected_accent() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let mut vm = SettingsVm::new();
+        vm.set_general(
+            true,
+            true,
+            ThemeChoice::Dark,
+            AccentChoice::Emerald,
+            false,
+            true,
+        );
+        let vm = Rc::new(RefCell::new(vm));
+        let shell = SettingsShell::new(vm.clone()).expect("settings shell instantiates");
+
+        let emerald = crate::accent::resolve(AccentChoice::Emerald, true);
+        assert_eq!(shell.ui.get_accent(), colour(emerald.base));
+        assert_eq!(shell.ui.get_accent_hover(), colour(emerald.bright));
+        assert_eq!(shell.ui.get_accent_soft(), colour(emerald.wash));
+        // Emerald is light-luminance on dark, so its on-accent foreground must be
+        // ink — a white pill knob / button label would be invisible on the fill.
+        assert_eq!(shell.ui.get_accent_on(), colour(emerald.on));
+        assert_eq!(shell.ui.get_accent_index(), 2, "selector tracks the accent");
+
+        // Switch accent *and* theme: the family is re-resolved against both.
+        vm.borrow_mut().set_general(
+            true,
+            true,
+            ThemeChoice::Light,
+            AccentChoice::Onyx,
+            false,
+            false,
+        );
+        shell.update_from_vm(&vm.borrow());
+        let onyx_light = crate::accent::resolve(AccentChoice::Onyx, false);
+        assert_eq!(shell.ui.get_accent(), colour(onyx_light.base));
+        assert_eq!(shell.ui.get_accent_index(), 4);
+    }
+
+    // The sub-floor wash is the accent at a theme-dependent alpha; a lost alpha
+    // would make the software-dimming zone a solid accent block.
+    #[test]
+    fn settings_accent_soft_carries_the_theme_alpha() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let vm = Rc::new(RefCell::new(SettingsVm::new()));
+        let shell = SettingsShell::new(vm.clone()).expect("settings shell instantiates");
+
+        for (dark, expected) in [(true, 0x4d), (false, 0x33)] {
+            vm.borrow_mut().set_general(
+                true,
+                true,
+                ThemeChoice::Dark,
+                AccentChoice::Ruby,
+                false,
+                dark,
+            );
+            shell.update_from_vm(&vm.borrow());
+            assert_eq!(
+                shell.ui.get_accent_soft().alpha(),
+                expected,
+                "wash alpha (dark={dark})"
+            );
+        }
     }
 
     // First-paint fix, settings twin: like the flyout, every present must force a

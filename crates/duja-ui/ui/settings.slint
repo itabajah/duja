@@ -76,7 +76,10 @@ component MiniButton inherits Rectangle {
         text: root.text;
         font-size: 12px;
         font-weight: 600;
-        color: root.primary ? #ffffff : Palette.text;
+        // A primary button's label sits ON the accent fill, so it must contrast
+        // with the accent rather than being hardcoded white (which is unreadable on
+        // Gold/Emerald/Sapphire/Onyx in dark). No-op for ruby.
+        color: root.primary ? Palette.accent-on : Palette.text;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -132,6 +135,13 @@ export component SettingsWindow inherits Window {
 
     // --- inputs from the Rust shell (set from SettingsVm state) ---
     in property <bool> dark <=> Palette.dark;
+    // The accent family, pushed by the settings shell. This window owns its *own*
+    // `Palette` instance (a Slint global is per component tree), so these aliases
+    // are not redundant with the flyout's — without them only the flyout recolours.
+    in property <color> accent <=> Palette.accent;
+    in property <color> accent-hover <=> Palette.accent-hover;
+    in property <color> accent-soft <=> Palette.accent-soft;
+    in property <color> accent-on <=> Palette.accent-on;
     // The desired window height (logical px), driven by the app.
     in property <length> content-height: 600px;
     // Repaint anchor, flipped by the shell on every present (see the window-edge
@@ -142,6 +152,8 @@ export component SettingsWindow inherits Window {
     in-out property <bool> autostart-on;
     in property <bool> autostart-supported: true;
     in property <int> theme-index;
+    // The accent selector's row, indexing `duja_ui::accent::ACCENT_ORDER`.
+    in property <int> accent-index;
     in-out property <bool> update-check-on;
     in property <string> update-status;
     in property <bool> update-available;
@@ -154,6 +166,7 @@ export component SettingsWindow inherits Window {
     // --- outputs to the Rust shell (mapped onto SettingsVm calls) ---
     callback autostart-toggled(/* on */ bool);
     callback theme-selected(/* index */ int);
+    callback accent-selected(/* index */ int);
     callback update-check-toggled(/* on */ bool);
     callback check-updates-clicked();
     callback open-releases-clicked();
@@ -284,6 +297,21 @@ export component SettingsWindow inherits Window {
                                 accessible-label: @tr("Theme");
                                 selected => {
                                     root.theme-selected(self.current-index);
+                                }
+                            }
+                        }
+                        // The accent colour the whole app (and both icons) is
+                        // painted in. The row order must match
+                        // `duja_ui::accent::ACCENT_ORDER`, which the index maps
+                        // straight back through.
+                        FieldRow {
+                            label: @tr("Accent colour");
+                            ComboBox {
+                                model: [@tr("Ruby"), @tr("Gold"), @tr("Emerald"), @tr("Sapphire"), @tr("Onyx")];
+                                current-index: root.accent-index;
+                                accessible-label: @tr("Accent colour");
+                                selected => {
+                                    root.accent-selected(self.current-index);
                                 }
                             }
                         }

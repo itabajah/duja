@@ -29,6 +29,7 @@ use duja_core::continuum::{self, ContinuumConfig, SliderGeometry};
 use duja_core::id::StableDisplayId;
 use duja_core::model::{DimMode, DisplayKind, DisplaySnapshot};
 
+use crate::accent::AccentChoice;
 use crate::command::UiCommand;
 
 /// Which palette the flyout renders in.
@@ -157,6 +158,10 @@ pub struct FlyoutVm {
     dimming: BTreeMap<StableDisplayId, DimmingInfo>,
     link_all: bool,
     theme: Theme,
+    /// The accent the palette is painted in. The shell resolves it against
+    /// [`theme`](Self::theme) on every render, so a *theme* change automatically
+    /// re-pushes the right accent variants with no extra wiring.
+    accent: AccentChoice,
 }
 
 impl Default for FlyoutVm {
@@ -175,6 +180,7 @@ impl FlyoutVm {
             dimming: BTreeMap::new(),
             link_all: false,
             theme: Theme::default(),
+            accent: AccentChoice::default(),
         }
     }
 
@@ -331,6 +337,11 @@ impl FlyoutVm {
         self.theme = theme;
     }
 
+    /// Switch the accent colour. Pure presentation state; emits no command.
+    pub fn set_accent(&mut self, accent: AccentChoice) {
+        self.accent = accent;
+    }
+
     /// The current row list, in stable id order.
     #[must_use]
     pub fn rows(&self) -> &[FlyoutRow] {
@@ -347,6 +358,12 @@ impl FlyoutVm {
     #[must_use]
     pub fn theme(&self) -> Theme {
         self.theme
+    }
+
+    /// The current accent colour.
+    #[must_use]
+    pub fn accent(&self) -> AccentChoice {
+        self.accent
     }
 
     /// Whether there are no displays to show (drives the empty-state label).

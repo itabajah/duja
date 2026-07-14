@@ -9,6 +9,8 @@
 use duja_core::id::StableDisplayId;
 use duja_core::model::DimMode;
 
+use crate::accent::AccentChoice;
+
 /// A user-driven intent produced by a view-model, for the shell to forward.
 ///
 /// The set is deliberately tiny: everything the P4 flyout can *do* to the
@@ -71,6 +73,8 @@ pub enum SettingsCommand {
     SetAutostart(bool),
     /// Change the theme preference.
     SetTheme(ThemeChoice),
+    /// Change the accent colour the whole app is painted in (and the icons).
+    SetAccent(AccentChoice),
     /// Turn the opt-in update check on or off (config only; no network).
     SetUpdateCheck(bool),
     /// Run the update check now (the manual "Check for updates" action).

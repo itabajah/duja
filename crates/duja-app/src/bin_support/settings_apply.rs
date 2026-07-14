@@ -17,9 +17,11 @@
 
 use std::path::Path;
 
-use duja_core::config::{ConfigDocument, DimMode as ConfigDimMode, Theme as ConfigTheme};
+use duja_core::config::{
+    Accent as ConfigAccent, ConfigDocument, DimMode as ConfigDimMode, Theme as ConfigTheme,
+};
 use duja_core::model::DimMode;
-use duja_ui::{SettingsCommand, ThemeChoice};
+use duja_ui::{AccentChoice, SettingsCommand, ThemeChoice};
 
 /// Apply the config-affecting part of `command` to `doc`.
 ///
@@ -35,6 +37,10 @@ pub(crate) fn apply_to_document(doc: &mut ConfigDocument, command: &SettingsComm
         }
         SettingsCommand::SetTheme(choice) => {
             doc.set_theme(theme_to_config(*choice));
+            true
+        }
+        SettingsCommand::SetAccent(choice) => {
+            doc.set_accent(accent_to_config(*choice));
             true
         }
         SettingsCommand::SetUpdateCheck(on) => {
@@ -104,6 +110,29 @@ pub(crate) fn theme_to_choice(theme: ConfigTheme) -> ThemeChoice {
     }
 }
 
+/// Map a UI [`AccentChoice`] onto the config accent enum.
+pub(crate) fn accent_to_config(choice: AccentChoice) -> ConfigAccent {
+    match choice {
+        AccentChoice::Ruby => ConfigAccent::Ruby,
+        AccentChoice::Gold => ConfigAccent::Gold,
+        AccentChoice::Emerald => ConfigAccent::Emerald,
+        AccentChoice::Sapphire => ConfigAccent::Sapphire,
+        AccentChoice::Onyx => ConfigAccent::Onyx,
+    }
+}
+
+/// Map a config accent enum onto the UI [`AccentChoice`] (to seed the selector and
+/// the palette on startup).
+pub(crate) fn accent_to_choice(accent: ConfigAccent) -> AccentChoice {
+    match accent {
+        ConfigAccent::Ruby => AccentChoice::Ruby,
+        ConfigAccent::Gold => AccentChoice::Gold,
+        ConfigAccent::Emerald => AccentChoice::Emerald,
+        ConfigAccent::Sapphire => AccentChoice::Sapphire,
+        ConfigAccent::Onyx => AccentChoice::Onyx,
+    }
+}
+
 /// Map a domain [`DimMode`] onto the config mirror (via the existing `From`).
 fn dim_mode_to_config(mode: DimMode) -> ConfigDimMode {
     mode.into()
@@ -123,6 +152,26 @@ mod tests {
         for choice in [ThemeChoice::Auto, ThemeChoice::Light, ThemeChoice::Dark] {
             assert_eq!(theme_to_choice(theme_to_config(choice)), choice);
         }
+    }
+
+    #[test]
+    fn accent_mappings_round_trip() {
+        for choice in duja_ui::ACCENT_ORDER {
+            assert_eq!(accent_to_choice(accent_to_config(choice)), choice);
+        }
+    }
+
+    #[test]
+    fn set_accent_command_writes_the_document() {
+        let mut doc = ConfigDocument::defaults();
+        assert!(apply_to_document(
+            &mut doc,
+            &SettingsCommand::SetAccent(AccentChoice::Emerald)
+        ));
+        assert_eq!(
+            doc.config().expect("typed").general.accent,
+            ConfigAccent::Emerald
+        );
     }
 
     #[test]
