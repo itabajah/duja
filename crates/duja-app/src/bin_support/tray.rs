@@ -173,10 +173,14 @@ mod geometry;
 mod icon;
 
 /// The flyout's fixed logical width (matches `flyout.slint`).
-const FLYOUT_LOGICAL_WIDTH: f32 = 320.0;
-/// The settings window's fixed logical design size (matches `settings.slint`).
-const SETTINGS_LOGICAL_WIDTH: f32 = 440.0;
-const SETTINGS_LOGICAL_HEIGHT: f32 = 600.0;
+const FLYOUT_LOGICAL_WIDTH: f32 = 360.0;
+/// The flyout's hard maximum logical height. Beyond this the rows scroll rather
+/// than the window growing (matches the `clamp(..., 620px)` in `flyout.slint`).
+const FLYOUT_MAX_LOGICAL_HEIGHT: f32 = 620.0;
+/// The settings window's initial logical size (matches `settings.slint`'s
+/// `preferred-width`/`preferred-height`). The window is user-resizable from here.
+const SETTINGS_LOGICAL_WIDTH: f32 = 560.0;
+const SETTINGS_LOGICAL_HEIGHT: f32 = 700.0;
 /// Gap kept from the work-area edges when placing the flyout.
 const FLYOUT_MARGIN: i32 = 12;
 
@@ -545,13 +549,18 @@ impl AppState {
     /// so the window lands flush against the tray edge at any scale (P0 live-QA bug
     /// 4); Slint sizes the buffer natively for the monitor it is shown on (PR #29).
     fn show_flyout(&mut self) {
-        use crate::bin_support::positioning::{flyout_origin, physical_window_size};
+        use crate::bin_support::positioning::{
+            flyout_height_cap, flyout_origin, physical_window_size,
+        };
+        let (cursor, work, scale) = geometry::cursor_work_area_and_scale();
         // Drive the window height from the row count (a no-frame window is not
-        // auto-grown to its content preferred size). Logical px — Slint scales it.
-        let logical_height = self.flyout_logical_height();
+        // auto-grown to its content preferred size), but never exceed the work
+        // area: on a small screen the flyout caps here and its rows scroll
+        // instead of overflowing off-screen. Logical px — Slint scales it.
+        let cap = flyout_height_cap(work, scale, FLYOUT_MARGIN, FLYOUT_MAX_LOGICAL_HEIGHT);
+        let logical_height = self.flyout_logical_height().min(cap).max(160.0);
         self.shell.set_content_height(logical_height);
 
-        let (cursor, work, scale) = geometry::cursor_work_area_and_scale();
         let physical = physical_window_size(FLYOUT_LOGICAL_WIDTH, logical_height, scale);
         let (x, y) = flyout_origin(cursor, work, physical, FLYOUT_MARGIN);
         self.shell
@@ -583,8 +592,8 @@ impl AppState {
     /// mirrors the `.slint` layout arithmetic (chrome + one card per row) to size
     /// it. Approximate by design — a few pixels of slack sit at the bottom.
     fn flyout_logical_height(&self) -> f32 {
-        const CHROME: f32 = 118.0; // padding + header + footer + inter-section gaps
-        const CARD: f32 = 132.0; // one monitor card
+        const CHROME: f32 = 78.0; // padding + header + inter-section gap (no footer)
+        const CARD: f32 = 101.0; // one card (name+caption row, then slider+pill row)
         const CARD_GAP: f32 = 8.0;
         let rows = self.vm.borrow().rows().len();
         let body = if rows == 0 {
@@ -593,7 +602,7 @@ impl AppState {
             let n = f32::from(u16::try_from(rows).unwrap_or(u16::MAX));
             n * CARD + (n - 1.0) * CARD_GAP
         };
-        (CHROME + body).clamp(160.0, 620.0)
+        (CHROME + body).clamp(160.0, FLYOUT_MAX_LOGICAL_HEIGHT)
     }
 
     /// Hide the flyout (process keeps running in the tray).

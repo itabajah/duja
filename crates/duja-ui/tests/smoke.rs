@@ -85,6 +85,6 @@ fn settings_shell_instantiates_and_renders() {
 
     // One-shot present at the design size (origin 0,0) — the same entry the app
     // uses; there is no separate `show` anymore.
-    shell.present_at(440.0, 600.0, 0, 0);
+    shell.present_at(560.0, 700.0, 0, 0);
     shell.hide();
 }

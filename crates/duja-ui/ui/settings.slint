@@ -108,17 +108,26 @@ component FieldRow inherits HorizontalLayout {
         font-size: 13px;
         vertical-alignment: center;
         horizontal-stretch: 1;
+        // Wrap rather than force the row wider — a long caption (e.g. "Brightness
+        // at hardware minimum") was the source of the horizontal scrollbar.
+        wrap: word-wrap;
     }
     @children
 }
 
 export component SettingsWindow inherits Window {
     title: @tr("Duja Settings");
-    width: 440px;
-    height: clamp(root.content-height, 340px, 820px);
+    // User-resizable both ways (item 1): a *preferred* (not fixed) size lets the
+    // OS resize reflow the content; min-width/height bound how far it can shrink
+    // so the controls always fit. The custom frameless grips below drive the
+    // actual resize (there is no OS border to grab).
+    preferred-width: 560px;
+    preferred-height: 700px;
+    min-width: 380px;
+    min-height: 360px;
     background: Palette.bg;
-    // Frameless like the flyout; the header is a drag handle (see below) and the
-    // ✕ / Esc close it. Keyboard resize/minimize are intentionally not offered.
+    // Frameless like the flyout; the header is a drag handle (see below), the
+    // edge/corner grips resize, and ✕ / Esc close it.
     no-frame: true;
 
     // --- inputs from the Rust shell (set from SettingsVm state) ---
@@ -160,6 +169,10 @@ export component SettingsWindow inherits Window {
     // Begin a system window move (frameless header drag). Wired to winit's
     // `drag_window` in the shell.
     callback start-drag();
+    // Begin a system window resize in a direction (0=N,1=S,2=E,3=W,4=NE,5=NW,
+    // 6=SE,7=SW). Emitted by the edge/corner grips; wired to winit's
+    // `drag_resize_window` in the shell.
+    callback start-resize(/* direction */ int);
 
     forward-focus: scope;
     scope := FocusScope {
@@ -237,9 +250,17 @@ export component SettingsWindow inherits Window {
             }
 
             ScrollView {
+                // Vertical scroll only — the content wraps/stretches to the width,
+                // so a horizontal bar should never appear (item 1).
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
                 VerticalLayout {
                     padding: 14px;
                     spacing: 12px;
+                    // Pack sections to the top: now that the window is resizable it
+                    // can be taller than the content, and without this the surplus
+                    // would spread the sections/rows apart instead of sitting at the
+                    // bottom.
+                    alignment: start;
 
                     // ---------------- General ----------------
                     Section {
@@ -296,7 +317,8 @@ export component SettingsWindow inherits Window {
                                 FieldRow {
                                     label: @tr("Hardware floor");
                                     Slider {
-                                        width: 160px;
+                                        min-width: 150px;
+                                        horizontal-stretch: 1;
                                         minimum: 0;
                                         maximum: 50;
                                         value: monitor.floor-pct;
@@ -317,7 +339,8 @@ export component SettingsWindow inherits Window {
                                 FieldRow {
                                     label: @tr("Brightness at hardware minimum");
                                     Slider {
-                                        width: 160px;
+                                        min-width: 150px;
+                                        horizontal-stretch: 1;
                                         minimum: 5;
                                         maximum: 60;
                                         value: monitor.min-perceived-pct;
@@ -537,6 +560,108 @@ export component SettingsWindow inherits Window {
                             Rectangle { horizontal-stretch: 1; }
                         }
                     }
+                }
+            }
+        }
+
+        // Frameless resize grips: thin transparent drag zones on every edge and
+        // corner (item 1). Drawn after the content so they sit on top; only the
+        // outer 6px — window padding, no controls — is covered, so every widget
+        // stays clickable. Each starts a winit system resize via `start-resize`
+        // (0=N, 1=S, 2=E, 3=W, 4=NE, 5=NW, 6=SE, 7=SW).
+        Rectangle {
+            x: 6px;
+            y: 0;
+            width: root.width - 12px;
+            height: 6px;
+            TouchArea {
+                mouse-cursor: ns-resize;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) { root.start-resize(0); }
+                }
+            }
+        }
+        Rectangle {
+            x: 6px;
+            y: root.height - 6px;
+            width: root.width - 12px;
+            height: 6px;
+            TouchArea {
+                mouse-cursor: ns-resize;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) { root.start-resize(1); }
+                }
+            }
+        }
+        Rectangle {
+            x: root.width - 6px;
+            y: 6px;
+            width: 6px;
+            height: root.height - 12px;
+            TouchArea {
+                mouse-cursor: ew-resize;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) { root.start-resize(2); }
+                }
+            }
+        }
+        Rectangle {
+            x: 0;
+            y: 6px;
+            width: 6px;
+            height: root.height - 12px;
+            TouchArea {
+                mouse-cursor: ew-resize;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) { root.start-resize(3); }
+                }
+            }
+        }
+        Rectangle {
+            x: root.width - 6px;
+            y: 0;
+            width: 6px;
+            height: 6px;
+            TouchArea {
+                mouse-cursor: nesw-resize;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) { root.start-resize(4); }
+                }
+            }
+        }
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: 6px;
+            height: 6px;
+            TouchArea {
+                mouse-cursor: nwse-resize;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) { root.start-resize(5); }
+                }
+            }
+        }
+        Rectangle {
+            x: root.width - 6px;
+            y: root.height - 6px;
+            width: 6px;
+            height: 6px;
+            TouchArea {
+                mouse-cursor: nwse-resize;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) { root.start-resize(6); }
+                }
+            }
+        }
+        Rectangle {
+            x: 0;
+            y: root.height - 6px;
+            width: 6px;
+            height: 6px;
+            TouchArea {
+                mouse-cursor: nesw-resize;
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) { root.start-resize(7); }
                 }
             }
         }
