@@ -7,8 +7,8 @@
 //   * Every user-visible string goes through @tr(...) for i18n from day one.
 //   * Keyboard: Esc emits esc-pressed; Tab traverses; widgets take arrow keys.
 
-import { Slider, ComboBox, ScrollView, Button } from "std-widgets.slint";
-import { Palette, IconButton, PillToggle } from "flyout.slint";
+import { ScrollView } from "std-widgets.slint";
+import { Palette, IconButton, PillToggle, Dropdown, TrackSlider, TextButton } from "flyout.slint";
 
 // One per-monitor section, mirroring `duja_ui::settings_vm::MonitorSection`.
 export struct SettingsMonitorData {
@@ -291,12 +291,12 @@ export component SettingsWindow inherits Window {
                         }
                         FieldRow {
                             label: @tr("Theme");
-                            ComboBox {
+                            Dropdown {
                                 model: [@tr("Auto"), @tr("Light"), @tr("Dark")];
                                 current-index: root.theme-index;
-                                accessible-label: @tr("Theme");
-                                selected => {
-                                    root.theme-selected(self.current-index);
+                                label: @tr("Theme");
+                                selected(index) => {
+                                    root.theme-selected(index);
                                 }
                             }
                         }
@@ -306,12 +306,12 @@ export component SettingsWindow inherits Window {
                         // straight back through.
                         FieldRow {
                             label: @tr("Accent colour");
-                            ComboBox {
+                            Dropdown {
                                 model: [@tr("Ruby"), @tr("Gold"), @tr("Emerald"), @tr("Sapphire"), @tr("Onyx")];
                                 current-index: root.accent-index;
-                                accessible-label: @tr("Accent colour");
-                                selected => {
-                                    root.accent-selected(self.current-index);
+                                label: @tr("Accent colour");
+                                selected(index) => {
+                                    root.accent-selected(index);
                                 }
                             }
                         }
@@ -344,13 +344,12 @@ export component SettingsWindow inherits Window {
                                 }
                                 FieldRow {
                                     label: @tr("Hardware floor");
-                                    Slider {
+                                    TrackSlider {
                                         min-width: 150px;
-                                        horizontal-stretch: 1;
                                         minimum: 0;
                                         maximum: 50;
                                         value: monitor.floor-pct;
-                                        accessible-label: @tr("Hardware floor");
+                                        label: @tr("Hardware floor");
                                         changed(v) => {
                                             root.monitor-floor-changed(idx, v);
                                         }
@@ -366,13 +365,12 @@ export component SettingsWindow inherits Window {
                                 }
                                 FieldRow {
                                     label: @tr("Brightness at hardware minimum");
-                                    Slider {
+                                    TrackSlider {
                                         min-width: 150px;
-                                        horizontal-stretch: 1;
                                         minimum: 5;
                                         maximum: 60;
                                         value: monitor.min-perceived-pct;
-                                        accessible-label: @tr("Brightness at hardware minimum");
+                                        label: @tr("Brightness at hardware minimum");
                                         changed(v) => {
                                             root.monitor-min-perceived-changed(idx, v);
                                         }
@@ -388,12 +386,12 @@ export component SettingsWindow inherits Window {
                                 }
                                 FieldRow {
                                     label: @tr("Dim mode");
-                                    ComboBox {
+                                    Dropdown {
                                         model: [@tr("Overlay"), @tr("Gamma"), @tr("Off")];
                                         current-index: monitor.dim-mode-index;
-                                        accessible-label: @tr("Dim mode");
-                                        selected => {
-                                            root.monitor-dim-mode-selected(idx, self.current-index);
+                                        label: @tr("Dim mode");
+                                        selected(index) => {
+                                            root.monitor-dim-mode-selected(idx, index);
                                         }
                                     }
                                 }
@@ -405,11 +403,12 @@ export component SettingsWindow inherits Window {
                                 }
                                 if monitor.has-inputs: FieldRow {
                                     label: @tr("Input source");
-                                    ComboBox {
+                                    Dropdown {
                                         model: monitor.inputs;
-                                        accessible-label: @tr("Input source");
-                                        selected => {
-                                            root.monitor-input-selected(idx, self.current-index);
+                                        current-index: 0;
+                                        label: @tr("Input source");
+                                        selected(index) => {
+                                            root.monitor-input-selected(idx, index);
                                         }
                                     }
                                 }
@@ -560,10 +559,10 @@ export component SettingsWindow inherits Window {
                         }
                         HorizontalLayout {
                             spacing: 8px;
-                            Button {
+                            TextButton {
                                 text: @tr("Check now");
+                                label: @tr("Check for updates now");
                                 enabled: root.update-check-on;
-                                accessible-label: @tr("Check for updates now");
                                 clicked => {
                                     root.check-updates-clicked();
                                 }
@@ -578,9 +577,9 @@ export component SettingsWindow inherits Window {
                             }
                         }
                         if root.update-available: HorizontalLayout {
-                            Button {
+                            TextButton {
                                 text: @tr("Open releases page");
-                                accessible-label: @tr("Open the releases page in your browser");
+                                label: @tr("Open the releases page in your browser");
                                 clicked => {
                                     root.open-releases-clicked();
                                 }

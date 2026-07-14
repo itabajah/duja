@@ -198,6 +198,338 @@ export component PillToggle inherits Rectangle {
     }
 }
 
+// A themed dropdown (custom, not the std `ComboBox`) so it draws from *our*
+// `Palette` in both themes and sizes identically everywhere. The std widget
+// reads Slint's own Fluent palette, which follows the OS colour-scheme rather
+// than our app theme — its label went invisible on the light theme (a real
+// light-mode bug) and it could never follow the accent. Fixed 34px height and
+// `min-width` so every dropdown across the app (theme, accent, dim mode, input)
+// is the same size.
+export component Dropdown inherits Rectangle {
+    in property <[string]> model;
+    in property <int> current-index;
+    in property <bool> enabled: true;
+    in property <string> label;
+    callback selected(/* index */ int);
+
+    min-width: 158px;
+    max-width: 158px;
+    min-height: 34px;
+    max-height: 34px;
+    border-radius: 8px;
+    opacity: enabled ? 1.0 : 0.5;
+    background: touch.has-hover ? Palette.surface-hover : Palette.surface;
+    animate background { duration: 120ms; }
+    border-width: fs.has-focus ? 2px : 1px;
+    border-color: fs.has-focus ? Palette.focus-ring : Palette.border-strong;
+    forward-focus: fs;
+    accessible-role: combobox;
+    accessible-label: root.label;
+    accessible-expandable: true;
+    accessible-expanded: popup-open;
+    accessible-action-expand => {
+        popup.show();
+    }
+
+    // Tracks the popup so keyboard users can tell it is open (a11y) and so the
+    // chevron can flip. Set true on show, reset by the popup's `close` handler.
+    property <bool> popup-open;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 10px;
+        spacing: 6px;
+        Text {
+            text: (root.current-index >= 0 && root.current-index < root.model.length)
+                ? root.model[root.current-index] : "";
+            color: Palette.text;
+            font-size: 13px;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        Text {
+            text: root.popup-open ? "▴" : "▾";
+            color: Palette.text-subtle;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: parent.height + 4px;
+        width: root.width;
+        // Close when the user clicks elsewhere; an item click closes explicitly
+        // (below) after it has been delivered to the row's TouchArea.
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: Palette.surface;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border-strong;
+            drop-shadow-blur: 14px;
+            drop-shadow-color: #00000059;
+            VerticalLayout {
+                padding: 4px;
+                for item[idx] in root.model: Rectangle {
+                    height: 30px;
+                    border-radius: 6px;
+                    background: item-touch.has-hover ? Palette.surface-hover
+                        : (idx == root.current-index ? Palette.surface-greyed : transparent);
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 6px;
+                        Text {
+                            text: item;
+                            color: Palette.text;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                            horizontal-alignment: left;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        // A quiet tick on the current row.
+                        Text {
+                            text: idx == root.current-index ? "✓" : "";
+                            color: Palette.accent;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    item-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.selected(idx);
+                            root.popup-open = false;
+                            popup.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fs := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.popup-open = true;
+                popup.show();
+                return accept;
+            }
+            // Arrow keys change the selection in place without opening the popup,
+            // matching the std widget's keyboard behaviour.
+            if (event.text == Key.DownArrow) {
+                if (root.current-index < root.model.length - 1) {
+                    root.selected(root.current-index + 1);
+                }
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                if (root.current-index > 0) {
+                    root.selected(root.current-index - 1);
+                }
+                return accept;
+            }
+            return reject;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            fs.focus();
+            root.popup-open = true;
+            popup.show();
+        }
+    }
+}
+
+// A generic accent-following slider over an arbitrary `[minimum, maximum]` range
+// (custom, not the std `Slider`, which draws Slint's Fluent accent and never
+// followed our theme accent). Simpler than `BrightnessSlider` — no floor marker,
+// sub-floor zone, value bubble or glide — for the per-monitor calibration rows.
+export component TrackSlider inherits Rectangle {
+    in property <float> value;
+    in property <float> minimum: 0;
+    in property <float> maximum: 100;
+    in property <bool> enabled: true;
+    in property <string> label;
+    callback changed(/* value */ float);
+
+    min-width: 120px;
+    min-height: 24px;
+    max-height: 24px;
+    horizontal-stretch: 1;
+    opacity: enabled ? 1.0 : 0.5;
+    forward-focus: fs;
+    accessible-role: slider;
+    accessible-label: root.label;
+    accessible-value: root.value;
+    accessible-value-minimum: root.minimum;
+    accessible-value-maximum: root.maximum;
+    accessible-value-step: 1;
+
+    property <length> thumb-size: 14px;
+    property <length> track-h: 5px;
+    property <length> usable: root.width - thumb-size;
+    // Guard against a zero span (minimum == maximum) dividing by zero.
+    property <float> span: max(root.maximum - root.minimum, 0.001);
+    property <float> frac: clamp((root.value - root.minimum) / span, 0, 1);
+    property <bool> active: touch.pressed;
+
+    function set-from-pointer() {
+        if (!root.enabled) {
+            return;
+        }
+        root.changed(root.minimum + clamp((touch.mouse-x - thumb-size / 2) / usable, 0, 1) * span);
+    }
+    function nudge(delta: float) {
+        root.changed(clamp(root.value + delta, root.minimum, root.maximum));
+    }
+
+    // Track base.
+    Rectangle {
+        x: root.thumb-size / 2;
+        width: root.usable;
+        height: root.track-h;
+        y: (parent.height - self.height) / 2;
+        border-radius: self.height / 2;
+        background: Palette.track;
+    }
+    // Accent-following fill.
+    Rectangle {
+        x: root.thumb-size / 2;
+        width: root.usable * root.frac;
+        height: root.track-h;
+        y: (parent.height - self.height) / 2;
+        border-radius: self.height / 2;
+        background: @linear-gradient(90deg, Palette.accent 0%, Palette.accent-hover 100%);
+    }
+    // Thumb with the same accent glow as the brightness slider.
+    Rectangle {
+        width: root.thumb-size;
+        height: root.thumb-size;
+        border-radius: self.width / 2;
+        y: (parent.height - self.height) / 2;
+        x: root.usable * root.frac;
+        background: Palette.thumb;
+        border-width: 1px;
+        border-color: Palette.border-strong;
+        drop-shadow-blur: (root.active || touch.has-hover) ? 8px : 2px;
+        drop-shadow-color: (root.active || touch.has-hover) ? Palette.thumb-glow : #00000040;
+        animate drop-shadow-blur { duration: 120ms; }
+        animate drop-shadow-color { duration: 120ms; }
+    }
+    // Focus ring around the whole track when keyboard-focused.
+    if fs.has-focus: Rectangle {
+        x: 0;
+        width: root.width;
+        height: root.track-h + 12px;
+        y: (parent.height - self.height) / 2;
+        border-radius: self.height / 2;
+        border-width: 2px;
+        border-color: Palette.focus-ring;
+        background: transparent;
+    }
+
+    fs := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.RightArrow || event.text == Key.UpArrow) {
+                root.nudge(1);
+                return accept;
+            }
+            if (event.text == Key.LeftArrow || event.text == Key.DownArrow) {
+                root.nudge(-1);
+                return accept;
+            }
+            return reject;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        moved => {
+            root.set-from-pointer();
+        }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                fs.focus();
+                root.set-from-pointer();
+            }
+        }
+    }
+}
+
+// A themed text button (custom, not the std `Button`) so it draws from *our*
+// `Palette` and follows the accent when `primary`. Sizes to its label, so it
+// suits variable-width actions ("Check now", "Open releases page").
+export component TextButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary;
+    in property <bool> enabled: true;
+    // A richer label for screen readers; falls back to the visible text.
+    in property <string> label;
+    callback clicked();
+
+    min-height: 32px;
+    max-height: 32px;
+    border-radius: 8px;
+    opacity: enabled ? 1.0 : 0.5;
+    background: primary
+        ? (touch.has-hover ? Palette.accent-hover : Palette.accent)
+        : (touch.has-hover ? Palette.surface-hover : Palette.surface);
+    animate background { duration: 120ms; }
+    border-width: primary ? 0px : 1px;
+    border-color: fs.has-focus ? Palette.focus-ring : Palette.border-strong;
+    forward-focus: fs;
+    accessible-role: button;
+    accessible-label: root.label == "" ? root.text : root.label;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        Text {
+            text: root.text;
+            // A primary label sits ON the accent fill (use `accent-on`); a
+            // secondary one sits on the surface (use `text`, dimmed when disabled).
+            color: root.primary ? Palette.accent-on : Palette.text;
+            font-size: 13px;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+
+    fs := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            fs.focus();
+            root.clicked();
+        }
+    }
+}
+
 // The brightness slider with a hardware-floor handoff marker. Custom (not the
 // std Slider) so it can draw the marker and the two-tone sub-floor zone, and so
 // a mid-drag pointer grab is never disturbed by an external `value` write: while
