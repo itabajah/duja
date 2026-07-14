@@ -46,11 +46,12 @@ impl SettingsShell {
             .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
 
         // Install the fractional-DPI buffer keeper (no focus-loss dismissal for
-        // the settings window). `desired` seeds to the design size; the app keeps
-        // it current via `set_content_height` / `present_at`.
-        let desired: crate::dpi::DesiredSize = Rc::new(std::cell::Cell::new((440.0, 600.0)));
+        // the settings window). `desired` seeds to the initial size; `present_at`
+        // keeps it current, and — because the settings window is user-resizable —
+        // `track_resize: true` updates it as the user drags the window's edges.
+        let desired: crate::dpi::DesiredSize = Rc::new(std::cell::Cell::new((560.0, 700.0)));
         let focus_lost: crate::dpi::FocusLostCb = Rc::new(RefCell::new(None));
-        crate::dpi::install_window_hook(ui.window(), desired.clone(), focus_lost);
+        crate::dpi::install_window_hook(ui.window(), desired.clone(), focus_lost, true);
 
         let shell = SettingsShell {
             ui,
@@ -86,6 +87,35 @@ impl SettingsShell {
                     use i_slint_backend_winit::WinitWindowAccessor;
                     ui.window().with_winit_window(|w| {
                         let _ = w.drag_window();
+                    });
+                }
+            });
+        }
+
+        // Frameless resize grips: start a winit system resize in the direction the
+        // grip encodes (the `.slint` edge/corner TouchAreas pass 0..=7). The OS
+        // then drives the resize until release — no per-frame set-size.
+        {
+            let weak = self.ui.as_weak();
+            self.ui.on_start_resize(move |dir| {
+                if let Some(ui) = weak.upgrade() {
+                    use i_slint_backend_winit::WinitWindowAccessor;
+                    use i_slint_backend_winit::winit::window::ResizeDirection;
+                    let direction = match dir {
+                        0 => ResizeDirection::North,
+                        1 => ResizeDirection::South,
+                        2 => ResizeDirection::East,
+                        3 => ResizeDirection::West,
+                        4 => ResizeDirection::NorthEast,
+                        5 => ResizeDirection::NorthWest,
+                        6 => ResizeDirection::SouthEast,
+                        7 => ResizeDirection::SouthWest,
+                        // The `.slint` grips only ever emit 0..=7; ignore anything
+                        // else rather than starting a stray corner resize.
+                        _ => return,
+                    };
+                    ui.window().with_winit_window(|w| {
+                        let _ = w.drag_resize_window(direction);
                     });
                 }
             });
@@ -294,6 +324,29 @@ impl SettingsShell {
         self.desired.set((logical_width, logical_height));
         self.set_position(x, y);
         let _ = self.ui.show();
+        // A no-frame *resizable* window opens at its content's preferred size and
+        // ignores the `.slint` preferred-width/height, so force the initial inner
+        // size to the intended design size. Safe on the show path here (unlike the
+        // flyout) because the `present-nonce` flip below repaints the whole window,
+        // so this show-time resize cannot leave a partial first frame.
+        crate::dpi::enforce_physical_buffer(self.ui.window(), logical_width, logical_height);
+        // The settings window is user-resizable (custom frameless grips drive
+        // `drag_resize_window`); assert it now that the winit window exists. The
+        // `.slint` min-width/height bound how far it can shrink. No-op off winit.
+        {
+            use i_slint_backend_winit::WinitWindowAccessor;
+            use i_slint_backend_winit::winit::dpi::LogicalSize;
+            self.ui.window().with_winit_window(|w| {
+                w.set_resizable(true);
+                // Enforce the same shrink floor as the `.slint` min-width/height at
+                // the OS level, so an OS-driven grip resize can't drag the window
+                // below the size its controls need (belt-and-suspenders to Slint's
+                // own min-constraint propagation).
+                w.set_min_inner_size(Some(LogicalSize::new(380.0_f64, 360.0_f64)));
+                // Give the taskbar button a real icon (see `crate::window_icon`).
+                w.set_window_icon(crate::window_icon::app_icon());
+            });
+        }
         // Flip the repaint anchor so the whole window is marked dirty and the
         // software renderer presents a complete frame (see the flyout's
         // `present_at` for the full root cause).
@@ -640,14 +693,14 @@ mod binding_tests {
         let shell = SettingsShell::new(vm).expect("settings shell instantiates");
 
         let initial = shell.ui.get_present_nonce();
-        shell.present_at(440.0, 600.0, 0, 0);
+        shell.present_at(560.0, 700.0, 0, 0);
         assert_ne!(
             shell.ui.get_present_nonce(),
             initial,
             "present_at must flip the repaint nonce so the whole window is dirtied"
         );
 
-        shell.present_at(440.0, 600.0, 0, 0);
+        shell.present_at(560.0, 700.0, 0, 0);
         assert_eq!(
             shell.ui.get_present_nonce(),
             initial,

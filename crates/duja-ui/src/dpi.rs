@@ -39,12 +39,19 @@ pub(crate) type FocusLostCb = Rc<RefCell<Option<Box<dyn FnMut()>>>>;
 /// buffer at `desired × scale` across `ScaleFactorChanged`, and forwards a
 /// focus-loss to `focus_lost` when one is set. A no-op off the winit backend.
 ///
+/// When `track_resize` is set (the user-resizable settings window), a `Resized`
+/// also records the new **logical** size into `desired`, so a later scale change
+/// re-asserts the size the *user* dragged to rather than the initial seed. The
+/// fixed-size flyout passes `false` (its size is app-driven; recording its own
+/// re-asserts would only invite rounding drift).
+///
 /// Only one winit event hook can be registered per window, so both concerns
 /// share this one.
 pub(crate) fn install_window_hook(
     window: &slint::Window,
     desired: DesiredSize,
     focus_lost: FocusLostCb,
+    track_resize: bool,
 ) {
     window.on_winit_window_event(move |slint_window, event| {
         match event {
@@ -55,6 +62,35 @@ pub(crate) fn install_window_hook(
                 let scale = *scale_factor as f32;
                 let (lw, lh) = desired.get();
                 slint_window.with_winit_window(|w| size_to(w, lw, lh, scale));
+            }
+            WindowEvent::Resized(size) if track_resize => {
+                // Record the user's new size as logical px (physical / scale) so
+                // the scale-change arm above re-asserts it. Query the **monitor**
+                // scale (as `enforce_physical_buffer` does), never the window's own
+                // cached scale: right after `show()` the latter can still read the
+                // provisional 1.0, so a show-time programmatic `Resized` would be
+                // recorded in the wrong units and mis-size the window on the next
+                // scale change. We only *record* here — never `request_inner_size`
+                // — so this cannot loop with the resize.
+                let scale = slint_window
+                    .with_winit_window(|w| {
+                        w.current_monitor()
+                            .map_or_else(|| w.scale_factor(), |m| m.scale_factor())
+                    })
+                    .unwrap_or(1.0);
+                let scale = if scale.is_finite() && scale >= 0.1 {
+                    scale
+                } else {
+                    1.0
+                };
+                // RATIONALE (cast_possible_truncation, cast_precision_loss): a
+                // display scale is tiny and exactly representable in f32; physical
+                // window dimensions are far inside f32's exact-integer range.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                let (scale, pw, ph) = (scale as f32, size.width as f32, size.height as f32);
+                if pw >= 1.0 && ph >= 1.0 {
+                    desired.set((pw / scale, ph / scale));
+                }
             }
             WindowEvent::Focused(false) => {
                 if let Some(cb) = focus_lost.borrow_mut().as_mut() {

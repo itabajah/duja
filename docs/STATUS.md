@@ -1,6 +1,6 @@
 # Duja — Project Status
 
-_Last updated: 2026-07-13 (repo audit cleanup; Windows UI hardening #27–#30)._
+_Last updated: 2026-07-14 (UI layout & ruby theme pass; continuum v2 landed)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -254,6 +254,36 @@ path). The glide honours the OS "animation effects" accessibility setting
 (`SPI_GETCLIENTAREAANIMATION`) and is forced to 0 while the window is hidden or
 during a drag; only the rendered thumb glides, so the DDC-never-animates rule is
 untouched.
+
+### UI layout & ruby theme (2026-07-14)
+
+A visual/layout pass driven by direct user requests, in four small PRs:
+
+- **Ruby theme.** The shared `Palette` accent moved from blue to a ruby red
+  (`accent`/`accent-hover`/`accent-soft`/`thumb-glow`/`focus-ring`), and every
+  neutral grey took a subtle warm tint at the same lightness so the whole surface
+  reads warm rather than cool. `danger` shifted lighter/pinker (dark) and deeper
+  (light) to stay distinct from the accent. One `Palette.dark` bool still drives
+  both themes; the two std-widget settings sliders keep their neutral look.
+- **Flyout header & inline toggle.** Each row's "Software dimming" toggle now sits
+  inline to the right of its slider (was a separate row beneath it); the "Link
+  all" toggle moved into the header (after the wordmark), retiring the footer and
+  reclaiming a row of height. The manual refresh affordance was dropped from the
+  UI — hot-plug auto-refreshes, and the rescan stays wired (`refresh-requested`)
+  but unsurfaced, since the software renderer would not ink its glyph. The flyout
+  widened 320→360 px.
+- **Flyout scroll.** The rows now live in a `ScrollView`: the window still grows
+  with the display count up to its max, but beyond that (or on a small screen —
+  the height is capped to the work area) the rows scroll instead of clipping,
+  matching the settings window.
+- **Resizable settings.** The settings window is user-resizable both ways via
+  custom frameless edge/corner grips (winit `drag_resize_window`) with
+  `preferred`/`min` sizing, and the horizontal scrollbar is gone (the long
+  calibration label wraps, the sliders stretch, the ScrollView's horizontal bar
+  is off). The `Resized`→`desired` capture keeps the DPI re-assert tracking the
+  user's chosen size. The frameless-resize *behaviour* and all the theme/layout
+  aesthetics are the pending visual-QA items (below); the code compiles, lints,
+  and its binding/geometry logic is unit-covered.
 
 ## P5 gate results
 

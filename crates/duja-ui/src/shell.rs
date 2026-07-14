@@ -62,9 +62,9 @@ impl FlyoutShell {
         // Install the single winit event hook: fractional-DPI buffer keeper +
         // focus-loss forwarder. `desired` seeds to the design size; the app
         // updates it via `enforce_logical_size`.
-        let desired: crate::dpi::DesiredSize = Rc::new(std::cell::Cell::new((320.0, 260.0)));
+        let desired: crate::dpi::DesiredSize = Rc::new(std::cell::Cell::new((360.0, 260.0)));
         let focus_lost: crate::dpi::FocusLostCb = Rc::new(RefCell::new(None));
-        crate::dpi::install_window_hook(ui.window(), desired.clone(), focus_lost.clone());
+        crate::dpi::install_window_hook(ui.window(), desired.clone(), focus_lost.clone(), false);
 
         let shell = FlyoutShell {
             ui,
@@ -256,6 +256,13 @@ impl FlyoutShell {
         self.desired.set((logical_width, logical_height));
         self.set_position(x, y);
         let _ = self.ui.show();
+        // Give the taskbar button a real icon once the winit window exists.
+        {
+            use i_slint_backend_winit::WinitWindowAccessor;
+            self.ui.window().with_winit_window(|w| {
+                w.set_window_icon(crate::window_icon::app_icon());
+            });
+        }
         self.ui.set_present_nonce(!self.ui.get_present_nonce());
     }
 
@@ -468,6 +475,63 @@ mod binding_tests {
             "VM link-all did not turn back off (the toggle was stuck on)"
         );
         assert_eq!(switch().accessible_checked(), Some(false));
+    }
+
+    // Item 2: the per-row "Software dimming" toggle moved from its own row *under*
+    // the slider to sit *inline beside* it. The wiring is unchanged, but the new
+    // nesting (VerticalLayout > HorizontalLayout > PillToggle) could break the
+    // toggle's clickability or its one-way `checked: dimming-on` binding — so this
+    // drives the real widget to prove the inline toggle still round-trips. A pure
+    // `FlyoutVm` test cannot see the `.slint` binding.
+    #[test]
+    fn software_dimming_toggle_round_trips_inline_with_the_slider() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![snapshot("A", 40)]);
+        let mut info = std::collections::BTreeMap::new();
+        info.insert(
+            StableDisplayId::from_parts("GSM", 0x0001, Some("A")).unwrap(),
+            crate::flyout_vm::DimmingInfo {
+                hardware_floor: Some(20),
+                min_perceived_pct: 25,
+                dimming_on: true,
+            },
+        );
+        vm.set_dimming_info(info);
+        let vm = Rc::new(RefCell::new(vm));
+        let shell = FlyoutShell::new(vm.clone()).expect("shell instantiates");
+        shell.on_command(|_cmd| {});
+
+        let switch = || {
+            ElementHandle::find_by_accessible_label(&shell.ui, "Software dimming")
+                .next()
+                .expect("the per-row Software-dimming switch exists")
+        };
+
+        // Starts on (dimming_on: true), reflected in the rendered inline pill.
+        assert!(vm.borrow().rows().first().unwrap().dimming_on);
+        assert_eq!(switch().accessible_checked(), Some(true));
+
+        // Click: the VM turns off AND the inline pill reflects it (via the re-render).
+        switch().invoke_accessible_default_action();
+        assert!(
+            !vm.borrow().rows().first().unwrap().dimming_on,
+            "VM dimming did not turn off"
+        );
+        assert_eq!(
+            switch().accessible_checked(),
+            Some(false),
+            "the inline pill did not reflect the off state"
+        );
+
+        // Click again: back on — the toggle is not stuck.
+        switch().invoke_accessible_default_action();
+        assert!(
+            vm.borrow().rows().first().unwrap().dimming_on,
+            "VM dimming did not turn back on"
+        );
+        assert_eq!(switch().accessible_checked(), Some(true));
     }
 
     // First-paint fix: every present must force a *complete* frame. The winit

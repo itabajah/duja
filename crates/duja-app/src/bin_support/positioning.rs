@@ -178,6 +178,28 @@ pub(crate) fn center_in(work: Rect, size: (u32, u32)) -> (i32, i32) {
     (x, y)
 }
 
+/// The largest logical flyout height that fits inside `work` (physical px) at
+/// `scale`, leaving `margin` physical px clear top and bottom, and never
+/// exceeding `absolute_cap` (logical px). The flyout scrolls its rows beyond
+/// this, so a small screen never overflows.
+///
+/// A degenerate scale (non-finite or `< 0.1`) is treated as `1.0`, matching
+/// [`physical_dim`].
+pub(crate) fn flyout_height_cap(work: Rect, scale: f32, margin: i32, absolute_cap: f32) -> f32 {
+    let scale = if scale.is_finite() && scale >= 0.1 {
+        scale
+    } else {
+        1.0
+    };
+    let margin_px = u32::try_from(margin.max(0)).unwrap_or(0);
+    let usable_physical = work.h.saturating_sub(margin_px.saturating_mul(2));
+    // RATIONALE (cast_precision_loss): a work-area height in physical pixels is
+    // far below f32's 2^24 exact-integer limit, so this u32 -> f32 is exact.
+    #[allow(clippy::cast_precision_loss)]
+    let usable_logical = usable_physical as f32 / scale;
+    absolute_cap.min(usable_logical)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +238,51 @@ mod tests {
     fn clamps_to_the_left_edge() {
         let (x, _y) = flyout_origin((0, 1035), WORK, FLYOUT, MARGIN);
         assert_eq!(x, WORK.x + MARGIN);
+    }
+
+    fn approx(got: f32, want: f32) {
+        assert!((got - want).abs() < 0.01, "expected ~{want}, got {got}");
+    }
+
+    #[test]
+    fn height_cap_is_the_absolute_cap_on_a_tall_screen() {
+        // 1040 - 24 = 1016 usable logical at scale 1.0; the 620 cap wins.
+        approx(flyout_height_cap(WORK, 1.0, MARGIN, 620.0), 620.0);
+    }
+
+    #[test]
+    fn height_cap_shrinks_to_fit_a_short_screen() {
+        let short = Rect {
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 500,
+        };
+        // 500 - 2*12 = 476 usable logical, below the 620 cap.
+        approx(flyout_height_cap(short, 1.0, MARGIN, 620.0), 476.0);
+    }
+
+    #[test]
+    fn height_cap_accounts_for_dpi_scale() {
+        let hi_dpi = Rect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1000,
+        };
+        // (1000 - 24) / 2.0 = 488 logical.
+        approx(flyout_height_cap(hi_dpi, 2.0, MARGIN, 620.0), 488.0);
+    }
+
+    #[test]
+    fn height_cap_treats_a_degenerate_scale_as_one() {
+        let short = Rect {
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 500,
+        };
+        approx(flyout_height_cap(short, 0.0, MARGIN, 620.0), 476.0);
     }
 
     #[test]

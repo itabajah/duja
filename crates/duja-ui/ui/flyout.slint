@@ -10,6 +10,8 @@
 //   * Every user-visible string goes through @tr(...) for i18n from day one.
 //   * Keyboard: sliders take arrow keys, Tab traverses, Esc emits esc-pressed.
 
+import { ScrollView } from "std-widgets.slint";
+
 // One monitor row, mirroring `duja_ui::flyout_vm::FlyoutRow`.
 export struct FlyoutRowData {
     name: string,
@@ -33,37 +35,46 @@ export struct FlyoutRowData {
 export global Palette {
     in property <bool> dark: true;
 
-    out property <color> bg: dark ? #17171b : #f4f5f7;
-    out property <color> surface: dark ? #232329 : #ffffff;
-    out property <color> surface-hover: dark ? #2b2b33 : #f0f1f4;
-    out property <color> surface-greyed: dark ? #1d1d21 : #ececed;
-    out property <color> text: dark ? #f3f3f6 : #17171b;
-    out property <color> text-subtle: dark ? #9a9aa4 : #6b6b75;
-    out property <color> text-faint: dark ? #6d6d78 : #9a9aa4;
-    out property <color> border: dark ? #34343c : #e3e4e8;
-    out property <color> border-strong: dark ? #45454f : #cfd0d6;
-    // A single accent, tuned to read on both surfaces.
-    out property <color> accent: dark ? #4f8cf7 : #2f6fed;
-    out property <color> accent-hover: dark ? #6a9ef8 : #4a82f0;
+    // Neutrals carry a subtle warm tint (hue nudged toward red at the same
+    // lightness) so the whole surface reads warm rather than cool-blue. The light
+    // ramp is stepped a little deeper than a bare off-white so the white cards,
+    // hairline borders and off-state pills separate clearly from the surface
+    // instead of washing out (a light-theme visibility pass).
+    out property <color> bg: dark ? #1a1719 : #ece9eb;
+    out property <color> surface: dark ? #262327 : #ffffff;
+    out property <color> surface-hover: dark ? #2e2a2e : #f2edf0;
+    out property <color> surface-greyed: dark ? #201d1f : #e5dfe2;
+    out property <color> text: dark ? #f4f2f4 : #1a171a;
+    out property <color> text-subtle: dark ? #9c9a9e : #6d6a6e;
+    out property <color> text-faint: dark ? #706d72 : #837f86;
+    out property <color> border: dark ? #3a353a : #d8d1d5;
+    out property <color> border-strong: dark ? #4c464c : #c4bcc0;
+    // A single ruby accent, tuned to read on both surfaces.
+    out property <color> accent: dark ? #f2555a : #e5484d;
+    out property <color> accent-hover: dark ? #ff6d72 : #ef5b60;
     // Low-opacity accent used for the sub-floor (software-dimming) track zone.
-    out property <color> accent-soft: dark ? #4f8cf74d : #2f6fed33;
-    out property <color> track: dark ? #3a3a43 : #dfe0e6;
-    out property <color> track-dead: dark ? #2a2a31 : #d0d1d7;
+    out property <color> accent-soft: dark ? #f2555a4d : #e5484d33;
+    out property <color> track: dark ? #403a40 : #d4ccd0;
+    out property <color> track-dead: dark ? #2f2a2f : #c5bdc1;
     out property <color> thumb: #ffffff;
-    out property <color> marker: dark ? #f3f3f6 : #3a3a43;
+    out property <color> marker: dark ? #f4f2f4 : #403a40;
     // Line A (hardware zero) reads quieter than line B (the transition).
-    out property <color> marker-soft: dark ? #f3f3f680 : #3a3a4359;
+    out property <color> marker-soft: dark ? #f4f2f480 : #403a4059;
     // The accent glow around the thumb on hover/press (premium touch).
-    out property <color> thumb-glow: dark ? #4f8cf7 : #2f6fed;
+    out property <color> thumb-glow: dark ? #f2555a : #e5484d;
     // The value bubble shown while dragging.
-    out property <color> bubble-bg: dark ? #2b2b33 : #ffffff;
-    out property <color> bubble-border: dark ? #45454f : #cfd0d6;
-    out property <color> focus-ring: dark ? #6a9ef8 : #2f6fed;
-    out property <color> danger: dark ? #f07a7a : #d64545;
+    out property <color> bubble-bg: dark ? #2e2a2e : #ffffff;
+    out property <color> bubble-border: dark ? #4c464c : #c4bcc0;
+    out property <color> focus-ring: dark ? #ff6d72 : #e5484d;
+    // A distinct red for error/unresponsive states, kept clearly apart from the
+    // ruby accent in both themes: in dark it reads lighter/pinker than the accent;
+    // in light the accent is already a bright coral, so danger separates by going
+    // the other way — a deeper, more saturated red.
+    out property <color> danger: dark ? #ff9d9d : #b42318;
     // A crisp 1px window-edge stroke so a borderless (no-frame) window still reads
     // as a distinct window against a same-coloured app behind it (item 4). Tuned
     // to contrast against the window's own bg in each theme.
-    out property <color> window-edge: dark ? #4a4a56 : #c4c6cc;
+    out property <color> window-edge: dark ? #4a4a56 : #bfb8bc;
 }
 
 // A square, keyboard-focusable icon button (header/footer chrome).
@@ -415,8 +426,9 @@ export component BrightnessSlider inherits Rectangle {
 
 export component FlyoutWindow inherits Window {
     title: @tr("Duja Brightness");
-    // Slim, tray-flyout proportions on an 8 px grid.
-    width: 320px;
+    // Slim, tray-flyout proportions on an 8 px grid. A touch wider than a bare
+    // slider so the inline per-row dimming toggle has room (item 2).
+    width: 360px;
     // Height driven by the app (no-frame windows are not auto-grown to content).
     height: clamp(root.content-height, 160px, 620px);
     background: Palette.bg;
@@ -481,11 +493,14 @@ export component FlyoutWindow inherits Window {
         VerticalLayout {
             padding: 14px;
             spacing: 10px;
-            // Pack to the top: any slack from the explicitly-set window height
-            // sits at the bottom instead of stretching the cards' internals.
-            alignment: start;
+            // No `alignment: start`: the body ScrollView below carries
+            // `vertical-stretch` and fills the slack, so the cards pack to the top
+            // inside it and it scrolls once the window hits its max height.
 
-            // Header: product wordmark (stretch) + settings gear + close.
+            // Header: wordmark (stretch) + link-all toggle + settings gear +
+            // close. Link-all moved up from the retired footer, reclaiming a row
+            // of height. (Manual "refresh displays" is still wired via
+            // `refresh-requested` but not surfaced — hot-plug auto-refreshes.)
             HorizontalLayout {
                 spacing: 6px;
                 VerticalLayout {
@@ -506,7 +521,48 @@ export component FlyoutWindow inherits Window {
                         font-weight: 500;
                         color: Palette.text-faint;
                         horizontal-alignment: left;
+                        // Decorative wordmark subtitle: keep it out of the a11y tree
+                        // so it doesn't shadow the slider's "Brightness" label.
+                        accessible-role: none;
                     }
+                }
+                // Link-all: a captioned pill, centred at its natural 21px height
+                // (a HorizontalLayout would otherwise stretch it to the 30px row).
+                VerticalLayout {
+                    alignment: center;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: @tr("Link all");
+                            color: Palette.text-subtle;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            // Right-align + no stretch so the glyphs hug the pill
+                            // instead of the layout padding the text box out.
+                            horizontal-alignment: right;
+                            horizontal-stretch: 0;
+                            // Decorative caption for the link-all pill (which carries
+                            // the label); keep it out of the a11y tree.
+                            accessible-role: none;
+                        }
+                        PillToggle {
+                            // One-way (not `<=>`): the shell owns the state — it
+                            // updates the VM and re-renders `link-all`, like the
+                            // per-row dimming toggle. A two-way binding here froze
+                            // the pill (P0 live-QA: "Link all does nothing").
+                            checked: root.link-all;
+                            label: @tr("Link all displays");
+                            toggled(on) => {
+                                root.link-toggled(on);
+                            }
+                        }
+                    }
+                }
+                // Breathing room between the link-all control and the window-chrome
+                // buttons, so the two groups read as distinct.
+                Rectangle {
+                    min-width: 12px;
+                    max-width: 12px;
                 }
                 gear := IconButton {
                     icon: "⚙";
@@ -524,9 +580,24 @@ export component FlyoutWindow inherits Window {
                 }
             }
 
-            // Empty-state, shown only when there are no displays.
-            if root.no-displays: Rectangle {
-                height: 96px;
+            // Body: the empty-state or the monitor rows, wrapped in a ScrollView
+            // so the window grows to fit the cards up to its max height, then
+            // scrolls instead of clipping (item 4, mirroring the settings window).
+            // Cards stretch to the width, so only a vertical bar ever appears.
+            ScrollView {
+                vertical-stretch: 1;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                VerticalLayout {
+                    spacing: 8px;
+                    // Pack cards to the top at their natural height: the ScrollView
+                    // makes its viewport at least as tall as the visible area, so
+                    // without this the surplus would stretch every card (dead space
+                    // below the slider) instead of sitting harmlessly at the bottom.
+                    alignment: start;
+
+                    // Empty-state, shown only when there are no displays.
+                    if root.no-displays: Rectangle {
+                        height: 96px;
                 border-radius: 12px;
                 background: Palette.surface;
                 border-width: 1px;
@@ -549,7 +620,7 @@ export component FlyoutWindow inherits Window {
                         accessible-label: @tr("No displays detected");
                     }
                     Text {
-                        text: @tr("Connect a display, then Refresh.");
+                        text: @tr("Connect a display to get started.");
                         color: Palette.text-subtle;
                         font-size: 11px;
                         horizontal-alignment: center;
@@ -557,11 +628,8 @@ export component FlyoutWindow inherits Window {
                 }
             }
 
-            // Monitor rows. Content-sized (no scroll wrapper) so the window grows
-            // to fit every card up to the window max-height, rather than a greedy
-            // `vertical-stretch` collapsing it to the min-height and clipping.
-            if !root.no-displays: VerticalLayout {
-                spacing: 8px;
+                    // Monitor rows. The empty `for` renders nothing when there
+                    // are no displays, so it needs no `if` guard of its own.
                     for row[idx] in root.rows: Rectangle {
                         background: row.greyed ? Palette.surface-greyed
                             : (card-hover.has-hover ? Palette.surface-hover : Palette.surface);
@@ -582,8 +650,13 @@ export component FlyoutWindow inherits Window {
                             padding: 12px;
                             spacing: 8px;
 
+                            // Name / kind on the left; the software-dimming caption
+                            // on the right, bottom-aligned so it sits just above its
+                            // pill (on the slider row below) with a comfortable gap.
+                            // The caption column matches the pill column width below,
+                            // so the two line up as one stacked control.
                             HorizontalLayout {
-                                spacing: 8px;
+                                spacing: 6px;
                                 VerticalLayout {
                                     horizontal-stretch: 1;
                                     spacing: 1px;
@@ -601,89 +674,69 @@ export component FlyoutWindow inherits Window {
                                         font-weight: 500;
                                     }
                                 }
-                                Text {
-                                    text: row.percent + "%";
-                                    color: Palette.text;
-                                    font-size: 15px;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: right;
-                                    width: 44px;
+                                VerticalLayout {
+                                    min-width: 54px;
+                                    max-width: 54px;
+                                    alignment: end;
+                                    Text {
+                                        text: @tr("Software dimming");
+                                        color: Palette.text-subtle;
+                                        font-size: 9px;
+                                        wrap: word-wrap;
+                                        horizontal-alignment: center;
+                                        // Decorative caption for the pill (which
+                                        // carries the label); keep it out of the a11y
+                                        // tree so it isn't announced twice.
+                                        accessible-role: none;
+                                    }
                                 }
                             }
 
-                            BrightnessSlider {
-                                value: row.percent;
-                                enabled: row.slider-enabled;
-                                dimming-on: row.dimming-on;
-                                marker-visible: row.has-floor;
-                                marker-fraction: row.marker-fraction;
-                                marker-a-fraction: row.marker-a-fraction;
-                                markers-coincide: row.markers-coincide;
-                                glide-ms: root.glide-ms;
-                                changed(v) => {
-                                    root.slider-changed(idx, v);
-                                }
-                            }
-
+                            // Slider + software-dimming pill, side by side (item 2).
+                            // The slider stretches; the pill sits at its natural 21px,
+                            // vertically centred on the slider's 28px row (level with
+                            // the track), in a column the same width as the caption
+                            // above it.
                             HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    text: @tr("Software dimming");
-                                    color: Palette.text-subtle;
-                                    font-size: 11px;
-                                    vertical-alignment: center;
-                                    horizontal-stretch: 1;
-                                }
-                                PillToggle {
-                                    checked: row.dimming-on;
+                                spacing: 6px;
+                                BrightnessSlider {
+                                    value: row.percent;
                                     enabled: row.slider-enabled;
-                                    label: @tr("Software dimming");
-                                    toggled(on) => {
-                                        root.dimming-toggled(idx, on);
+                                    dimming-on: row.dimming-on;
+                                    marker-visible: row.has-floor;
+                                    marker-fraction: row.marker-fraction;
+                                    marker-a-fraction: row.marker-a-fraction;
+                                    markers-coincide: row.markers-coincide;
+                                    glide-ms: root.glide-ms;
+                                    changed(v) => {
+                                        root.slider-changed(idx, v);
+                                    }
+                                }
+                                // Nest the pill so neither dimension is stretched by
+                                // the column's slack: the outer VerticalLayout centres
+                                // it vertically (natural 21px height, not the 28px
+                                // row) and the inner HorizontalLayout centres it
+                                // horizontally (natural 38px width, not the 54px
+                                // column). This is exactly how the header "Link all"
+                                // pill is wrapped, so the two pills are identical.
+                                VerticalLayout {
+                                    min-width: 54px;
+                                    max-width: 54px;
+                                    alignment: center;
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        PillToggle {
+                                            checked: row.dimming-on;
+                                            enabled: row.slider-enabled;
+                                            label: @tr("Software dimming");
+                                            toggled(on) => {
+                                                root.dimming-toggled(idx, on);
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-            }
-
-            // Footer: link-all toggle (stretch) + refresh.
-            HorizontalLayout {
-                spacing: 8px;
-                // Centre the pill at its natural 21px height instead of letting the
-                // footer row (30px tall because of the refresh IconButton) stretch
-                // it — it was rendering ~30px, visibly taller than the identical
-                // in-card dimming pill (item 3). A HorizontalLayout stretches a
-                // child to the row height; this wrapper pins the pill to its
-                // preferred size, vertically centred, matching the other rows.
-                VerticalLayout {
-                    alignment: center;
-                    PillToggle {
-                        // One-way (not `<=>`): the shell owns the state — it updates
-                        // the VM and re-renders `link-all`, exactly like the per-row
-                        // dimming toggle. A two-way binding here left `checked` frozen
-                        // (nothing wrote it), so the pill never moved and every click
-                        // re-sent the same value (P0 live-QA: "Link all does nothing").
-                        checked: root.link-all;
-                        label: @tr("Link all displays");
-                        toggled(on) => {
-                            root.link-toggled(on);
-                        }
-                    }
-                }
-                Text {
-                    text: @tr("Link all");
-                    color: Palette.text-subtle;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
-                IconButton {
-                    icon: "⟳";
-                    label: @tr("Refresh displays");
-                    clicked => {
-                        root.refresh-requested();
                     }
                 }
             }

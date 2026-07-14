@@ -54,6 +54,7 @@ pub mod shell;
 pub(crate) mod dpi;
 pub(crate) mod generated;
 pub(crate) mod model_sync;
+pub(crate) mod window_icon;
 
 pub use command::{SettingsCommand, ThemeChoice, UiCommand};
 pub use flyout_vm::{DimmingInfo, FlyoutRow, FlyoutVm, Theme};
