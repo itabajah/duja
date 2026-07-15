@@ -21,6 +21,7 @@ use duja_core::id::StableDisplayId;
 use duja_core::input_source;
 use duja_core::model::{DimMode, DisplaySnapshot};
 
+use crate::accent::{ACCENT_ORDER, AccentChoice};
 use crate::command::{SettingsCommand, ThemeChoice};
 
 /// The largest hardware floor the settings slider offers (percentage points).
@@ -195,6 +196,9 @@ pub struct SettingsVm {
     autostart_supported: bool,
     theme: ThemeChoice,
     dark: bool,
+    /// The accent the palette is painted in. Resolved against `dark` by the shell,
+    /// so a theme change re-pushes the right variants for free.
+    accent: AccentChoice,
     update_check_on: bool,
     update_status: UpdateStatus,
     monitors: Vec<MonitorSection>,
@@ -217,6 +221,7 @@ impl SettingsVm {
             autostart_supported: true,
             theme: ThemeChoice::Auto,
             dark: true,
+            accent: AccentChoice::default(),
             update_check_on: false,
             update_status: UpdateStatus::Disabled,
             monitors: Vec::new(),
@@ -247,12 +252,14 @@ impl SettingsVm {
         autostart_on: bool,
         autostart_supported: bool,
         theme: ThemeChoice,
+        accent: AccentChoice,
         update_check_on: bool,
         dark: bool,
     ) {
         self.autostart_on = autostart_on;
         self.autostart_supported = autostart_supported;
         self.theme = theme;
+        self.accent = accent;
         self.dark = dark;
         self.update_check_on = update_check_on;
         // Keep the status consistent with the toggle: turning the check off
@@ -326,6 +333,21 @@ impl SettingsVm {
             .unwrap_or(0)
     }
 
+    /// The current accent colour.
+    #[must_use]
+    pub fn accent(&self) -> AccentChoice {
+        self.accent
+    }
+
+    /// The selector index of the current accent.
+    #[must_use]
+    pub fn accent_index(&self) -> usize {
+        ACCENT_ORDER
+            .iter()
+            .position(|a| *a == self.accent)
+            .unwrap_or(0)
+    }
+
     /// The resolved palette to render: `true` for the dark palette. Distinct from
     /// [`theme`](Self::theme) (the raw Auto/Light/Dark *preference* the selector
     /// shows) — the app resolves `Auto` against the OS and passes the result in
@@ -384,6 +406,16 @@ impl SettingsVm {
         let choice = *THEME_ORDER.get(index)?;
         self.theme = choice;
         Some(SettingsCommand::SetTheme(choice))
+    }
+
+    /// Pick an accent colour by selector index. Out of range is ignored.
+    ///
+    /// Mirrors [`select_theme`](Self::select_theme): the local state updates
+    /// optimistically and the app persists the returned command.
+    pub fn select_accent(&mut self, index: usize) -> Option<SettingsCommand> {
+        let choice = *ACCENT_ORDER.get(index)?;
+        self.accent = choice;
+        Some(SettingsCommand::SetAccent(choice))
     }
 
     /// Toggle the opt-in update check.
@@ -601,7 +633,14 @@ mod tests {
         let mut vm = SettingsVm::new();
         // A fresh VM defaults to the dark palette (matches Palette.dark's default).
         assert!(vm.dark());
-        vm.set_general(true, true, ThemeChoice::Light, true, false);
+        vm.set_general(
+            true,
+            true,
+            ThemeChoice::Light,
+            AccentChoice::Ruby,
+            true,
+            false,
+        );
         assert!(vm.autostart_on());
         assert_eq!(vm.theme(), ThemeChoice::Light);
         // The resolved palette is carried independently of the raw preference.
@@ -610,7 +649,14 @@ mod tests {
         // Enabling the check from disabled moves to idle.
         assert_eq!(vm.update_status(), &UpdateStatus::Idle);
         // Disabling shows disabled again; a dark resolution is carried through.
-        vm.set_general(true, true, ThemeChoice::Dark, false, true);
+        vm.set_general(
+            true,
+            true,
+            ThemeChoice::Dark,
+            AccentChoice::Ruby,
+            false,
+            true,
+        );
         assert!(vm.dark());
         assert_eq!(vm.update_status(), &UpdateStatus::Disabled);
     }
@@ -628,7 +674,14 @@ mod tests {
     #[test]
     fn toggle_autostart_inert_when_unsupported() {
         let mut vm = SettingsVm::new();
-        vm.set_general(false, false, ThemeChoice::Auto, false, true);
+        vm.set_general(
+            false,
+            false,
+            ThemeChoice::Auto,
+            AccentChoice::Ruby,
+            false,
+            true,
+        );
         assert_eq!(vm.toggle_autostart(true), None);
         assert!(!vm.autostart_on());
     }
@@ -645,6 +698,31 @@ mod tests {
         // Out-of-range index is ignored.
         assert_eq!(vm.select_theme(9), None);
         assert_eq!(vm.theme(), ThemeChoice::Light);
+    }
+
+    #[test]
+    fn select_accent_maps_through_accent_order() {
+        let mut vm = SettingsVm::new();
+        // The default is ruby, so the selector opens on row 0.
+        assert_eq!(vm.accent(), AccentChoice::Ruby);
+        assert_eq!(vm.accent_index(), 0);
+
+        // Every row must round-trip: index -> choice -> index.
+        for (index, expected) in ACCENT_ORDER.into_iter().enumerate() {
+            assert_eq!(
+                vm.select_accent(index),
+                Some(SettingsCommand::SetAccent(expected))
+            );
+            assert_eq!(vm.accent(), expected);
+            assert_eq!(vm.accent_index(), index);
+        }
+    }
+
+    #[test]
+    fn select_accent_ignores_an_out_of_range_index() {
+        let mut vm = SettingsVm::new();
+        assert_eq!(vm.select_accent(ACCENT_ORDER.len()), None);
+        assert_eq!(vm.accent(), AccentChoice::Ruby, "state is unchanged");
     }
 
     #[test]

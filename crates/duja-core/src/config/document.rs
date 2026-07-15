@@ -16,7 +16,7 @@ use toml_edit::{DocumentMut, Item, Table};
 use crate::config::error::ConfigError;
 use crate::config::migrate;
 use crate::config::persist;
-use crate::config::schema::{Config, DimMode, Theme};
+use crate::config::schema::{Accent, Config, DimMode, Theme};
 
 /// The commented `[hotkeys]` example prepended to a freshly emitted default
 /// config. All bindings are optional and unbound by default; these lines
@@ -164,6 +164,11 @@ impl ConfigDocument {
     /// Set `general.theme`.
     pub fn set_theme(&mut self, theme: Theme) {
         self.set_general("theme", toml_edit::value(theme_token(theme)));
+    }
+
+    /// Set `general.accent`.
+    pub fn set_accent(&mut self, accent: Accent) {
+        self.set_general("accent", toml_edit::value(accent_token(accent)));
     }
 
     /// Set a hotkey binding for `action`, inserting or replacing it.
@@ -317,6 +322,18 @@ fn theme_token(theme: Theme) -> &'static str {
         Theme::System => "system",
         Theme::Light => "light",
         Theme::Dark => "dark",
+    }
+}
+
+/// The TOML token for an [`Accent`], matching the serde `rename_all = "lowercase"`
+/// on the enum. Guarded against drifting from serde by `accent_token_matches_serde`.
+fn accent_token(accent: Accent) -> &'static str {
+    match accent {
+        Accent::Ruby => "ruby",
+        Accent::Gold => "gold",
+        Accent::Emerald => "emerald",
+        Accent::Sapphire => "sapphire",
+        Accent::Onyx => "onyx",
     }
 }
 
@@ -481,6 +498,45 @@ theme = \"dark\"
             let cfg = doc.config().expect("typed");
             assert_eq!(cfg.monitors.get("X").expect("entry").dim_mode, mode);
         }
+    }
+
+    #[test]
+    fn accent_token_matches_serde() {
+        // The setter writes a token by hand while the schema reads it through
+        // serde's `rename_all`. Round-tripping every variant through the typed view
+        // is what stops the two maps drifting apart.
+        for accent in [
+            Accent::Ruby,
+            Accent::Gold,
+            Accent::Emerald,
+            Accent::Sapphire,
+            Accent::Onyx,
+        ] {
+            let mut doc = ConfigDocument::defaults();
+            doc.set_accent(accent);
+            let cfg = doc.config().expect("typed");
+            assert_eq!(cfg.general.accent, accent);
+        }
+    }
+
+    #[test]
+    fn set_accent_preserves_comments_and_other_keys() {
+        let original = "\
+# hand-written — keep me!
+[general]
+autostart = false
+theme = \"dark\"
+";
+        let mut doc = ConfigDocument::parse(original).expect("parse");
+        doc.set_accent(Accent::Emerald);
+
+        let saved = doc.to_toml_string();
+        assert!(saved.contains("# hand-written"), "{saved}");
+        assert!(saved.contains("accent = \"emerald\""), "{saved}");
+        // The setter touches only its own key.
+        let cfg = doc.config().expect("typed");
+        assert!(!cfg.general.autostart, "other keys survive");
+        assert_eq!(cfg.general.theme, Theme::Dark);
     }
 
     #[test]
