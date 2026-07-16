@@ -52,12 +52,17 @@ windows = { workspace = true, features = [
 
 [build-dependencies]
 embed-manifest.workspace = true
+# Embeds the whirlpool exe icon (Windows only; the build.rs call is gated).
+embed-resource.workspace = true
 
 [dev-dependencies]
 duja-core = { workspace = true, features = ["test-support"] }
 duja-dimmer = { workspace = true }
 duja-platform = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+# The `gen_exe_icon` example encoder + the icon drift-guard test (duja-ui, which
+# owns `whirlpool_rgba`, is already a normal dependency).
+ico.workspace = true
 
 [lints]
 workspace = true
