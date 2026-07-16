@@ -52,10 +52,14 @@ minisign -Vm SHA256SUMS -P <DUJA_MINISIGN_PUBLIC_KEY>
 Duja's minisign public key (published here; the private key is kept offline):
 
 ```
-# TODO(release): paste the line from `minisign.pub` here before tagging v0.1.0.
-# Generate once with:  minisign -G -W -p minisign.pub -s minisign.key
-# then add the secret MINISIGN_SECRET_KEY (= minisign.key contents) to the repo.
-RWQ_REPLACE_WITH_REAL_PUBLIC_KEY
+untrusted comment: minisign public key A2873CFFA7472F9E
+RWSeL0en/zyHopbYOTmC4nwO4pLW0WN6awWsuhwoUZnSM+D0zukOl0UK
+```
+
+So the verify command is:
+
+```sh
+minisign -Vm SHA256SUMS -P RWSeL0en/zyHopbYOTmC4nwO4pLW0WN6awWsuhwoUZnSM+D0zukOl0UK
 ```
 
 You can also inspect the build-provenance attestation on any release asset with
