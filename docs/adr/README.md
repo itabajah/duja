@@ -18,6 +18,8 @@ MADR-lite format. Accepted ADRs are changed by superseding, not editing.
 | [0012](0012-binary-size-budget-variance.md) | Binary-size budget raised 12 → 16 MB | accepted |
 | [0013](0013-macos-ddc-wrap-vs-vendor.md) | macOS DDC/CI: own thin backend (don't wrap ddc-macos) | accepted |
 | [0014](0014-perceptual-continuum-v2.md) | Perceptual brightness continuum (v2) | accepted |
+| [0015](0015-update-check-on-by-default.md) | Update check on by default (smart-notify) | accepted |
+| [0016](0016-windows-distribution-and-signing.md) | Windows distribution & signing (Inno + minisign + provenance) | accepted |
 
 Spike evidence lives on branches `spike/eventloop`, `spike/ddc`,
 `spike/overlay` (code is not merged; findings are).

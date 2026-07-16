@@ -73,9 +73,11 @@ fn run(args: &[String]) -> anyhow::Result<ExitCode> {
     }
 }
 
-/// Run the opt-in update check once and print the outcome (the `--check-updates`
-/// mode). Always makes the network request when invoked explicitly, regardless
-/// of the `general.update_check` config toggle — the flag *is* the opt-in.
+/// Run the update check once and print the outcome (the `--check-updates` mode).
+/// Always makes the network request when invoked explicitly, regardless of the
+/// `general.update_check` config toggle (which is on by default and gates only
+/// the app's automatic background check) — running this subcommand is itself the
+/// request.
 fn check_updates() -> ExitCode {
     use bin_support::updates::{self, HttpsTransport, UpdateOutcome};
 

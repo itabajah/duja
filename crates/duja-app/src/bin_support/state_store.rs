@@ -70,6 +70,11 @@ impl StateStore {
         self.dirty = true;
     }
 
+    /// The Unix timestamp of the last update check, if one has ever run.
+    pub(crate) fn last_update_check(&self) -> Option<i64> {
+        self.file.last_update_check()
+    }
+
     /// Persist the state if it is dirty and the debounce window has elapsed.
     ///
     /// Returns `true` if a write happened. Never an error path for the caller: a

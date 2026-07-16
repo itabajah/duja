@@ -61,7 +61,9 @@ use crate::bin_support::hotkey::{self, Accelerator, HotkeyAction, Modifiers as A
 use crate::bin_support::paths::DujaPaths;
 use crate::bin_support::state_store::StateStore;
 use crate::bin_support::updates::{self, HttpsTransport, UpdateOutcome};
-use crate::bin_support::{backend, gamma, ipc, motion, run, settings, settings_apply, startup};
+use crate::bin_support::{
+    backend, gamma, ipc, motion, run, settings, settings_apply, startup, toast,
+};
 
 /// The brightness step (percentage points) a `brightness_up` / `brightness_down`
 /// hotkey applies to every display. Fixed in P5; a configurable step is a
@@ -285,6 +287,9 @@ enum Action {
     Restore,
     /// Nudge every display's brightness by the given signed step (a hotkey).
     Nudge(i16),
+    /// Open the GitHub releases page (the "Update available" menu item). Duja
+    /// only ever opens the page — it never downloads.
+    OpenReleases,
     /// Begin a clean shutdown.
     Quit,
 }
@@ -334,9 +339,13 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
     // 4b. Settings window + autostart backend (window stays hidden until opened).
     let (settings_shell, settings_vm, autostart) = build_settings_window(accent)?;
 
-    // 5. Tray icon + menu on the same thread. Its glyph and colour are shared with
-    //    the taskbar/alt-tab window icons (`duja_ui::icon`); the accent drives all.
-    let tray = build_tray(accent).context("creating the tray icon")?;
+    // 5. Tray icon + menu on the same thread (glyph/colour shared with the
+    //    taskbar icons via `duja_ui::icon`), plus the update-surface handles.
+    let TrayHandles {
+        tray,
+        menu: tray_menu,
+        update_item,
+    } = build_tray(accent).context("creating the tray icon")?;
 
     // 6. Async pipeline: engine (with a bounds-updating enumerator) + event pump
     //    + overlay dimmer. The dimmer is optional — its absence only disables
@@ -365,14 +374,7 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
         let bounds = bounds.clone();
         move |id| bounds.lock().ok().and_then(|b| b.device_for(id))
     });
-    // Global hotkeys: register from config on this (main) thread. A failure to
-    // create the manager or register a binding only disables that hotkey — the
-    // app runs on without it. The registrar is kept in the app state so the
-    // settings window can rebind and re-register it live.
-    let mut hotkeys = OsHotkeyRegistrar::new();
-    let initial_plan = hotkey::resolve(&config.hotkeys);
-    log_hotkey_issues(&initial_plan);
-    let hotkey_outcomes = outcomes_by_action(&hotkey::apply_plan(&mut hotkeys, &initial_plan));
+    let (hotkeys, hotkey_outcomes) = init_hotkeys(&config);
     APP.with(|cell| {
         cell.set(Some(AppState {
             shell,
@@ -397,13 +399,13 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
             hotkeys,
             hotkey_outcomes,
             tray,
+            menu: tray_menu,
+            update_item,
+            update_available: None,
+            update_check_in_flight: false,
         }));
     });
-    wire_ui_commands();
-    wire_settings_commands();
-    wire_tray_handlers();
-    install_hotkey_event_handler();
-    spawn_notification_bridge(notifications);
+    wire_event_sources(notifications);
 
     // IPC control server: dujactl and second launches talk to us over the pipe.
     let ipc_server = ipc::start(std::sync::Arc::new(ipc::TrayBridge::new(engine.sender())));
@@ -534,11 +536,26 @@ struct AppState {
     /// accent change can swap its glyph colour live via `TrayIcon::set_icon`.
     /// Dropping `AppState` at teardown drops it, exactly as the old local did.
     tray: tray_icon::TrayIcon,
+    /// A live handle to the tray menu (shares the same `Rc` inner as the menu the
+    /// tray owns) so the "Update available" item can be prepended at runtime.
+    menu: tray_icon::menu::Menu,
+    /// The pre-built "Update available" menu item, held out of the menu until a
+    /// background check finds a newer release, then prepended once.
+    update_item: tray_icon::menu::MenuItem,
+    /// The newest release surfaced this session (`Some(tag)`), for dedup so the
+    /// menu item/toast fire once per version.
+    update_available: Option<String>,
+    /// Whether an update check is currently running on the background thread, so
+    /// checks never overlap or hammer the API.
+    update_check_in_flight: bool,
 }
 
 impl AppState {
     /// Apply a tray/menu action.
     fn handle_action(&mut self, action: Action) {
+        // Piggyback the once-a-day update check on a real user interaction, so
+        // it never needs a timer (the zero-idle-wakeup guarantee holds).
+        self.maybe_background_update_check();
         match action {
             Action::Open => self.show_flyout(),
             Action::Toggle => {
@@ -552,6 +569,7 @@ impl AppState {
             Action::OpenSettings => self.open_settings(),
             Action::Restore => self.restore_screen(),
             Action::Nudge(delta) => self.nudge_all(delta),
+            Action::OpenReleases => open_url(updates::RELEASES_PAGE_URL),
             Action::Quit => self.begin_quit(),
         }
     }
@@ -1005,24 +1023,99 @@ impl AppState {
         self.set_user_level(id, clamped);
     }
 
-    /// Kick off the opt-in update check on a background thread (never blocks the
-    /// UI thread), then fold the result back onto the Slint loop.
+    /// The manual update check (settings "Check now"): always runs regardless of
+    /// the `update_check` toggle — invoking it is itself the opt-in — but not
+    /// while another check is already in flight.
     fn start_update_check(&mut self) {
+        if self.update_check_in_flight {
+            return;
+        }
+        self.spawn_update_check(false);
+    }
+
+    /// The once-a-day background check, gated so it never hammers the API or
+    /// spams the user: only while the check is enabled, no check is in flight,
+    /// no update is already surfaced, and a day has passed since the last check.
+    ///
+    /// Called from real interactions ([`AppState::handle_action`]) and once at
+    /// startup — never on a timer, so the process still sleeps when idle.
+    fn maybe_background_update_check(&mut self) {
+        if !self.config.general.update_check
+            || self.update_check_in_flight
+            || self.update_available.is_some()
+            || !due_for_check(
+                unix_now(),
+                self.state.last_update_check(),
+                UPDATE_CHECK_INTERVAL_SECS,
+            )
+        {
+            return;
+        }
+        self.spawn_update_check(true);
+    }
+
+    /// Run the check on a background thread (never blocks the UI thread), record
+    /// the timestamp so a failure also waits a day, and fold the result back
+    /// onto the Slint loop. `background` selects how the outcome is surfaced.
+    fn spawn_update_check(&mut self, background: bool) {
+        self.update_check_in_flight = true;
         self.state.record_update_check(unix_now());
         let _ = self.state.maybe_flush(Instant::now());
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("duja-update-check".to_owned())
-            .spawn(|| {
+            .spawn(move || {
                 let outcome = updates::check_for_update(&HttpsTransport, env!("CARGO_PKG_VERSION"));
-                let status = update_status_from(outcome);
                 let _ = slint::invoke_from_event_loop(move || {
-                    with_app(move |app| {
-                        app.settings_vm.borrow_mut().set_update_status(status);
-                        app.settings_shell.update_from_vm(&app.settings_vm.borrow());
-                    });
+                    with_app(move |app| app.on_update_outcome(outcome, background));
                 });
-            })
-            .ok();
+            });
+        if spawned.is_err() {
+            // The worker never ran, so nothing will clear the guard via
+            // `on_update_outcome` — reset it now so checks aren't wedged off.
+            self.update_check_in_flight = false;
+        }
+    }
+
+    /// Fold a completed update check back into the UI. Always reflects the
+    /// status into the settings window (it may be open); a *background*
+    /// `UpdateAvailable` additionally surfaces the tray item, tooltip, and toast.
+    fn on_update_outcome(&mut self, outcome: UpdateOutcome, background: bool) {
+        self.update_check_in_flight = false;
+        self.settings_vm
+            .borrow_mut()
+            .set_update_status(update_status_from(outcome.clone()));
+        self.settings_shell
+            .update_from_vm(&self.settings_vm.borrow());
+        if background && let UpdateOutcome::UpdateAvailable { version } = outcome {
+            self.surface_update_available(&version);
+        }
+    }
+
+    /// Surface a newly-discovered release: add the "Update available" item to the
+    /// top of the tray menu (once), refresh its label, set the tray tooltip, and
+    /// raise a best-effort toast. Deduplicated so the same version acts once.
+    fn surface_update_available(&mut self, version: &str) {
+        use tray_icon::menu::PredefinedMenuItem;
+
+        if self.update_available.as_deref() == Some(version) {
+            return;
+        }
+        let first = self.update_available.is_none();
+        self.update_available = Some(version.to_owned());
+        self.update_item
+            .set_text(format!("Update available — {version}"));
+        if first {
+            // Prepend the item + a separator above Open/Settings/… exactly once;
+            // a later version change only updates the label and re-toasts.
+            let sep = PredefinedMenuItem::separator();
+            if let Err(e) = self.menu.prepend_items(&[&self.update_item, &sep]) {
+                warn!(error = %e, "failed to add the update menu item");
+            }
+        }
+        if let Err(e) = self.tray.set_tooltip(Some("Duja — update available")) {
+            warn!(error = %e, "failed to set the update tooltip");
+        }
+        toast::notify_update_available(version);
     }
 
     /// Record a user level, forward the hardware write to the engine, and
@@ -1428,6 +1521,8 @@ fn wire_tray_handlers() {
             Action::OpenSettings
         } else if event.id() == &ids.restore {
             Action::Restore
+        } else if event.id() == &ids.update {
+            Action::OpenReleases
         } else if event.id() == &ids.quit {
             Action::Quit
         } else {
@@ -1646,15 +1741,26 @@ struct MenuIds {
     open: tray_icon::menu::MenuId,
     settings: tray_icon::menu::MenuId,
     restore: tray_icon::menu::MenuId,
+    /// The "Update available" item — its id is recorded even though the item is
+    /// not in the menu until a newer release is found, so the handler routes it.
+    update: tray_icon::menu::MenuId,
     quit: tray_icon::menu::MenuId,
 }
 
+/// The tray icon plus the live handles needed to surface an update at runtime:
+/// the menu (shared `Rc` inner) and the pre-built "Update available" item.
+struct TrayHandles {
+    tray: tray_icon::TrayIcon,
+    menu: tray_icon::menu::Menu,
+    update_item: tray_icon::menu::MenuItem,
+}
+
 /// Build the tray icon with its right-click menu (Open / Settings / Restore
-/// screen / Quit).
+/// screen / Quit) plus a held-back "Update available" item.
 ///
 /// The icon is the accent-coloured display silhouette — the same glyph and colour
 /// the taskbar button carries (see [`duja_ui::icon`]).
-fn build_tray(accent: AccentChoice) -> anyhow::Result<tray_icon::TrayIcon> {
+fn build_tray(accent: AccentChoice) -> anyhow::Result<TrayHandles> {
     use tray_icon::menu::{Menu, MenuItem};
     use tray_icon::{TrayIconBuilder, menu::PredefinedMenuItem};
 
@@ -1663,6 +1769,9 @@ fn build_tray(accent: AccentChoice) -> anyhow::Result<tray_icon::TrayIcon> {
     let settings = MenuItem::new("Settings", true, None);
     let restore = MenuItem::new("Restore screen", true, None);
     let quit = MenuItem::new("Quit", true, None);
+    // Built now (so its id is stable and known to the handler) but not appended:
+    // it is prepended only when a background check finds a newer release.
+    let update_item = MenuItem::new("Update available", true, None);
     menu.append_items(&[
         &open,
         &settings,
@@ -1677,16 +1786,24 @@ fn build_tray(accent: AccentChoice) -> anyhow::Result<tray_icon::TrayIcon> {
             open: open.id().clone(),
             settings: settings.id().clone(),
             restore: restore.id().clone(),
+            update: update_item.id().clone(),
             quit: quit.id().clone(),
         };
     });
 
-    TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
+    let tray = TrayIconBuilder::new()
+        // Clone shares the same `Rc` inner, so prepends on our kept handle show
+        // up in the menu the tray owns.
+        .with_menu(Box::new(menu.clone()))
         .with_tooltip("Duja")
         .with_icon(icon::tray_icon(duja_ui::accent::icon_rgb(accent))?)
         .build()
-        .map_err(|e| anyhow::anyhow!("failed to create the tray icon: {e}"))
+        .map_err(|e| anyhow::anyhow!("failed to create the tray icon: {e}"))?;
+    Ok(TrayHandles {
+        tray,
+        menu,
+        update_item,
+    })
 }
 
 /// Load the config, tolerating a missing file (defaults) and logging a broken
@@ -1729,6 +1846,52 @@ fn unix_now() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
+/// The background update-check interval: at most once a day.
+const UPDATE_CHECK_INTERVAL_SECS: i64 = 24 * 60 * 60;
+
+/// Whether a background update check is due: never checked before, or at least
+/// `interval_secs` have passed since `last_check_unix`.
+///
+/// Uses saturating subtraction so a non-monotonic wall clock (a check timestamp
+/// in the future) cannot panic under the arithmetic-side-effects lint, nor
+/// wrongly fire — it reports "not due" until real time catches up.
+fn due_for_check(now_unix: i64, last_check_unix: Option<i64>, interval_secs: i64) -> bool {
+    match last_check_unix {
+        None => true,
+        Some(last) => now_unix.saturating_sub(last) >= interval_secs,
+    }
+}
+
+/// Build the global-hotkey registrar and apply the initial plan from `config`
+/// on the (main) thread. A failure to create the manager or register a binding
+/// only disables that hotkey (logged) — the app runs on. The registrar is
+/// returned so the settings window can rebind and re-register it live.
+fn init_hotkeys(
+    config: &Config,
+) -> (
+    OsHotkeyRegistrar,
+    BTreeMap<HotkeyAction, hotkey::RegisterResult>,
+) {
+    let mut hotkeys = OsHotkeyRegistrar::new();
+    let initial_plan = hotkey::resolve(&config.hotkeys);
+    log_hotkey_issues(&initial_plan);
+    let outcomes = outcomes_by_action(&hotkey::apply_plan(&mut hotkeys, &initial_plan));
+    (hotkeys, outcomes)
+}
+
+/// Wire every event source onto the published [`AppState`]: UI/settings/tray
+/// handlers, the hotkey handler, the engine-notification bridge, and the first
+/// background update check (startup is a one-time event, not idle, so a newer
+/// release surfaces promptly on launch without ever needing a timer).
+fn wire_event_sources(notifications: crossbeam_channel::Receiver<EngineNotification>) {
+    wire_ui_commands();
+    wire_settings_commands();
+    wire_tray_handlers();
+    install_hotkey_event_handler();
+    spawn_notification_bridge(notifications);
+    with_app(AppState::maybe_background_update_check);
+}
+
 /// Bridge engine notifications onto the Slint loop on a side thread.
 fn spawn_notification_bridge(notifications: crossbeam_channel::Receiver<EngineNotification>) {
     std::thread::Builder::new()
@@ -1753,8 +1916,9 @@ mod tests {
     use super::{Accelerator, Action, Code, GhkModifiers, HotkeyAction};
     use super::{ContinuumConfig, DimMode, TOGGLE_GUARD, toggle_decision};
     use super::{
-        DEFAULT_USER_LEVEL_PCT, ToggleDecision, accel_to_hotkey, action_for, adopt_enumeration,
-        adopt_position, code_for_key, ghk_modifiers, reflected_level,
+        DEFAULT_USER_LEVEL_PCT, ToggleDecision, UPDATE_CHECK_INTERVAL_SECS, accel_to_hotkey,
+        action_for, adopt_enumeration, adopt_position, code_for_key, due_for_check, ghk_modifiers,
+        reflected_level,
     };
     use crate::bin_support::state_store::StateStore;
     use duja_core::id::StableDisplayId;
@@ -1780,6 +1944,23 @@ mod tests {
             user_level_pct: reading_pct,
             capabilities: Capabilities::default(),
         }
+    }
+
+    #[test]
+    fn update_check_due_only_after_the_interval() {
+        let day = UPDATE_CHECK_INTERVAL_SECS;
+        // Never checked before ⇒ always due.
+        assert!(due_for_check(1_000, None, day));
+        // Just checked ⇒ not due.
+        assert!(!due_for_check(1_000, Some(1_000), day));
+        // Less than a day later ⇒ not due.
+        assert!(!due_for_check(1_000 + day - 1, Some(1_000), day));
+        // Exactly a day later ⇒ due.
+        assert!(due_for_check(1_000 + day, Some(1_000), day));
+        // More than a day later ⇒ due.
+        assert!(due_for_check(1_000 + day * 2, Some(1_000), day));
+        // Non-monotonic clock (last is in the future) ⇒ not due, no panic.
+        assert!(!due_for_check(1_000, Some(5_000), day));
     }
 
     fn temp_state() -> (StateStore, tempfile::TempDir) {
