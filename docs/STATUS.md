@@ -1,6 +1,7 @@
 # Duja — Project Status
 
-_Last updated: 2026-07-14 (UI layout & ruby theme overhaul merged — PR #39)._
+_Last updated: 2026-07-16 (v0.1.0 release: installer + signed release pipeline +
+smart update loop)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -18,14 +19,20 @@ The authoritative plan is the phase roadmap; architecture decisions live in
 | P3 Windows hardware slice | `m3-win-hw` | ✅ done |
 | P4 Windows dimmer + UI (MVP) | `m4-win-mvp` | ✅ done |
 | P5 Power features (Windows complete) | `m5-win-full` | ✅ done |
+| **First release** | **`v0.1.0` (Windows)** | 🚀 shipping — installer + portable zip, signed, auto-update loop |
 | P6 macOS port | `m6-macos` / `v0.3.0-beta` | 🚧 in progress — wave 1 (backends) landed; wave 2 (app assembly + packaging) + gate remain |
 | P7 Linux port | `m7-linux` / `v0.4.0-beta` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
 
-**Release tags (`v0.1.0-alpha`, `v0.2.0-beta`) are still unset.** The **hardware
-sign-off now PASSES on real hardware** (live console-session QA, 2026-07-11 —
-see "Live hardware QA"); the alpha tag is gated only on the remaining
-**pure-visual** checks (tray/flyout/overlay appearance), which need human eyes.
+**`v0.1.0` is the first public release.** The hardware sign-off passed on real
+hardware (2026-07-11, see "Live hardware QA") and the **pure-visual QA is now
+signed off** (user, 2026-07-16), which were the two gates. Shipping as a clean
+**stable** `v0.1.0` (not `-alpha`) so the built-in update checker — which only
+prompts on newer *stable* releases via GitHub's `/releases/latest` — works end to
+end from day one. Distribution is a tag-triggered
+[`release.yml`](../.github/workflows/release.yml): an Inno Setup installer + a
+portable zip, each with `SHA256SUMS`, a minisign signature, and a build-provenance
+attestation.
 
 Health: **709 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
@@ -34,8 +41,11 @@ finding fixed test-first before tagging.
 
 Measured (headless, P4/P5 gates): idle RSS **23.3 MB** (budget ≤ 35),
 idle CPU **0 ms over 20 s** — zero wakeups, by construction.
-`duja.exe` **17.21 MB** (over the 16 MB budget — see
-[ADR-0012](adr/0012-binary-size-budget-variance.md)); `dujactl.exe` 0.6 MB.
+`duja.exe` is now **~19 MB** (release, thin LTO): over the 16 MB budget — the
+update-check TLS stack plus the WinRT toast bindings added by the v0.1.0 smart
+update loop (`UI_Notifications`/`Data_Xml_Dom`). Tracked in
+[ADR-0012](adr/0012-binary-size-budget-variance.md)/[debt.md](debt.md); P8 owns
+the trim (fat LTO, feature-gating the update stack). `dujactl.exe` ~0.8 MB.
 
 ## What is done
 
@@ -115,9 +125,11 @@ idle CPU **0 ms over 20 s** — zero wakeups, by construction.
   `CancelIoEx` cancellation. `dujactl` speaks IPC-first with silent fallback to
   the direct hardware backend; second instance forwards `ShowFlyout`.
 - **Settings window**, **autostart** (in-house trait over the HKCU Run key), and
-  an **opt-in update check** (off by default; one HTTPS GET over rustls, body
-  capped at 64 KiB before buffering, conservative semver, opens the browser —
-  **never downloads**).
+  the **update check** — one HTTPS GET over rustls, body capped at 64 KiB before
+  buffering, opens the browser, **never downloads**. Promoted to a smart-notify
+  loop for v0.1.0 (see "v0.1.0 release" below): on by default, once-a-day
+  background check piggybacked on interaction (zero idle wakeups), surfaced in the
+  tray + a toast, with SemVer-correct precedence.
 - Gate: adversarial review + **security checklist §6 item-by-item** +
   **unsafe audit #2**. Results below.
 
@@ -294,6 +306,39 @@ finding — a fractional-DPI scale race in the settings `Resized` capture, which
 read the window's provisional scale instead of the monitor's — was fixed (it now
 queries the monitor scale, as `enforce_physical_buffer` does).
 
+### v0.1.0 release (2026-07-16)
+
+The first public release turns the Windows-complete build into something users can
+install and stay current on:
+
+- **Smart update loop.** The P5 notify-only checker became a real retention loop:
+  **on by default** (opt-out via `general.update_check = false`), a **once-a-day**
+  background check that piggybacks on user interaction (tray/hotkey events and
+  startup) so the **zero-idle-wakeup** guarantee holds — no timer, no poll. A
+  newer release surfaces as a prepended **"Update available"** tray item, a tray
+  tooltip, and a **WinRT toast** (no new crate — extra `windows` features; AUMID
+  `io.github.itabajah.duja`, matched by the installer shortcut). The version
+  compare is now full **SemVer** precedence (pre-release ordering, build metadata
+  ignored) — future-proofing the alpha/beta line — while GitHub's
+  `/releases/latest` keeps betas from prompting stable users. Still **never
+  downloads or installs**.
+- **Distribution.** A tag-triggered
+  [`release.yml`](../.github/workflows/release.yml) on `windows-latest` builds
+  `--release --locked`, stages a portable zip via the (dependency-free)
+  `xtask dist`, compiles an **Inno Setup** installer
+  ([`packaging/windows/duja.iss`](../packaging/windows/duja.iss); per-user, no
+  UAC, optional launch-at-login writing the *same* HKCU Run value as the in-app
+  autostart), then emits `SHA256SUMS`, **minisign** signatures, and a
+  **build-provenance** attestation, and publishes the GitHub Release with
+  git-cliff notes. A tag/version guard fails fast on a mismatched tag; a
+  `workflow_dispatch` runs the whole thing as an artifacts-only dry run.
+- **Docs & brand.** A premium README (hero rendered from the faceted-gem
+  whirlpool mark, badges, install/verify sections), a social-preview card, and the
+  threat-model/SmartScreen/verification notes in [SECURITY.md](../SECURITY.md).
+- **Not signed.** No Authenticode certificate yet, so SmartScreen warns on first
+  run; authenticity is via the checksums + minisign key + provenance. Binary size
+  regressed to ~19 MB (P8 trim).
+
 ## P5 gate results
 
 **Security checklist §6** — every item PASS, each with a proving test: pipe
@@ -370,10 +415,12 @@ therefore reports an occasional FAIL that reflects real DDC/CI wire flakiness,
 not a logic defect. Tracked in [debt.md](debt.md); a future harness change
 should score an *error rate* threshold rather than absolute zero.
 
-### 1. Remaining QA — the pure-visual checks (still need human eyes)
+### 1. Pure-visual QA — SIGNED OFF (user, 2026-07-16)
 
-The functional path is proven above; these items are inherently visual and
-cannot be automated — run `target\release\duja.exe` and eyeball:
+The functional path was proven on hardware (above); these inherently-visual
+items were verified manually in the UI by the user and **signed off for the
+`v0.1.0` release**. Retained here as the per-release visual smoke list — run
+`target\release\duja.exe` and eyeball:
 
 1. Tray icon + "Duja" tooltip, legible on light **and** dark taskbars.
 2. Left-click toggles the flyout near the tray, fully on-screen (top/left
@@ -396,9 +443,9 @@ cannot be automated — run `target\release\duja.exe` and eyeball:
     recovers. (Also visual/timing — needs a hand on the cable and the power
     button.)
 
-With the hardware sign-off now passing, `v0.1.0-alpha` is gated **only** on
-these visual checks; tag it once they look right (and `v0.2.0-beta` for the
-public beta).
+Both gates (hardware + visual) now pass, so `v0.1.0` ships. Add to this list per
+release: the tray **"Update available"** item + toast appear when a newer release
+exists, and clicking either opens the releases page.
 
 ### 2. Known gaps carried forward
 - **Binary 17.21 MB > 16 MB budget** — P8 must recover it (ADR-0012 ledger).

@@ -62,4 +62,6 @@ pub(crate) mod stress;
 pub(crate) mod updates;
 
 #[cfg(windows)]
+pub(crate) mod toast;
+#[cfg(windows)]
 pub(crate) mod tray;

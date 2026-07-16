@@ -8,7 +8,7 @@
 //!
 //! [general]
 //! autostart = true
-//! update_check = false   # opt-in; no network by default
+//! update_check = true    # on by default; once-a-day background check
 //! theme = "system"
 //!
 //! [hotkeys]
@@ -130,10 +130,13 @@ pub enum Accent {
 pub struct General {
     /// Launch Duja automatically at login.
     pub autostart: bool,
-    /// Check GitHub for a newer release on startup.
+    /// Check GitHub for a newer release.
     ///
-    /// **Opt-in** and off by default: Duja makes no network request unless the
-    /// user enables this (plan §6.3).
+    /// **On by default** (opt-out): while enabled, Duja runs a once-a-day
+    /// background check that piggybacks on user interaction (no idle-CPU
+    /// wakeups) and, on a newer release, surfaces it via a tray item and a
+    /// toast. It never downloads or installs anything — a click just opens the
+    /// releases page. Set to `false` to disable all update networking.
     pub update_check: bool,
     /// Which UI theme to use.
     pub theme: Theme,
@@ -145,7 +148,7 @@ impl Default for General {
     fn default() -> Self {
         General {
             autostart: true,
-            update_check: false,
+            update_check: true,
             theme: Theme::System,
             accent: Accent::Ruby,
         }
@@ -257,7 +260,7 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.schema_version, CURRENT_VERSION);
         assert!(cfg.general.autostart, "autostart defaults on");
-        assert!(!cfg.general.update_check, "update check is opt-in (off)");
+        assert!(cfg.general.update_check, "update check is on by default");
         assert_eq!(cfg.general.theme, Theme::System);
         assert_eq!(cfg.general.accent, Accent::Ruby);
         assert!(cfg.hotkeys.is_empty());
@@ -283,7 +286,7 @@ mod tests {
         let cfg: Config = toml_edit::de::from_str("[general]\nautostart = false\n")
             .expect("valid partial config");
         assert!(!cfg.general.autostart);
-        assert!(!cfg.general.update_check);
+        assert!(cfg.general.update_check, "update_check defaults on");
         assert_eq!(cfg.general.theme, Theme::System);
         assert_eq!(cfg.general.accent, Accent::Ruby);
     }

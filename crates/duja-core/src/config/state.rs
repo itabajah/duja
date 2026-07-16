@@ -60,7 +60,7 @@ pub struct LevelEntry {
 pub struct StateFile {
     /// The state schema version.
     pub schema_version: u32,
-    /// When the opt-in update check last ran, in seconds since the Unix epoch.
+    /// When the update check last ran, in seconds since the Unix epoch.
     ///
     /// Lives here — not in the user's config — because it is volatile bookkeeping
     /// the user never edits. `None` until the first manual check. A scalar, so it

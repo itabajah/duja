@@ -1,21 +1,24 @@
-//! The opt-in update check (plan §6.3): one HTTPS GET, a semver compare, and a
-//! browser hand-off — Duja never downloads or installs anything itself.
+//! The update check: one HTTPS GET, a semver compare, and a browser hand-off —
+//! Duja never downloads or installs anything itself.
 //!
-//! # Off by default, manual only
+//! # On by default, notify-only
 //!
-//! No network request happens unless the user turns the check on
-//! (`general.update_check`) **and** triggers it — from the settings window or
-//! the `duja --check-updates` CLI. There is **no** background timer (the
-//! zero-idle-wakeup rule; scheduled checks are a post-1.0 item), so this module
-//! runs only on an explicit user action.
+//! The check runs while `general.update_check` is on (the default). It is not a
+//! timer: a once-a-day background check piggybacks on events the process is
+//! already handling (tray interaction, startup), so the zero-idle-wakeup
+//! guarantee is untouched (see `tray::maybe_background_update_check`). The
+//! manual paths — the settings window "Check now" button and the
+//! `duja --check-updates` CLI — still work regardless of the toggle. On a newer
+//! release Duja surfaces it (tray item, tooltip, toast) and, when acted on,
+//! opens the releases page in the browser; it **never** downloads or installs.
 //!
 //! # Shape
 //!
 //! The decision logic is pure: [`check_for_update`] takes an injected
 //! [`UpdateTransport`] and the compiled-in version and returns an
 //! [`UpdateOutcome`]. That makes every branch — newer / older / equal /
-//! pre-release / garbage JSON / oversized / network error — unit-testable
-//! against a fake transport, with no socket in sight.
+//! pre-release ordering / garbage JSON / oversized / network error —
+//! unit-testable against a fake transport, with no socket in sight.
 //!
 //! The real transport ([`HttpsTransport`]) wraps `ureq` (rustls) with 5-second
 //! timeouts and reads the body **read-limited** to [`MAX_RESPONSE_BYTES`] before
@@ -59,11 +62,11 @@ pub struct TransportError(pub String);
 /// The result of an update check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateOutcome {
-    /// The running build is the newest stable release (or the latest release is
-    /// a pre-release, which never prompts).
+    /// The running build is the newest release (nothing strictly newer, or the
+    /// latest tag did not parse as a version).
     UpToDate,
-    /// A strictly-newer stable release is available; carries its tag as printed
-    /// by GitHub (e.g. `v1.2.0`).
+    /// A strictly-newer release is available; carries its tag as printed by
+    /// GitHub (e.g. `v1.2.0`).
     UpdateAvailable {
         /// The newer release's tag name.
         version: String,
@@ -78,9 +81,9 @@ pub enum UpdateOutcome {
 ///
 /// Pure with respect to the transport: no I/O of its own, so it is exhaustively
 /// unit-testable. A failed fetch or an unparseable response yields
-/// [`UpdateOutcome::Failed`]; a latest release that is a pre-release or not
-/// strictly newer yields [`UpdateOutcome::UpToDate`] (conservative — only a
-/// strictly-greater *stable* version prompts).
+/// [`UpdateOutcome::Failed`]; a latest release that is not strictly newer than
+/// the running build yields [`UpdateOutcome::UpToDate`]. Only a
+/// strictly-greater version (by `SemVer` precedence) prompts.
 #[must_use]
 pub fn check_for_update(transport: &dyn UpdateTransport, current_version: &str) -> UpdateOutcome {
     match transport.fetch(RELEASES_API_URL) {
@@ -106,9 +109,9 @@ fn evaluate(body: &[u8], current: &str) -> UpdateOutcome {
         return UpdateOutcome::Failed(reason);
     };
     match Version::parse(&tag) {
-        // A newer STABLE release: prompt.
+        // Strictly newer by `SemVer` precedence: prompt.
         Some(latest) if latest > current_v => UpdateOutcome::UpdateAvailable { version: tag },
-        // Equal, older, a pre-release, or an unparseable tag: never prompt.
+        // Equal, older, or an unparseable tag: do not prompt.
         _ => UpdateOutcome::UpToDate,
     }
 }
@@ -119,46 +122,130 @@ fn parse_tag_name(body: &[u8]) -> Option<String> {
     value.get("tag_name")?.as_str().map(str::to_owned)
 }
 
-/// A parsed *stable* semantic version: `major.minor.patch` with no pre-release
-/// or build metadata.
+/// One dot-separated identifier of a `SemVer` pre-release string.
 ///
-/// The field order makes the derived [`Ord`] compare major, then minor, then
-/// patch — exactly semver's precedence for release versions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Per `SemVer` §11, an all-numeric identifier compares numerically and ranks
+/// below an alphanumeric one; two alphanumerics compare in ASCII order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreId {
+    /// An all-ASCII-digit identifier (e.g. `1`), compared numerically.
+    Numeric(u64),
+    /// Any other identifier (e.g. `rc`, `alpha`), compared as ASCII text.
+    Alnum(String),
+}
+
+impl Ord for PreId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (self, other) {
+            (PreId::Numeric(a), PreId::Numeric(b)) => a.cmp(b),
+            (PreId::Alnum(a), PreId::Alnum(b)) => a.cmp(b),
+            // Numeric identifiers always have lower precedence than alphanumeric.
+            (PreId::Numeric(_), PreId::Alnum(_)) => Ordering::Less,
+            (PreId::Alnum(_), PreId::Numeric(_)) => Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for PreId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// A parsed semantic version: `major.minor.patch` with optional pre-release
+/// identifiers. Build metadata is parsed away and ignored (`SemVer` §10).
+///
+/// [`Ord`] implements `SemVer` §11 precedence: compare the numeric core, then —
+/// on a tie — a version *with* a pre-release ranks below one without, and
+/// otherwise the pre-release identifier lists compare element-wise (a longer
+/// list winning when every shared identifier is equal).
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Version {
     major: u64,
     minor: u64,
     patch: u64,
+    /// Empty for a stable release; the ordered identifiers otherwise.
+    pre: Vec<PreId>,
+}
+
+impl Ord for Version {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (self.major, self.minor, self.patch).cmp(&(other.major, other.minor, other.patch)) {
+            Ordering::Equal => match (self.pre.is_empty(), other.pre.is_empty()) {
+                // A stable release outranks any pre-release of the same core.
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                // Both pre-releases: compare identifier lists element-wise; if
+                // all shared identifiers tie, the longer list has higher
+                // precedence (`Iterator::cmp` already gives this).
+                (false, false) => self.pre.iter().cmp(other.pre.iter()),
+            },
+            core => core,
+        }
+    }
+}
+
+impl PartialOrd for Version {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Version {
-    /// Parse a `[v]MAJOR.MINOR.PATCH` tag, returning `None` for anything with a
-    /// pre-release (`-rc1`) or build (`+meta`) suffix, extra components, or a
-    /// non-numeric field.
+    /// Parse a `[v]MAJOR.MINOR.PATCH[-pre][+build]` tag.
     ///
-    /// Pre-releases deliberately do not parse: only a strictly-greater stable
-    /// release should ever prompt the user (plan §6.3).
+    /// Returns `None` for a non-numeric or missing core field, more than three
+    /// core components, or an empty pre-release identifier. Build metadata
+    /// (`+…`) is accepted and discarded — it does not affect precedence.
     fn parse(tag: &str) -> Option<Version> {
         let trimmed = tag.trim();
         let body = trimmed
             .strip_prefix('v')
             .or_else(|| trimmed.strip_prefix('V'))
             .unwrap_or(trimmed);
-        // A stable release has no pre-release or build metadata.
-        if body.contains('-') || body.contains('+') {
-            return None;
-        }
-        let mut parts = body.split('.');
+        // Strip build metadata first (`SemVer` §10: ignored in precedence).
+        let body = body.split('+').next().unwrap_or(body);
+        // Split off the pre-release at the first '-'.
+        let (core, pre) = match body.split_once('-') {
+            Some((core, pre)) => (core, Some(pre)),
+            None => (body, None),
+        };
+
+        let mut parts = core.split('.');
         let major = parts.next()?.parse::<u64>().ok()?;
         let minor = parts.next()?.parse::<u64>().ok()?;
         let patch = parts.next()?.parse::<u64>().ok()?;
         if parts.next().is_some() {
-            return None; // more than three dotted components
+            return None; // more than three dotted core components
         }
+
+        let pre = match pre {
+            None => Vec::new(),
+            Some(pre) => {
+                let mut ids = Vec::new();
+                for id in pre.split('.') {
+                    if id.is_empty() {
+                        return None; // empty identifier, e.g. `1.0.0-` or `1.0.0-a..b`
+                    }
+                    // An identifier that is all ASCII digits compares numerically.
+                    if id.bytes().all(|b| b.is_ascii_digit()) {
+                        ids.push(PreId::Numeric(id.parse::<u64>().ok()?));
+                    } else {
+                        ids.push(PreId::Alnum(id.to_owned()));
+                    }
+                }
+                ids
+            }
+        };
+
         Some(Version {
             major,
             minor,
             patch,
+            pre,
         })
     }
 }
@@ -288,12 +375,62 @@ mod tests {
     }
 
     #[test]
-    fn newer_prerelease_never_prompts() {
-        // A pre-release is conservatively ignored even if numerically higher.
+    fn newer_prerelease_prompts() {
+        // A newer pre-release (higher core) still prompts under `SemVer` ordering.
+        // In practice GitHub's `/releases/latest` never returns a pre-release,
+        // but the comparison must be correct for the alpha/beta line.
         let t = FakeTransport::body(&release("v2.0.0-rc1"));
+        assert_eq!(
+            check_for_update(&t, "1.0.0"),
+            UpdateOutcome::UpdateAvailable {
+                version: "v2.0.0-rc1".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn build_metadata_is_ignored() {
+        // `+build` does not affect precedence: same core ⇒ up to date.
+        let t = FakeTransport::body(&release("v1.0.0+build.7"));
         assert_eq!(check_for_update(&t, "1.0.0"), UpdateOutcome::UpToDate);
-        let t = FakeTransport::body(&release("v2.0.0+build.7"));
-        assert_eq!(check_for_update(&t, "1.0.0"), UpdateOutcome::UpToDate);
+        assert_eq!(Version::parse("1.0.0+build.7"), Version::parse("1.0.0"));
+    }
+
+    #[test]
+    fn a_prerelease_is_lower_than_its_stable_release() {
+        // 2.0.0-rc.1 < 2.0.0, so a running rc is offered the stable release.
+        let t = FakeTransport::body(&release("v2.0.0"));
+        assert_eq!(
+            check_for_update(&t, "2.0.0-rc.1"),
+            UpdateOutcome::UpdateAvailable {
+                version: "v2.0.0".to_owned()
+            }
+        );
+        // …but the same rc is not offered its own pre-release.
+        let t = FakeTransport::body(&release("v2.0.0-rc.1"));
+        assert_eq!(check_for_update(&t, "2.0.0-rc.1"), UpdateOutcome::UpToDate);
+    }
+
+    #[test]
+    fn semver_prerelease_precedence_chain() {
+        // `SemVer` §11 worked example, in strictly increasing order.
+        let chain = [
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0",
+        ];
+        for pair in chain.windows(2) {
+            let [lower, higher] = pair else { continue };
+            let lo = Version::parse(lower).expect("parses");
+            let hi = Version::parse(higher).expect("parses");
+            assert!(lo < hi, "{lower} should be < {higher}");
+            assert!(hi > lo, "{higher} should be > {lower}");
+        }
     }
 
     #[test]
@@ -353,20 +490,33 @@ mod tests {
     }
 
     #[test]
-    fn version_parse_rejects_prerelease_and_junk() {
+    fn version_parse_accepts_core_and_prerelease_rejects_junk() {
         assert_eq!(
             Version::parse("v1.2.3"),
             Some(Version {
                 major: 1,
                 minor: 2,
-                patch: 3
+                patch: 3,
+                pre: Vec::new(),
             })
         );
         assert_eq!(Version::parse("1.2.3"), Version::parse("v1.2.3"));
-        assert_eq!(Version::parse("1.2.3-rc1"), None);
+        // Pre-release identifiers now parse and round-trip (numeric vs alnum).
+        assert_eq!(
+            Version::parse("1.2.3-rc.2"),
+            Some(Version {
+                major: 1,
+                minor: 2,
+                patch: 3,
+                pre: vec![PreId::Alnum("rc".to_owned()), PreId::Numeric(2)],
+            })
+        );
+        // Junk and malformed cores still reject.
         assert_eq!(Version::parse("1.2"), None);
         assert_eq!(Version::parse("1.2.3.4"), None);
         assert_eq!(Version::parse("banana"), None);
+        assert_eq!(Version::parse("1.2.3-"), None); // empty pre-release
+        assert_eq!(Version::parse("1.2.3-a..b"), None); // empty identifier
     }
 
     // A live smoke test against the real GitHub API. Never run in CI or the

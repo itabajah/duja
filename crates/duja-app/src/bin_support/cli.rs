@@ -27,7 +27,7 @@ pub(crate) enum Command {
     },
     /// Restore the screen: clear overlays + identity gamma, then report.
     Restore,
-    /// Run the opt-in update check once, print the outcome, exit (headless).
+    /// Run the update check once, print the outcome, exit (headless).
     CheckUpdates,
     /// Print usage.
     Help,

@@ -9,9 +9,14 @@ within 7 days.
 
 ## Threat model (summary)
 
-Duja runs unprivileged, ships no telemetry, and makes **no network requests by
-default** (the only network code is an opt-in, off-by-default version check
-that opens the releases page — it never downloads or executes anything).
+Duja runs unprivileged and ships no telemetry. The **only** network code is the
+update check: while enabled (on by default; opt-out with
+`general.update_check = false`) it makes one HTTPS GET to the GitHub releases API
+**at most once a day**, piggybacked on a real user interaction so an idle machine
+never wakes for it. On a newer release it surfaces a tray item and a toast whose
+click opens the releases page — it **never downloads, installs, or executes
+anything**. The response body is read-capped at 64 KiB before buffering, over
+rustls with a 5-second timeout.
 
 Local attack surface and mitigations:
 
@@ -28,6 +33,30 @@ Local attack surface and mitigations:
 ## Supply chain
 
 Pinned lockfile; `cargo-deny` (advisories + license allowlist) on every PR;
-GitHub Actions pinned by commit SHA. Planned for the first tagged release (the
-release workflow lands with `v0.1.0-alpha`; nothing is published yet): SHA256SUMS
-with a build-provenance attestation and a minisign signature.
+GitHub Actions pinned by commit SHA. Each tagged release
+([`.github/workflows/release.yml`](.github/workflows/release.yml)) publishes, for
+every artifact, a **SHA256SUMS** file, a **minisign** signature (`.minisig`), and
+a GitHub **build-provenance attestation**.
+
+> **Note — code signing.** Release binaries are **not** yet signed with an
+> Authenticode certificate, so Windows SmartScreen may warn on first run. Verify
+> authenticity with the checksums and minisign signature below instead.
+
+### Verifying a release
+
+```sh
+sha256sum -c SHA256SUMS
+minisign -Vm SHA256SUMS -P <DUJA_MINISIGN_PUBLIC_KEY>
+```
+
+Duja's minisign public key (published here; the private key is kept offline):
+
+```
+# TODO(release): paste the line from `minisign.pub` here before tagging v0.1.0.
+# Generate once with:  minisign -G -W -p minisign.pub -s minisign.key
+# then add the secret MINISIGN_SECRET_KEY (= minisign.key contents) to the repo.
+RWQ_REPLACE_WITH_REAL_PUBLIC_KEY
+```
+
+You can also inspect the build-provenance attestation on any release asset with
+`gh attestation verify <file> --repo itabajah/duja`.

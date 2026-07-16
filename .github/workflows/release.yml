@@ -1,0 +1,165 @@
+# Duja release pipeline — builds, packages, signs, and publishes a tagged release.
+#
+# Trigger: pushing a `v*` tag publishes a GitHub Release with the Windows
+# installer, a portable zip, SHA256SUMS, minisign signatures, and a build-
+# provenance attestation. `workflow_dispatch` builds the same artifacts and
+# uploads them as workflow artifacts for inspection WITHOUT publishing (a dry
+# run) — use it to validate the pipeline before tagging.
+#
+# All third-party actions are SHA-pinned (supply-chain policy, as in ci.yml).
+# Shell tools installed via choco (Inno Setup, minisign) are outside that policy,
+# exactly like the apt-get/choco steps in ci.yml.
+#
+# One-time setup before the first real tag (see SECURITY.md):
+#   1. minisign -G -W -p minisign.pub -s minisign.key   (passwordless key)
+#   2. add the repo secret MINISIGN_SECRET_KEY = the full contents of minisign.key
+#   3. commit minisign.pub and paste its line into SECURITY.md/README
+#   4. keep minisign.key offline (never committed)
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+# contents: write → create the Release + upload assets.
+# id-token + attestations: write → build-provenance attestation.
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: build & publish (windows-x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # git-cliff needs full history + tags to render the release notes.
+          fetch-depth: 0
+
+      # Resolve the version and decide whether this run publishes. On a tag push
+      # the tag (minus `v`) MUST equal the workspace version, or we fail fast
+      # rather than ship a mislabeled installer.
+      - name: Resolve version
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+?)"' |
+                  Select-Object -First 1).Matches.Groups[1].Value
+          if ('${{ github.ref_type }}' -eq 'tag') {
+            $tag = '${{ github.ref_name }}' -replace '^v',''
+            if ($tag -ne $ver) { throw "tag $tag does not match Cargo.toml version $ver" }
+            $publish = 'true'
+          } else {
+            $publish = 'false'
+          }
+          "VERSION=$ver" >> $env:GITHUB_ENV
+          "PUBLISH=$publish" >> $env:GITHUB_ENV
+          Write-Host "version=$ver publish=$publish"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      # rust-toolchain.toml pins 1.96.1; rustup installs it on first use.
+      - name: Build release binaries
+        run: cargo build --release --locked -p duja-app -p dujactl
+
+      # Portable zip (staging + Compress-Archive), via the dependency-free xtask.
+      - name: Stage portable archive
+        run: cargo run --release -p xtask -- dist --version ${{ env.VERSION }}
+
+      # Inno Setup installer. Not reliably preinstalled on windows-latest → install.
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion=${{ env.VERSION }} packaging\windows\duja.iss
+
+      # SHA256SUMS over the two shippable artifacts (two-space `sha256sum -c` form).
+      - name: Compute SHA256SUMS
+        shell: pwsh
+        run: |
+          Push-Location target/dist
+          $files = "duja-setup-${{ env.VERSION }}.exe",
+                   "duja-${{ env.VERSION }}-windows-x64.zip"
+          Get-FileHash $files -Algorithm SHA256 |
+            ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) } |
+            Set-Content -Encoding ascii SHA256SUMS
+          Get-Content SHA256SUMS
+          Pop-Location
+
+      # Dry-run visibility: always upload the built artifacts for inspection.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: duja-${{ env.VERSION }}-windows-x64
+          path: |
+            target/dist/duja-setup-${{ env.VERSION }}.exe
+            target/dist/duja-${{ env.VERSION }}-windows-x64.zip
+            target/dist/SHA256SUMS
+          if-no-files-found: error
+
+      # ---- Publish-only steps (tag pushes) ----------------------------------
+
+      # Sign every artifact (installer, zip, SHA256SUMS) with the offline key.
+      - name: Sign artifacts (minisign)
+        if: env.PUBLISH == 'true'
+        shell: pwsh
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:MINISIGN_KEY)) {
+            throw "MINISIGN_SECRET_KEY secret is not set — see SECURITY.md"
+          }
+          choco install minisign -y --no-progress
+          $env:MINISIGN_KEY | Set-Content -NoNewline -Encoding ascii minisign.key
+          try {
+            Push-Location target/dist
+            foreach ($f in "duja-setup-${{ env.VERSION }}.exe",
+                            "duja-${{ env.VERSION }}-windows-x64.zip",
+                            "SHA256SUMS") {
+              minisign -S -s ../../minisign.key -m $f -c "duja ${{ env.VERSION }}"
+              if ($LASTEXITCODE -ne 0) { throw "minisign failed for $f" }
+            }
+            Pop-Location
+          } finally {
+            Remove-Item minisign.key -ErrorAction SilentlyContinue
+          }
+
+      - name: Attest build provenance
+        if: env.PUBLISH == 'true'
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            target/dist/duja-setup-${{ env.VERSION }}.exe
+            target/dist/duja-${{ env.VERSION }}-windows-x64.zip
+
+      - name: Install git-cliff
+        if: env.PUBLISH == 'true'
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2
+        with:
+          tool: git-cliff
+      - name: Generate release notes
+        if: env.PUBLISH == 'true'
+        run: git cliff --tag ${{ github.ref_name }} --latest --strip all -o RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        if: env.PUBLISH == 'true'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          body_path: RELEASE_NOTES.md
+          fail_on_unmatched_files: true
+          files: |
+            target/dist/duja-setup-${{ env.VERSION }}.exe
+            target/dist/duja-${{ env.VERSION }}-windows-x64.zip
+            target/dist/SHA256SUMS
+            target/dist/*.minisig

@@ -48,6 +48,13 @@ windows = { workspace = true, features = [
     # Querying the monitor scale under the cursor (GetDpiForMonitor) so the flyout
     # is sized + placed correctly BEFORE it is shown (item 1: one-shot present).
     "Win32_UI_HiDpi",
+    # WinRT toast notification for a newly-available update (no extra crate).
+    # SetCurrentProcessExplicitAppUserModelID (for the toast's app identity) is
+    # already covered by Win32_UI_Shell above.
+    "UI_Notifications",
+    "Data_Xml_Dom",
+    "Foundation",
+    "Foundation_Collections",
 ] }
 
 [build-dependencies]
