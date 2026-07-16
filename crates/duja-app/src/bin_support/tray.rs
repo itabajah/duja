@@ -1061,15 +1061,19 @@ impl AppState {
         self.update_check_in_flight = true;
         self.state.record_update_check(unix_now());
         let _ = self.state.maybe_flush(Instant::now());
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("duja-update-check".to_owned())
             .spawn(move || {
                 let outcome = updates::check_for_update(&HttpsTransport, env!("CARGO_PKG_VERSION"));
                 let _ = slint::invoke_from_event_loop(move || {
                     with_app(move |app| app.on_update_outcome(outcome, background));
                 });
-            })
-            .ok();
+            });
+        if spawned.is_err() {
+            // The worker never ran, so nothing will clear the guard via
+            // `on_update_outcome` — reset it now so checks aren't wedged off.
+            self.update_check_in_flight = false;
+        }
     }
 
     /// Fold a completed update check back into the UI. Always reflects the

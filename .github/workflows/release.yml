@@ -55,7 +55,9 @@ jobs:
         run: |
           $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+?)"' |
                   Select-Object -First 1).Matches.Groups[1].Value
-          if ('${{ github.ref_type }}' -eq 'tag') {
+          # Publish ONLY on a tag *push* — never on workflow_dispatch, even if it
+          # was manually pointed at a tag ref (that path is a dry run by design).
+          if ('${{ github.event_name }}' -eq 'push' -and '${{ github.ref_type }}' -eq 'tag') {
             $tag = '${{ github.ref_name }}' -replace '^v',''
             if ($tag -ne $ver) { throw "tag $tag does not match Cargo.toml version $ver" }
             $publish = 'true'

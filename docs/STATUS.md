@@ -448,7 +448,8 @@ release: the tray **"Update available"** item + toast appear when a newer releas
 exists, and clicking either opens the releases page.
 
 ### 2. Known gaps carried forward
-- **Binary 17.21 MB > 16 MB budget** — P8 must recover it (ADR-0012 ledger).
+- **Binary ~19 MB > 16 MB budget** — P8 must recover it (ADR-0012 ledger; the
+  v0.1.0 WinRT toast bindings widened the P5 17.21 MB overage).
 - **WMI panel set-path** has never executed on real hardware (this box is a
   desktop): borrow a laptop for a 30-minute run before the beta.
 - Suspend/resume does not re-push DDC levels when the display set is unchanged;
