@@ -1,0 +1,9 @@
+// Windows resource script — the sole purpose is the executable's file/shortcut
+// icon. Resource ID 1 is the lowest-numbered ICON, which is the one Explorer, the
+// taskbar and the Apps list use for `duja.exe`. The icon itself is the committed,
+// generated whirlpool (see `examples/gen_exe_icon.rs`).
+//
+// Deliberately NO manifest here: the PerMonitorV2 DPI manifest is embedded
+// separately by `embed-manifest` in build.rs, and two manifest resources would
+// clash.
+1 ICON "assets/duja.ico"

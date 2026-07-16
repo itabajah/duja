@@ -129,6 +129,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Build-only (duja-app build.rs, P4): embeds the PerMonitorV2 DPI-awareness
 # application manifest into the executable.
 embed-manifest = "1"
+# Build-only (duja-app build.rs): compiles the one-line `duja.rc` so the static
+# whirlpool exe icon (`assets/duja.ico`) is embedded as a PE icon resource. Only
+# invoked under the Windows gate; present-but-unused on other lanes.
+embed-resource = "3"
+# Dev-only (duja-app): the `gen_exe_icon` example encodes the multi-size `.ico`,
+# and the drift test decodes it to compare against the whirlpool generator.
+ico = "0.4"
 # Opt-in update check (duja-app, P5): a single HTTPS GET to the GitHub releases
 # API. `default-features = false` + `tls` selects the rustls (ring) backend with
 # bundled webpki roots — NO native-tls, so the binary stays self-contained and
