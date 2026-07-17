@@ -173,8 +173,11 @@ fn parse_descriptor_text(raw: &[u8]) -> Option<String> {
 /// 2. else a **non-zero** numeric serial from bytes 12..=15, as
 ///    `MFG-PROD-s<decimal>` — it survives EDID byte changes (e.g. firmware
 ///    updates) that would shift a content hash,
-/// 3. else `MFG-PROD-#hXXXXXXXX`, an FNV-1a hash of the full EDID (a zero
-///    numeric serial is unset, which is common, and must not collide).
+/// 3. else `MFG-PROD-#hXXXXXXXX`, an FNV-1a hash of the 128-byte **base block**
+///    (a zero numeric serial is unset, which is common, and must not collide);
+///    keyed on the base block only — matching [`EdidInfo::parse`], which reads
+///    only the base block — so a truncated or extension-carrying read of the
+///    same panel yields the same id (and keeps its per-display config).
 ///
 /// [`with_slot`](Self::with_slot) disambiguates identical twin monitors that
 /// share an EDID.
@@ -197,7 +200,16 @@ impl StableDisplayId {
         let id = match serial_key {
             Some(serial) => format!("{base}-{serial}"),
             None if info.serial_number != 0 => format!("{base}-s{}", info.serial_number),
-            None => format!("{base}-#h{}", fnv1a_hex(edid)),
+            // Hash the 128-byte base block only, not any extension blocks or
+            // trailing bytes: the same panel read once with extensions and once
+            // base-block-only (a truncated registry value, a driver dropping
+            // extensions, another machine's reader) must map to the SAME id, or
+            // its per-display config is silently lost. `parse` succeeded above, so
+            // the base block is present; the `unwrap_or` is purely defensive.
+            None => format!(
+                "{base}-#h{}",
+                fnv1a_hex(edid.get(..BASE_BLOCK_LEN).unwrap_or(edid))
+            ),
         };
         Ok(StableDisplayId(id))
     }
@@ -518,6 +530,29 @@ mod tests {
         }
         let c = StableDisplayId::from_edid(&other).unwrap();
         assert_ne!(a.as_str(), c.as_str());
+    }
+
+    #[test]
+    fn hash_fallback_keys_on_the_base_block_only() {
+        // A serial-less panel read once with just its 128-byte base block and
+        // once with an appended extension block must get the SAME id: the hash
+        // keys on the identity-bearing base block only, matching `parse`'s
+        // "only the base block is read" contract. Before the fix the hash
+        // covered the whole slice, so the two reads split into distinct ids and
+        // the display's per-monitor config was silently lost on the second read.
+        let base = dell_edid_no_serial();
+        let base_id = StableDisplayId::from_edid(&base).unwrap();
+
+        let mut with_extension = base.clone();
+        // Append a 128-byte block whose bytes differ from the base block; only
+        // the base block bytes 0..128 are unchanged.
+        with_extension.extend_from_slice(&[0xA5u8; BASE_BLOCK_LEN]);
+        let extended_id = StableDisplayId::from_edid(&with_extension).unwrap();
+
+        assert_eq!(
+            base_id, extended_id,
+            "the same base block must yield the same id regardless of trailing bytes"
+        );
     }
 
     #[test]
