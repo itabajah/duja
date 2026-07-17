@@ -96,6 +96,16 @@ pub struct MonitorSection {
     /// The allowed input sources; empty when input switching is unsupported (the
     /// dropdown is then hidden).
     pub inputs: Vec<InputChoice>,
+    /// The selector index of the input the user last picked this session, or
+    /// `None` if none has been chosen yet.
+    ///
+    /// A [`DisplaySnapshot`] carries no active-input readback, so this starts
+    /// `None` (rendered as an *empty* dropdown) rather than a misleading `0` that
+    /// would falsely claim the first allowed input is the live one.
+    /// [`select_monitor_input`](SettingsVm::select_monitor_input) records the
+    /// user's choice here so the dropdown sticks on it and arrow-key navigation
+    /// continues from it, instead of snapping back to index 0.
+    pub selected_input_index: Option<usize>,
 }
 
 impl MonitorSection {
@@ -494,19 +504,21 @@ impl SettingsVm {
         })
     }
 
-    /// Switch a monitor's input by section index and input-option index. Ignored
-    /// for an out-of-range index.
-    #[must_use]
+    /// Switch a monitor's input by section index and input-option index,
+    /// recording the choice as the section's
+    /// [`selected_input_index`](MonitorSection::selected_input_index) so the
+    /// dropdown reflects it. Ignored for an out-of-range monitor or input index.
     pub fn select_monitor_input(
-        &self,
+        &mut self,
         monitor_index: usize,
         input_index: usize,
     ) -> Option<SettingsCommand> {
-        let section = self.monitors.get(monitor_index)?;
-        let choice = section.inputs.get(input_index)?;
+        let section = self.monitors.get_mut(monitor_index)?;
+        let code = section.inputs.get(input_index)?.code;
+        section.selected_input_index = Some(input_index);
         Some(SettingsCommand::SetInput {
             id: section.id.clone(),
-            value: choice.code,
+            value: code,
         })
     }
 
@@ -574,6 +586,8 @@ fn build_section(
         dim_mode: monitor.dim_mode.into(),
         gamma_available: gamma_allowed,
         inputs,
+        // No active-input readback exists in a snapshot; start unselected.
+        selected_input_index: None,
     }
 }
 
@@ -897,6 +911,32 @@ mod tests {
         );
         // Out-of-range input index is ignored.
         assert_eq!(vm.select_monitor_input(0, 9), None);
+    }
+
+    #[test]
+    fn input_selection_records_the_selected_index() {
+        let mut vm = SettingsVm::new();
+        let config = config_with_monitor("A", 0, ConfigDimMode::Overlay);
+        vm.set_displays(&[snap("A", "Left", vec![0x11, 0x0F])], &config, true);
+        // A snapshot carries no active-input readback, so the section starts with
+        // no selection — the dropdown renders empty rather than a misleading 0.
+        assert_eq!(
+            vm.monitors().first().and_then(|s| s.selected_input_index),
+            None
+        );
+        // Picking an input records it so the dropdown sticks on the choice; the
+        // `.slint` current-index was hardcoded to 0 before, so it never held.
+        let _ = vm.select_monitor_input(0, 1);
+        assert_eq!(
+            vm.monitors().first().and_then(|s| s.selected_input_index),
+            Some(1)
+        );
+        // An out-of-range pick leaves the recorded selection untouched.
+        let _ = vm.select_monitor_input(0, 9);
+        assert_eq!(
+            vm.monitors().first().and_then(|s| s.selected_input_index),
+            Some(1)
+        );
     }
 
     fn hotkey_row(action_key: &str, binding: &str) -> HotkeyRow {
