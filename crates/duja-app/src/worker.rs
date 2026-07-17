@@ -17,9 +17,18 @@
 //! [`AckOutcome::Panicked`] and the worker exits (the engine then marks the
 //! display unresponsive). A stuck (never-returning) controller call simply
 //! never acks — the engine's watchdog handles that by leaking this thread.
+//!
+//! A worker also observes a shared `retired` flag the engine flips on detach: it
+//! checks the flag after every controller call and before performing any buffered
+//! write, and exits immediately when set. This guarantees a detached worker whose
+//! wedged call finally returns never drains its backlog into another hardware
+//! write — so it can never become a second writer racing its replacement
+//! (ADR-0017).
 
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -32,7 +41,8 @@ use duja_core::model::Feature;
 use crate::ControllerOpener;
 use crate::protocol::{AckOutcome, InflightKey, WorkerAck, WorkerCommand};
 
-/// The engine's handle to one worker: its command sender and join handle.
+/// The engine's handle to one worker: its command sender, join handle, and the
+/// lifecycle signals that make detach safe (ADR-0017).
 ///
 /// Dropping the handle drops the sender, so an idle worker observes the
 /// disconnect and exits on its own; leaked (stuck) workers are simply dropped
@@ -43,6 +53,19 @@ pub(crate) struct WorkerHandle {
     pub(crate) cmd_tx: Sender<WorkerCommand>,
     /// The worker thread's join handle (never joined for leaked workers).
     pub(crate) join: JoinHandle<()>,
+    /// Disconnects when the worker thread exits by **any** path. The engine waits
+    /// on this with a shared deadline for a **bounded** shutdown, detaching a
+    /// worker still wedged in a driver call instead of joining it forever.
+    pub(crate) done: Receiver<()>,
+    /// This worker's monotonic identity, carried on its
+    /// [`AckOutcome::OpenFailed`] so the engine can ignore a stale failure from an
+    /// already-replaced worker (generation match).
+    pub(crate) generation: u64,
+    /// Flipped by the engine when it detaches this worker. The worker observes it
+    /// after every controller call (and before performing buffered writes) and
+    /// exits immediately, so a detached worker never performs another hardware
+    /// write — never a second writer to the same panel.
+    pub(crate) retired: Arc<AtomicBool>,
 }
 
 /// Spawn a worker for `id` that opens its controller via `opener` **on its own
@@ -57,20 +80,34 @@ pub(crate) fn spawn_worker(
     id: StableDisplayId,
     opener: ControllerOpener,
     min_gap: Duration,
+    generation: u64,
     ack_tx: Sender<WorkerAck>,
 ) -> WorkerHandle {
     let (cmd_tx, cmd_rx) = unbounded::<WorkerCommand>();
+    let (done_tx, done_rx) = unbounded::<()>();
+    let retired = Arc::new(AtomicBool::new(false));
+    let worker_retired = Arc::clone(&retired);
     let join = thread::spawn(move || {
+        // Dropped when this thread exits by ANY path (open failure, clean stop, or
+        // a leaked-then-returning wedged call), disconnecting `done_rx` so the
+        // engine's bounded shutdown can observe the exit without a `join()`.
+        let _done = done_tx;
         let Some(controller) = opener() else {
             let _ = ack_tx.send(WorkerAck {
                 id,
-                outcome: AckOutcome::OpenFailed,
+                outcome: AckOutcome::OpenFailed { generation },
             });
             return;
         };
-        worker_loop(&id, controller, min_gap, &cmd_rx, &ack_tx);
+        worker_loop(&id, controller, min_gap, &cmd_rx, &ack_tx, &worker_retired);
     });
-    WorkerHandle { cmd_tx, join }
+    WorkerHandle {
+        cmd_tx,
+        join,
+        done: done_rx,
+        generation,
+        retired,
+    }
 }
 
 /// What a receive attempt produced.
@@ -92,6 +129,7 @@ fn worker_loop(
     min_gap: Duration,
     cmd_rx: &Receiver<WorkerCommand>,
     ack_tx: &Sender<WorkerAck>,
+    retired: &Arc<AtomicBool>,
 ) {
     // Newest queued write per feature, and the earliest instant each feature
     // may next be written (its min-gap deadline).
@@ -157,9 +195,21 @@ fn worker_loop(
             if is_panic {
                 return;
             }
+            // If the engine detached us during this read, exit before doing any
+            // more work (a detached worker must not linger; see below).
+            if retired.load(Ordering::Acquire) {
+                return;
+            }
         }
 
         // 3b. Perform writes whose min-gap has elapsed.
+        //
+        // If the engine detached us while we were parked / draining, exit before
+        // performing ANY buffered write: a detached worker whose replacement may
+        // already exist must never issue a second hardware write to the panel.
+        if retired.load(Ordering::Acquire) {
+            return;
+        }
         let now = Instant::now();
         let ready: Vec<Feature> = latest
             .iter()
@@ -185,6 +235,14 @@ fn worker_loop(
                 outcome,
             });
             if is_panic {
+                return;
+            }
+            // The write we just performed may have been a wedged call the engine
+            // gave up on and detached us for (watchdog / shutdown). If so, exit NOW
+            // — do not loop back to drain and coalesce the queued backlog into
+            // another write, which would race the freshly-spawned replacement
+            // worker as a second writer on the same monitor (E-A / ADR-0017).
+            if retired.load(Ordering::Acquire) {
                 return;
             }
             next_ok.insert(feature, now.checked_add(min_gap).unwrap_or(now));
@@ -341,7 +399,7 @@ mod tests {
         let opener: crate::ControllerOpener = Box::new(move || {
             Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
         });
-        let handle = spawn_worker(worker_id(), opener, Duration::from_millis(5), ack_tx);
+        let handle = spawn_worker(worker_id(), opener, Duration::from_millis(5), 1, ack_tx);
 
         for (i, feature) in [
             Feature::Brightness,
@@ -394,7 +452,7 @@ mod tests {
         let opener: crate::ControllerOpener = Box::new(move || {
             Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
         });
-        let handle = spawn_worker(worker_id(), opener, Duration::from_millis(80), ack_tx);
+        let handle = spawn_worker(worker_id(), opener, Duration::from_millis(80), 1, ack_tx);
 
         for _ in 0..100u32 {
             handle
@@ -436,14 +494,14 @@ mod tests {
         // worker thread must exit without entering its loop.
         let (ack_tx, ack_rx) = unbounded();
         let opener: crate::ControllerOpener = Box::new(|| None);
-        let handle = spawn_worker(worker_id(), opener, Duration::from_millis(5), ack_tx);
+        let handle = spawn_worker(worker_id(), opener, Duration::from_millis(5), 7, ack_tx);
 
         let ack = ack_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("worker never acked the failed open");
         assert!(
-            matches!(ack.outcome, AckOutcome::OpenFailed),
-            "expected OpenFailed, got {:?}",
+            matches!(ack.outcome, AckOutcome::OpenFailed { generation: 7 }),
+            "expected OpenFailed with the worker's generation, got {:?}",
             ack.outcome
         );
         // The thread exited on its own; joining must not hang.

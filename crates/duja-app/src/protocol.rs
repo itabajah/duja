@@ -75,10 +75,17 @@ pub(crate) enum AckOutcome {
         seq: u64,
     },
     /// The deferred open (run on the worker thread) failed to produce a
-    /// controller; the worker never entered its loop and is exiting. The engine
-    /// drops the dead handle and leaves the display worker-less until the next
-    /// sighting.
-    OpenFailed,
+    /// controller; the worker never entered its loop and is exiting.
+    ///
+    /// The engine marks the display unresponsive (greying it and arming a respawn
+    /// on the next sighting) — but only when `generation` matches the currently
+    /// registered worker's, so a stale failure from an already-replaced worker
+    /// (respawn / reattach) is ignored and never retires the fresh worker that
+    /// superseded it.
+    OpenFailed {
+        /// The generation of the worker that failed to open.
+        generation: u64,
+    },
 }
 
 /// A worker's reply to the engine, tagged with the worker's display id.
