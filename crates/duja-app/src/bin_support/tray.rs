@@ -312,6 +312,13 @@ enum Action {
 /// # Errors
 /// Fatal setup failures (flyout window or tray icon cannot be created, the
 /// platform event pump cannot start) bubble up so `main` exits non-zero.
+// RATIONALE(clippy::too_many_lines): `run` is the app-assembly entry point — a
+// single linear sequence of one-time wiring (paths, instance/installer guards,
+// crash recovery, HDR verdict, windows, engine, IPC, handlers) before the event
+// loop. Breaking it up is tracked with the tray.rs module split (Wave 1); an
+// artificial extraction purely to satisfy the line count would scatter cohesive
+// wiring and read worse. Kept as one readable sequence until the split.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
     let _ = verbose; // logging is initialised by the caller.
     let paths = DujaPaths::resolve_or_fallback();
@@ -327,6 +334,11 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
         }
         return Ok(ExitCode::SUCCESS);
     }
+
+    // 1b. Hold the fixed-name installer-detection mutex for our whole lifetime so
+    //     the Windows installer (`AppMutex=`) can detect a running instance; see
+    //     `InstallerGuard`. Named binding = held across `run()`; no-op off Windows.
+    let _installer_guard = duja_platform::InstallerGuard::acquire();
 
     // 2. Crash-marker recovery: a dirty gamma exit is undone before we start.
     startup::recover_from_crash_marker(&paths.crash_marker, || {

@@ -41,10 +41,12 @@ mod mac;
 mod mac_events;
 
 pub mod autostart;
+mod installer_guard;
 pub mod ipc;
 mod single_instance;
 
 pub use autostart::{Autostart, AutostartError};
+pub use installer_guard::InstallerGuard;
 pub use ipc::{IpcTransportError, PipeClient, PipeServer};
 pub use single_instance::SingleInstance;
 
