@@ -236,6 +236,46 @@ fn verified_write_retries_then_errors_on_persistent_mismatch() {
     assert_eq!(c.transport().writes.len(), 3);
 }
 
+#[test]
+fn verified_write_tolerates_readback_drift_up_to_the_tolerance() {
+    // A monitor that quantises the written value so the readback lands exactly
+    // VERIFY_TOLERANCE (2) raw units off. The verify loop MUST accept this —
+    // real monitors round a written value to their own step — so the write
+    // succeeds on the first attempt with no retry. This pins the lower edge of
+    // the tolerance window: it fails if VERIFY_TOLERANCE were tightened below 2.
+    let quirks = ResolvedQuirks {
+        verify_writes: true,
+        ..ResolvedQuirks::default()
+    };
+    let t = FakeTransport::nominal().drifting(2);
+    let mut c = controller(t, quirks);
+    c.set(Feature::Brightness, 42).unwrap();
+    // Within tolerance on the first try: exactly one write, no retry.
+    assert_eq!(c.transport().writes.len(), 1);
+    // The readback drifted to written + 2.
+    assert_eq!(c.get(Feature::Brightness).unwrap().current, 44);
+}
+
+#[test]
+fn verified_write_rejects_readback_drift_beyond_the_tolerance() {
+    // One unit past the tolerance (VERIFY_TOLERANCE + 1 = 3): every readback
+    // lands 3 off, outside the window, so each attempt is a mismatch and the
+    // write fails after exhausting its retries. This pins the upper edge: it
+    // fails if VERIFY_TOLERANCE were loosened to 3 or more.
+    let quirks = ResolvedQuirks {
+        verify_writes: true,
+        ..ResolvedQuirks::default()
+    };
+    let t = FakeTransport::nominal().drifting(3);
+    let mut c = controller(t, quirks);
+    assert!(matches!(
+        c.set(Feature::Brightness, 42),
+        Err(ControlError::Backend(_))
+    ));
+    // Three verify attempts, each issuing one write.
+    assert_eq!(c.transport().writes.len(), 3);
+}
+
 // --- clamping ------------------------------------------------------------
 
 #[test]
@@ -244,6 +284,33 @@ fn out_of_range_set_clamps_to_max() {
     c.set(Feature::Brightness, u16::MAX).unwrap();
     // The last write must be the clamped value (max 100), not u16::MAX.
     assert_eq!(c.transport().writes.last(), Some(&(0x10u8, 100u16)));
+}
+
+#[test]
+fn hardware_reported_zero_max_is_floored_so_a_set_never_writes_raw_zero() {
+    // A monitor (or one corrupt-but-successful DDC reply) answers the brightness
+    // Get with current 0 / max 0. That is a *successful* reply, so read_retry
+    // returns Ok and the value would be trusted verbatim. A max of 0 is
+    // meaningless for a continuous control: `value.min(0)` collapses every level
+    // to raw 0 and pegs the panel at its darkest step regardless of the slider.
+    let t = FakeTransport::nominal().with_value(0x10, 0, 0);
+    let mut c = controller(t, ResolvedQuirks::default());
+
+    // get must still succeed and report a sane, positive max (the controller
+    // contract's range-sanity rule: a supported continuous feature has max > 0).
+    let range = c.get(Feature::Brightness).unwrap();
+    assert!(
+        range.max >= 1,
+        "a reported max of 0 must be floored to >= 1"
+    );
+
+    // A mid-slider set must clamp against the floored max, never write raw 0.
+    c.set(Feature::Brightness, 50).unwrap();
+    assert_eq!(
+        c.transport().writes.last(),
+        Some(&(0x10u8, 50u16.min(range.max))),
+        "a set must clamp against the floored max, never collapse to raw 0"
+    );
 }
 
 // --- capability fallback -------------------------------------------------

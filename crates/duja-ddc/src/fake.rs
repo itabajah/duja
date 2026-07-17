@@ -36,6 +36,7 @@ pub struct FakeTransport {
     fail_writes: usize,
     fail_caps: usize,
     ignore_writes: bool,
+    read_back_drift: u16,
     pub reads: Vec<u8>,
     pub writes: Vec<(u8, u16)>,
     pub caps_calls: usize,
@@ -70,6 +71,7 @@ impl FakeTransport {
             fail_writes: 0,
             fail_caps: 0,
             ignore_writes: false,
+            read_back_drift: 0,
             reads: Vec::new(),
             writes: Vec::new(),
             caps_calls: 0,
@@ -122,6 +124,19 @@ impl FakeTransport {
         self
     }
 
+    /// Make every stored write read back `delta` raw units above what was
+    /// written, modelling a monitor that quantises a written value to its own
+    /// coarser step. The default fake stores writes exactly (`delta` 0); this
+    /// opt-in seam drives the controller's verify-by-readback tolerance window,
+    /// so a verified write of `v` reads back `v + delta` and the controller sees
+    /// a drift of exactly `delta` (the offset is added saturating, then clamped
+    /// to the feature's max like any stored value).
+    #[must_use]
+    pub fn drifting(mut self, delta: u16) -> Self {
+        self.read_back_drift = delta;
+        self
+    }
+
     fn inject_err(&self) -> TransportError {
         match self.inject {
             InjectKind::Timeout => TransportError::Timeout,
@@ -160,7 +175,7 @@ impl VcpTransport for FakeTransport {
             self.values.insert(
                 code,
                 VcpReading {
-                    current: value.min(max),
+                    current: value.saturating_add(self.read_back_drift).min(max),
                     max,
                 },
             );

@@ -314,29 +314,32 @@ impl<T: VcpTransport, C: Clock> DdcController<T, C> {
             .is_some_and(|caps| !caps.supports(feature))
     }
 
-    /// Apply the `max_brightness` override (brightness only) to a raw reading.
+    /// Apply the `max_brightness` override (brightness only) to a raw reading,
+    /// then floor a continuous feature's max at 1 (see [`floor_continuous_max`]).
     fn with_max_override(&self, feature: Feature, reading: VcpReading) -> FeatureRange {
         if feature == Feature::Brightness
             && let Some(max) = self.quirks.max_brightness
         {
             return FeatureRange {
                 current: reading.current.min(max),
-                max,
+                max: floor_continuous_max(feature, max),
             };
         }
         FeatureRange {
             current: reading.current,
-            max: reading.max,
+            max: floor_continuous_max(feature, reading.max),
         }
     }
 
     /// The clamp ceiling for a continuous feature: the `max_brightness` quirk if
-    /// set, else a cached max, else discovered by a read.
+    /// set, else a cached max, else discovered by a read. Always floored at 1 for
+    /// a continuous feature (see [`floor_continuous_max`]); the quirk still wins
+    /// over any reported max when set.
     fn effective_max(&mut self, feature: Feature) -> Result<u16, TransportError> {
         if feature == Feature::Brightness
             && let Some(max) = self.quirks.max_brightness
         {
-            return Ok(max);
+            return Ok(floor_continuous_max(feature, max));
         }
         if let Some(&max) = self.cached_max.get(&feature) {
             return Ok(max);
@@ -429,6 +432,28 @@ impl<T: VcpTransport, C: Clock> BrightnessController for DdcController<T, C> {
             Feature::InputSource => self.set_input_source(value),
             Feature::Brightness | Feature::Contrast => self.set_continuous(feature, value),
         }
+    }
+}
+
+/// Floor a continuous feature's reported maximum at 1.
+///
+/// A brightness/contrast maximum of 0 is physically meaningless: it makes
+/// `value.min(max)` collapse every level to raw 0 and peg the panel at its
+/// darkest step. A real monitor — or a single corrupt-but-*successful* DDC reply
+/// — can answer the Get with `max = 0`, which [`DdcController::read_retry`]
+/// returns as `Ok`, so without this the value would be cached and trusted
+/// verbatim. We clamp to 1 rather than surfacing an error because the controller
+/// contract requires a supported continuous feature's `get` to *succeed* and
+/// report `max > 0` (duja-core range-sanity, ADR-0002): a clamp keeps the
+/// display usable, whereas an error would fail an otherwise-successful read. The
+/// `max_brightness` quirk is floored the same way, so it still wins over any
+/// reported max while never yielding 0. [`Feature::InputSource`] is exempt — its
+/// metadata is untrusted and legitimately reports `current > max`.
+fn floor_continuous_max(feature: Feature, max: u16) -> u16 {
+    if feature == Feature::InputSource {
+        max
+    } else {
+        max.max(1)
     }
 }
 
