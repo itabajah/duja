@@ -47,6 +47,18 @@ UninstallDisplayName={#MyAppName} {#MyAppVersion}
 WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
+; Detect a running Duja before installing/uninstalling. A live instance holds a
+; fixed-name mutex under this exact name for its whole lifetime (created by
+; duja-platform's InstallerGuard via CreateMutexW) — byte-identical to the
+; app-side name. Without this the tray window (which only HIDES on close) is
+; invisible to the installer, so an in-place upgrade or uninstall over a running
+; instance silently fails or version-skews duja.exe against a freshly written
+; dujactl.exe. When the mutex is found, Inno prompts the user to close Duja
+; first. Both installer and app run in the same session (per-user, no UAC), so
+; the session-local `Local\` namespace resolves to the same kernel object.
+; Follow-up (not this change): seamless auto-close via the Restart Manager
+; (CloseApplications / WM_QUERYENDSESSION) so the user need not close it by hand.
+AppMutex=Local\duja-installer-guard
 
 [Tasks]
 Name: "autostart"; Description: "Launch Duja automatically at login"; Flags: unchecked

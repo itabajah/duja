@@ -84,12 +84,13 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, NAMED_PIPE_MODE,
-    PIPE_REJECT_REMOTE_CLIENTS, WaitNamedPipeW,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
+    NAMED_PIPE_MODE, PIPE_REJECT_REMOTE_CLIENTS, WaitNamedPipeW,
 };
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::{
-    CreateEventW, GetCurrentProcess, GetCurrentProcessId, OpenProcessToken, WaitForSingleObject,
+    CreateEventW, GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken,
+    PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -942,9 +943,27 @@ impl PipeClient {
             };
             match opened {
                 Ok(handle) if !handle.is_invalid() => {
-                    return Ok(PipeClient {
-                        stream: PipeStream::new(handle, None),
-                    });
+                    // The open succeeded, but that only proves *some* server owns
+                    // this name — not that it is ours. Because the app creates its
+                    // pipe with FILE_FLAG_FIRST_PIPE_INSTANCE, a squatter that
+                    // pre-creates `\\.\pipe\duja-<our-SID>` (the name is derivable
+                    // from the SID) makes the real app's create fail and answers
+                    // here instead. Verify the SERVER's identity — the serving
+                    // process's user SID must equal ours — before trusting it, the
+                    // client-side mirror of the server's own peer check.
+                    if server_trusted(
+                        server_sid_string(handle).as_deref(),
+                        current_user_sid_string().as_deref(),
+                    ) {
+                        return Ok(PipeClient {
+                            stream: PipeStream::new(handle, None),
+                        });
+                    }
+                    // A foreign or unresolvable server: close and report
+                    // NotRunning so `dujactl` falls back to the direct backend
+                    // (the safe degrade) rather than trusting a foreign server.
+                    close_handle(handle);
+                    return Err(IpcTransportError::NotRunning);
                 }
                 _ => {
                     // SAFETY: reads the last-error for the failed open above.
@@ -982,6 +1001,66 @@ impl PipeClient {
     pub fn request(&mut self, request: &Request) -> Result<Response, IpcTransportError> {
         Ok(duja_ipc::exchange(&mut self.stream, request)?)
     }
+}
+
+// -- Server-identity verification -----------------------------------------
+
+/// Whether a server whose resolved token user SID is `server_sid` (or `None` if
+/// it could not be resolved) is trusted by a client whose own user SID is
+/// `our_sid`.
+///
+/// This is the pure decision behind the client's server check, unit-tested
+/// directly because a genuine foreign-SID server cannot be produced in a
+/// same-principal test. It is fail-closed and mirrors the unix transport's
+/// `peer_allowed` rule: trust requires **both** SIDs to be present and equal, so
+/// an unresolved server SID (or an unresolved own SID) is refused rather than
+/// trusted. The `is_some()` guard is load-bearing — without it two unresolved
+/// SIDs (`None == None`) would read as a match.
+fn server_trusted(server_sid: Option<&str>, our_sid: Option<&str>) -> bool {
+    server_sid.is_some() && server_sid == our_sid
+}
+
+/// The token user SID (`S-1-…`) of the process serving the connected pipe
+/// `handle`, or `None` if it cannot be resolved (which the caller treats as a
+/// refusal).
+///
+/// The client-side mirror of the server's [`client_in_same_session`] check:
+/// `GetNamedPipeServerProcessId` names the serving process, which we open with
+/// the least privilege that exposes its token
+/// ([`PROCESS_QUERY_LIMITED_INFORMATION`]) and whose `TokenUser` SID we
+/// stringify via the same [`read_token_sid_string`] helper the current-user
+/// lookup uses.
+fn server_sid_string(handle: HANDLE) -> Option<String> {
+    let mut server_pid = 0u32;
+    // SAFETY: `handle` is a connected client pipe handle we own; the call writes
+    // the serving process's PID into `server_pid` and reads only `handle`.
+    if unsafe { GetNamedPipeServerProcessId(handle, &mut server_pid) }.is_err() {
+        return None;
+    }
+    // SAFETY: `OpenProcess` borrows no memory; it returns an owned process handle
+    // (closed below via `close_handle`) or an error. QUERY_LIMITED_INFORMATION is
+    // the least access that still exposes the process token.
+    let opened = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, server_pid) };
+    let Ok(process) = opened else {
+        return None;
+    };
+    // SAFETY: `process` is a live process handle opened for token query;
+    // `OpenProcessToken` writes an owned token handle we close below, and
+    // `read_token_sid_string` reads only a `TOKEN_QUERY` token that outlives it.
+    let sid = unsafe {
+        let mut token = HANDLE::default();
+        let sid = if OpenProcessToken(process, TOKEN_QUERY, &mut token).is_ok() {
+            read_token_sid_string(token)
+        } else {
+            None
+        };
+        if !token.is_invalid() {
+            let _ = CloseHandle(token);
+        }
+        sid
+    };
+    close_handle(process);
+    sid
 }
 
 // -- Current-user SID -----------------------------------------------------
@@ -1078,5 +1157,44 @@ mod tests {
         let descriptor = SecurityDescriptor::user_only(&sid).expect("descriptor");
         let attributes = descriptor.attributes();
         assert!(!attributes.lpSecurityDescriptor.is_null());
+    }
+
+    #[test]
+    fn server_trusted_requires_both_sids_present_and_equal() {
+        // The pure security decision behind the client's server check (the
+        // full foreign-SID round trip is not unit-testable without a second
+        // principal — see `server_sid_string`), mirroring the unix transport's
+        // `peer_allowed_only_for_matching_uid`.
+        const OURS: &str = "S-1-5-21-1-2-3-1001";
+
+        // Same resolved SID (our own server) ⇒ trusted.
+        assert!(server_trusted(Some(OURS), Some(OURS)));
+
+        // A different server SID — e.g. a squatter running as SYSTEM — ⇒ refused.
+        // This assertion pins the property: it goes red if the comparison is
+        // inverted or made permissive.
+        assert!(
+            !server_trusted(Some("S-1-5-18"), Some(OURS)),
+            "a foreign server SID must be refused"
+        );
+
+        // An unresolvable server SID ⇒ refused (fail closed, not trust-on-error).
+        assert!(
+            !server_trusted(None, Some(OURS)),
+            "an unresolvable server SID must be refused"
+        );
+
+        // An unresolvable own SID ⇒ refused.
+        assert!(
+            !server_trusted(Some(OURS), None),
+            "an unresolvable own SID must be refused"
+        );
+
+        // Both unresolvable ⇒ refused: the `None == None` trap the `is_some()`
+        // guard exists to close.
+        assert!(
+            !server_trusted(None, None),
+            "two unresolvable SIDs must not be treated as a match"
+        );
     }
 }
