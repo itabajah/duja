@@ -325,27 +325,45 @@ impl ScreenStateGuard {
             return Ok(());
         };
         let display = self.touched.remove(pos);
-        let result = restore_identity(&display);
+        // Restore first; only *keep* it forgotten (and maybe clear the marker) on
+        // success. A failed restore puts the display back and leaves the marker,
+        // so the ramp is retried on Drop and recovered on the next launch.
+        if let Err(e) = restore_identity(&display) {
+            self.touched.insert(pos, display);
+            return Err(e);
+        }
         if self.touched.is_empty() {
             self.clear_marker_now();
         }
-        result
+        Ok(())
     }
 
-    /// Restore identity gamma on every touched display now, clear the marker,
-    /// and forget the touched set (so [`Drop`] does nothing further). Returns
-    /// what was restored.
+    /// Restore identity gamma on every touched display now and return what was
+    /// restored.
+    ///
+    /// The crash marker is cleared **only if every restore succeeded**. Any
+    /// display whose restore failed is kept in the touched set — so [`Drop`]
+    /// retries it and `touched` keeps reflecting the still-engaged ramps — and
+    /// the marker is left in place, so a persistent unrestored ramp still
+    /// triggers [`restore_all`] recovery on the next launch.
     pub fn restore_now(&mut self) -> RestoreReport {
         let mut report = RestoreReport::default();
+        let mut still_touched = Vec::new();
         for display in self.touched.drain(..) {
             match restore_identity(&display) {
                 Ok(()) => report.restored.push(display.name().to_owned()),
-                Err(e) => report
-                    .failed
-                    .push((display.name().to_owned(), e.to_string())),
+                Err(e) => {
+                    report
+                        .failed
+                        .push((display.name().to_owned(), e.to_string()));
+                    still_touched.push(display);
+                }
             }
         }
-        self.clear_marker_now();
+        self.touched = still_touched;
+        if report.is_clean() {
+            self.clear_marker_now();
+        }
         report
     }
 
@@ -375,13 +393,20 @@ impl ScreenStateGuard {
 
 impl Drop for ScreenStateGuard {
     fn drop(&mut self) {
-        // Best-effort: restore every touched display and clear the marker. Runs
-        // during a panic unwind too, so it must never itself panic — every call
-        // here swallows its error.
+        // Best-effort: restore every touched display. Runs during a panic unwind
+        // too, so it must never itself panic — every call here swallows its error.
+        // The marker is cleared ONLY if every restore succeeded; if any failed it
+        // is kept, so the next launch's `marker_present` triggers `restore_all`
+        // (the never-brick net for a persistent, unrestored gamma ramp).
+        let mut all_restored = true;
         for display in self.touched.drain(..) {
-            let _ = restore_identity(&display);
+            if restore_identity(&display).is_err() {
+                all_restored = false;
+            }
         }
-        self.clear_marker_now();
+        if all_restored {
+            self.clear_marker_now();
+        }
     }
 }
 
@@ -507,5 +532,95 @@ mod tests {
         assert_eq!(d.name(), r"\\.\DISPLAY1");
         // NUL-terminated wide buffer.
         assert_eq!(d.name_wide.last(), Some(&0));
+    }
+
+    // --- Fix 2: the crash marker must survive a FAILED restore -------------
+    //
+    // The marker exists to recover a persistent, unrestored gamma ramp after an
+    // unclean or failed exit. Clearing it on a restore that *failed* removes the
+    // safety net in the exact case it was designed for. These tests inject a
+    // display whose identity restore is guaranteed to fail (a bogus GDI device
+    // name → `CreateDCW` fails) and assert the marker is retained.
+
+    /// A GDI device name that does not exist, so `CreateDCW`/restore always fail.
+    const BOGUS_DEVICE: &str = r"\\.\DUJA_BOGUS_DISPLAY_DEVICE";
+
+    fn unique_marker(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("duja-{tag}-{}.tmp", std::process::id()))
+    }
+
+    /// Build a touched display whose restore fails, asserting the precondition so
+    /// a machine where the bogus name *succeeds* fails loudly instead of silently
+    /// passing for the wrong reason.
+    fn failing_display() -> GammaDisplay {
+        let d = GammaDisplay::from_device_name(BOGUS_DEVICE);
+        assert!(
+            restore_identity(&d).is_err(),
+            "precondition: a bogus GDI device must fail restore_identity"
+        );
+        d
+    }
+
+    #[test]
+    fn restore_now_keeps_marker_when_a_restore_fails() {
+        let path = unique_marker("restore-now-fail");
+        let _ = clear_marker(&path);
+        let mut guard = ScreenStateGuard::new(Some(path.clone()));
+        guard.mark_if_needed();
+        assert!(marker_present(&path));
+        guard.touched.push(failing_display());
+
+        let report = guard.restore_now();
+        assert!(!report.is_clean(), "the failed restore must be reported");
+        assert!(
+            marker_present(&path),
+            "a failed restore_now must NOT clear the marker (never-brick net)"
+        );
+        // Decision: a failed display is retained in `touched` so Drop retries it.
+        assert_eq!(guard.touched().len(), 1, "failed display stays touched");
+
+        guard.touched.clear();
+        let _ = clear_marker(&path);
+    }
+
+    #[test]
+    fn restore_display_keeps_display_and_marker_when_restore_fails() {
+        let path = unique_marker("restore-display-fail");
+        let _ = clear_marker(&path);
+        let mut guard = ScreenStateGuard::new(Some(path.clone()));
+        guard.mark_if_needed();
+        guard.touched.push(failing_display());
+
+        let result = guard.restore_display(BOGUS_DEVICE);
+        assert!(result.is_err(), "a failed restore must surface its error");
+        assert_eq!(
+            guard.touched().len(),
+            1,
+            "a failed restore must keep the display touched"
+        );
+        assert!(
+            marker_present(&path),
+            "a failed restore_display must NOT clear the marker"
+        );
+
+        guard.touched.clear();
+        let _ = clear_marker(&path);
+    }
+
+    #[test]
+    fn drop_keeps_marker_when_a_restore_fails() {
+        let path = unique_marker("drop-fail");
+        let _ = clear_marker(&path);
+        {
+            let mut guard = ScreenStateGuard::new(Some(path.clone()));
+            guard.mark_if_needed();
+            guard.touched.push(failing_display());
+            // guard drops here: the failed restore must SKIP clearing the marker.
+        }
+        assert!(
+            marker_present(&path),
+            "Drop must keep the marker when a restore fails, so the next launch recovers"
+        );
+        let _ = clear_marker(&path);
     }
 }

@@ -16,6 +16,9 @@ duja-core.workspace = true
 # Overlay backend: layered click-through windows + gamma ramps + DXGI HDR probe.
 # default-features off; enable only the modules the backend touches.
 crossbeam-channel = { workspace = true }
+# A WARN when a non-fatal overlay call is refused (e.g. an older Win10 build or an
+# enterprise policy rejecting WDA_EXCLUDEFROMCAPTURE). Already in the app's graph.
+tracing = { workspace = true }
 windows = { version = "0.62", default-features = false, features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
