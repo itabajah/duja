@@ -20,6 +20,7 @@ MADR-lite format. Accepted ADRs are changed by superseding, not editing.
 | [0014](0014-perceptual-continuum-v2.md) | Perceptual brightness continuum (v2) | accepted |
 | [0015](0015-update-check-on-by-default.md) | Update check on by default (smart-notify) | accepted |
 | [0016](0016-windows-distribution-and-signing.md) | Windows distribution & signing (Inno + minisign + provenance) | accepted |
+| [0017](0017-engine-shutdown-lifecycle-contract.md) | Engine shutdown & worker-lifecycle contract (generation + retired + bounded shutdown) | accepted |
 
 Spike evidence lives on branches `spike/eventloop`, `spike/ddc`,
 `spike/overlay` (code is not merged; findings are).

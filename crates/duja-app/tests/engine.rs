@@ -203,6 +203,60 @@ impl BrightnessController for Panicky {
     }
 }
 
+/// A controller that announces each `set` entry on `entered` (with its instance
+/// `tag`), optionally blocks the FIRST `set` on a one-shot `gate`, then records
+/// every completed write on `writes` as `(tag, value)`. Lets a test hold a write
+/// wedged in the driver, force a retire/replace, release it, and prove the
+/// detached worker never performs a second hardware write (E-A) or that shutdown
+/// does not block on the wedged call (H3).
+#[derive(Debug)]
+struct GatedSet {
+    tag: u8,
+    entered: Sender<u8>,
+    writes: Sender<(u8, u16)>,
+    gate: Option<Receiver<()>>,
+    current: u16,
+}
+
+impl BrightnessController for GatedSet {
+    fn probe(&mut self) -> Result<Capabilities, ControlError> {
+        Ok(caps())
+    }
+    fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+        Ok(FeatureRange {
+            current: self.current,
+            max: 100,
+        })
+    }
+    fn set(&mut self, _feature: Feature, value: u16) -> Result<(), ControlError> {
+        let _ = self.entered.send(self.tag);
+        if let Some(gate) = self.gate.take() {
+            // Block this (first) write until the test releases it — the wedged
+            // driver call the watchdog fires on.
+            let _ = gate.recv();
+        }
+        let _ = self.writes.send((self.tag, value));
+        Ok(())
+    }
+}
+
+/// Wait up to `dur` for the next `entered` tag equal to `want`, draining other
+/// tags. Returns whether it arrived.
+fn wait_tag(rx: &Receiver<u8>, want: u8, dur: Duration) -> bool {
+    let deadline = Instant::now().checked_add(dur).unwrap();
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        match rx.recv_timeout(deadline.saturating_duration_since(now)) {
+            Ok(tag) if tag == want => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+}
+
 // --- helpers --------------------------------------------------------------
 
 /// A shared, mutable enumeration state, cloneable for the enumerator closure.
@@ -1296,6 +1350,470 @@ fn self_write_echo_suppressed_on_a_sub_100_max_panel() {
         )),
         "Duja's own write must not echo back on a sub-100-max panel"
     );
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+// --- worker-lifecycle fixes (H3, E-A, E-C, E-D, E-E) -----------------------
+
+#[test]
+fn shutdown_does_not_hang_on_a_blocked_worker() {
+    // H3: a worker blocked inside controller.set() (younger than the watchdog) is
+    // still in the engine's worker map when shutdown runs. Shutdown must send
+    // Shutdown, flag it retired, wait a BOUNDED time, and DETACH it — never
+    // join() a thread wedged in a driver call, which would hang app exit forever.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (entered_tx, entered_rx) = unbounded::<u8>();
+    let (writes_tx, _writes_rx) = unbounded::<(u8, u16)>();
+    // The gate is never released, so the worker's set() blocks for the whole test.
+    let (release_tx, release_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    let factory: duja_app::ControllerFactory = {
+        let entered_tx = entered_tx.clone();
+        let writes_tx = writes_tx.clone();
+        let release_rx = release_rx.clone();
+        Box::new(move |_id| {
+            let entered_tx = entered_tx.clone();
+            let writes_tx = writes_tx.clone();
+            let release_rx = release_rx.clone();
+            Box::new(move || {
+                Some(Box::new(GatedSet {
+                    tag: 1,
+                    entered: entered_tx.clone(),
+                    writes: writes_tx.clone(),
+                    gate: Some(release_rx.clone()),
+                    current: 50,
+                }) as Box<dyn BrightnessController>)
+            }) as duja_app::ControllerOpener
+        })
+    };
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(10),
+        // Large: the wedged write must NOT be watchdog-retired before shutdown,
+        // so the worker is still registered when shutdown runs.
+        watchdog_timeout: Duration::from_secs(30),
+        displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
+    };
+    let (engine, _notes) = Engine::spawn(cfg, enumerator(state, calls_tx), factory, platform_rx);
+    let cmds = engine.sender();
+
+    // Drive a write and wait until the worker is actually blocked inside set().
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 40,
+    })
+    .unwrap();
+    assert!(
+        wait_tag(&entered_rx, 1, Duration::from_secs(2)),
+        "the worker should enter its (blocking) set()"
+    );
+
+    // Shutdown must complete within a bounded time despite the wedged worker.
+    within(Duration::from_secs(8), move || engine.shutdown());
+    let _ = platform_tx;
+    let _ = release_tx;
+}
+
+#[test]
+fn detached_worker_performs_no_second_write() {
+    // E-A: a worker wedged in set() past the watchdog is detached (marked stuck)
+    // and replaced. When the wedged call finally returns, the zombie must NOT
+    // drain the buffered backlog and issue a SECOND hardware write to the same
+    // panel (two DDC writers on one monitor). The `retired` flag makes it exit
+    // the instant its blocked call returns.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (entered_tx, entered_rx) = unbounded::<u8>();
+    let (writes_tx, _writes_rx) = unbounded::<(u8, u16)>();
+    let (release_tx, release_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    // Worker A (first open) wedges its first set() on the gate; worker B (every
+    // later open) writes freely. Each tags its set-entries/writes by instance.
+    let call = Arc::new(Mutex::new(0u32));
+    let factory: duja_app::ControllerFactory = {
+        let entered_tx = entered_tx.clone();
+        let writes_tx = writes_tx.clone();
+        let release_rx = release_rx.clone();
+        Box::new(move |_id| {
+            let n = {
+                let mut c = call.lock().unwrap();
+                *c += 1;
+                *c
+            };
+            let entered_tx = entered_tx.clone();
+            let writes_tx = writes_tx.clone();
+            let release_rx = release_rx.clone();
+            Box::new(move || {
+                let (tag, gate) = if n == 1 {
+                    (1u8, Some(release_rx.clone()))
+                } else {
+                    (2u8, None)
+                };
+                Some(Box::new(GatedSet {
+                    tag,
+                    entered: entered_tx.clone(),
+                    writes: writes_tx.clone(),
+                    gate,
+                    current: 50,
+                }) as Box<dyn BrightnessController>)
+            }) as duja_app::ControllerOpener
+        })
+    };
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(10),
+        watchdog_timeout: Duration::from_millis(150),
+        displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
+    };
+    let (engine, notes) = Engine::spawn(cfg, enumerator(state, calls_tx), factory, platform_rx);
+    let cmds = engine.sender();
+
+    // Worker A enters its first set() and wedges on the gate.
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 40,
+    })
+    .unwrap();
+    assert!(
+        wait_tag(&entered_rx, 1, Duration::from_secs(2)),
+        "worker A should enter its wedged set()"
+    );
+
+    // Queue a backlog to A while it is wedged (buffered in A's channel; crossbeam
+    // still delivers it after the engine drops the sender on detach).
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 41,
+    })
+    .unwrap();
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 42,
+    })
+    .unwrap();
+
+    // The watchdog fires: A is detached and marked unresponsive.
+    let want = id.clone();
+    assert!(
+        wait_note(&notes, Duration::from_secs(2), |n| {
+            matches!(n, EngineNotification::DisplayUnresponsive(x) if *x == want)
+        }),
+        "the wedged worker should be marked unresponsive"
+    );
+
+    // A sighting spawns replacement worker B; the snapshot round-trip is a barrier
+    // proving the respawn was processed before we release A.
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+    let _ = snapshot(&cmds);
+
+    // Release A's wedged call. A must exit WITHOUT draining the backlog and
+    // issuing a second write; a second tag-1 set-entry is exactly the double-write.
+    release_tx.send(()).unwrap();
+    assert!(
+        !wait_tag(&entered_rx, 1, Duration::from_secs(1)),
+        "detached worker A must not perform a second write (double-writer)"
+    );
+
+    within(Duration::from_secs(4), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn open_failure_marks_display_unresponsive() {
+    // E-C: a genuine OpenFailed (the deferred open returns None) must mark the
+    // display UNRESPONSIVE (grey it, arm respawn on the next sighting) — not leave
+    // it listed as a normal display with no worker and no recovery path.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    // Every open fails.
+    let factory: duja_app::ControllerFactory =
+        Box::new(|_id| Box::new(|| None) as duja_app::ControllerOpener);
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(10),
+        watchdog_timeout: Duration::from_secs(5),
+        displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
+    };
+    let (engine, notes) = Engine::spawn(cfg, enumerator(state, calls_tx), factory, platform_rx);
+    let cmds = engine.sender();
+
+    // The failed open must surface as unresponsive...
+    let want = id.clone();
+    assert!(
+        wait_note(&notes, Duration::from_secs(2), |n| {
+            matches!(n, EngineNotification::DisplayUnresponsive(x) if *x == want)
+        }),
+        "a failed open must mark the display unresponsive"
+    );
+    // ...while still being listed (greyed, not hidden), and the engine stays live.
+    let snaps = snapshot(&cmds);
+    assert!(
+        snaps.iter().any(|s| s.id == id),
+        "the display should still be listed (greyed)"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn stale_open_failed_does_not_retire_a_fresh_worker() {
+    // E-C (generation): a stale OpenFailed from a worker that was already replaced
+    // (a superseded generation) must be IGNORED — it must not retire or grey the
+    // fresh, healthy worker that took its place.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (writes_tx, writes_rx) = unbounded();
+    let (open_entered_tx, open_entered_rx) = unbounded::<()>();
+    let (release_tx, release_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    // First open: signal entry, block, then FAIL (None). Later opens: Recording.
+    let call = Arc::new(Mutex::new(0u32));
+    let factory: duja_app::ControllerFactory = {
+        let writes_tx = writes_tx.clone();
+        Box::new(move |_id| {
+            let n = {
+                let mut c = call.lock().unwrap();
+                *c += 1;
+                *c
+            };
+            let writes_tx = writes_tx.clone();
+            let open_entered_tx = open_entered_tx.clone();
+            let release_rx = release_rx.clone();
+            Box::new(move || {
+                if n == 1 {
+                    let _ = open_entered_tx.send(());
+                    let _ = release_rx.recv();
+                    None
+                } else {
+                    Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
+                }
+            }) as duja_app::ControllerOpener
+        })
+    };
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(10),
+        watchdog_timeout: Duration::from_secs(30),
+        displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
+    };
+    let (engine, notes) = Engine::spawn(
+        cfg,
+        enumerator(state.clone(), calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // Worker A's open is wedged (generation 1).
+    open_entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker A should start opening");
+
+    // Unplug + replug: A is retired and healthy worker B (generation 2) spawns.
+    *state.lock().unwrap() = Vec::new();
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+    assert!(snapshot(&cmds).is_empty(), "display should be gone");
+    *state.lock().unwrap() = vec![discovered(&id)];
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+
+    // B is live: a user write flows through it.
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 33,
+    })
+    .unwrap();
+    let (_c, seen) = drain_writes(&writes_rx, |f, v| f == Feature::Brightness && v == 33);
+    assert!(
+        seen.contains(&(Feature::Brightness, 33)),
+        "worker B should be the live worker"
+    );
+
+    // Release A: it fails its open and emits a STALE OpenFailed (generation 1).
+    release_tx.send(()).unwrap();
+
+    // The stale ack must NOT grey the display — B is healthy.
+    let want = id.clone();
+    assert!(
+        !wait_note(&notes, Duration::from_millis(600), |n| {
+            matches!(n, EngineNotification::DisplayUnresponsive(x) if *x == want)
+        }),
+        "a stale OpenFailed must not mark the fresh worker's display unresponsive"
+    );
+    // ...and B still writes.
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 44,
+    })
+    .unwrap();
+    let (_c2, seen2) = drain_writes(&writes_rx, |f, v| f == Feature::Brightness && v == 44);
+    assert!(
+        seen2.contains(&(Feature::Brightness, 44)),
+        "worker B must remain live after the stale ack"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn abandoned_display_is_not_un_greyed_on_resight() {
+    // E-D: after MAX_STUCK_RESPAWNS stuck cycles a display is abandoned (no more
+    // respawn). A later enumeration sights it and the manager emits Responsive,
+    // but the engine must NOT report it responsive — with no live worker it must
+    // stay greyed.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    // Every worker hangs on set(): each recovery attempt wedges and re-sticks.
+    let factory: duja_app::ControllerFactory = Box::new(|_id| {
+        Box::new(|| Some(Box::new(Hang) as Box<dyn BrightnessController>))
+            as duja_app::ControllerOpener
+    });
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(10),
+        watchdog_timeout: Duration::from_millis(120),
+        displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
+    };
+    let (engine, notes) = Engine::spawn(cfg, enumerator(state, calls_tx), factory, platform_rx);
+    let cmds = engine.sender();
+
+    // Cycle 1: a write wedges -> unresponsive.
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 40,
+    })
+    .unwrap();
+    let want = id.clone();
+    assert!(
+        wait_note(&notes, Duration::from_secs(2), |n| matches!(
+            n,
+            EngineNotification::DisplayUnresponsive(x) if *x == want
+        )),
+        "cycle 1: display should be marked unresponsive"
+    );
+
+    // Recovery 1 respawns a fresh (still-hanging) worker (stuck_count 1 < MAX).
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+    // Cycle 2: drive a fresh write to the respawned worker so it wedges and
+    // re-sticks (stuck_count -> 2 == MAX). Driving it explicitly keeps this test
+    // independent of the recovery-restore path (E-E).
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 41,
+    })
+    .unwrap();
+    let want2 = id.clone();
+    assert!(
+        wait_note(&notes, Duration::from_secs(2), |n| matches!(
+            n,
+            EngineNotification::DisplayUnresponsive(x) if *x == want2
+        )),
+        "cycle 2: the respawned worker should wedge and re-stick"
+    );
+
+    // Recovery 2: the display is abandoned (stuck_count == MAX). The sighting must
+    // NOT surface DisplayResponsive — no live worker exists.
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+    let want3 = id.clone();
+    assert!(
+        !wait_note(&notes, Duration::from_secs(1), |n| matches!(
+            n,
+            EngineNotification::DisplayResponsive(x) if *x == want3
+        )),
+        "an abandoned display must not be reported responsive (stays greyed)"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn watchdog_recovery_restores_user_level_not_relearn() {
+    // E-E: on the pure watchdog-recovery (Responsive, no replug) path the engine
+    // must RESTORE the recorded user level via a Set — mirroring Reattached — not
+    // issue an initial Get that relearns (and clobbers) the level from hardware.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (writes_tx, writes_rx) = unbounded();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    // First worker hangs (wedges the write -> unresponsive); later workers record.
+    let hang_first = Arc::new(Mutex::new(true));
+    let factory: duja_app::ControllerFactory = {
+        let hang_first = hang_first.clone();
+        let writes_tx = writes_tx.clone();
+        Box::new(move |_id| {
+            let hang = {
+                let mut f = hang_first.lock().unwrap();
+                let h = *f;
+                *f = false;
+                h
+            };
+            let writes_tx = writes_tx.clone();
+            Box::new(move || {
+                if hang {
+                    Some(Box::new(Hang) as Box<dyn BrightnessController>)
+                } else {
+                    Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
+                }
+            }) as duja_app::ControllerOpener
+        })
+    };
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(10),
+        watchdog_timeout: Duration::from_millis(150),
+        displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
+    };
+    let (engine, notes) = Engine::spawn(cfg, enumerator(state, calls_tx), factory, platform_rx);
+    let cmds = engine.sender();
+
+    // Dim to 30 while the hung worker is wedged -> watchdog -> unresponsive.
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 30,
+    })
+    .unwrap();
+    let want = id.clone();
+    assert!(
+        wait_note(&notes, Duration::from_secs(2), |n| matches!(
+            n,
+            EngineNotification::DisplayUnresponsive(x) if *x == want
+        )),
+        "the wedged write should mark the display unresponsive"
+    );
+
+    // Watchdog recovery: a sighting spawns a fresh worker. The engine must
+    // RE-DISPATCH a Set of 30 (restore), not an initial Get (relearn).
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+    let (_c, seen) = drain_writes(&writes_rx, |f, v| f == Feature::Brightness && v == 30);
+    assert!(
+        seen.contains(&(Feature::Brightness, 30)),
+        "recovery must restore the user's 30%, not relearn from hardware; saw {seen:?}"
+    );
+
     within(Duration::from_secs(2), move || engine.shutdown());
     let _ = platform_tx;
 }

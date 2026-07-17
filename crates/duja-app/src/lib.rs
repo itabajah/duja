@@ -193,7 +193,8 @@ pub enum EngineCommand {
         /// Where the engine sends the snapshot vector.
         reply: Sender<Vec<DisplaySnapshot>>,
     },
-    /// Drain workers (bounded), join non-leaked threads, and stop the engine.
+    /// Drain workers on a bounded deadline (detaching any still wedged in a
+    /// driver call) and stop the engine. Never blocks app exit (ADR-0017).
     Shutdown,
 }
 

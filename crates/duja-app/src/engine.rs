@@ -32,10 +32,11 @@
 
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::Ordering;
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Select, Sender, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Select, Sender, unbounded};
 
 use duja_core::debounce::{Action, Debouncer};
 use duja_core::id::StableDisplayId;
@@ -49,6 +50,13 @@ use crate::{ControllerFactory, EngineCommand, EngineConfig, EngineNotification, 
 /// After a display has been marked stuck this many times, it is abandoned for
 /// the session (no further worker is spawned on recovery).
 const MAX_STUCK_RESPAWNS: u32 = 2;
+
+/// Total wall-clock budget the engine waits for its workers to exit on shutdown
+/// before **detaching** (leaking) any still wedged in a driver call. App exit
+/// must never block unboundedly on a hardware call, so this is a small constant
+/// rather than a per-op timeout; a healthy worker exits in microseconds and only
+/// a genuinely stuck one ever consumes the budget (ADR-0017).
+const SHUTDOWN_JOIN_BUDGET: Duration = Duration::from_secs(2);
 
 /// All mutable state owned by the engine thread.
 pub(crate) struct EngineState {
@@ -84,6 +92,11 @@ pub(crate) struct EngineState {
     /// flyout is closed). `None` keeps the idle engine at zero wakeups.
     poll_next: Option<Instant>,
     seq: u64,
+    /// Monotonic worker-identity counter. Each spawned worker gets the next value
+    /// as its generation; the engine acts on a worker's `OpenFailed` only when the
+    /// ack's generation still matches the registered worker's (WORKER identity),
+    /// independent of `seq` (OP identity).
+    next_gen: u64,
 }
 
 impl EngineState {
@@ -124,6 +137,7 @@ impl EngineState {
             stuck_count: BTreeMap::new(),
             poll_next: None,
             seq: 0,
+            next_gen: 0,
         };
 
         let join = thread::spawn(move || {
@@ -356,17 +370,39 @@ impl EngineState {
                     respawned.insert(id);
                 }
                 ManagerEvent::Responsive { id } => {
-                    // Recovery from unresponsive: respawn unless a sighting event
-                    // in THIS pass already did (dedupe), or the display has been
-                    // abandoned after too many stuck cycles.
-                    if !respawned.contains(&id)
-                        && self.stuck_count.get(&id).copied().unwrap_or(0) < MAX_STUCK_RESPAWNS
-                    {
+                    // Recovery from unresponsive. A display is only surfaced as
+                    // responsive when it actually has a LIVE worker — the presence
+                    // of a worker, not `manager.responsive` alone, is the truth the
+                    // UI greys on (ADR-0017).
+                    let has_worker = if respawned.contains(&id) {
+                        // A sighting event in THIS pass (Added/Reattached) already
+                        // spawned a fresh worker and issued the right one-shot;
+                        // don't retire it, respawn a second one, or re-learn the
+                        // power-on level (dedupe). It has a live worker.
+                        true
+                    } else if self.stuck_count.get(&id).copied().unwrap_or(0) < MAX_STUCK_RESPAWNS {
                         self.retire_worker(&id);
                         self.spawn_for(&id);
-                        self.dispatch_initial_get(&id);
+                        // Restore the recorded user level (mirroring the Reattached
+                        // arm) rather than re-learning it from hardware: if the
+                        // wedged write never actually applied, an initial Get would
+                        // clobber the user's saved intent with a stale reading
+                        // (E-E). Fall back to an initial Get only when no level was
+                        // ever recorded.
+                        match self.manager.user_level_of(&id) {
+                            Some(level) => self.dispatch_set(&id, Feature::Brightness, level),
+                            None => self.dispatch_initial_get(&id),
+                        }
+                        true
+                    } else {
+                        // Abandoned after too many stuck cycles: no worker is
+                        // spawned, so it must STAY greyed — do not un-grey a display
+                        // that is dead with no live worker (E-D).
+                        false
+                    };
+                    if has_worker {
+                        self.notify(EngineNotification::DisplayResponsive(id));
                     }
-                    self.notify(EngineNotification::DisplayResponsive(id));
                 }
                 // The manager never emits Unresponsive from an enumeration.
                 ManagerEvent::Unresponsive { .. } => {}
@@ -384,10 +420,12 @@ impl EngineState {
     /// dropped when the worker exits.
     fn spawn_for(&mut self, id: &StableDisplayId) {
         let opener = (self.factory)(id);
+        self.next_gen = self.next_gen.wrapping_add(1);
         let handle = spawn_worker(
             id.clone(),
             opener,
             self.cfg.write_min_gap,
+            self.next_gen,
             self.ack_tx.clone(),
         );
         self.workers.insert(id.clone(), handle);
@@ -397,9 +435,20 @@ impl EngineState {
     ///
     /// The handle is dropped (not joined): an idle worker sees the channel
     /// disconnect and exits, and a leaked one is left running — either way the
-    /// engine never blocks on the hot-plug path.
+    /// engine never blocks on the hot-plug path. Before dropping, the worker's
+    /// `retired` flag is set so a worker wedged in a driver call exits the moment
+    /// the call returns, without performing another hardware write (E-A).
     fn retire_worker(&mut self, id: &StableDisplayId) {
-        drop(self.workers.remove(id));
+        if let Some(handle) = self.workers.remove(id) {
+            // RATIONALE(Ordering::Release): the only correctness requirement is
+            // that the worker's next Acquire load (after each controller call)
+            // observes this store, so a detached worker stops before its next
+            // write; a single `AtomicBool` behind an `Arc` gives that under any
+            // ordering. Release/Acquire is used for clarity and future-proofing
+            // (Relaxed would suffice today — the flag carries no other memory).
+            handle.retired.store(true, Ordering::Release);
+            drop(handle);
+        }
         self.clear_inflight_for(id);
         self.pending_learn.remove(id);
         self.poll_gets.remove(id);
@@ -545,18 +594,33 @@ impl EngineState {
                 self.clear_inflight_match(&id, key, seq);
                 self.mark_stuck(&id);
             }
-            AckOutcome::OpenFailed => {
-                // The deferred open failed on the worker thread. Drop the dead
-                // handle and clear any state we optimistically recorded for it —
-                // but only if the handle currently registered is the one that
-                // exited, so a stale OpenFailed cannot retire a fresh worker
-                // that already replaced it (respawn / reattach).
+            AckOutcome::OpenFailed { generation } => {
+                // The deferred open failed on the worker thread. Act only if the
+                // CURRENTLY registered worker is the one that failed (generation
+                // match), so a stale failure from an already-replaced worker
+                // (respawn / reattach) is ignored and never retires the fresh
+                // worker that superseded it. This replaces the previous
+                // `join.is_finished()` identity proxy, which raced thread-exit
+                // timing (a legitimate failure could be missed while the thread had
+                // not yet terminated).
                 if self
                     .workers
                     .get(&id)
-                    .is_some_and(|handle| handle.join.is_finished())
+                    .is_some_and(|handle| handle.generation == generation)
                 {
-                    self.retire_worker(&id);
+                    // Mark the display unresponsive so the UI greys it and the next
+                    // sighting's `Responsive` path respawns a worker — otherwise a
+                    // transient open/probe NAK would silently leave it listed as
+                    // normal with no worker and no recovery, losing control for the
+                    // session. A clean open-failure does NOT count toward the
+                    // stuck/abandon budget: unlike a hung driver it leaks no thread
+                    // and is cheap to retry.
+                    if self.manager.mark_unresponsive(&id).is_some() {
+                        self.surface_unresponsive(&id);
+                    } else {
+                        // Already unresponsive / disconnected: just drop the handle.
+                        self.retire_worker(&id);
+                    }
                 }
             }
         }
@@ -578,20 +642,25 @@ impl EngineState {
         }
     }
 
-    /// Mark `id` unresponsive (if newly so): detach its worker, clear its
-    /// in-flight ops, and notify. Idempotent via the manager.
+    /// Mark `id` unresponsive after a hung/panicked control op (if newly so),
+    /// counting it toward the stuck/abandon budget, then detach + notify.
+    /// Idempotent via the manager.
     fn mark_stuck(&mut self, id: &StableDisplayId) {
         if self.manager.mark_unresponsive(id).is_some() {
             let count = self.stuck_count.entry(id.clone()).or_insert(0);
             *count = count.saturating_add(1);
-            // Drop the handle WITHOUT joining: a stuck thread must never be
-            // joined; an already-exited (panicked) one just releases here.
-            drop(self.workers.remove(id));
-            self.clear_inflight_for(id);
-            self.poll_gets.remove(id);
-            self.notify(EngineNotification::DisplayUnresponsive(id.clone()));
-            self.notify_displays_changed();
+            self.surface_unresponsive(id);
         }
+    }
+
+    /// Detach `id`'s worker (never joining a possibly-stuck thread) and emit the
+    /// unresponsive + changed notifications. Call only after
+    /// [`DisplayManager::mark_unresponsive`](duja_core::manager::DisplayManager::mark_unresponsive)
+    /// reported a fresh transition, so the notifications fire exactly once.
+    fn surface_unresponsive(&mut self, id: &StableDisplayId) {
+        self.retire_worker(id);
+        self.notify(EngineNotification::DisplayUnresponsive(id.clone()));
+        self.notify_displays_changed();
     }
 
     /// Remove the in-flight entry for `(id, key)` iff its seq matches (a newer
@@ -633,13 +702,36 @@ impl EngineState {
         ));
     }
 
-    /// On shutdown, ask every remaining (responsive) worker to stop and join
-    /// it. Leaked workers were already removed from the map, so this never
-    /// blocks on a stuck thread.
+    /// On shutdown, ask every remaining worker to stop and wait for them to exit
+    /// against a single **bounded** deadline, then detach (leak) any still wedged
+    /// in a driver call. App exit must never block unboundedly on a hardware call
+    /// (H3 / ADR-0017): a worker younger than the watchdog can still be blocked in
+    /// `controller.set()` and joining it could hang forever.
     fn shutdown_workers(&mut self) {
-        for (_id, handle) in std::mem::take(&mut self.workers) {
+        let workers = std::mem::take(&mut self.workers);
+        // Ask every worker to stop AND flag it retired, so one blocked in a driver
+        // call exits the instant the call returns instead of draining its backlog.
+        for handle in workers.values() {
+            handle.retired.store(true, Ordering::Release);
             let _ = handle.cmd_tx.send(crate::protocol::WorkerCommand::Shutdown);
-            let _ = handle.join.join();
+        }
+        // Wait for exits against ONE shared deadline: `done` disconnects the moment
+        // a worker thread finishes, so a healthy worker is observed immediately and
+        // the total wait can never exceed the budget regardless of worker count.
+        // A worker that exits is reaped with a (now-instant) join; one still wedged
+        // when the budget is spent is detached — dropping its handle leaks the
+        // thread, which dies when its call returns and it observes `retired`.
+        let deadline = Instant::now().checked_add(SHUTDOWN_JOIN_BUDGET);
+        for handle in workers.into_values() {
+            let exited = deadline.is_some_and(|dl| {
+                matches!(
+                    handle.done.recv_deadline(dl),
+                    Err(RecvTimeoutError::Disconnected)
+                )
+            });
+            if exited {
+                let _ = handle.join.join();
+            }
         }
     }
 }
