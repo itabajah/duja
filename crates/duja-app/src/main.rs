@@ -111,11 +111,15 @@ fn init_logging(command: Command) {
             logging::install_panic_hook(None);
         }
         Command::Tray { verbose: false } => {
-            let log_dir = DujaPaths::resolve().map(|p| p.log_dir);
-            logging::init(log_dir.as_deref(), false);
+            // Derive the log paths through the SAME resolve-or-fallback the tray
+            // runs from, so a host with no home dir still logs to the temp root
+            // (previously logging was silently disabled while the tray itself ran
+            // on temp paths). Unchanged when a home dir resolves.
+            let paths = DujaPaths::resolve_or_fallback();
+            logging::init(Some(&paths.log_dir), false);
             // The tray release build has no console; a panic (e.g. inside a Slint
             // callback, which then aborts) would otherwise vanish. Persist it.
-            logging::install_panic_hook(log_dir.map(|dir| dir.join(logging::CRASH_FILE)));
+            logging::install_panic_hook(Some(paths.log_dir.join(logging::CRASH_FILE)));
         }
         _ => logging::init(None, false),
     }

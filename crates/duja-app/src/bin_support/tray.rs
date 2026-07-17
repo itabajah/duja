@@ -179,6 +179,10 @@ const FLYOUT_LOGICAL_WIDTH: f32 = 360.0;
 /// The flyout's hard maximum logical height. Beyond this the rows scroll rather
 /// than the window growing (matches the `clamp(..., 620px)` in `flyout.slint`).
 const FLYOUT_MAX_LOGICAL_HEIGHT: f32 = 620.0;
+/// The flyout's minimum logical height (the empty-state / single-row floor,
+/// matching the `clamp(160px, …)` in `flyout.slint`). The work-area cap is never
+/// allowed to shrink the window below this.
+const FLYOUT_MIN_LOGICAL_HEIGHT: f32 = 160.0;
 /// The settings window's initial logical size (matches `settings.slint`'s
 /// `preferred-width`/`preferred-height`). The window is user-resizable from here.
 const SETTINGS_LOGICAL_WIDTH: f32 = 560.0;
@@ -301,7 +305,7 @@ enum Action {
 /// platform event pump cannot start) bubble up so `main` exits non-zero.
 pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
     let _ = verbose; // logging is initialised by the caller.
-    let paths = DujaPaths::resolve().unwrap_or_else(fallback_paths);
+    let paths = DujaPaths::resolve_or_fallback();
 
     // 1. Single-instance guard: a second launch asks the running instance to
     //    surface its flyout over IPC, then exits 0.
@@ -608,7 +612,7 @@ impl AppState {
         // area: on a small screen the flyout caps here and its rows scroll
         // instead of overflowing off-screen. Logical px — Slint scales it.
         let cap = flyout_height_cap(work, scale, FLYOUT_MARGIN, FLYOUT_MAX_LOGICAL_HEIGHT);
-        let logical_height = self.flyout_logical_height().min(cap).max(160.0);
+        let logical_height = clamp_flyout_height(self.flyout_logical_height(), cap);
         self.shell.set_content_height(logical_height);
 
         let physical = physical_window_size(FLYOUT_LOGICAL_WIDTH, logical_height, scale);
@@ -652,7 +656,21 @@ impl AppState {
             let n = f32::from(u16::try_from(rows).unwrap_or(u16::MAX));
             n * CARD + (n - 1.0) * CARD_GAP
         };
-        (CHROME + body).clamp(160.0, FLYOUT_MAX_LOGICAL_HEIGHT)
+        (CHROME + body).clamp(FLYOUT_MIN_LOGICAL_HEIGHT, FLYOUT_MAX_LOGICAL_HEIGHT)
+    }
+
+    /// The flyout's content-driven logical height, clamped to the work area of
+    /// the monitor under the cursor — the same sizing [`AppState::show_flyout`]
+    /// applies. Re-queries the cursor work-area/scale (rather than caching) so a
+    /// `DisplaysChanged` while the flyout is open re-asserts the *capped* height:
+    /// that notification fires on every `SetUserLevel` (a slider drag) and every
+    /// enumeration, and without the cap a drag/refresh would push the window back
+    /// to full height and overflow a small/high-DPI work area.
+    fn capped_flyout_height(&self) -> f32 {
+        use crate::bin_support::positioning::flyout_height_cap;
+        let (_cursor, work, scale) = geometry::cursor_work_area_and_scale();
+        let cap = flyout_height_cap(work, scale, FLYOUT_MARGIN, FLYOUT_MAX_LOGICAL_HEIGHT);
+        clamp_flyout_height(self.flyout_logical_height(), cap)
     }
 
     /// Hide the flyout (process keeps running in the tray).
@@ -1263,7 +1281,11 @@ impl AppState {
         // count may have changed), re-asserting the logical size so the buffer
         // tracks it.
         if self.flyout_visible {
-            let logical_height = self.flyout_logical_height();
+            // Re-assert the content-driven height, keeping the work-area cap: this
+            // fires on every SetUserLevel (a slider drag) and every enumeration, so
+            // without the cap a drag/refresh while open would push the capped
+            // window back to full height and overflow a small/high-DPI screen.
+            let logical_height = self.capped_flyout_height();
             self.shell.set_content_height(logical_height);
             self.shell
                 .enforce_logical_size(FLYOUT_LOGICAL_WIDTH, logical_height);
@@ -1819,18 +1841,6 @@ fn load_config(paths: &DujaPaths) -> Config {
     }
 }
 
-/// Fallback paths under the OS temp dir when no home directory is resolvable.
-fn fallback_paths() -> DujaPaths {
-    let root = std::env::temp_dir().join("duja");
-    warn!(root = %root.display(), "no home directory; using a temp data root");
-    DujaPaths {
-        config: root.join("config.toml"),
-        state: root.join("state.toml"),
-        crash_marker: root.join("gamma.dirty"),
-        log_dir: root.join("logs"),
-    }
-}
-
 /// Best-effort OS dark-theme detection. Not trivially available through
 /// winit/slint in this version, so P4 returns `None` (⇒ the flyout defaults to
 /// its dark theme). Documented deviation; a real query lands with the settings
@@ -1849,16 +1859,27 @@ fn unix_now() -> i64 {
 /// The background update-check interval: at most once a day.
 const UPDATE_CHECK_INTERVAL_SECS: i64 = 24 * 60 * 60;
 
-/// Whether a background update check is due: never checked before, or at least
-/// `interval_secs` have passed since `last_check_unix`.
+/// Clamp a flyout's content-driven height to the work-area `cap` while keeping
+/// the minimum window height. Pure and shared by [`AppState::show_flyout`] and
+/// the open-flyout resize in [`AppState::on_displays_changed`] so both apply the
+/// same cap; unit-tested independently of the Win32 work-area query.
+fn clamp_flyout_height(content: f32, cap: f32) -> f32 {
+    content.min(cap).max(FLYOUT_MIN_LOGICAL_HEIGHT)
+}
+
+/// Whether a background update check is due: never checked before, at least
+/// `interval_secs` have passed since `last_check_unix`, **or** that timestamp is
+/// in the future.
 ///
-/// Uses saturating subtraction so a non-monotonic wall clock (a check timestamp
-/// in the future) cannot panic under the arithmetic-side-effects lint, nor
-/// wrongly fire — it reports "not due" until real time catches up.
+/// A future `last` means a backward wall-clock correction or a bad persisted
+/// value; treat it as due so the check can never be wedged off forever (a plain
+/// `now.saturating_sub(last)` would clamp to 0 and report "not due" until real
+/// time overtook the stale future stamp). Uses saturating subtraction so the
+/// non-monotonic case cannot panic under the arithmetic-side-effects lint.
 fn due_for_check(now_unix: i64, last_check_unix: Option<i64>, interval_secs: i64) -> bool {
     match last_check_unix {
         None => true,
-        Some(last) => now_unix.saturating_sub(last) >= interval_secs,
+        Some(last) => now_unix < last || now_unix.saturating_sub(last) >= interval_secs,
     }
 }
 
@@ -1959,8 +1980,27 @@ mod tests {
         assert!(due_for_check(1_000 + day, Some(1_000), day));
         // More than a day later ⇒ due.
         assert!(due_for_check(1_000 + day * 2, Some(1_000), day));
-        // Non-monotonic clock (last is in the future) ⇒ not due, no panic.
-        assert!(!due_for_check(1_000, Some(5_000), day));
+        // Non-monotonic clock (last in the FUTURE: a backward clock correction or
+        // a bad persisted value) ⇒ DUE, so the check can never be wedged off
+        // forever (and still no panic).
+        assert!(due_for_check(1_000, Some(5_000), day));
+        // One second before `last` is still in the future ⇒ due.
+        assert!(due_for_check(4_999, Some(5_000), day));
+    }
+
+    #[test]
+    fn flyout_height_is_clamped_to_the_work_area_cap() {
+        use super::{FLYOUT_MIN_LOGICAL_HEIGHT, clamp_flyout_height};
+        // Cap below content ⇒ clamp DOWN to the cap so rows scroll instead of
+        // overflowing off-screen. This is the on_displays_changed regression: an
+        // open flyout dropped this cap and grew back to its full content height.
+        assert!((clamp_flyout_height(620.0, 300.0) - 300.0).abs() < f32::EPSILON);
+        // Cap above content ⇒ keep the content's own layout height.
+        assert!((clamp_flyout_height(420.0, 620.0) - 420.0).abs() < f32::EPSILON);
+        // A cap tighter than the floor still yields at least the minimum height.
+        assert!(
+            (clamp_flyout_height(620.0, 100.0) - FLYOUT_MIN_LOGICAL_HEIGHT).abs() < f32::EPSILON
+        );
     }
 
     fn temp_state() -> (StateStore, tempfile::TempDir) {
