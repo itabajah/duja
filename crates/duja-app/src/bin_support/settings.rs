@@ -15,8 +15,10 @@
 //! Gamma ramps are meaningless under HDR, so a display configured for
 //! [`DimMode::Gamma`] is silently downgraded to [`DimMode::Overlay`] whenever
 //! the HDR probe does not *positively* confirm gamma is safe (HDR-active **or**
-//! an indeterminate probe both force overlay). The probe result is captured once
-//! per enumeration and passed in as `gamma_allowed`.
+//! an indeterminate probe both force overlay). The probe result is refreshed on
+//! each enumeration — the app re-probes the live HDR state (throttled off the
+//! slider-drag hot path) and passes it in as `gamma_allowed` — so a display that
+//! goes HDR mid-session stops receiving a bypassed gamma ramp.
 
 // RATIONALE: these pure modules are consumed only by the Windows tray assembly,
 // but stay cross-platform (not cfg-gated) so their unit tests run on every CI
@@ -30,8 +32,9 @@ use duja_ui::Theme as UiTheme;
 
 /// Resolve the [`ContinuumConfig`] for one display from its per-monitor settings.
 ///
-/// `gamma_allowed` is the once-per-enumeration HDR verdict: `false` forces every
-/// [`DimMode::Gamma`] display onto the overlay path.
+/// `gamma_allowed` is the live HDR verdict, re-probed by the app on each
+/// enumeration: `false` forces every [`DimMode::Gamma`] display onto the overlay
+/// path.
 pub(crate) fn continuum_for(
     kind: DisplayKind,
     monitor: &MonitorConfig,

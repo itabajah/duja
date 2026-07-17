@@ -74,6 +74,15 @@ const HOTKEY_BRIGHTNESS_STEP: i16 = 5;
 /// dismissing gesture (rather than a fresh open), closing the click-outside race.
 const TOGGLE_GUARD: Duration = Duration::from_millis(200);
 
+/// How long a probed HDR gamma verdict is trusted before the app re-probes DXGI.
+///
+/// The verdict is refreshed from [`AppState::on_displays_changed`], which also
+/// fires on every `SetUserLevel` echo (a slider drag) — re-probing DXGI there
+/// unconditionally would put a factory-create on the drag hot path. This TTL
+/// bounds the probe rate to at most once per window while still picking up a
+/// live HDR on/off change well inside human reaction time.
+const GAMMA_VERDICT_TTL: Duration = Duration::from_secs(1);
+
 /// What a tray-icon click resolves to, given flyout visibility + recency of hide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToggleDecision {
@@ -391,6 +400,9 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
             dimmer,
             config,
             gamma_allowed,
+            // The verdict above was just probed; start the TTL clock from now so
+            // the first enumeration does not immediately re-probe.
+            last_gamma_probe: Some(Instant::now()),
             bounds,
             state: StateStore::load(paths.state.clone()),
             crash_marker: paths.crash_marker.clone(),
@@ -509,7 +521,14 @@ struct AppState {
     snapshots: Vec<DisplaySnapshot>,
     dimmer: Option<PlatformDimmer>,
     config: Config,
+    /// The live HDR gamma verdict: `false` forces every gamma-mode display onto
+    /// the overlay path. Seeded at startup and re-probed on enumeration by
+    /// [`AppState::refresh_gamma_verdict`], so a display that goes HDR mid-session
+    /// stops receiving a (bypassed, marker-writing) gamma ramp.
     gamma_allowed: bool,
+    /// When the HDR verdict was last probed, so the DXGI query is throttled off
+    /// the slider-drag hot path (see [`GAMMA_VERDICT_TTL`]).
+    last_gamma_probe: Option<Instant>,
     bounds: Arc<Mutex<BoundsMap>>,
     state: StateStore,
     crash_marker: std::path::PathBuf,
@@ -715,14 +734,28 @@ impl AppState {
         );
     }
 
-    /// Clean shutdown: persist state, restore gamma (clearing the marker), quit
-    /// the event loop.
+    /// Clean shutdown: persist state, restore gamma, quit the event loop.
     fn begin_quit(&mut self) {
         let _ = self.state.flush(Instant::now());
-        // The gamma guard restores every engaged display and clears the crash
-        // marker; the explicit remove is a redundant safety net.
-        self.gamma.restore_all();
-        let _ = std::fs::remove_file(&self.crash_marker);
+        // Restore every display this session engaged. The gamma guard clears the
+        // crash marker itself on a CLEAN restore and KEEPS it when a restore
+        // genuinely failed — the never-brick net for a ramp that would outlive
+        // the process — so the marker must be removed here ONLY when that restore
+        // came back clean. (The prior unconditional remove defeated the retention,
+        // so a failed restore left no marker and the next launch never recovered.)
+        // A global identity pass then clears any ramp left over from a prior dirty
+        // run, mirroring `restore_screen`'s belt-and-suspenders.
+        let gamma_clean = self.gamma.restore_all();
+        let report = duja_dimmer::restore_all();
+        if gamma_clean {
+            let _ = std::fs::remove_file(&self.crash_marker);
+        }
+        info!(
+            gamma_clean,
+            restored = report.restored.len(),
+            failed = report.failed.len(),
+            "restored screen on quit"
+        );
         if let Some(dimmer) = self.dimmer.as_mut() {
             let _ = dimmer.clear();
         }
@@ -1215,6 +1248,33 @@ impl AppState {
         let _ = self.state.maybe_flush(Instant::now());
     }
 
+    /// Re-probe the live HDR gamma verdict into
+    /// [`gamma_allowed`](Self::gamma_allowed) so it is not frozen at process
+    /// start.
+    ///
+    /// If a display is SDR at launch and the user later turns Windows HDR on,
+    /// this flips the verdict to `false`; every read site (`plan_commands`,
+    /// `hardware_target`, `continuum_for`) then routes its gamma-configured
+    /// displays onto the overlay path, so `SetDeviceGammaRamp` is never issued
+    /// under HDR — where the legacy ramp is bypassed and the write would only
+    /// leave an ineffective dim behind a crash marker. When the verdict flips the
+    /// other way (HDR lost), the same path simply re-allows gamma.
+    ///
+    /// The DXGI probe is throttled to at most once per [`GAMMA_VERDICT_TTL`]: the
+    /// caller ([`on_displays_changed`](Self::on_displays_changed)) also runs on a
+    /// `SetUserLevel` echo (a slider drag), so an unthrottled probe would land a
+    /// factory-create on the drag hot path. A single global verdict is kept for
+    /// now (per-display HDR is a future refinement).
+    fn refresh_gamma_verdict(&mut self) {
+        let now = Instant::now();
+        if !verdict_probe_due(self.last_gamma_probe, now, GAMMA_VERDICT_TTL) {
+            return;
+        }
+        self.last_gamma_probe = Some(now);
+        self.gamma_allowed =
+            duja_dimmer::gamma_support_from_hdr(duja_dimmer::is_hdr_active()).allows_gamma();
+    }
+
     /// Adopt a fresh enumeration: mirror each display's CURRENT hardware brightness
     /// into the UI (writing NOTHING to the hardware — item 5), rebuild the flyout
     /// rows against *user* levels, and re-apply overlays for user-controlled
@@ -1227,6 +1287,11 @@ impl AppState {
     /// placeholder (see [`adopt_position`]). Only a genuine user action
     /// ([`set_user_level`](Self::set_user_level)) writes to hardware thereafter.
     fn on_displays_changed(&mut self, snapshots: Vec<DisplaySnapshot>) {
+        // Keep the HDR gamma verdict live across the session — this is the app's
+        // enumeration path (a hot-plug, or a resume/session-unlock re-enumeration
+        // forwarded by the engine as this notification). Throttled internally, so
+        // a slider-drag echo that also lands here never hammers the DXGI probe.
+        self.refresh_gamma_verdict();
         self.displays = snapshots.iter().map(|s| (s.id.clone(), s.kind)).collect();
         // Keep the full snapshots (with capabilities) for the settings sections,
         // and refresh the (possibly-open) settings window's per-monitor list.
@@ -1883,6 +1948,19 @@ fn due_for_check(now_unix: i64, last_check_unix: Option<i64>, interval_secs: i64
     }
 }
 
+/// Whether the cached HDR verdict is stale enough to re-probe DXGI: never probed
+/// (`None`), or at least `ttl` has elapsed since the last probe.
+///
+/// Pure and monotonic-clock-safe ([`Instant::duration_since`] saturates), so the
+/// throttle that keeps the probe off the slider-drag hot path is unit-tested
+/// without the FFI probe itself.
+fn verdict_probe_due(last: Option<Instant>, now: Instant, ttl: Duration) -> bool {
+    match last {
+        None => true,
+        Some(last) => now.duration_since(last) >= ttl,
+    }
+}
+
 /// Build the global-hotkey registrar and apply the initial plan from `config`
 /// on the (main) thread. A failure to create the manager or register a binding
 /// only disables that hotkey (logged) — the app runs on. The registrar is
@@ -1937,15 +2015,15 @@ mod tests {
     use super::{Accelerator, Action, Code, GhkModifiers, HotkeyAction};
     use super::{ContinuumConfig, DimMode, TOGGLE_GUARD, toggle_decision};
     use super::{
-        DEFAULT_USER_LEVEL_PCT, ToggleDecision, UPDATE_CHECK_INTERVAL_SECS, accel_to_hotkey,
-        action_for, adopt_enumeration, adopt_position, code_for_key, due_for_check, ghk_modifiers,
-        reflected_level,
+        DEFAULT_USER_LEVEL_PCT, GAMMA_VERDICT_TTL, ToggleDecision, UPDATE_CHECK_INTERVAL_SECS,
+        accel_to_hotkey, action_for, adopt_enumeration, adopt_position, code_for_key,
+        due_for_check, ghk_modifiers, reflected_level, verdict_probe_due,
     };
     use crate::bin_support::state_store::StateStore;
     use duja_core::id::StableDisplayId;
     use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
     use std::collections::BTreeSet;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // --- Item 5: launching Duja must NOT change the monitor brightness ---------
     //
@@ -1986,6 +2064,29 @@ mod tests {
         assert!(due_for_check(1_000, Some(5_000), day));
         // One second before `last` is still in the future ⇒ due.
         assert!(due_for_check(4_999, Some(5_000), day));
+    }
+
+    #[test]
+    fn verdict_probe_is_due_only_after_the_ttl() {
+        // Fix 1: the HDR verdict re-probe is throttled off the slider-drag hot
+        // path. `on_displays_changed` (which drives it) also fires on a
+        // SetUserLevel echo, so the probe must run at most once per TTL while
+        // still refreshing within it.
+        let ttl = GAMMA_VERDICT_TTL;
+        let t0 = Instant::now();
+        // Never probed ⇒ always due (the field starts unset / first enumeration).
+        assert!(verdict_probe_due(None, t0, ttl));
+        // Just probed ⇒ not due.
+        assert!(!verdict_probe_due(Some(t0), t0, ttl));
+        // Within the TTL ⇒ not due (a drag echo re-uses the cached verdict).
+        let mid = t0.checked_add(ttl / 2).expect("instant in range");
+        assert!(!verdict_probe_due(Some(t0), mid, ttl));
+        // Exactly at the TTL ⇒ due.
+        let at = t0.checked_add(ttl).expect("instant in range");
+        assert!(verdict_probe_due(Some(t0), at, ttl));
+        // Past the TTL ⇒ due.
+        let past = t0.checked_add(ttl * 2).expect("instant in range");
+        assert!(verdict_probe_due(Some(t0), past, ttl));
     }
 
     #[test]
