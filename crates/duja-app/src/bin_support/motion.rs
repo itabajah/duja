@@ -53,7 +53,19 @@ pub(crate) fn os_animations_enabled() -> bool {
             SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
         )
     };
-    ok.is_ok() && enabled != 0
+    // On success the OS overwrote `enabled` with the real setting; on failure it
+    // left our motion-on seed untouched. Decide on that value alone so a failed
+    // query yields the documented motion-on default (the old `ok.is_ok() && …`
+    // returned motion-OFF on failure — the opposite of the doc).
+    animations_enabled_from(ok.is_ok().then_some(enabled))
+}
+
+/// Pure motion decision for [`os_animations_enabled`]: `queried` is the
+/// OS-written `BOOL` from a successful query, or `None` when the query failed
+/// (⇒ the motion-on default). Motion is on unless the OS explicitly reported
+/// client-area animations disabled.
+fn animations_enabled_from(queried: Option<i32>) -> bool {
+    queried.is_none_or(|enabled| enabled != 0)
 }
 
 /// Non-Windows: the flyout is Windows-only today; assume motion is fine.
@@ -74,5 +86,17 @@ mod tests {
         // Reduced motion: honour the accessibility opt-out.
         assert_eq!(glide_for(true, false), 0);
         assert_eq!(glide_for(false, false), 0);
+    }
+
+    #[test]
+    fn motion_defaults_on_when_the_os_query_fails() {
+        use super::animations_enabled_from;
+        // Query failed (None) ⇒ motion ON: the documented Windows default. The
+        // old code ANDed the failed success flag in and returned motion-OFF here.
+        assert!(animations_enabled_from(None));
+        // OS reported animations enabled ⇒ on.
+        assert!(animations_enabled_from(Some(1)));
+        // OS reported animations disabled ⇒ off (honour the accessibility opt-out).
+        assert!(!animations_enabled_from(Some(0)));
     }
 }
