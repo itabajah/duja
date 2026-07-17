@@ -32,11 +32,21 @@ Local attack surface and mitigations:
 
 ## Supply chain
 
-Pinned lockfile; `cargo-deny` (advisories + license allowlist) on every PR;
-GitHub Actions pinned by commit SHA. Each tagged release
-([`.github/workflows/release.yml`](.github/workflows/release.yml)) publishes, for
-every artifact, a **SHA256SUMS** file, a **minisign** signature (`.minisig`), and
-a GitHub **build-provenance attestation**.
+Pinned lockfile; `cargo-deny` (advisories + license allowlist) on every PR **and
+again on the tagged commit at release time**; GitHub Actions pinned by commit SHA.
+Each tagged release
+([`.github/workflows/release.yml`](.github/workflows/release.yml)) ships two
+binaries — the Windows installer (`.exe`) and a portable `.zip` — each carrying a
+GitHub **build-provenance attestation**. Alongside them a **SHA256SUMS** file
+lists their hashes, and a **minisign** signature (`.minisig`) covers each binary
+*and* `SHA256SUMS` itself. The minisigned `SHA256SUMS` is the root of trust:
+verify it, then its hashes chain to the two binaries. The provenance attestation
+covers **the two binaries only** — `SHA256SUMS` and the `.minisig` files are
+verified through minisign, not attestation.
+
+The step-by-step release procedure — dry run, per-asset verification, and how to
+turn on Authenticode / Azure Trusted Signing later — is in
+[`docs/release-checklist.md`](docs/release-checklist.md).
 
 > **Note — code signing.** Release binaries are **not** yet signed with an
 > Authenticode certificate, so Windows SmartScreen may warn on first run. Verify
@@ -62,5 +72,7 @@ So the verify command is:
 minisign -Vm SHA256SUMS -P RWSeL0en/zyHopbYOTmC4nwO4pLW0WN6awWsuhwoUZnSM+D0zukOl0UK
 ```
 
-You can also inspect the build-provenance attestation on any release asset with
-`gh attestation verify <file> --repo itabajah/duja`.
+You can also verify the build-provenance attestation on either binary — the
+installer `.exe` or the portable `.zip` — with
+`gh attestation verify <file> --repo itabajah/duja`. (`SHA256SUMS` and the
+`.minisig` files are not attested; they are covered by minisign above.)

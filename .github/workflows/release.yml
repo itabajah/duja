@@ -6,9 +6,19 @@
 # uploads them as workflow artifacts for inspection WITHOUT publishing (a dry
 # run) — use it to validate the pipeline before tagging.
 #
+# Every run first re-validates the tagged commit (cargo-deny + clippy + tests),
+# so advisory/yank drift — or a tag placed on a commit that never passed CI —
+# fails the run before anything is built or published.
+#
 # All third-party actions are SHA-pinned (supply-chain policy, as in ci.yml).
 # Shell tools installed via choco (Inno Setup, minisign) are outside that policy,
-# exactly like the apt-get/choco steps in ci.yml.
+# exactly like the apt-get/choco steps in ci.yml; the choco install is version-
+# pinned + checksum-required, and the minisign download is hash-checked.
+#
+# github.* context (tag name, event) is NEVER interpolated into a run body — it
+# flows through a step `env:` map and is read as $env:VAR, so a crafted tag name
+# cannot inject shell into this privileged (contents/id-token/attestations:write,
+# minisign-secret-holding) job. Full runbook: docs/release-checklist.md.
 #
 # One-time setup before the first real tag (see SECURITY.md):
 #   1. minisign -G -W -p minisign.pub -s minisign.key   (passwordless key)
@@ -52,13 +62,19 @@ jobs:
       # rather than ship a mislabeled installer.
       - name: Resolve version
         shell: pwsh
+        env:
+          # Pass github context through env — never splice ${{ github.* }} into a
+          # run body (a crafted tag name would otherwise inject PowerShell here).
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+?)"' |
                   Select-Object -First 1).Matches.Groups[1].Value
           # Publish ONLY on a tag *push* — never on workflow_dispatch, even if it
           # was manually pointed at a tag ref (that path is a dry run by design).
-          if ('${{ github.event_name }}' -eq 'push' -and '${{ github.ref_type }}' -eq 'tag') {
-            $tag = '${{ github.ref_name }}' -replace '^v',''
+          if ($env:EVENT_NAME -eq 'push' -and $env:REF_TYPE -eq 'tag') {
+            $tag = $env:REF_NAME -replace '^v',''
             if ($tag -ne $ver) { throw "tag $tag does not match Cargo.toml version $ver" }
             $publish = 'true'
           } else {
@@ -68,7 +84,25 @@ jobs:
           "PUBLISH=$publish" >> $env:GITHUB_ENV
           Write-Host "version=$ver publish=$publish"
 
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # ---- Release gate: re-validate the tagged commit ----------------------
+      # The 3-OS matrix already ran on the merge PR; re-run the quality gate here
+      # on the exact tagged commit to catch advisory/yank drift since the merge
+      # and to refuse a tag placed on a commit that never passed CI. Runs on BOTH
+      # the publish (tag push) and dry-run (workflow_dispatch) paths and fails the
+      # job on any error, so a red or advisory-drifted tag can never publish.
+      # No rust-cache below this point: the signed build stays hermetic (a clean
+      # build is the trade for reproducibility). ci.yml keeps its cache.
+      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2
+        with:
+          tool: cargo-deny,cargo-nextest
+      - name: Gate (cargo-deny)
+        run: cargo deny check
+      - name: Gate (clippy)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Gate (tests)
+        run: cargo nextest run --workspace --all-features
+      - name: Gate (doctests)
+        run: cargo test --doc --workspace --all-features
 
       # rust-toolchain.toml pins 1.96.1; rustup installs it on first use.
       - name: Build release binaries
@@ -76,27 +110,63 @@ jobs:
 
       # Portable zip (staging + Compress-Archive), via the dependency-free xtask.
       - name: Stage portable archive
-        run: cargo run --release -p xtask -- dist --version ${{ env.VERSION }}
+        shell: pwsh
+        run: cargo run --release -p xtask -- dist --version $env:VERSION
 
       # Inno Setup installer. Not reliably preinstalled on windows-latest → install.
       - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
+        # Pin the exact version and require a verified checksum so a bumped or
+        # compromised upstream package can't slip into the signed build. 6.7.1 is
+        # the current stable Inno Setup 6 on Chocolatey (no 6.4.x is published there).
+        run: choco install innosetup --version=6.7.1 -y --no-progress --require-checksums
       - name: Build installer
         shell: pwsh
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
-            /DMyAppVersion=${{ env.VERSION }} packaging\windows\duja.iss
+            "/DMyAppVersion=$env:VERSION" packaging\windows\duja.iss
+
+      # ---- Optional: Azure Trusted Signing (Authenticode) — INERT today -----
+      # Duja ships no code-signing certificate yet, so this step is guarded off.
+      # When a cert exists, Authenticode-signing the installer stops SmartScreen
+      # warning on first run. It runs BEFORE Compute SHA256SUMS on purpose, so the
+      # checksums AND the provenance attestation cover the *signed* bytes —
+      # enabling it is a config-only change, no step reordering.
+      #
+      # Enable it with NO edit to this file:
+      #   1. Create an Azure Trusted Signing account + certificate profile.
+      #   2. Repo variables: AZURE_SIGN=true, AZURE_SIGN_ENDPOINT,
+      #      AZURE_SIGN_ACCOUNT, AZURE_SIGN_CERT_PROFILE.
+      #   3. Repo secrets: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
+      #      (or wire OIDC via this job's existing `id-token: write` and drop the
+      #      client secret — the more secure option).
+      # Only the installer .exe is Authenticode-signable; the portable .zip and
+      # SHA256SUMS are not PE files and stay covered by minisign + provenance.
+      - name: Sign installer (Azure Trusted Signing)
+        if: env.PUBLISH == 'true' && vars.AZURE_SIGN == 'true'
+        uses: azure/trusted-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.AZURE_SIGN_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGN_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGN_CERT_PROFILE }}
+          files: ${{ github.workspace }}/target/dist/duja-setup-${{ env.VERSION }}.exe
 
       # SHA256SUMS over the two shippable artifacts (two-space `sha256sum -c` form).
       - name: Compute SHA256SUMS
         shell: pwsh
         run: |
           Push-Location target/dist
-          $files = "duja-setup-${{ env.VERSION }}.exe",
-                   "duja-${{ env.VERSION }}-windows-x64.zip"
-          Get-FileHash $files -Algorithm SHA256 |
-            ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) } |
-            Set-Content -Encoding ascii SHA256SUMS
+          $files = "duja-setup-${env:VERSION}.exe",
+                   "duja-${env:VERSION}-windows-x64.zip"
+          # Write LF-only and no BOM: Set-Content -Encoding ascii emits CRLF, which
+          # leaves a trailing \r on every filename so Linux `sha256sum -c SHA256SUMS`
+          # fails even though the hashes are correct. Keep the two-space form.
+          $lines = Get-FileHash $files -Algorithm SHA256 |
+            ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) }
+          $content = ($lines -join "`n") + "`n"
+          [System.IO.File]::WriteAllText((Join-Path (Get-Location) 'SHA256SUMS'), $content)
           Get-Content SHA256SUMS
           Pop-Location
 
@@ -133,18 +203,23 @@ jobs:
           if ($got -ne $sha) { throw "minisign zip hash mismatch: $got" }
           Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\minisign" -Force
           $minisign = "$env:RUNNER_TEMP\minisign\minisign-win64\x86_64\minisign.exe"
-          $env:MINISIGN_KEY | Set-Content -NoNewline -Encoding ascii minisign.key
+          # Write the secret key to an ABSOLUTE path under RUNNER_TEMP so the
+          # finally wipes it even if signing throws while CWD is inside target/dist
+          # (Push-Location below moves us there before the signing loop).
+          $keyPath = Join-Path $env:RUNNER_TEMP 'minisign.key'
+          $env:MINISIGN_KEY | Set-Content -NoNewline -Encoding ascii -LiteralPath $keyPath
           try {
             Push-Location target/dist
-            foreach ($f in "duja-setup-${{ env.VERSION }}.exe",
-                            "duja-${{ env.VERSION }}-windows-x64.zip",
+            foreach ($f in "duja-setup-${env:VERSION}.exe",
+                            "duja-${env:VERSION}-windows-x64.zip",
                             "SHA256SUMS") {
-              & $minisign -S -s ../../minisign.key -m $f -c "duja ${{ env.VERSION }}"
+              & $minisign -S -s $keyPath -m $f -c "duja ${env:VERSION}"
               if ($LASTEXITCODE -ne 0) { throw "minisign failed for $f" }
             }
             Pop-Location
           } finally {
-            Remove-Item minisign.key -ErrorAction SilentlyContinue
+            # Absolute path → wiped regardless of the CWD when the block unwinds.
+            Remove-Item -LiteralPath $keyPath -Force -ErrorAction SilentlyContinue
           }
 
       - name: Attest build provenance
@@ -162,7 +237,12 @@ jobs:
           tool: git-cliff
       - name: Generate release notes
         if: env.PUBLISH == 'true'
-        run: git cliff --tag ${{ github.ref_name }} --latest --strip all -o RELEASE_NOTES.md
+        shell: pwsh
+        env:
+          # Same rule as Resolve version: the tag reaches git-cliff via env and is
+          # passed as a single quoted argument, never spliced into the run body.
+          REF_NAME: ${{ github.ref_name }}
+        run: git cliff --tag "$env:REF_NAME" --latest --strip all -o RELEASE_NOTES.md
 
       - name: Create GitHub Release
         if: env.PUBLISH == 'true'
