@@ -21,6 +21,9 @@ MADR-lite format. Accepted ADRs are changed by superseding, not editing.
 | [0015](0015-update-check-on-by-default.md) | Update check on by default (smart-notify) | accepted |
 | [0016](0016-windows-distribution-and-signing.md) | Windows distribution & signing (Inno + minisign + provenance) | accepted |
 | [0017](0017-engine-shutdown-lifecycle-contract.md) | Engine shutdown & worker-lifecycle contract (generation + retired + bounded shutdown) | accepted |
+| [0018](0018-app-owns-continuum-engine-owns-pacing.md) | App owns the continuum; the engine owns pacing (single write authority) | accepted |
+| [0019](0019-version-ladder-and-release-trains.md) | Version ladder & release trains (v0.1.x Windows, v0.2 macOS, v0.3 Linux, v1.0) | accepted |
+| [0020](0020-release-integrity-and-signing-readiness.md) | Release integrity & signing readiness (no injection, gated publish, hermetic, Azure-ready) | accepted |
 
 Spike evidence lives on branches `spike/eventloop`, `spike/ddc`,
 `spike/overlay` (code is not merged; findings are).
