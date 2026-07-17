@@ -9,11 +9,23 @@
 //!
 //! # Ordering
 //!
-//! Rows are sorted by [`StableDisplayId`] on every
-//! [`set_displays`](FlyoutVm::set_displays). Because the id is durable across
-//! replug, this order is **stable across refreshes**: the same set of displays
-//! always yields the same row order, so a monitor never jumps position under
-//! the user's cursor when an unrelated enumeration arrives.
+//! Rows are **order-stable by identity**: a display keeps the row position it was
+//! first seen at for as long as it stays connected.
+//! [`set_displays`](FlyoutVm::set_displays) matches each incoming snapshot to an
+//! existing row by [`StableDisplayId`] and never reindexes a survivor;
+//! genuinely-new displays are **appended after** the survivors (in id order, so a
+//! *fresh* population is deterministic) and gone displays are dropped.
+//!
+//! Precisely: an **addition** never moves a survivor (a new display goes to the
+//! end, never above an existing row); a **removal** compacts the rows below the
+//! gone display, preserving their relative order. The flyout addresses each
+//! slider's `changed` by its *positional* row index, so this ordering keeps a row
+//! a user is **mid-drag** on bound to the same display when a hot-plug arrives —
+//! a re-sort under a held thumb would retarget the drag to the wrong display. The
+//! one residual case is a concurrent **unplug of a *different* display** during a
+//! drag, which compacts and can shift the dragged row; it is rare (two hands, two
+//! monitors) and the external-change reflection path re-settles the level, so it
+//! is left as a known edge rather than moving slider addressing to id-keyed.
 //!
 //! # Unresponsive displays
 //!
@@ -184,32 +196,56 @@ impl FlyoutVm {
         }
     }
 
-    /// Replace the display set from a fresh batch of engine snapshots.
+    /// Merge a fresh batch of engine snapshots into the rows, **order-stably**.
     ///
-    /// Rows are rebuilt sorted by [`StableDisplayId`] (stable across calls). The
-    /// greyed/unresponsive state is preserved: a display still in the
-    /// unresponsive set stays greyed and slider-disabled at its snapshot level.
+    /// Each surviving display keeps its current row position (its data refreshed
+    /// in place); genuinely-new displays are appended after the survivors in id
+    /// order, and displays no longer present are dropped. Never reindexing a
+    /// survivor is what keeps a row a user is mid-drag on bound to the same
+    /// display across a hot-plug (see the module `# Ordering` note) — the flyout
+    /// binds each slider's `changed` to its positional row index.
+    ///
+    /// The greyed/unresponsive and dimming state is preserved: a display still in
+    /// the unresponsive set stays greyed and slider-disabled at its snapshot
+    /// level.
     pub fn set_displays(&mut self, snapshots: Vec<DisplaySnapshot>) {
-        let mut snapshots = snapshots;
-        snapshots.sort_by(|a, b| a.id.cmp(&b.id));
-        self.rows = snapshots
+        // Index the incoming batch by id: a `BTreeMap` both de-duplicates and
+        // yields a deterministic (id-sorted) order for the genuinely-new displays
+        // appended below.
+        let mut incoming: BTreeMap<StableDisplayId, DisplaySnapshot> = snapshots
             .into_iter()
-            .map(|snap| {
-                let greyed = self.unresponsive.contains(&snap.id);
-                let dim = self.dimming.get(&snap.id).copied().unwrap_or_default();
-                FlyoutRow {
-                    id: snap.id,
-                    display_name: snap.name,
-                    level_pct: snap.user_level_pct.min(100),
-                    kind_label: kind_label(snap.kind).to_owned(),
-                    greyed,
-                    slider_enabled: !greyed,
-                    dimming_on: dim.dimming_on,
-                    hardware_floor_pct: dim.hardware_floor,
-                    min_perceived_pct: dim.min_perceived_pct,
-                }
-            })
+            .map(|snap| (snap.id.clone(), snap))
             .collect();
+        let mut rows = Vec::with_capacity(incoming.len());
+        // 1. Keep every surviving row AT ITS CURRENT POSITION, refreshed in place.
+        for existing in &self.rows {
+            if let Some(snap) = incoming.remove(&existing.id) {
+                rows.push(self.build_row(snap));
+            }
+        }
+        // 2. Append the genuinely-new displays after the survivors, in id order.
+        for (_, snap) in incoming {
+            rows.push(self.build_row(snap));
+        }
+        self.rows = rows;
+    }
+
+    /// Build one presentation row from a snapshot, applying the independently
+    /// tracked greyed + dimming state for that display.
+    fn build_row(&self, snap: DisplaySnapshot) -> FlyoutRow {
+        let greyed = self.unresponsive.contains(&snap.id);
+        let dim = self.dimming.get(&snap.id).copied().unwrap_or_default();
+        FlyoutRow {
+            id: snap.id,
+            display_name: snap.name,
+            level_pct: snap.user_level_pct.min(100),
+            kind_label: kind_label(snap.kind).to_owned(),
+            greyed,
+            slider_enabled: !greyed,
+            dimming_on: dim.dimming_on,
+            hardware_floor_pct: dim.hardware_floor,
+            min_perceived_pct: dim.min_perceived_pct,
+        }
     }
 
     /// Replace the per-display dimming config (floor + on/off), patching each
@@ -447,6 +483,69 @@ mod tests {
         assert_eq!(ids, vec![id_of("A").as_str(), id_of("B").as_str()]);
         // Levels updated in place, order unchanged.
         assert_eq!(vm.rows().first().map(|r| r.level_pct), Some(45));
+    }
+
+    #[test]
+    fn set_displays_keeps_existing_row_positions_when_a_lower_id_hot_plugs_in() {
+        let mut vm = FlyoutVm::new();
+        // Two displays whose ids sort B < C.
+        vm.set_displays(vec![
+            snap("B", "Bee", 50, DisplayKind::ExternalDdc),
+            snap("C", "Cee", 60, DisplayKind::ExternalDdc),
+        ]);
+        // A lower-sorting display "A" hot-plugs in mid-session. Order-stable: the
+        // existing rows keep their positions and the newcomer is appended — a
+        // re-sort would slide B/C down one and (because the flyout addresses a
+        // slider drag by its positional row index) retarget a held thumb to the
+        // wrong display.
+        vm.set_displays(vec![
+            snap("A", "Ay", 40, DisplayKind::ExternalDdc),
+            snap("B", "Bee", 50, DisplayKind::ExternalDdc),
+            snap("C", "Cee", 60, DisplayKind::ExternalDdc),
+        ]);
+        let ids: Vec<&str> = vm.rows().iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                id_of("B").as_str(),
+                id_of("C").as_str(),
+                id_of("A").as_str()
+            ],
+            "existing rows stay put; the newcomer is appended (never a re-sort)"
+        );
+        // The row at index 0 is still B — never reassigned to the lower-sorting A.
+        assert_eq!(
+            vm.rows().first().map(|r| r.id.as_str()),
+            Some(id_of("B").as_str())
+        );
+    }
+
+    #[test]
+    fn set_displays_drop_keeps_surviving_row_positions_stable() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![
+            snap("B", "Bee", 50, DisplayKind::ExternalDdc),
+            snap("C", "Cee", 60, DisplayKind::ExternalDdc),
+        ]);
+        // Hot-plug A in (appended): rows are now [B, C, A].
+        vm.set_displays(vec![
+            snap("A", "Ay", 40, DisplayKind::ExternalDdc),
+            snap("B", "Bee", 50, DisplayKind::ExternalDdc),
+            snap("C", "Cee", 60, DisplayKind::ExternalDdc),
+        ]);
+        // Now the middle display C disconnects. The survivors keep their
+        // established positions: B stays at index 0 and A stays where it was
+        // appended — no re-sort back to [A, B].
+        vm.set_displays(vec![
+            snap("A", "Ay", 40, DisplayKind::ExternalDdc),
+            snap("B", "Bee", 50, DisplayKind::ExternalDdc),
+        ]);
+        let ids: Vec<&str> = vm.rows().iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![id_of("B").as_str(), id_of("A").as_str()],
+            "a removal shifts nothing else: survivors keep their order"
+        );
     }
 
     #[test]

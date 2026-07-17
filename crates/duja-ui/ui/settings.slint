@@ -19,6 +19,10 @@ export struct SettingsMonitorData {
     gamma-available: bool,
     inputs: [string],
     has-inputs: bool,
+    // The selector index of the input the user last picked (-1 = none yet). A
+    // snapshot has no active-input readback, so it starts -1; picking one records
+    // it in the VM so the dropdown sticks on the choice.
+    selected-input-index: int,
 }
 
 // One editable hotkey row, mirroring `duja_ui::settings_vm::HotkeyRow`.
@@ -262,7 +266,14 @@ export component SettingsWindow inherits Window {
                 }
             }
 
+            // Reserve the East resize grip's 6px lane on the right so the vertical
+            // scrollbar sits to its left — otherwise the grip (drawn on top of the
+            // content) sat over the scrollbar and hijacked scroll-drags into
+            // window resizes (item 4).
+            HorizontalLayout {
+                vertical-stretch: 1;
             ScrollView {
+                horizontal-stretch: 1;
                 // Vertical scroll only — the content wraps/stretches to the width,
                 // so a horizontal bar should never appear (item 1).
                 horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
@@ -405,7 +416,10 @@ export component SettingsWindow inherits Window {
                                     label: @tr("Input source");
                                     Dropdown {
                                         model: monitor.inputs;
-                                        current-index: 0;
+                                        // Reflect the user's last pick (-1 shows an
+                                        // empty label until one is chosen), instead
+                                        // of the old hardcoded 0 that never stuck.
+                                        current-index: monitor.selected-input-index;
                                         label: @tr("Input source");
                                         selected(index) => {
                                             root.monitor-input-selected(idx, index);
@@ -588,6 +602,9 @@ export component SettingsWindow inherits Window {
                         }
                     }
                 }
+            }
+            // The 6px spacer that keeps the scrollbar clear of the East grip.
+            Rectangle { min-width: 6px; max-width: 6px; }
             }
         }
 

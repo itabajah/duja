@@ -8,13 +8,30 @@
 //! ([`on_command`](SettingsShell::on_command)). No settings logic lives here.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
+use duja_core::id::StableDisplayId;
+
 use crate::command::SettingsCommand;
 use crate::generated::{SettingsHotkeyData, SettingsMonitorData, SettingsWindow};
 use crate::settings_vm::{MonitorSection, SettingsVm, UpdateStatus};
+
+/// Per-monitor cache of the input-source label model, keyed by display id.
+///
+/// Each value pairs the labels the model was built from (to detect a change)
+/// with the [`VecModel`] itself. The cached model is reused across renders so a
+/// monitor row's `inputs` [`ModelRc`] keeps a **stable pointer identity** while
+/// its label list is unchanged: a `ModelRc` compares by identity
+/// (`core::ptr::eq`), so allocating a fresh `VecModel` every render made
+/// [`SettingsMonitorData`]'s `PartialEq` report *every* row as changed — defeating
+/// [`crate::model_sync::sync`]'s fast path. That replaced the whole section on
+/// every render (collapsing an open Input dropdown mid-click) and churned one
+/// `VecModel` per monitor per frame. The model is rebuilt only when a monitor's
+/// label list actually changes.
+type InputModelCache = BTreeMap<StableDisplayId, (Vec<SharedString>, Rc<VecModel<SharedString>>)>;
 
 /// Owns the Slint settings component and bridges it to a [`SettingsVm`].
 pub struct SettingsShell {
@@ -22,6 +39,9 @@ pub struct SettingsShell {
     vm: Rc<RefCell<SettingsVm>>,
     monitors: Rc<VecModel<SettingsMonitorData>>,
     hotkeys: Rc<VecModel<SettingsHotkeyData>>,
+    /// Reused per-monitor input-label models, keeping each row's `inputs`
+    /// `ModelRc` identity stable across renders (see [`InputModelCache`]).
+    input_models: Rc<RefCell<InputModelCache>>,
     /// The design logical size the buffer keeper enforces (see [`crate::dpi`]).
     desired: crate::dpi::DesiredSize,
     /// The colour of the taskbar/alt-tab icon, following the user's accent. A
@@ -62,6 +82,7 @@ impl SettingsShell {
             vm,
             monitors,
             hotkeys,
+            input_models: Rc::new(RefCell::new(InputModelCache::new())),
             desired,
             icon_rgb: std::cell::Cell::new(crate::accent::icon_rgb(
                 crate::accent::AccentChoice::default(),
@@ -91,7 +112,13 @@ impl SettingsShell {
     /// Render `vm`'s state into the Slint component. Call after any external
     /// mutation of the shared view-model (e.g. an update-check result arriving).
     pub fn update_from_vm(&self, vm: &SettingsVm) {
-        render_into(&self.ui, &self.monitors, &self.hotkeys, vm);
+        render_into(
+            &self.ui,
+            &self.monitors,
+            &self.hotkeys,
+            &self.input_models,
+            vm,
+        );
     }
 
     /// Wire every widget event to the shared view-model, forwarding the emitted
@@ -324,14 +351,19 @@ impl SettingsShell {
         }
         {
             let vm = self.vm.clone();
+            let render = self.render_closure();
             let handler = handler.clone();
             self.ui.on_monitor_input_selected(move |idx, option| {
-                let command = vm
-                    .borrow()
-                    .select_monitor_input(to_index(idx), to_index(option));
-                if let Some(command) = command {
-                    (handler.borrow_mut())(command);
-                }
+                // Records the picked index in the VM, then re-renders so the
+                // dropdown's `current-index` reflects the choice (it used to be
+                // hardcoded to 0, so a selection never stuck). `apply_command`
+                // releases the mutable borrow before the re-render (P0 bugs 1 & 2).
+                apply_command(
+                    &vm,
+                    |v| v.select_monitor_input(to_index(idx), to_index(option)),
+                    &render,
+                    &handler,
+                );
             });
         }
     }
@@ -346,9 +378,10 @@ impl SettingsShell {
         let weak = self.ui.as_weak();
         let monitors = self.monitors.clone();
         let hotkeys = self.hotkeys.clone();
+        let input_models = self.input_models.clone();
         move |vm: &SettingsVm| {
             if let Some(ui) = weak.upgrade() {
-                render_into(&ui, &monitors, &hotkeys, vm);
+                render_into(&ui, &monitors, &hotkeys, &input_models, vm);
             }
         }
     }
@@ -434,6 +467,7 @@ fn render_into(
     ui: &SettingsWindow,
     monitors: &VecModel<SettingsMonitorData>,
     hotkeys: &VecModel<SettingsHotkeyData>,
+    input_models: &RefCell<InputModelCache>,
     vm: &SettingsVm,
 ) {
     ui.set_autostart_on(vm.autostart_on());
@@ -456,8 +490,19 @@ fn render_into(
     ui.set_update_status(SharedString::from(status_line(vm.update_status())));
     ui.set_update_available(vm.update_available());
 
-    let monitor_data: Vec<SettingsMonitorData> =
-        vm.monitors().iter().map(monitor_to_data).collect();
+    // Reuse each monitor's input-label model across renders so its `inputs`
+    // ModelRc keeps a stable identity and the row diff's fast path holds (see
+    // `InputModelCache`); the model is rebuilt only when a label list changes.
+    let models = {
+        let mut cache = input_models.borrow_mut();
+        reconcile_input_models(&mut cache, vm.monitors())
+    };
+    let monitor_data: Vec<SettingsMonitorData> = vm
+        .monitors()
+        .iter()
+        .zip(models.iter())
+        .map(|(section, inputs)| monitor_to_data(section, inputs))
+        .collect();
     // Diff in place (never `set_vec`) so a per-monitor slider/combo the user is
     // interacting with is not destroyed by an unrelated re-render (P0 bug 3).
     crate::model_sync::sync(monitors, monitor_data);
@@ -475,21 +520,58 @@ fn render_into(
     crate::model_sync::sync(hotkeys, hotkey_data);
 }
 
-/// Map one [`MonitorSection`] to its Slint counterpart.
-fn monitor_to_data(section: &MonitorSection) -> SettingsMonitorData {
-    let inputs: Vec<SharedString> = section
-        .inputs
-        .iter()
-        .map(|choice| SharedString::from(choice.label.as_str()))
-        .collect();
+/// Reconcile the per-monitor input-label models against `sections`, reusing the
+/// cached [`VecModel`] for a monitor whose label list is unchanged — keeping its
+/// [`ModelRc`] identity stable so the row's `PartialEq` fast path holds (see
+/// [`InputModelCache`]) — and rebuilding it only when the labels change. Entries
+/// for monitors no longer present are dropped, so the cache never outgrows the
+/// current display set. Returns the model to use for each section, in order.
+fn reconcile_input_models(
+    cache: &mut InputModelCache,
+    sections: &[MonitorSection],
+) -> Vec<Rc<VecModel<SharedString>>> {
+    let mut fresh = InputModelCache::new();
+    let mut models = Vec::with_capacity(sections.len());
+    for section in sections {
+        let labels: Vec<SharedString> = section
+            .inputs
+            .iter()
+            .map(|choice| SharedString::from(choice.label.as_str()))
+            .collect();
+        // Reuse the cached model iff its labels are byte-for-byte unchanged;
+        // otherwise a fresh model (new identity) makes the diff replace the row
+        // and the dropdown rebuild — which is what a changed input list wants.
+        let model = match cache.remove(&section.id) {
+            Some((cached_labels, cached_model)) if cached_labels == labels => cached_model,
+            _ => Rc::new(VecModel::from(labels.clone())),
+        };
+        fresh.insert(section.id.clone(), (labels, model.clone()));
+        models.push(model);
+    }
+    *cache = fresh;
+    models
+}
+
+/// Map one [`MonitorSection`] to its Slint counterpart, using the caller-provided
+/// (cached, identity-stable) input-label model for its `inputs` field.
+fn monitor_to_data(
+    section: &MonitorSection,
+    inputs: &Rc<VecModel<SharedString>>,
+) -> SettingsMonitorData {
     SettingsMonitorData {
         name: SharedString::from(section.name.as_str()),
         floor_pct: i32::from(section.floor_pct),
         min_perceived_pct: i32::from(section.min_perceived_pct),
         dim_mode_index: i32::try_from(section.dim_mode_index()).unwrap_or(0),
         gamma_available: section.gamma_available,
-        has_inputs: !inputs.is_empty(),
-        inputs: ModelRc::from(Rc::new(VecModel::from(inputs)) as Rc<VecModel<SharedString>>),
+        has_inputs: !section.inputs.is_empty(),
+        inputs: ModelRc::from(inputs.clone()),
+        // -1 = no selection (an empty dropdown): a snapshot carries no active-input
+        // readback, so it stays -1 until the user picks one (see the VM field).
+        selected_input_index: section
+            .selected_input_index
+            .and_then(|i| i32::try_from(i).ok())
+            .unwrap_or(-1),
     }
 }
 
@@ -638,6 +720,126 @@ mod tests {
         assert!(!status_line(&UpdateStatus::Failed).is_empty());
     }
 
+    fn snapshot_with_inputs(serial: &str, inputs: Vec<u8>) -> DisplaySnapshot {
+        DisplaySnapshot {
+            id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap(),
+            name: format!("Monitor {serial}"),
+            kind: DisplayKind::ExternalDdc,
+            user_level_pct: 50,
+            capabilities: Capabilities {
+                allowed_inputs: inputs,
+                ..Capabilities::default()
+            },
+        }
+    }
+
+    // --- Fix 2: the per-monitor input model must keep a stable identity across
+    // renders so the row diff's fast path holds (a fresh `VecModel` every render
+    // made every row look changed, replacing the section and collapsing an open
+    // Input dropdown mid-click). ---
+
+    #[test]
+    fn input_models_are_reused_when_labels_are_unchanged() {
+        let mut vm = SettingsVm::new();
+        vm.set_displays(
+            &[snapshot_with_inputs("A", vec![0x11, 0x0F])],
+            &Config::default(),
+            true,
+        );
+        let mut cache = InputModelCache::new();
+        let first = reconcile_input_models(&mut cache, vm.monitors());
+        let second = reconcile_input_models(&mut cache, vm.monitors());
+        // Unchanged labels ⇒ the SAME VecModel instance flows through both renders,
+        // so the row's `inputs` ModelRc keeps a stable identity and `sync` skips
+        // the row — no popup reset, no per-render allocation.
+        assert!(
+            Rc::ptr_eq(first.first().unwrap(), second.first().unwrap()),
+            "the cached input model must be reused when the labels are unchanged"
+        );
+    }
+
+    #[test]
+    fn input_models_are_rebuilt_when_labels_change() {
+        let mut vm = SettingsVm::new();
+        vm.set_displays(
+            &[snapshot_with_inputs("A", vec![0x11, 0x0F])],
+            &Config::default(),
+            true,
+        );
+        let mut cache = InputModelCache::new();
+        let first = reconcile_input_models(&mut cache, vm.monitors());
+        // The allowed-input list changes ⇒ a fresh model (new identity) so the row
+        // is replaced and the dropdown rebuilds — the correct response to a real
+        // change.
+        vm.set_displays(
+            &[snapshot_with_inputs("A", vec![0x11])],
+            &Config::default(),
+            true,
+        );
+        let second = reconcile_input_models(&mut cache, vm.monitors());
+        assert!(
+            !Rc::ptr_eq(first.first().unwrap(), second.first().unwrap()),
+            "a changed label list must get a fresh model identity"
+        );
+    }
+
+    #[test]
+    fn input_models_cache_drops_gone_monitors() {
+        let mut vm = SettingsVm::new();
+        vm.set_displays(
+            &[
+                snapshot_with_inputs("A", vec![0x11]),
+                snapshot_with_inputs("B", vec![0x0F]),
+            ],
+            &Config::default(),
+            true,
+        );
+        let mut cache = InputModelCache::new();
+        let _ = reconcile_input_models(&mut cache, vm.monitors());
+        assert_eq!(cache.len(), 2);
+        // Dropping a display prunes its cached model — the cache never outgrows
+        // the current display set.
+        vm.set_displays(
+            &[snapshot_with_inputs("A", vec![0x11])],
+            &Config::default(),
+            true,
+        );
+        let _ = reconcile_input_models(&mut cache, vm.monitors());
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn monitor_row_equality_hinges_on_the_inputs_model_identity() {
+        // Why the cache exists: a `ModelRc` is compared by pointer identity
+        // (`core::ptr::eq`), so two rows sharing the SAME inputs model compare
+        // equal (sync's fast path), but an identical-CONTENT yet freshly allocated
+        // model makes them compare UNEQUAL — which is exactly how building a new
+        // `VecModel` every render defeated the diff.
+        let labels = vec![SharedString::from("hdmi1"), SharedString::from("dp1")];
+        let make = |inputs: &Rc<VecModel<SharedString>>| SettingsMonitorData {
+            name: SharedString::from("Left"),
+            floor_pct: 0,
+            min_perceived_pct: 25,
+            dim_mode_index: 0,
+            gamma_available: true,
+            has_inputs: true,
+            inputs: ModelRc::from(inputs.clone()),
+            selected_input_index: -1,
+        };
+        let shared: Rc<VecModel<SharedString>> = Rc::new(VecModel::from(labels.clone()));
+        assert_eq!(
+            make(&shared),
+            make(&shared),
+            "a shared inputs-model identity ⇒ rows compare equal (fast path)"
+        );
+        let fresh: Rc<VecModel<SharedString>> = Rc::new(VecModel::from(labels));
+        assert_ne!(
+            make(&shared),
+            make(&fresh),
+            "a fresh inputs model of equal content ⇒ rows compare unequal"
+        );
+    }
+
     // Instantiating the Slint window needs a real backend/event loop, which is
     // unavailable in this disconnected session and in headless CI. The smoke
     // test that exercises it lives behind `#[ignore]` in tests/smoke.rs.
@@ -667,6 +869,46 @@ mod binding_tests {
             user_level_pct: 50,
             capabilities: Capabilities::default(),
         }
+    }
+
+    fn snapshot_with_inputs(serial: &str, inputs: Vec<u8>) -> DisplaySnapshot {
+        DisplaySnapshot {
+            capabilities: Capabilities {
+                allowed_inputs: inputs,
+                ..Capabilities::default()
+            },
+            ..snapshot(serial)
+        }
+    }
+
+    // Fix 2 end-to-end: the per-monitor input model must keep a stable identity
+    // across renders, so an unrelated re-render never replaces the row and tears
+    // down an open Input dropdown mid-click. A `ModelRc` is compared by pointer
+    // identity, so `first == second` means the SAME model instance survived. Goes
+    // red against the pre-fix `monitor_to_data`, which built a fresh `VecModel`
+    // every render (a different identity each time).
+    #[test]
+    fn settings_input_model_identity_is_stable_across_renders() {
+        use slint::Model;
+        i_slint_backend_testing::init_no_event_loop();
+
+        let mut vm = SettingsVm::new();
+        vm.set_displays(
+            &[snapshot_with_inputs("A", vec![0x11, 0x0F])],
+            &Config::default(),
+            true,
+        );
+        let vm = Rc::new(RefCell::new(vm));
+        let shell = SettingsShell::new(vm.clone()).expect("settings shell instantiates");
+
+        let first = shell.monitors.row_data(0).expect("one monitor row").inputs;
+        shell.update_from_vm(&vm.borrow());
+        let second = shell.monitors.row_data(0).expect("one monitor row").inputs;
+        assert_eq!(
+            first, second,
+            "the inputs model identity must be stable across renders (else the diff \
+             replaces the row and resets an open Input dropdown)"
+        );
     }
 
     // The perceptual-anchor calibration slider must render in each per-monitor
