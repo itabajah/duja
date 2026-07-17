@@ -86,19 +86,46 @@ pub fn get(client: &mut PipeClient, id: &str, verbose: bool) -> u8 {
     }
 }
 
-/// `set <id|all> brightness <pct>` over IPC. `all` is expanded client-side into
-/// one `SetBrightness` per listed display.
+/// `set <id|all> brightness <pct>` over IPC.
+///
+/// `<id>` sends a single `SetBrightness` on the already-connected `client`. `all`
+/// is expanded client-side into one `SetBrightness` per listed display (see
+/// [`set_all`]).
 pub fn set(client: &mut PipeClient, target: &SetTarget, percent: u8, verbose: bool) -> u8 {
-    let ids = match target {
-        SetTarget::One(id) => vec![id.clone()],
-        SetTarget::All => match client.request(&Request::ListDisplays) {
-            Ok(Response::Displays { displays }) => {
-                displays.into_iter().map(|d| d.id).collect::<Vec<_>>()
+    match target {
+        SetTarget::One(id) => {
+            note(verbose, "ipc");
+            match set_brightness(client, id, percent) {
+                Ok(code) | Err(code) => code,
             }
-            Ok(Response::Error { code, message }) => return error_exit(&code, &message),
-            Ok(other) => return unexpected(&other),
-            Err(err) => return transport_exit(&err),
-        },
+        }
+        SetTarget::All => set_all(client, percent, verbose, try_connect),
+    }
+}
+
+/// `set all` over IPC: list the displays on `client`, then drive one
+/// `SetBrightness` per display, each on its own fresh connection.
+///
+/// The IPC server serves exactly one request per connection, so the connection
+/// that answered `ListDisplays` (the passed-in `client`) is spent; every
+/// `SetBrightness` reconnects via `connect` — the same one-request-per-connect
+/// pattern the app itself uses. `connect` is [`try_connect`] in production and a
+/// test seam otherwise.
+///
+/// A failed mid-loop reconnect means the app went away: it is reported as a
+/// server error (never a silent success, and never a fall-back to the direct
+/// hardware backend, which could put a second uncoordinated writer on the bus).
+fn set_all(
+    client: &mut PipeClient,
+    percent: u8,
+    verbose: bool,
+    connect: impl Fn() -> Option<PipeClient>,
+) -> u8 {
+    let ids: Vec<String> = match client.request(&Request::ListDisplays) {
+        Ok(Response::Displays { displays }) => displays.into_iter().map(|d| d.id).collect(),
+        Ok(Response::Error { code, message }) => return error_exit(&code, &message),
+        Ok(other) => return unexpected(&other),
+        Err(err) => return transport_exit(&err),
     };
 
     if ids.is_empty() {
@@ -110,21 +137,43 @@ pub fn set(client: &mut PipeClient, target: &SetTarget, percent: u8, verbose: bo
     note(verbose, "ipc");
     let mut exit = EXIT_OK;
     for id in ids {
-        match client.request(&Request::SetBrightness {
-            id: id.clone(),
-            pct: percent,
-        }) {
-            Ok(Response::Ok) => println!("{id}: set {percent}%"),
-            Ok(Response::Error { code, message }) => {
-                exit = error_exit(&code, &message);
-            }
-            Ok(other) => {
-                exit = unexpected(&other);
-            }
-            Err(err) => return transport_exit(&err),
+        let Some(mut fresh) = connect() else {
+            return server_unreachable();
+        };
+        match set_brightness(&mut fresh, &id, percent) {
+            Ok(EXIT_OK) => {}
+            Ok(code) => exit = code,
+            Err(code) => return code,
         }
     }
     exit
+}
+
+/// Report that the running app became unreachable partway through `set all` (a
+/// mid-loop reconnect failed). Mirrors [`transport_exit`]'s wording and code.
+fn server_unreachable() -> u8 {
+    eprintln!("dujactl: ipc server error: the running app became unreachable");
+    EXIT_SERVER
+}
+
+/// Issue one `SetBrightness` on `client` and render the reply.
+///
+/// `Ok` carries the per-display exit contribution (`EXIT_OK` on success, else the
+/// server's mapped error code); `Err` carries a transport-failure code that must
+/// abort the whole `set` (the single-request path returns it directly).
+fn set_brightness(client: &mut PipeClient, id: &str, percent: u8) -> Result<u8, u8> {
+    match client.request(&Request::SetBrightness {
+        id: id.to_owned(),
+        pct: percent,
+    }) {
+        Ok(Response::Ok) => {
+            println!("{id}: set {percent}%");
+            Ok(EXIT_OK)
+        }
+        Ok(Response::Error { code, message }) => Ok(error_exit(&code, &message)),
+        Ok(other) => Ok(unexpected(&other)),
+        Err(err) => Err(transport_exit(&err)),
+    }
 }
 
 /// A response of the wrong shape for the request (a protocol desync).
@@ -173,4 +222,101 @@ fn features_label(features: &[FeatureDto]) -> String {
         })
         .collect::<Vec<_>>()
         .join(",")
+}
+
+#[cfg(all(test, any(windows, unix)))]
+mod tests {
+    use super::*;
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+    use duja_platform::PipeServer;
+
+    /// A unique transport name per test so a live server never collides with the
+    /// real running app or a parallel test. Windows: a per-process pipe name;
+    /// unix: a per-process socket path under a dedicated temp directory.
+    fn unique_name(tag: &str) -> String {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        #[cfg(windows)]
+        {
+            format!(r"\\.\pipe\duja-dujactl-{tag}-{pid}-{n}")
+        }
+        #[cfg(unix)]
+        {
+            format!("/tmp/duja-dujactl-{tag}-{pid}-{n}/ctl.sock")
+        }
+    }
+
+    fn display(id: &str) -> DisplayInfo {
+        DisplayInfo {
+            id: id.to_owned(),
+            name: "Fake".to_owned(),
+            kind: DisplayKindDto::ExternalDdc,
+            level_pct: 50,
+            features: vec![FeatureDto::Brightness],
+        }
+    }
+
+    /// A live-server handler exposing two displays; each `SetBrightness` for a
+    /// known id answers `Ok` and bumps `sets`, so the test can assert every
+    /// display was actually driven (not merely that the command returned 0).
+    fn two_display_handler(
+        sets: Arc<AtomicUsize>,
+    ) -> impl Fn(Request) -> Response + Send + Sync + 'static {
+        move |req| match req {
+            Request::ListDisplays => Response::Displays {
+                displays: vec![display("GSM-5B09-a"), display("GSM-5B09-b")],
+            },
+            Request::SetBrightness { id, pct } => {
+                if (id == "GSM-5B09-a" || id == "GSM-5B09-b") && pct <= 100 {
+                    sets.fetch_add(1, Ordering::SeqCst);
+                    Response::Ok
+                } else {
+                    Response::Error {
+                        code: "unknown_display".to_owned(),
+                        message: "no such id".to_owned(),
+                    }
+                }
+            }
+            _ => Response::Error {
+                code: "unexpected".to_owned(),
+                message: "unexpected request".to_owned(),
+            },
+        }
+    }
+
+    /// Regression: `set all` reused ONE `PipeClient` for `ListDisplays` and every
+    /// `SetBrightness`, but the IPC server serves exactly one request per
+    /// connection — so the first `SetBrightness` landed on a closed connection and
+    /// the command failed (`EXIT_SERVER`), changing zero displays. Drive the real
+    /// `set_all` against a live one-shot `PipeServer` and assert every display is
+    /// set, each on its own fresh connection.
+    #[test]
+    fn set_all_drives_every_display_across_the_one_shot_server() {
+        let name = unique_name("setall");
+        let sets = Arc::new(AtomicUsize::new(0));
+        let server = PipeServer::serve_named(&name, two_display_handler(sets.clone()))
+            .expect("live IPC server");
+
+        let mut client =
+            PipeClient::connect_named(&name, Duration::from_secs(2)).expect("connect for list");
+        let connect = || PipeClient::connect_named(&name, Duration::from_secs(2)).ok();
+
+        let code = set_all(&mut client, 30, false, connect);
+
+        assert_eq!(
+            code, EXIT_OK,
+            "set all must drive every display over the one-shot server; got exit {code}"
+        );
+        assert_eq!(
+            sets.load(Ordering::SeqCst),
+            2,
+            "both displays must receive a SetBrightness on their own connection"
+        );
+
+        server.shutdown();
+    }
 }
