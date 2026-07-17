@@ -25,8 +25,9 @@ mod hdr;
 mod sys;
 
 use std::fmt;
-use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver as MpscReceiver, SyncSender, sync_channel};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
 use windows::Win32::Foundation::HWND;
@@ -40,6 +41,19 @@ pub use gamma::{
     enumerate_gamma_displays, mark_dirty, marker_present, restore_all, restore_identity, set_gamma,
 };
 pub use hdr::{GammaSupport, display_supports_gamma, gamma_support_from_hdr, is_hdr_active};
+
+/// Upper bound on how long [`WindowsDimmer::dispatch`] waits for the overlay
+/// worker's one-shot reply before giving up and degrading to a backend failure.
+///
+/// A healthy apply/clear round-trips through the worker (channel hop +
+/// `SetLayeredWindowAttributes`/`CreateWindowExW`) well under the crate's ~16 ms
+/// frame budget, so this ceiling is orders of magnitude larger and never trips
+/// on a working worker. Its job is the pathological case: a worker wedged inside
+/// a hung global CBT/shell hook, an AV shim, or RDP shadowing must not freeze the
+/// calling thread — the Slint UI thread — indefinitely. Bounding the wait lets
+/// the caller fall back to software failure and keep the UI (and `begin_quit`)
+/// responsive. Mirrors the engine's ADR-0017 bounded-wait philosophy.
+const DIMMER_REPLY_BUDGET: Duration = Duration::from_secs(2);
 
 /// A command sent to the overlay worker thread, each carrying a one-shot reply.
 enum Command {
@@ -118,6 +132,15 @@ impl WindowsDimmer {
     /// Post the shutdown message and join the worker. Idempotent: the join
     /// handle is taken on the first call, so later calls (and [`Drop`]) are
     /// no-ops.
+    ///
+    /// # Limitation
+    /// The [`apply`](Self::apply)/[`clear`](Self::clear) reply wait is bounded
+    /// (see `DIMMER_REPLY_BUDGET`), but this `join` is **not**: a worker wedged
+    /// inside a hung Win32 call never processes the shutdown post, so the join
+    /// blocks until it does. Stable `std` has no timed join; a bounded teardown
+    /// would need a detach-or-timeout mechanism and is left as follow-up. In
+    /// practice the same wedge that would hang the join already degrades
+    /// apply/clear to a backend failure, so the UI stays responsive until quit.
     pub fn shutdown(&mut self) {
         if let Some(join) = self.join.take() {
             sys::post_shutdown(self.control);
@@ -138,7 +161,30 @@ impl WindowsDimmer {
             .send(make(reply_tx))
             .map_err(|_| DimmerError::Backend)?;
         sys::post_wake(self.control);
-        reply_rx.recv().map_err(|_| DimmerError::Backend)?
+        // Bounded wait: a wedged worker degrades to a backend failure instead of
+        // freezing the caller (the Slint UI thread). A late reply that arrives
+        // after this returns lands on the now-dropped `reply_rx`, which just
+        // fails the worker's `reply.send(..)` harmlessly (it uses `let _ =`).
+        recv_reply(&reply_rx, DIMMER_REPLY_BUDGET)
+    }
+}
+
+/// Wait for the overlay worker's one-shot reply, but never longer than `budget`.
+///
+/// A healthy worker replies within a frame; a wedged one (a hung global hook
+/// inside `CreateWindowExW`/`DestroyWindow`, an AV shim, RDP shadowing) would
+/// otherwise block the caller — the Slint UI thread — forever. On a timeout *or*
+/// a disconnected worker we degrade to [`DimmerError::Backend`] so the caller
+/// can fall back to software failure instead of freezing.
+fn recv_reply(
+    rx: &MpscReceiver<Result<(), DimmerError>>,
+    budget: Duration,
+) -> Result<(), DimmerError> {
+    // Timeout OR disconnect both degrade to `Backend`: a bounded wait, never an
+    // unbounded block on a wedged worker.
+    match rx.recv_timeout(budget) {
+        Ok(reply) => reply,
+        Err(_) => Err(DimmerError::Backend),
     }
 }
 
@@ -302,4 +348,62 @@ fn worker_main(rx: &Receiver<Command>, init_tx: &SyncSender<Result<isize, Dimmer
 
     worker.clear();
     sys::destroy_window(control);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the "wedged worker freezes the UI thread" bug: the reply
+    /// wait must be *bounded*. We run it on a helper thread and watchdog that
+    /// thread, so a regression to a blocking `recv()` fails this test cleanly
+    /// instead of hanging the whole suite.
+    #[test]
+    fn recv_reply_is_bounded_when_worker_never_replies() {
+        // The worker is "wedged": the sender stays alive (so the wait is a real
+        // timeout, not a disconnect) but no reply is ever sent.
+        let (_never_replies, reply_rx) = sync_channel::<Result<(), DimmerError>>(1);
+        let budget = Duration::from_millis(150);
+
+        let (done_tx, done_rx) = sync_channel::<Result<(), DimmerError>>(1);
+        let handle = std::thread::spawn(move || {
+            let _ = done_tx.send(recv_reply(&reply_rx, budget));
+        });
+
+        // Generous watchdog: far above the budget so a healthy bounded wait
+        // always lands, but finite so a blocking recv() surfaces as a failure.
+        // On timeout we must NOT join `handle` — the wedged wait would never
+        // return and joining it would hang the test instead of failing it.
+        let watchdog = Duration::from_secs(5);
+        match done_rx.recv_timeout(watchdog) {
+            Ok(reply) => {
+                handle.join().ok();
+                assert!(
+                    matches!(reply, Err(DimmerError::Backend)),
+                    "expected Backend on no-reply, got {reply:?}"
+                );
+            }
+            Err(e) => panic!(
+                "recv_reply did not return within {watchdog:?} ({e:?}): it blocked past \
+                 its {budget:?} budget (regression to a blocking recv())"
+            ),
+        }
+    }
+
+    /// A worker that replies passes its result straight through, unchanged.
+    #[test]
+    fn recv_reply_propagates_worker_result() {
+        let (ok_tx, ok_rx) = sync_channel::<Result<(), DimmerError>>(1);
+        ok_tx.send(Ok(())).unwrap();
+        assert!(recv_reply(&ok_rx, Duration::from_secs(1)).is_ok());
+
+        let (err_tx, err_rx) = sync_channel::<Result<(), DimmerError>>(1);
+        err_tx
+            .send(Err(DimmerError::Os("boom".to_owned())))
+            .unwrap();
+        assert!(matches!(
+            recv_reply(&err_rx, Duration::from_secs(1)),
+            Err(DimmerError::Os(_))
+        ));
+    }
 }

@@ -162,16 +162,28 @@ pub(super) fn create_overlay(
     }
     .map_err(|e| DimmerError::Os(format!("overlay CreateWindowExW failed: {e}")))?;
 
-    // Uniform alpha (colour key unused).
+    // Uniform alpha (colour key unused). A failure here is fatal, but the window
+    // already exists: destroy it before propagating, or it leaks as a hidden
+    // top-level window on every failed attempt.
     // SAFETY: `hwnd` is our just-created layered window; LWA_ALPHA uses the alpha
     // byte and ignores the colour key.
-    unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA) }
-        .map_err(|e| DimmerError::Os(format!("SetLayeredWindowAttributes failed: {e}")))?;
+    if let Err(e) = unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA) } {
+        destroy_window(hwnd);
+        return Err(DimmerError::Os(format!(
+            "SetLayeredWindowAttributes failed: {e}"
+        )));
+    }
 
     // Defeat screen capture (BitBlt/Desktop Duplication) of the dimming layer.
+    // NON-FATAL: an older Win10 build or an enterprise capture policy can refuse
+    // WDA_EXCLUDEFROMCAPTURE. The overlay still dims (it may just be captured), so
+    // we log and continue rather than destroying the window and failing the dim.
     // SAFETY: `hwnd` is our live window.
-    unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) }
-        .map_err(|e| DimmerError::Os(format!("SetWindowDisplayAffinity failed: {e}")))?;
+    if let Err(e) = unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) } {
+        tracing::warn!(
+            "SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) failed; overlay may be captured: {e}"
+        );
+    }
 
     // Show without activating (no focus steal), then pin to the top of the
     // topmost band.
