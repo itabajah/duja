@@ -1,7 +1,7 @@
 # Duja — Project Status
 
-_Last updated: 2026-07-16 (v0.1.0 release: installer + signed release pipeline +
-smart update loop)._
+_Last updated: 2026-07-17 (v0.1.1: post-v0.1.0 deep-review fix wave —
+correctness, safety, and supply-chain hardening across all crates)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -19,10 +19,14 @@ The authoritative plan is the phase roadmap; architecture decisions live in
 | P3 Windows hardware slice | `m3-win-hw` | ✅ done |
 | P4 Windows dimmer + UI (MVP) | `m4-win-mvp` | ✅ done |
 | P5 Power features (Windows complete) | `m5-win-full` | ✅ done |
-| **First release** | **`v0.1.0` (Windows)** | 🚀 shipping — installer + portable zip, signed, auto-update loop |
-| P6 macOS port | `m6-macos` / `v0.3.0-beta` | 🚧 in progress — wave 1 (backends) landed; wave 2 (app assembly + packaging) + gate remain |
-| P7 Linux port | `m7-linux` / `v0.4.0-beta` | pending |
+| **First release** | **`v0.1.0` (Windows)** | ✅ shipped — installer + portable zip, signed, auto-update loop |
+| **Deep-review fix wave** | **`v0.1.1` (Windows)** | 🚀 shipping — 10 fix PRs, all confirmed defects fixed test-first |
+| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 (app assembly + packaging) + gate remain |
+| P7 Linux port | `m7-linux` / `v0.3.0` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
+
+_Version ladder re-mapped in [ADR-0019](adr/0019-version-ladder-and-release-trains.md):
+v0.1.x Windows train, v0.2.0 macOS, v0.3.0 Linux, v1.0.0 hardening._
 
 **`v0.1.0` is the first public release.** The hardware sign-off passed on real
 hardware (2026-07-11, see "Live hardware QA") and the **pure-visual QA is now
@@ -34,10 +38,42 @@ end from day one. Distribution is a tag-triggered
 portable zip, each with `SHA256SUMS`, a minisign signature, and a build-provenance
 attestation.
 
-Health: **709 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
+Health: **761 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
-on stable, adversarial gate reviews at **P2, P3, P4, P5** with every confirmed
-finding fixed test-first before tagging.
+on stable, adversarial gate reviews at **P2, P3, P4, P5** plus a full post-v0.1.0
+**deep review** (14 module reviewers, every non-low finding adversarially
+verified) with every confirmed finding fixed test-first.
+
+### v0.1.1 — deep-review fix wave (2026-07-17)
+
+After v0.1.0 shipped, a 14-module line-by-line review (Opus reviewers, findings
+double-checked by adversarial verifiers — final tally **45 confirmed, 6 refuted,
+1 uncertain**) audited the whole codebase. `duja-core`, the IPC stack, and the
+Windows event pump/single-instance/autostart came back **verified-clean**; the
+confirmed defects were fixed across **10 PRs (#46–#55)**, each landed test-first
+(red-first regression proven) and reviewed by a separate adversarial agent before
+merge — the same discipline that has caught every real seam defect. Highlights:
+
+- **Concurrency/lifecycle** (`engine`, ADR-0017): a bounded shutdown that no
+  longer hangs app-exit on a wedged driver call; a generation + `retired` backbone
+  so a detached worker can never become a second writer to a panel; a failed
+  controller open now greys-and-recovers instead of silently losing control.
+- **Never-brick** (`dimmer`, `app`): overlay windows destroyed on error (no leak),
+  capture-exclusion failure degraded not fatal, the gamma crash marker preserved on
+  a failed restore (including the clean-quit path), the overlay apply bounded so a
+  wedged worker can't freeze the UI, and the HDR gamma verdict re-probed live
+  instead of frozen at launch.
+- **User-facing correctness**: `dujactl set all` over IPC; a hot-plug during a
+  slider drag no longer retargets the drag to the wrong monitor; a zero-max DDC
+  reply can no longer drive a panel dark; EDID identity keyed on the base block so
+  per-monitor config isn't lost.
+- **Security / supply chain**: release-pipeline script-injection closed and the
+  publish gated on the full CI; LF checksums; `dujactl` verifies the pipe server's
+  SID; the installer detects a running instance.
+
+Refactor/test debt this surfaced (tray.rs split, per-display HDR, a CI headless
+E2E smoke, the throttle-at-tray regression test, `ddc_broken` routing) is tracked
+in [debt.md](debt.md); ADRs **0017–0020** record the new contracts.
 
 Measured (headless, P4/P5 gates): idle RSS **23.3 MB** (budget ≤ 35),
 idle CPU **0 ms over 20 s** — zero wakeups, by construction.
