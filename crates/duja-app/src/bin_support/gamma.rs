@@ -44,8 +44,27 @@ pub(crate) trait GammaSink {
     fn engage(&mut self, id: &StableDisplayId, factor: f32);
     /// Restore identity gamma for one display previously engaged.
     fn restore(&mut self, id: &StableDisplayId);
-    /// Restore every engaged display and clear the crash marker (clean teardown).
-    fn restore_all(&mut self);
+    /// Restore every engaged display and clear the crash marker (clean teardown),
+    /// returning whether every restore succeeded (`true` = clean). A `false`
+    /// return means at least one ramp could not be reset and the crash marker was
+    /// kept, so the caller must not force-remove it.
+    fn restore_all(&mut self) -> bool;
+}
+
+/// Reconcile a gamma engage map (resolved id → GDI device name) with the outcome
+/// of a restore pass: drop every id whose device restored cleanly, and RETAIN any
+/// id whose device is still in `failed_devices` — its ramp is still live and the
+/// guard still tracks that device in its `touched` set, so the two must not
+/// diverge.
+///
+/// Pure (no OS), so the name→id retention rule is unit-tested on every target
+/// without a real GDI guard. Correct under the "device names can change across a
+/// hot-plug" caveat: it matches on the exact device name the engage recorded.
+fn retain_failed_engagements(
+    engaged: &mut BTreeMap<StableDisplayId, String>,
+    failed_devices: &BTreeSet<String>,
+) {
+    engaged.retain(|_id, device| failed_devices.contains(device));
 }
 
 /// The pure decision core: tracks which displays currently have gamma engaged
@@ -101,7 +120,7 @@ pub(crate) use platform::GammaBackend;
 
 #[cfg(windows)]
 mod platform {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
 
     use duja_core::dimmer::{DimCommand, GAMMA_FLOOR};
@@ -109,7 +128,7 @@ mod platform {
     use duja_dimmer::{GammaDisplay, ScreenStateGuard};
     use tracing::warn;
 
-    use super::{GammaCoordinator, GammaSink};
+    use super::{GammaCoordinator, GammaSink, retain_failed_engagements};
 
     /// Resolve a resolved display id to its GDI device name (e.g. `\\.\DISPLAY1`).
     type DeviceResolver = Box<dyn FnMut(&StableDisplayId) -> Option<String>>;
@@ -152,12 +171,23 @@ mod platform {
             }
         }
 
-        fn restore_all(&mut self) {
-            self.engaged.clear();
+        fn restore_all(&mut self) -> bool {
+            // Restore FIRST, then reconcile `engaged` against what actually still
+            // holds a ramp: `restore_now` retains any display whose restore failed
+            // in the guard's `touched`, so `engaged` must keep those ids too (and
+            // drop only the ones that restored cleanly) rather than blanket-clear
+            // and diverge from the guard.
             let report = self.guard.restore_now();
-            if !report.failed.is_empty() {
+            let failed_devices: BTreeSet<String> = report
+                .failed
+                .iter()
+                .map(|(device, _err)| device.clone())
+                .collect();
+            retain_failed_engagements(&mut self.engaged, &failed_devices);
+            if !report.is_clean() {
                 warn!(failed = report.failed.len(), "some gamma restores failed");
             }
+            report.is_clean()
         }
     }
 
@@ -194,10 +224,15 @@ mod platform {
             self.coord.apply(commands, &mut self.sink);
         }
 
-        /// Restore every engaged display and clear the crash marker.
-        pub(crate) fn restore_all(&mut self) {
+        /// Restore every engaged display and clear the crash marker, returning
+        /// whether every restore succeeded (`true` = clean).
+        ///
+        /// A `false` return means a gamma ramp could not be reset; the guard has
+        /// KEPT the crash marker so the next launch recovers, and the caller must
+        /// not force-remove it.
+        pub(crate) fn restore_all(&mut self) -> bool {
             self.coord.forget_all();
-            self.sink.restore_all();
+            self.sink.restore_all()
         }
     }
 
@@ -238,7 +273,11 @@ mod platform {
                 "the first gamma engage must write the crash marker"
             );
 
-            backend.restore_all();
+            let clean = backend.restore_all();
+            assert!(
+                clean,
+                "a restore that leaves nothing engaged must report clean"
+            );
             assert!(!marker.exists(), "a clean quit must clear the crash marker");
         }
 
@@ -286,7 +325,9 @@ mod tests {
         fn restore(&mut self, id: &StableDisplayId) {
             self.restored.push(id.clone());
         }
-        fn restore_all(&mut self) {}
+        fn restore_all(&mut self) -> bool {
+            true
+        }
     }
 
     #[test]
@@ -380,5 +421,48 @@ mod tests {
         // this with a whole-guard restore instead).
         coord.apply(&[], &mut sink);
         assert!(sink.restored.is_empty());
+    }
+
+    #[test]
+    fn restore_reconciliation_retains_failed_and_drops_restored() {
+        // Fix 3: after a restore pass, the sink's engage map (id → device) must
+        // mirror the guard's `touched`: an id whose device restore FAILED stays
+        // engaged (its ramp is still live), one whose device restored cleanly is
+        // dropped. Device names map back to ids via the engage map itself. Pure,
+        // so it covers the reconciliation without a real (failing) GDI guard.
+        use std::collections::{BTreeMap, BTreeSet};
+        let mut engaged: BTreeMap<StableDisplayId, String> = BTreeMap::new();
+        engaged.insert(id("A"), r"\\.\DISPLAY1".to_owned()); // restored → drop
+        engaged.insert(id("B"), r"\\.\DISPLAY2".to_owned()); // failed → retain
+        let failed: BTreeSet<String> = std::iter::once(r"\\.\DISPLAY2".to_owned()).collect();
+
+        retain_failed_engagements(&mut engaged, &failed);
+
+        assert_eq!(engaged.len(), 1, "only the failed id is retained");
+        assert!(
+            engaged.contains_key(&id("B")),
+            "the id whose restore failed stays engaged (mirrors the guard)"
+        );
+        assert!(
+            !engaged.contains_key(&id("A")),
+            "the id whose restore succeeded is dropped"
+        );
+    }
+
+    #[test]
+    fn restore_reconciliation_clears_all_when_every_restore_succeeds() {
+        // The clean path: no failures ⇒ the engage map empties, matching a guard
+        // whose `touched` drained completely.
+        use std::collections::{BTreeMap, BTreeSet};
+        let mut engaged: BTreeMap<StableDisplayId, String> = BTreeMap::new();
+        engaged.insert(id("A"), r"\\.\DISPLAY1".to_owned());
+        engaged.insert(id("B"), r"\\.\DISPLAY2".to_owned());
+
+        retain_failed_engagements(&mut engaged, &BTreeSet::new());
+
+        assert!(
+            engaged.is_empty(),
+            "a clean restore forgets every engagement"
+        );
     }
 }
