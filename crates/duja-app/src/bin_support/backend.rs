@@ -97,16 +97,25 @@ pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<DisplayGeom>) {
 }
 
 /// Concatenate the DDC and panel display lists, dropping any DDC entry whose
-/// stable id also appears in the panel list.
-///
-/// On a laptop the DDC backend can enumerate the built-in panel's `HMONITOR`
-/// alongside its genuine external monitors; the `duja-panel` (WMI) backend
-/// enumerates that same panel as an [`DisplayKind::InternalPanel`]. When both
-/// resolve to the same [`StableDisplayId`], the WMI entry is authoritative — it
-/// carries the correct `InternalPanel` kind — so the DDC duplicate is dropped.
-/// This is defense-in-depth: the DDC backend already omits internal targets, so
-/// in practice no duplicate reaches here. Surviving DDC entries keep their
+/// stable id also appears in the panel list. Surviving DDC entries keep their
 /// order and precede the panels.
+///
+/// This is **defense-in-depth** behind the primary fix, and its reach is
+/// deliberately limited by identity derivation. The DDC backend already omits
+/// internal/embedded panels during correlation (via `outputTechnology`), so in
+/// practice no built-in panel reaches this step; dedup only mops up a residual
+/// cross-backend duplicate.
+///
+/// It catches **serial-bearing** duplicates: a panel that exposes a serial
+/// derives the *same* [`StableDisplayId`] from either backend (`from_edid`'s
+/// serial-string path and WMI's `from_parts` agree), so the duplicate is
+/// matched and the authoritative WMI [`DisplayKind::InternalPanel`] entry wins.
+/// A **serial-less** panel does *not* converge: `from_edid` hashes the full
+/// 128-byte EDID while `from_parts` hashes only `"MFG-PROD"`, so the two ids
+/// differ and dedup cannot match them (see
+/// `serial_less_internal_panel_ids_diverge_across_backends`). Serial-less
+/// internal panels are therefore excluded by the `outputTechnology`
+/// classification skip, never by this dedup.
 fn dedup_displays(
     ddc: Vec<(DiscoveredDisplay, DisplayGeom)>,
     panel: Vec<(DiscoveredDisplay, DisplayGeom)>,
@@ -258,8 +267,13 @@ mod tests {
 
     #[test]
     fn dedup_drops_ddc_duplicate_of_internal_panel() {
-        // Same stable id appears in BOTH lists (the laptop internal panel), plus
-        // one genuine external monitor only in the DDC list.
+        // Exercises the dedup LOGIC for the case it actually covers: a
+        // serial-BEARING panel, whose id both backends derive identically. We
+        // inject one shared id into both lists directly (rather than
+        // round-tripping two backends); a serial-bearing panel genuinely
+        // converges this way, whereas a serial-less one would NOT — see
+        // `serial_less_internal_panel_ids_diverge_across_backends`. Plus one
+        // genuine external monitor present only in the DDC list.
         let shared = StableDisplayId::from_parts("GSM", 0x5B09, Some("PANEL1")).unwrap();
         let external = StableDisplayId::from_parts("DEL", 0xA131, Some("EXT1")).unwrap();
 
@@ -294,5 +308,49 @@ mod tests {
                     && display.kind == DisplayKind::ExternalDdc)
         );
         assert_eq!(out.len(), 2);
+    }
+
+    /// A checksum-valid 128-byte EDID for `mfg`/`product` with NO serial (zero
+    /// numeric serial, no serial-string descriptor), so `from_edid` takes the
+    /// content-hash fallback. Built without indexing / raw arithmetic to stay
+    /// inside the lint wall.
+    fn serial_less_edid(mfg: &str, product: u16) -> Vec<u8> {
+        let mut e: Vec<u8> = vec![0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+        let mut letters = mfg.bytes();
+        let val = |c: u8| u16::from(c).wrapping_sub(64) & 0x1F;
+        let v0 = val(letters.next().unwrap_or(b'A'));
+        let v1 = val(letters.next().unwrap_or(b'A'));
+        let v2 = val(letters.next().unwrap_or(b'A'));
+        e.extend_from_slice(&((v0 << 10) | (v1 << 5) | v2).to_be_bytes());
+        e.extend_from_slice(&product.to_le_bytes());
+        e.extend_from_slice(&0u32.to_le_bytes());
+        e.resize(127, 0x00);
+        let sum: u8 = e.iter().copied().fold(0u8, u8::wrapping_add);
+        e.push(sum.wrapping_neg());
+        e
+    }
+
+    #[test]
+    fn serial_less_internal_panel_ids_diverge_across_backends() {
+        // Documents why the `outputTechnology` classification skip — not this
+        // dedup — is what removes a serial-less built-in panel. The DDC backend
+        // derives identity with `from_edid` (hashing the full 128-byte EDID);
+        // the WMI backend uses `from_parts` (hashing only "MFG-PROD"). With no
+        // serial to anchor them the two ids differ, so `dedup_displays` cannot
+        // match a serial-less panel that ever slipped through as external.
+        let edid = serial_less_edid("AUO", 0x1234);
+        let ddc_id = StableDisplayId::from_edid(&edid).unwrap();
+        let wmi_id = StableDisplayId::from_parts("AUO", 0x1234, None).unwrap();
+        assert_ne!(
+            ddc_id, wmi_id,
+            "serial-less DDC and WMI ids must diverge (from_edid vs from_parts hash inputs)"
+        );
+
+        // Both entries therefore survive dedup — nothing to match on. This is
+        // the residual case the outputTechnology skip is responsible for, not
+        // dedup.
+        let ddc = vec![ddc_entry(&ddc_id, "internal-as-ddc")];
+        let panel = vec![panel_entry(&wmi_id, "Built-in")];
+        assert_eq!(dedup_displays(ddc, panel).len(), 2);
     }
 }

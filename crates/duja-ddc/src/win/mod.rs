@@ -129,14 +129,24 @@ impl DdcDisplay {
     }
 }
 
-/// Enumerate the attached DDC-capable external monitors, in a deterministic
+/// Enumerate the attached DDC-capable **external** monitors, in a deterministic
 /// order (sorted by device interface path).
 ///
 /// Identity is recovered from each monitor's registry EDID and correlated to
-/// its physical handle via the device interface path. A monitor whose EDID
-/// cannot be correlated or parsed is **skipped** (rather than given a fabricated
-/// identity) — its handle is released — so every returned [`DdcDisplay`] has a
-/// genuine EDID-derived [`StableDisplayId`].
+/// its physical handle via the device interface path. Two classes of target are
+/// deliberately **excluded** from the returned list:
+///
+/// - **Internal / embedded panels** — any target whose CCD `outputTechnology`
+///   marks it as internal, embedded `DisplayPort`, or embedded UDI (a laptop's
+///   built-in eDP). These belong to `duja-panel`, which enumerates them as
+///   internal panels; surfacing them here too would double-count and mislabel
+///   the built-in screen as external.
+/// - A monitor whose EDID cannot be correlated or parsed — skipped rather than
+///   given a fabricated identity.
+///
+/// Every returned [`DdcDisplay`] is therefore a real external monitor with a
+/// genuine EDID-derived [`StableDisplayId`]; each excluded target's
+/// physical-monitor handle is released.
 ///
 /// # Errors
 /// [`DdcError::Os`] if the `SetupAPI` device-information set cannot be opened.
