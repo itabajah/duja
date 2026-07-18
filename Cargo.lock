@@ -1145,7 +1145,7 @@ checksum = "edf234dd1594d6dd434a8fb8cada51ddbbc593e40e4a01556a0b31c62da2775b"
 
 [[package]]
 name = "duja-app"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "duja-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "insta",
  "proptest",
@@ -1186,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "duja-ddc"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "core-foundation 0.10.1",
  "core-foundation-sys",
@@ -1200,7 +1200,7 @@ dependencies = [
 
 [[package]]
 name = "duja-dimmer"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "crossbeam-channel",
  "dispatch2",
@@ -1217,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "duja-ipc"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "duja-core",
  "proptest",
@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "duja-panel"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "core-graphics 0.25.0",
  "duja-core",
@@ -1239,7 +1239,7 @@ dependencies = [
 
 [[package]]
 name = "duja-platform"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "core-foundation-sys",
  "crossbeam-channel",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "duja-ui"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "duja-core",
  "i-slint-backend-testing",
@@ -1265,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "dujactl"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "duja-core",
  "duja-ddc",
@@ -6757,7 +6757,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.2"
+version = "0.1.3"
 
 [[package]]
 name = "y4m"
