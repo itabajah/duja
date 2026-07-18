@@ -2,9 +2,11 @@
 //!
 //! # Backend → [`DiscoveredDisplay`] mapping
 //!
-//! `duja-ddc` external monitors map to [`DisplayKind::ExternalDdc`] and
-//! `duja-panel` internal panels to [`DisplayKind::InternalPanel`]. Names come
-//! straight from each backend.
+//! `duja-ddc` external monitors map to [`DisplayKind::ExternalDdc`]; internal
+//! panels map to [`DisplayKind::InternalPanel`], whether they come from
+//! `duja-panel` (WMI) or, as a fallback when WMI cannot see the built-in panel,
+//! from `duja-ddc` (a DDC display flagged internal). Names come straight from
+//! each backend.
 //!
 //! **Capabilities are set statically at enumeration** — brightness-only, with
 //! `hardware_range: true` — rather than probed here. This is the minimal correct
@@ -93,36 +95,42 @@ pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<DisplayGeom>) {
         })
         .collect();
 
-    dedup_displays(ddc, panel).into_iter().unzip()
+    merge_displays(ddc, panel).into_iter().unzip()
 }
 
-/// Concatenate the DDC and panel display lists, dropping any DDC entry whose
-/// stable id also appears in the panel list. Surviving DDC entries keep their
-/// order and precede the panels.
+/// Merge the DDC and panel display lists into the tray's display set, applying
+/// the internal-panel fallback policy. Kept DDC entries retain their enumeration
+/// order and precede the panels; the WMI panels always follow.
 ///
-/// This is **defense-in-depth** behind the primary fix, and its reach is
-/// deliberately limited by identity derivation. The DDC backend already omits
-/// internal/embedded panels during correlation (via `outputTechnology`), so in
-/// practice no built-in panel reaches this step; dedup only mops up a residual
-/// cross-backend duplicate.
-///
-/// It catches **serial-bearing** duplicates: a panel that exposes a serial
-/// derives the *same* [`StableDisplayId`] from either backend (`from_edid`'s
-/// serial-string path and WMI's `from_parts` agree), so the duplicate is
-/// matched and the authoritative WMI [`DisplayKind::InternalPanel`] entry wins.
-/// A **serial-less** panel does *not* converge: `from_edid` hashes the full
-/// 128-byte EDID while `from_parts` hashes only `"MFG-PROD"`, so the two ids
-/// differ and dedup cannot match them (see
-/// `serial_less_internal_panel_ids_diverge_across_backends`). Serial-less
-/// internal panels are therefore excluded by the `outputTechnology`
-/// classification skip, never by this dedup.
-fn dedup_displays(
+/// Truth table, per DDC entry (the WMI panels are always kept):
+/// - **External DDC display** — always kept; an external monitor is never in the
+///   WMI list, so nothing supersedes it.
+/// - **Internal DDC display, WMI returned ≥ 1 panel** — dropped. WMI is
+///   authoritative for an internal panel it can control, so its
+///   [`DisplayKind::InternalPanel`] entry wins and the DDC duplicate is removed.
+///   The signal is "WMI listed *any* panel", not an id match: a serial-less panel
+///   derives DIFFERENT ids from the two backends (`from_edid` hashes the whole
+///   128-byte EDID; WMI's `from_parts` hashes only `"MFG-PROD"`), so id-matching
+///   alone could never dedup it — see
+///   `merge_drops_internal_ddc_duplicate_when_wmi_has_the_panel_serial_less`.
+/// - **Internal DDC display, WMI returned 0 panels** — KEPT, as the
+///   [`DisplayKind::InternalPanel`] fallback. This is the fix: on a laptop whose
+///   backlight is GPU/OEM-driven, WMI cannot see the panel and the DDC path is
+///   its only carrier, so dropping it here would leave the built-in screen in
+///   neither list, vanished (see `internal_panel_survives_when_wmi_is_empty`).
+fn merge_displays(
     ddc: Vec<(DiscoveredDisplay, DisplayGeom)>,
     panel: Vec<(DiscoveredDisplay, DisplayGeom)>,
 ) -> Vec<(DiscoveredDisplay, DisplayGeom)> {
+    // WMI is authoritative for any internal panel it can see, so an internal DDC
+    // fallback survives only when WMI listed no panel at all. External DDC entries
+    // are always kept (an external is never in the WMI list). The dedup signal is
+    // "WMI listed any panel", NOT an id match, because a serial-less panel derives
+    // divergent ids across the two backends — see the truth table above.
+    let wmi_has_panel = !panel.is_empty();
     let mut out: Vec<(DiscoveredDisplay, DisplayGeom)> = ddc
         .into_iter()
-        .filter(|(display, _)| !panel.iter().any(|(p, _)| p.id == display.id))
+        .filter(|(display, _)| display.kind != DisplayKind::InternalPanel || !wmi_has_panel)
         .collect();
     out.extend(panel);
     out
@@ -132,14 +140,21 @@ fn dedup_displays(
 fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
     // Each `DdcDisplay` is dropped at the end of the map closure, releasing its
     // physical-monitor handle promptly — we keep only the metadata, bounds, and
-    // GDI device name.
+    // GDI device name. A display the DDC backend flags `is_internal` is a laptop
+    // panel surfaced as the fallback carrier, so it is classified InternalPanel
+    // (not ExternalDdc); the merge then keeps it only when WMI lists no panel.
     match duja_ddc::enumerate() {
         Ok(displays) => displays
             .into_iter()
             .map(|d| {
+                let kind = if d.is_internal {
+                    DisplayKind::InternalPanel
+                } else {
+                    DisplayKind::ExternalDdc
+                };
                 let display = DiscoveredDisplay {
                     id: d.id.clone(),
-                    kind: DisplayKind::ExternalDdc,
+                    kind,
                     name: d.name.clone(),
                     capabilities: hardware_brightness_caps(),
                 };
@@ -175,8 +190,18 @@ fn discover_panel() -> Vec<DiscoveredDisplay> {
 ///
 /// This is the shape the engine's `ControllerFactory` needs: it re-enumerates
 /// on every call so a hot-plugged display always gets a freshly-opened handle.
+///
+/// **WMI is tried before DDC.** A WMI-controllable internal panel must be driven
+/// by native WMI backlight, not DDC-over-eDP; and now that `duja_ddc::enumerate`
+/// also surfaces internal panels, a DDC-first order could wrongly open a DDC
+/// handle for a WMI-owned panel. An external monitor is never in the WMI list
+/// (WMI lists only `WmiMonitorBrightness` internal panels), so `open_panel`
+/// returns `None` for it and it falls through to `open_ddc`. A fallback internal
+/// panel that WMI cannot see likewise falls through to `open_ddc`, which
+/// re-matches it by id; the engine's verify-first write then routes it to real
+/// hardware (if DDC-over-eDP answers) or a `SoftwareOnly` overlay (if not).
 pub(crate) fn open_controller(id: &StableDisplayId) -> Option<Box<dyn BrightnessController>> {
-    open_ddc(id).or_else(|| open_panel(id))
+    open_panel(id).or_else(|| open_ddc(id))
 }
 
 #[cfg(windows)]
@@ -222,7 +247,7 @@ fn open_panel_controller(
 
 #[cfg(test)]
 mod tests {
-    use super::{DisplayGeom, dedup_displays, hardware_brightness_caps};
+    use super::{DisplayGeom, hardware_brightness_caps, merge_displays};
     use duja_core::dimmer::DisplayBounds;
     use duja_core::id::StableDisplayId;
     use duja_core::manager::DiscoveredDisplay;
@@ -253,6 +278,25 @@ mod tests {
         (display, geom)
     }
 
+    /// A DDC-backed entry for an INTERNAL panel surfaced by the fallback — kind
+    /// `InternalPanel`, exactly as `discover_ddc` now labels a `DdcDisplay` whose
+    /// `is_internal` flag is set — carrying the external-style geometry the DDC
+    /// backend still provides for it.
+    fn ddc_internal_entry(id: &StableDisplayId, name: &str) -> (DiscoveredDisplay, DisplayGeom) {
+        let display = DiscoveredDisplay {
+            id: id.clone(),
+            kind: DisplayKind::InternalPanel,
+            name: Some(name.to_owned()),
+            capabilities: hardware_brightness_caps(),
+        };
+        let geom = (
+            id.as_str().to_owned(),
+            Some(DisplayBounds::new(0, 0, 100, 100)),
+            Some(r"\\.\display1".to_owned()),
+        );
+        (display, geom)
+    }
+
     /// A WMI panel entry (internal) for `id`, with no geometry (matches how the
     /// panel backend contributes `None` bounds/device).
     fn panel_entry(id: &StableDisplayId, name: &str) -> (DiscoveredDisplay, DisplayGeom) {
@@ -266,24 +310,25 @@ mod tests {
     }
 
     #[test]
-    fn dedup_drops_ddc_duplicate_of_internal_panel() {
-        // Exercises the dedup LOGIC for the case it actually covers: a
-        // serial-BEARING panel, whose id both backends derive identically. We
-        // inject one shared id into both lists directly (rather than
-        // round-tripping two backends); a serial-bearing panel genuinely
-        // converges this way, whereas a serial-less one would NOT — see
-        // `serial_less_internal_panel_ids_diverge_across_backends`. Plus one
-        // genuine external monitor present only in the DDC list.
+    fn merge_drops_internal_ddc_duplicate_when_wmi_has_the_panel_serial_bearing() {
+        // A serial-BEARING built-in panel: both backends derive the SAME id
+        // (from_edid's serial-string path and WMI's from_parts agree). The DDC
+        // backend now surfaces it as the internal fallback (kind InternalPanel),
+        // and WMI also lists it. Policy: an internal DDC entry is dropped whenever
+        // WMI returned any panel — WMI is authoritative for a panel it can control
+        // — so the id survives exactly once, as the WMI InternalPanel. Plus one
+        // genuine external monitor, present only in the DDC list, which always
+        // survives.
         let shared = StableDisplayId::from_parts("GSM", 0x5B09, Some("PANEL1")).unwrap();
         let external = StableDisplayId::from_parts("DEL", 0xA131, Some("EXT1")).unwrap();
 
         let ddc = vec![
-            ddc_entry(&shared, "internal-as-ddc"),
+            ddc_internal_entry(&shared, "internal-as-ddc"),
             ddc_entry(&external, "real external"),
         ];
         let panel = vec![panel_entry(&shared, "Built-in")];
 
-        let out = dedup_displays(ddc, panel);
+        let out = merge_displays(ddc, panel);
 
         // The shared id survives exactly once, as the InternalPanel (WMI) entry.
         let shared_hits: Vec<&DiscoveredDisplay> = out
@@ -331,13 +376,14 @@ mod tests {
     }
 
     #[test]
-    fn serial_less_internal_panel_ids_diverge_across_backends() {
-        // Documents why the `outputTechnology` classification skip — not this
-        // dedup — is what removes a serial-less built-in panel. The DDC backend
-        // derives identity with `from_edid` (hashing the full 128-byte EDID);
-        // the WMI backend uses `from_parts` (hashing only "MFG-PROD"). With no
-        // serial to anchor them the two ids differ, so `dedup_displays` cannot
-        // match a serial-less panel that ever slipped through as external.
+    fn merge_drops_internal_ddc_duplicate_when_wmi_has_the_panel_serial_less() {
+        // A serial-LESS built-in panel: the two backends derive DIFFERENT ids —
+        // `from_edid` hashes the full 128-byte EDID, WMI's `from_parts` hashes
+        // only "MFG-PROD" — so id-matching alone could never dedup them. The new
+        // policy does not rely on id-matching: because WMI returned a panel, the
+        // internal DDC entry is dropped regardless of the id divergence, leaving
+        // exactly the WMI InternalPanel. This is the very duplicate the OLD
+        // id-match dedup let through as a second, mislabeled row.
         let edid = serial_less_edid("AUO", 0x1234);
         let ddc_id = StableDisplayId::from_edid(&edid).unwrap();
         let wmi_id = StableDisplayId::from_parts("AUO", 0x1234, None).unwrap();
@@ -346,11 +392,74 @@ mod tests {
             "serial-less DDC and WMI ids must diverge (from_edid vs from_parts hash inputs)"
         );
 
-        // Both entries therefore survive dedup — nothing to match on. This is
-        // the residual case the outputTechnology skip is responsible for, not
-        // dedup.
-        let ddc = vec![ddc_entry(&ddc_id, "internal-as-ddc")];
+        let ddc = vec![ddc_internal_entry(&ddc_id, "internal-as-ddc")];
         let panel = vec![panel_entry(&wmi_id, "Built-in")];
-        assert_eq!(dedup_displays(ddc, panel).len(), 2);
+        let out = merge_displays(ddc, panel);
+        assert_eq!(
+            out.len(),
+            1,
+            "WMI presence dedups the divergent-id internal DDC entry"
+        );
+        let survivor = out.first().map(|(display, _)| display);
+        assert_eq!(survivor.map(|d| d.id.clone()), Some(wmi_id));
+        assert_eq!(survivor.map(|d| d.kind), Some(DisplayKind::InternalPanel));
+    }
+
+    #[test]
+    fn internal_panel_survives_when_wmi_is_empty() {
+        // THE bug fix. On the user's laptop the built-in panel's backlight is not
+        // ACPI/WMI-driven, so `discover_panel` (WMI) returns nothing. The DDC
+        // fallback surfaces the panel (kind InternalPanel); with no WMI panel to
+        // supersede it, the merge MUST keep it — otherwise the internal panel
+        // appears in neither list and vanishes from the tray (the exact v0.1.2
+        // regression this guards). An external monitor from the same DDC pass is
+        // kept alongside it.
+        let internal = StableDisplayId::from_parts("AUO", 0x1234, None).unwrap();
+        let external = StableDisplayId::from_parts("DEL", 0xA131, Some("EXT1")).unwrap();
+
+        let ddc = vec![
+            ddc_internal_entry(&internal, "Built-in (DDC fallback)"),
+            ddc_entry(&external, "real external"),
+        ];
+        let panel: Vec<(DiscoveredDisplay, DisplayGeom)> = Vec::new();
+
+        let out = merge_displays(ddc, panel);
+
+        let internal_hit = out
+            .iter()
+            .find(|(display, _)| display.id == internal)
+            .map(|(display, _)| display);
+        assert_eq!(
+            internal_hit.map(|d| d.kind),
+            Some(DisplayKind::InternalPanel),
+            "the internal panel must survive as InternalPanel when WMI is empty"
+        );
+        assert!(
+            out.iter()
+                .any(|(display, _)| display.id == external
+                    && display.kind == DisplayKind::ExternalDdc),
+            "the external monitor survives alongside it"
+        );
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn external_ddc_display_always_survives_regardless_of_wmi() {
+        // An external monitor is never in the WMI panel list, and the merge must
+        // never drop it — present it beside a WMI panel (with a different id) and
+        // confirm it is kept as ExternalDdc.
+        let external = StableDisplayId::from_parts("DEL", 0xA131, Some("EXT1")).unwrap();
+        let panel_id = StableDisplayId::from_parts("AUO", 0x1234, None).unwrap();
+
+        let ddc = vec![ddc_entry(&external, "real external")];
+        let panel = vec![panel_entry(&panel_id, "Built-in")];
+
+        let out = merge_displays(ddc, panel);
+        assert!(
+            out.iter()
+                .any(|(display, _)| display.id == external
+                    && display.kind == DisplayKind::ExternalDdc)
+        );
+        assert_eq!(out.len(), 2);
     }
 }
