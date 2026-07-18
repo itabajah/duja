@@ -18,12 +18,13 @@ mod sys;
 use std::fmt;
 
 use duja_core::dimmer::DisplayBounds;
-use duja_core::id::{EdidInfo, StableDisplayId};
+use duja_core::id::StableDisplayId;
 use duja_core::quirks::QuirkDb;
 use windows::Win32::Foundation::HANDLE;
 
 use crate::clock::SystemClock;
 use crate::controller::DdcController;
+use crate::correlate::correlate;
 use crate::transport::{TransportError, VcpReading, VcpTransport};
 
 /// A failure enumerating the attached displays.
@@ -128,20 +129,34 @@ impl DdcDisplay {
     }
 }
 
-/// Enumerate the attached DDC-capable external monitors, in a deterministic
+/// Enumerate the attached DDC-capable **external** monitors, in a deterministic
 /// order (sorted by device interface path).
 ///
 /// Identity is recovered from each monitor's registry EDID and correlated to
-/// its physical handle via the device interface path. A monitor whose EDID
-/// cannot be correlated or parsed is **skipped** (rather than given a fabricated
-/// identity) — its handle is released — so every returned [`DdcDisplay`] has a
-/// genuine EDID-derived [`StableDisplayId`].
+/// its physical handle via the device interface path. Two classes of target are
+/// deliberately **excluded** from the returned list:
+///
+/// - **Internal / embedded panels** — any target whose CCD `outputTechnology`
+///   marks it as internal, embedded `DisplayPort`, or embedded UDI (a laptop's
+///   built-in eDP). These belong to `duja-panel`, which enumerates them as
+///   internal panels; surfacing them here too would double-count and mislabel
+///   the built-in screen as external.
+/// - A monitor whose EDID cannot be correlated or parsed — skipped rather than
+///   given a fabricated identity.
+///
+/// Every returned [`DdcDisplay`] is therefore a real external monitor with a
+/// genuine EDID-derived [`StableDisplayId`]; each excluded target's
+/// physical-monitor handle is released.
 ///
 /// # Errors
 /// [`DdcError::Os`] if the `SetupAPI` device-information set cannot be opened.
 pub fn enumerate() -> Result<Vec<DdcDisplay>, DdcError> {
     let edids = sys::collect_monitor_edids()?;
-    let paths = sys::monitor_paths();
+    let targets = sys::monitor_paths();
+    // Pure correlation of path -> EDID -> identity. Internal panels are omitted
+    // (they belong to `duja-panel`), so their `HMONITOR`s below match nothing
+    // and are dropped rather than mislabelled as external DDC monitors.
+    let resolved = correlate(&targets, &edids);
 
     let mut displays = Vec::new();
     for hmon in sys::enum_hmonitors() {
@@ -163,30 +178,23 @@ pub fn enumerate() -> Result<Vec<DdcDisplay>, DdcError> {
             sys::destroy(extra);
         }
 
-        // GDI adapter -> real monitor device interface path (CCD) -> EDID.
+        // Attach this HMONITOR's handle + bounds to its correlated external
+        // identity, matched by GDI adapter name. An HMONITOR with no external
+        // identity (the internal panel, or a monitor whose EDID failed to
+        // correlate) drops its handle here.
         let gdi_key = gdi.to_ascii_lowercase();
-        let Some(path) = paths.iter().find(|p| p.gdi_device == gdi_key) else {
+        let Some(display) = resolved.iter().find(|c| c.gdi_device == gdi_key) else {
             continue; // `handle` drops here, releasing the monitor.
         };
-        let Some((_, edid)) = edids.iter().find(|(key, _)| *key == path.interface_path) else {
-            continue;
-        };
-        let Ok(id) = StableDisplayId::from_edid(edid) else {
-            continue;
-        };
-        let name = EdidInfo::parse(edid)
-            .ok()
-            .and_then(|info| info.monitor_name)
-            .or_else(|| path.friendly.clone());
 
         displays.push(DdcDisplay {
-            id,
-            name,
-            edid: edid.clone(),
+            id: display.id.clone(),
+            name: display.name.clone(),
+            edid: display.edid.clone(),
             bounds,
             gdi_device: gdi,
             handle,
-            sort_key: path.interface_path.clone(),
+            sort_key: display.sort_key.clone(),
         });
     }
 

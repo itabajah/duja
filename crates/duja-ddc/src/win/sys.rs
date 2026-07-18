@@ -29,8 +29,10 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
 use windows::Win32::Devices::Display::{
     CapabilitiesRequestAndCapabilitiesReply, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
     DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
-    DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
-    DISPLAYCONFIG_TARGET_DEVICE_NAME, DestroyPhysicalMonitor, DisplayConfigGetDeviceInfo,
+    DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED,
+    DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED,
+    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
+    DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY, DestroyPhysicalMonitor, DisplayConfigGetDeviceInfo,
     GUID_DEVINTERFACE_MONITOR, GetCapabilitiesStringLength, GetDisplayConfigBufferSizes,
     GetNumberOfPhysicalMonitorsFromHMONITOR, GetPhysicalMonitorsFromHMONITOR,
     GetVCPFeatureAndVCPFeatureReply, PHYSICAL_MONITOR, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
@@ -49,24 +51,8 @@ use windows::core::{BOOL, GUID, PCWSTR};
 
 use duja_core::dimmer::DisplayBounds;
 
+use crate::correlate::MonitorTarget;
 use crate::transport::{TransportError, VcpReading};
-
-/// One active display path resolved via the CCD API: the GDI adapter name, the
-/// real monitor device interface path, and the monitor's friendly name.
-///
-/// This bridges the gap the GDI monitor enumeration leaves on some GPUs (e.g.
-/// NVIDIA surfaces a generic `Default_Monitor` with no EDID linkage): the CCD
-/// target's `monitorDevicePath` is the true device interface path that keys the
-/// registry EDID.
-pub(crate) struct MonitorPath {
-    /// The GDI adapter device name, lower-cased (e.g. `\\.\display1`).
-    pub gdi_device: String,
-    /// The monitor device interface path, lower-cased (correlates to the EDID
-    /// map key).
-    pub interface_path: String,
-    /// The monitor's friendly name from the CCD target, if any.
-    pub friendly: Option<String>,
-}
 
 /// Decode a NUL-terminated (or full) fixed wide buffer into a `String`.
 fn wide_to_string(buf: &[u16]) -> String {
@@ -178,11 +164,25 @@ fn rect_to_bounds(rect: RECT) -> DisplayBounds {
     DisplayBounds::new(rect.left, rect.top, width, height)
 }
 
-/// Resolve every active display path to its (GDI adapter name, monitor device
-/// interface path, friendly name) via the CCD API. This is the reliable bridge
-/// from an `HMONITOR`'s GDI adapter to the real monitor device that owns the
-/// registry EDID.
-pub(crate) fn monitor_paths() -> Vec<MonitorPath> {
+/// Whether a CCD output technology denotes an internal/embedded panel — a
+/// laptop's built-in eDP (`INTERNAL`) or an embedded `DisplayPort`/UDI link —
+/// rather than an external connector. Such targets belong to `duja-panel`, so
+/// the correlation step drops them from the DDC list.
+fn is_internal_output(tech: DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY) -> bool {
+    tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL
+        || tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED
+        || tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED
+}
+
+/// Resolve every active display path to a [`MonitorTarget`] — its GDI adapter
+/// name, real monitor device interface path, friendly name, and internal-panel
+/// flag — via the CCD API. This is the reliable bridge from an `HMONITOR`'s GDI
+/// adapter to the real monitor device that owns the registry EDID (the GDI
+/// enumeration alone leaves a gap on some GPUs, e.g. NVIDIA surfaces a generic
+/// `Default_Monitor` with no EDID linkage; the CCD target's `monitorDevicePath`
+/// is the true interface path that keys the EDID). The `outputTechnology` field
+/// additionally flags the built-in panel so it can be excluded.
+pub(crate) fn monitor_paths() -> Vec<MonitorTarget> {
     let mut out = Vec::new();
     let mut num_paths = 0u32;
     let mut num_modes = 0u32;
@@ -242,6 +242,7 @@ pub(crate) fn monitor_paths() -> Vec<MonitorPath> {
             continue;
         }
         let interface_path = wide_to_string(&target.monitorDevicePath);
+        let is_internal = is_internal_output(target.outputTechnology);
         let friendly = {
             let name = wide_to_string(&target.monitorFriendlyDeviceName);
             if name.trim().is_empty() {
@@ -252,10 +253,11 @@ pub(crate) fn monitor_paths() -> Vec<MonitorPath> {
         };
 
         if !gdi.is_empty() && !interface_path.is_empty() {
-            out.push(MonitorPath {
+            out.push(MonitorTarget {
                 gdi_device: gdi.to_ascii_lowercase(),
                 interface_path: interface_path.to_ascii_lowercase(),
                 friendly,
+                is_internal,
             });
         }
     }
