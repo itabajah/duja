@@ -413,4 +413,24 @@ mod tests {
         assert_eq!(pair_handles_to_displays(&[true], 2), vec![(0, 0)]);
         assert!(pair_handles_to_displays(&[], 2).is_empty());
     }
+
+    #[test]
+    fn a_responsive_handle_is_never_dropped_for_a_silent_one() {
+        // Defense-in-depth invariant: a handle that answered DDC must never be
+        // the one released while a display is bound to a silent handle. Two
+        // responsive handles (idx 0, 2) straddle a silent one (idx 1), with two
+        // displays: both displays take the responsive handles; the ONLY unpaired
+        // (caller-released) handle is the silent one.
+        let pairs = pair_handles_to_displays(&[true, false, true], 2);
+        assert_eq!(pairs, vec![(0, 0), (1, 2)]);
+        let paired: std::collections::BTreeSet<usize> = pairs.iter().map(|&(_, h)| h).collect();
+        assert!(
+            paired.contains(&0) && paired.contains(&2),
+            "both DDC-responsive handles are kept"
+        );
+        assert!(
+            !paired.contains(&1),
+            "only the silent handle is left for the caller to release"
+        );
+    }
 }

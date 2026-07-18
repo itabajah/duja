@@ -51,6 +51,7 @@ use windows::core::{BOOL, GUID, PCWSTR};
 
 use duja_core::dimmer::DisplayBounds;
 
+use crate::controller::DEFAULT_MIN_GAP;
 use crate::correlate::MonitorTarget;
 use crate::transport::{TransportError, VcpReading};
 
@@ -454,24 +455,51 @@ fn read_reg_edid(hkey: HKEY) -> Option<Vec<u8>> {
     Some(data)
 }
 
-/// The MCCS luminance (brightness) VCP code, read once — off the hot path — only
-/// to probe whether a physical-monitor handle behind a mirrored `HMONITOR`
-/// actually speaks DDC/CI (see [`handle_answers_ddc`]). Kept in sync with
+/// The MCCS luminance (brightness) VCP code, read to probe whether a
+/// physical-monitor handle behind a mirrored `HMONITOR` actually speaks DDC/CI
+/// (see [`handle_answers_ddc`]). Kept in sync with
 /// `duja_core::model::Feature::Brightness`.
 const LUMINANCE_VCP_CODE: u8 = 0x10;
+
+/// Total attempts for a DDC probe read, mirroring the controller's `OP_ATTEMPTS`.
+const PROBE_ATTEMPTS: u32 = 3;
 
 /// Probe whether a physical-monitor handle answers DDC/CI, to disambiguate the
 /// panels behind a **mirrored** `HMONITOR` — e.g. a laptop's embedded eDP handle
 /// (which does not speak DDC) from the external monitor's handle (which does).
 ///
-/// Reads the luminance feature once: a real external monitor replies, an
-/// embedded panel does not. Any failure — including a transient DDC no-reply —
-/// reports `false`; the caller treats an all-silent multi-handle set as
-/// unresolvable and falls back to positional pairing. Called only for the rare
-/// mirrored `HMONITOR` that carries more physical handles than correlated
-/// displays, never on the common single-handle path.
+/// This decision **binds** a display to a handle and releases the others, so it
+/// must be reliable. The P1 evidence (see [`crate::controller`]) is that 60–70%
+/// of *unpaced* back-to-back DDC reads fail transiently — which is exactly why
+/// every real read is paced and retried. A single unpaced read here would
+/// therefore mis-report a genuine external as silent, and the caller would then
+/// bind the display to (and keep) the wrong handle while destroying the real one.
+///
+/// So this mirrors the controller's read model: up to [`PROBE_ATTEMPTS`]
+/// luminance reads, each retry paced by [`DEFAULT_MIN_GAP`] with growing
+/// back-off, returning `true` the moment any attempt succeeds. A genuine
+/// external answers within the retries; a true embedded panel stays silent
+/// across all of them. A still-silent result reports `false` — and because the
+/// caller binds responsive handles first, a handle that answered on *any*
+/// attempt is never the one released; only a genuinely all-silent excess set
+/// falls back to positional pairing. Called only for the rare mirrored
+/// `HMONITOR` that carries more physical handles than correlated displays, never
+/// on the common single-handle path.
 pub(crate) fn handle_answers_ddc(handle: HANDLE) -> bool {
-    get_vcp(handle, LUMINANCE_VCP_CODE).is_ok()
+    for attempt in 0..PROBE_ATTEMPTS {
+        if get_vcp(handle, LUMINANCE_VCP_CODE).is_ok() {
+            return true;
+        }
+        // Pace the retry: unpaced back-to-back reads are what fail, so a paced,
+        // backed-off retry is precisely what lets a genuine external answer. The
+        // gap grows with the attempt (the controller's min gap, then a multiple
+        // of it), mirroring its pace + exponential back-off. No sleep after the
+        // final attempt.
+        if attempt.saturating_add(1) < PROBE_ATTEMPTS {
+            std::thread::sleep(DEFAULT_MIN_GAP.saturating_mul(attempt.saturating_add(1)));
+        }
+    }
+    false
 }
 
 /// Read a VCP feature, returning the current value and maximum.
