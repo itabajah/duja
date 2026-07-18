@@ -86,6 +86,24 @@ pub(crate) enum AckOutcome {
         /// The generation of the worker that failed to open.
         generation: u64,
     },
+    /// The worker determined at runtime that this display has **no working
+    /// hardware brightness control**, so the engine should downgrade it to
+    /// [`DisplayKind::SoftwareOnly`](duja_core::model::DisplayKind::SoftwareOnly)
+    /// and re-plan with the full-slider software continuum.
+    ///
+    /// Emitted (at most once per worker) from one of three tight signals: a
+    /// probe reporting `hardware_range == false`, a first effective brightness
+    /// write whose read-back proves the panel did not move (a silent no-op), or a
+    /// first brightness write the backend rejected as unsupported. Like
+    /// [`OpenFailed`](Self::OpenFailed) it carries the worker's `generation`, so a
+    /// stale fallback from an already-replaced worker is ignored (generation
+    /// match). Unlike a stuck/panic path the worker keeps running — the display
+    /// still exists and its overlay dims it; residual hardware writes harmlessly
+    /// no-op.
+    SoftwareFallback {
+        /// The generation of the worker that detected the missing hardware.
+        generation: u64,
+    },
 }
 
 /// A worker's reply to the engine, tagged with the worker's display id.

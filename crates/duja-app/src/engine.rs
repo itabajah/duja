@@ -41,7 +41,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Select, Sender, unbounded};
 use duja_core::debounce::{Action, Debouncer};
 use duja_core::id::StableDisplayId;
 use duja_core::manager::{DisplayManager, ManagerEvent};
-use duja_core::model::Feature;
+use duja_core::model::{Feature, FeatureRange};
 
 use crate::protocol::{AckOutcome, InflightKey, WorkerAck};
 use crate::worker::{WorkerHandle, spawn_worker};
@@ -76,6 +76,11 @@ pub(crate) struct EngineState {
     inflight: BTreeMap<(StableDisplayId, InflightKey), (u64, Instant)>,
     /// Probed brightness max per display (for level scaling); defaults to 100.
     brightness_max: BTreeMap<StableDisplayId, u16>,
+    /// The most recent raw brightness the engine read per display (initial learn
+    /// or poll). Lets the self-heal require the hardware to have actually **moved**
+    /// to Duja's written value — a dead panel merely stuck at that value has not
+    /// moved and must not clear the software-only overlay.
+    last_hw_raw: BTreeMap<StableDisplayId, u16>,
     /// Displays whose initial hardware level we are still waiting to learn. A
     /// user `SetUserLevel` clears membership, so a late initial-`Get` ack can
     /// never clobber a level the user has already chosen.
@@ -131,6 +136,7 @@ impl EngineState {
             workers: BTreeMap::new(),
             inflight: BTreeMap::new(),
             brightness_max: BTreeMap::new(),
+            last_hw_raw: BTreeMap::new(),
             pending_learn: std::collections::BTreeSet::new(),
             poll_gets: std::collections::BTreeSet::new(),
             debouncer: Debouncer::new(cfg.displaychange_debounce),
@@ -556,37 +562,21 @@ impl EngineState {
                     && feature == Feature::Brightness
                 {
                     self.brightness_max.insert(id.clone(), range.max);
-                    let pct = raw_to_pct(range.current, range.max);
+                    // Remember the reading (returning the prior one) so the poll path
+                    // can tell whether the hardware actually moved.
+                    let prev_hw = self.last_hw_raw.insert(id.clone(), range.current);
                     let was_poll = self.poll_gets.remove(&id);
                     if self.pending_learn.remove(&id) {
                         // Initial learn: apply the reading only if the user has not
                         // set a level in the meantime (which would have cleared the
                         // pending flag).
-                        self.manager.record_user_level(&id, pct);
+                        self.manager
+                            .record_user_level(&id, raw_to_pct(range.current, range.max));
                         self.notify_displays_changed();
-                    } else if was_poll
-                        && self.manager.user_level_of(&id).is_none_or(|known| {
-                            // Compare at the RAW level against the raw our own last
-                            // write produced (`pct_to_raw(known)`), not at the pct
-                            // level against `known`. On a panel whose brightness_max
-                            // < 100 the write quantizes, so the readback pct differs
-                            // from the requested pct by up to the quantization step
-                            // — a pct-level compare would spuriously flag Duja's own
-                            // write as an external change. Reading back our own write
-                            // yields the exact raw we wrote (±1 for panel jitter).
-                            range.current.abs_diff(pct_to_raw(known, range.max)) > 1
-                        })
-                    {
-                        // Poll read: the hardware drifted from the raw our last write
-                        // produced, so something outside Duja changed it (physical
-                        // buttons, another app). Record it (so a replug restores the
-                        // external value) and reflect it to the app. A *stale*
-                        // initial-`Get` ack (not a poll) falls through and is ignored.
-                        self.manager.record_user_level(&id, pct);
-                        self.notify(EngineNotification::LevelRead {
-                            id: id.clone(),
-                            hw_pct: pct,
-                        });
+                    } else if was_poll {
+                        // A *stale* initial-`Get` ack (not a poll) falls through and
+                        // is ignored.
+                        self.handle_poll_read(&id, range, prev_hw);
                     }
                 }
             }
@@ -623,6 +613,79 @@ impl EngineState {
                     }
                 }
             }
+            AckOutcome::SoftwareFallback { generation } => {
+                // The worker proved this display has no working hardware brightness.
+                // Act only if the CURRENTLY registered worker is the one that
+                // reported it (generation match, exactly like `OpenFailed`), so a
+                // stale fallback from an already-replaced worker can never downgrade
+                // the fresh, healthy worker that superseded it. Flip the display to
+                // software-only and re-emit its snapshot so the app re-plans with the
+                // full-slider software continuum. `mark_software_only` reports a
+                // change only on the first flip, so this re-emits exactly once and
+                // never loops (a fresh worker re-detecting the same dead panel is a
+                // no-op).
+                if self
+                    .workers
+                    .get(&id)
+                    .is_some_and(|handle| handle.generation == generation)
+                    && self.manager.mark_software_only(&id)
+                {
+                    self.notify_displays_changed();
+                }
+            }
+        }
+    }
+
+    /// Process a poll `Get` reading for `id`.
+    ///
+    /// For a display **forced software-only**, its hardware brightness is decoupled
+    /// from the user's perceived level (the overlay drives perception), so a poll is
+    /// never an external-change signal — it is used **only to self-heal**: if the
+    /// panel is sitting at (±1 raw) the value Duja last wrote, it is demonstrably
+    /// live, so a prior no-hardware downgrade was a misfire; clear the overlay and
+    /// re-emit so the app restores the hardware continuum (MAJOR-2). The residual
+    /// hardware write Duja keeps sending to a software-only display is what makes
+    /// this observable.
+    ///
+    /// For a normal hardware display, a reading that drifts from the raw our own
+    /// last write produced means something outside Duja changed it (physical
+    /// buttons, another app): record it (so a replug restores the external value)
+    /// and reflect it to the app.
+    ///
+    /// `prev_hw` is the previous raw reading (before this one), used to require
+    /// actual movement before self-healing.
+    fn handle_poll_read(
+        &mut self,
+        id: &StableDisplayId,
+        range: FeatureRange,
+        prev_hw: Option<u16>,
+    ) {
+        // Compare at the RAW level against the raw our own last write produced
+        // (`pct_to_raw(known)`): on a panel whose brightness_max < 100 the write
+        // quantizes, so a pct-level compare would spuriously flag Duja's own write.
+        let at_written_level = self
+            .manager
+            .user_level_of(id)
+            .is_some_and(|known| range.current.abs_diff(pct_to_raw(known, range.max)) <= 1);
+
+        if self.manager.is_software_forced(id) {
+            // Self-heal only if the panel actually MOVED to our written value: a
+            // dead panel merely stuck at that value (prev == current) has not moved
+            // and must stay software-only.
+            let moved = prev_hw.is_some_and(|prev| prev != range.current);
+            if at_written_level && moved && self.manager.clear_software_forced(id) {
+                self.notify_displays_changed();
+            }
+            return;
+        }
+
+        if !at_written_level {
+            let pct = raw_to_pct(range.current, range.max);
+            self.manager.record_user_level(id, pct);
+            self.notify(EngineNotification::LevelRead {
+                id: id.clone(),
+                hw_pct: pct,
+            });
         }
     }
 

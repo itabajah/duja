@@ -1817,3 +1817,586 @@ fn watchdog_recovery_restores_user_level_not_relearn() {
     within(Duration::from_secs(2), move || engine.shutdown());
     let _ = platform_tx;
 }
+
+// --- no-hardware software-only fallback (BUG 3) ----------------------------
+//
+// A display with no working hardware brightness must be detected at runtime and
+// downgraded to `DisplayKind::SoftwareOnly`, so software dimming spans the whole
+// slider. Detection is worker-side via three tight signals: a probe reporting no
+// hardware range, a first effective brightness write whose read-back never moves
+// (a silent no-op), and a first brightness write the backend rejects.
+
+/// Build capabilities with an explicit `hardware_range` (and Brightness present
+/// iff hardware-backed), for the probe-driven detection test.
+fn caps_hw(hardware_range: bool) -> Capabilities {
+    Capabilities {
+        features: if hardware_range {
+            [Feature::Brightness].into_iter().collect()
+        } else {
+            std::collections::BTreeSet::new()
+        },
+        hardware_range,
+        raw_capabilities: None,
+        allowed_inputs: Vec::new(),
+    }
+}
+
+/// A controller that reports a configurable `hardware_range` from `probe`, counts
+/// hardware `set` calls, and answers `get` with a fixed value.
+#[derive(Debug)]
+struct ProbeController {
+    hardware_range: bool,
+    sets: Arc<Mutex<usize>>,
+}
+
+impl BrightnessController for ProbeController {
+    fn probe(&mut self) -> Result<Capabilities, ControlError> {
+        Ok(caps_hw(self.hardware_range))
+    }
+    fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+        Ok(FeatureRange {
+            current: 50,
+            max: 100,
+        })
+    }
+    fn set(&mut self, _feature: Feature, _value: u16) -> Result<(), ControlError> {
+        let mut count = self.sets.lock().unwrap();
+        *count = count.saturating_add(1);
+        Ok(())
+    }
+}
+
+/// A controller that probes as hardware-backed and ACKs every write (`Ok`), but
+/// whose read-back is pinned at `fixed` — a dead panel that lies about accepting
+/// writes. Its first effective write should be caught by the worker's read-back
+/// verification.
+#[derive(Debug)]
+struct AckNoopController {
+    fixed: u16,
+}
+
+impl BrightnessController for AckNoopController {
+    fn probe(&mut self) -> Result<Capabilities, ControlError> {
+        Ok(caps())
+    }
+    fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+        Ok(FeatureRange {
+            current: self.fixed,
+            max: 100,
+        })
+    }
+    fn set(&mut self, _feature: Feature, _value: u16) -> Result<(), ControlError> {
+        Ok(()) // ACK, but the panel never moves.
+    }
+}
+
+/// A controller that probes as hardware-backed and whose writes DO take, but only
+/// reflect on the read-back after `stale_reads` further reads (a slow panel behind
+/// a dock / MST hub / KVM). `stale_reads` reads after a `set` still report the old
+/// value; the next read reports (and settles at) the written value.
+#[derive(Debug)]
+struct LateReflectController {
+    shown: u16,
+    pending: Option<u16>,
+    stale_left: u32,
+    stale_reads: u32,
+}
+
+impl LateReflectController {
+    fn new(initial: u16, stale_reads: u32) -> Self {
+        LateReflectController {
+            shown: initial,
+            pending: None,
+            stale_left: 0,
+            stale_reads,
+        }
+    }
+}
+
+impl BrightnessController for LateReflectController {
+    fn probe(&mut self) -> Result<Capabilities, ControlError> {
+        Ok(caps())
+    }
+    fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+        if let Some(target) = self.pending {
+            if self.stale_left == 0 {
+                self.shown = target;
+                self.pending = None;
+            } else {
+                self.stale_left = self.stale_left.saturating_sub(1);
+            }
+        }
+        Ok(FeatureRange {
+            current: self.shown,
+            max: 100,
+        })
+    }
+    fn set(&mut self, _feature: Feature, value: u16) -> Result<(), ControlError> {
+        self.pending = Some(value);
+        self.stale_left = self.stale_reads;
+        Ok(())
+    }
+}
+
+/// A controller that probes as hardware-backed but REJECTS every write with
+/// `Unsupported` (the backend says the panel cannot do brightness). `get`
+/// succeeds at a fixed value so the initial learn completes.
+#[derive(Debug)]
+struct RejectWriteController {
+    fixed: u16,
+}
+
+impl BrightnessController for RejectWriteController {
+    fn probe(&mut self) -> Result<Capabilities, ControlError> {
+        Ok(caps())
+    }
+    fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+        Ok(FeatureRange {
+            current: self.fixed,
+            max: 100,
+        })
+    }
+    fn set(&mut self, _feature: Feature, _value: u16) -> Result<(), ControlError> {
+        Err(ControlError::Unsupported)
+    }
+}
+
+/// Wait for a `DisplaysChanged` whose snapshot for `id` has the given kind.
+fn wait_kind(
+    notes: &Receiver<EngineNotification>,
+    id: &StableDisplayId,
+    kind: DisplayKind,
+    dur: Duration,
+) -> bool {
+    wait_note(notes, dur, |n| {
+        matches!(
+            n,
+            EngineNotification::DisplaysChanged(snaps)
+                if snaps.iter().any(|s| s.id == *id && s.kind == kind)
+        )
+    })
+}
+
+#[test]
+fn probe_without_hardware_range_downgrades_to_software_only() {
+    // BUG 3 core: a controller that probes `hardware_range: false` must downgrade
+    // the display to SoftwareOnly — driven by the PROBE alone, before (and without)
+    // any dead hardware brightness write.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let sets = Arc::new(Mutex::new(0usize));
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    let factory: duja_app::ControllerFactory = {
+        let sets = sets.clone();
+        Box::new(move |_id| {
+            let sets = sets.clone();
+            Box::new(move || {
+                Some(Box::new(ProbeController {
+                    hardware_range: false,
+                    sets: sets.clone(),
+                }) as Box<dyn BrightnessController>)
+            }) as duja_app::ControllerOpener
+        })
+    };
+    let (engine, notes) = Engine::spawn(
+        EngineConfig::default(),
+        enumerator(state, calls_tx),
+        factory,
+        platform_rx,
+    );
+
+    assert!(
+        wait_kind(
+            &notes,
+            &id,
+            DisplayKind::SoftwareOnly,
+            Duration::from_secs(3)
+        ),
+        "a probe reporting no hardware range must downgrade the display to SoftwareOnly"
+    );
+    assert_eq!(
+        *sets.lock().unwrap(),
+        0,
+        "the downgrade must be probe-driven — no dead hardware write is required"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn ack_but_silent_noop_write_downgrades_to_software_only() {
+    // Detection b: a controller that probes hardware-backed and ACKs writes, but
+    // whose read-back never moves, must be downgraded after its first effective
+    // brightness write's read-back proves the panel did not move.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    // `get` is pinned at 60, distinct from DEFAULT_USER_LEVEL_PCT (50), so the
+    // learned-level notification below is unambiguous.
+    let factory: duja_app::ControllerFactory = Box::new(|_id| {
+        Box::new(
+            || Some(Box::new(AckNoopController { fixed: 60 }) as Box<dyn BrightnessController>),
+        ) as duja_app::ControllerOpener
+    });
+    let (engine, notes) = Engine::spawn(
+        EngineConfig::default(),
+        enumerator(state, calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // Wait until the initial Get has been learned (60), so the worker knows the
+    // pre-write value and the next write is an unambiguous, meaningful change.
+    assert!(
+        wait_note(&notes, Duration::from_secs(3), |n| matches!(
+            n,
+            EngineNotification::DisplaysChanged(s)
+                if s.first().map(|d| d.user_level_pct) == Some(60)
+        )),
+        "engine must learn the initial level 60"
+    );
+
+    // Drive a distinctly different level; the write ACKs but the panel never moves.
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 20,
+    })
+    .unwrap();
+
+    assert!(
+        wait_kind(
+            &notes,
+            &id,
+            DisplayKind::SoftwareOnly,
+            Duration::from_secs(3)
+        ),
+        "an ACK-but-no-op first write must downgrade the display to SoftwareOnly"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn slow_but_working_controller_is_not_falsely_downgraded() {
+    // BLOCKER-1 guard (the one that must bite a naive single-read): a working panel
+    // that reflects a write LATE — the first read-back still shows the old value,
+    // a later one shows the new value — must NOT be downgraded. Detection (b)
+    // retries the read-back, so it observes the movement; a single un-retried read
+    // would misread "slow" as "dead" and permanently force software-only.
+    //
+    // `stale_reads = 1`: the first read-back after the write is stale, the second
+    // is fresh — inside the retry budget, outside a single read.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    let factory: duja_app::ControllerFactory = Box::new(|_id| {
+        Box::new(|| {
+            Some(Box::new(LateReflectController::new(60, 1)) as Box<dyn BrightnessController>)
+        }) as duja_app::ControllerOpener
+    });
+    let (engine, notes) = Engine::spawn(
+        EngineConfig::default(),
+        enumerator(state, calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // Learn the initial level (60), then drive a real, meaningful change.
+    assert!(
+        wait_note(&notes, Duration::from_secs(3), |n| matches!(
+            n,
+            EngineNotification::DisplaysChanged(s)
+                if s.first().map(|d| d.user_level_pct) == Some(60)
+        )),
+        "engine must learn the initial level 60"
+    );
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 20,
+    })
+    .unwrap();
+
+    assert!(
+        !wait_kind(
+            &notes,
+            &id,
+            DisplayKind::SoftwareOnly,
+            Duration::from_secs(1)
+        ),
+        "a slow-but-working controller must never be downgraded (BLOCKER-1 false-downgrade guard)"
+    );
+    let snaps = snapshot(&cmds);
+    assert!(
+        snaps
+            .iter()
+            .any(|s| s.id == id && s.kind == DisplayKind::ExternalDdc),
+        "a slow-but-working controller must stay hardware-backed (ExternalDdc)"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn wrongly_forced_display_self_heals_to_hardware() {
+    // MAJOR-2 self-heal: a working-but-very-slow panel that detection (b) mistakes
+    // for dead (stale across ALL retries) must recover once a later poll read shows
+    // the hardware has actually MOVED to the value Duja wrote — proving it live. It
+    // must return to ExternalDdc without an app restart.
+    //
+    // `stale_reads = 6` outlasts detection (b)'s retries (so it IS wrongly forced),
+    // then reflects during polling (so it self-heals).
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    let factory: duja_app::ControllerFactory = Box::new(|_id| {
+        Box::new(|| {
+            Some(Box::new(LateReflectController::new(60, 6)) as Box<dyn BrightnessController>)
+        }) as duja_app::ControllerOpener
+    });
+    let (engine, notes) = Engine::spawn(
+        fast_poll_cfg(),
+        enumerator(state, calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // Learn 60, then a meaningful write the panel is too slow to reflect within the
+    // retries ⇒ wrongly forced software-only.
+    assert!(
+        wait_note(&notes, Duration::from_secs(3), |n| matches!(
+            n,
+            EngineNotification::DisplaysChanged(s)
+                if s.first().map(|d| d.user_level_pct) == Some(60)
+        )),
+        "engine must learn the initial level 60"
+    );
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 20,
+    })
+    .unwrap();
+    assert!(
+        wait_kind(
+            &notes,
+            &id,
+            DisplayKind::SoftwareOnly,
+            Duration::from_secs(3)
+        ),
+        "the very slow panel should first be (wrongly) forced software-only"
+    );
+
+    // Enable polling: a later poll reads the now-reflected value (20), which both
+    // matches what Duja wrote AND differs from the prior reading (60) ⇒ moved ⇒
+    // self-heal back to the real hardware kind.
+    cmds.send(EngineCommand::SetLevelPolling { on: true })
+        .unwrap();
+    assert!(
+        wait_kind(
+            &notes,
+            &id,
+            DisplayKind::ExternalDdc,
+            Duration::from_secs(5)
+        ),
+        "a wrongly-forced display must self-heal to ExternalDdc once proven live"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn rejected_first_write_downgrades_to_software_only() {
+    // Detection c (debt #48): a first brightness write the backend REJECTS
+    // (`Ok(Err(Unsupported))`) is no longer swallowed as a clean Set — it is a
+    // no-hardware signal that downgrades the display to SoftwareOnly.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    let factory: duja_app::ControllerFactory = Box::new(|_id| {
+        Box::new(|| {
+            Some(Box::new(RejectWriteController { fixed: 60 }) as Box<dyn BrightnessController>)
+        }) as duja_app::ControllerOpener
+    });
+    let (engine, notes) = Engine::spawn(
+        EngineConfig::default(),
+        enumerator(state, calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    assert!(
+        wait_note(&notes, Duration::from_secs(3), |n| matches!(
+            n,
+            EngineNotification::DisplaysChanged(s)
+                if s.first().map(|d| d.user_level_pct) == Some(60)
+        )),
+        "engine must learn the initial level 60"
+    );
+
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 20,
+    })
+    .unwrap();
+
+    assert!(
+        wait_kind(
+            &notes,
+            &id,
+            DisplayKind::SoftwareOnly,
+            Duration::from_secs(3)
+        ),
+        "a rejected first brightness write must downgrade the display to SoftwareOnly"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn stale_software_fallback_does_not_downgrade_fresh_worker() {
+    // Generation match (false-downgrade guard): a SoftwareFallback from a worker
+    // that was already replaced must be IGNORED, so it cannot downgrade the fresh,
+    // healthy worker that took its place. Worker A blocks in `probe` (reporting no
+    // hardware range); it is retired and replaced by a healthy worker B; only then
+    // is A's probe released, emitting a STALE fallback.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (writes_tx, writes_rx) = unbounded();
+    let (probe_entered_tx, probe_entered_rx) = unbounded::<()>();
+    let (release_tx, release_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    let call = Arc::new(Mutex::new(0u32));
+    let factory: duja_app::ControllerFactory = {
+        let writes_tx = writes_tx.clone();
+        Box::new(move |_id| {
+            let n = {
+                let mut c = call.lock().unwrap();
+                *c += 1;
+                *c
+            };
+            let writes_tx = writes_tx.clone();
+            let probe_entered_tx = probe_entered_tx.clone();
+            let release_rx = release_rx.clone();
+            Box::new(move || {
+                if n == 1 {
+                    Some(Box::new(GatedProbe {
+                        entered: probe_entered_tx.clone(),
+                        release: release_rx.clone(),
+                        hardware_range: false,
+                    }) as Box<dyn BrightnessController>)
+                } else {
+                    Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
+                }
+            }) as duja_app::ControllerOpener
+        })
+    };
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(10),
+        watchdog_timeout: Duration::from_secs(30),
+        displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
+    };
+    let (engine, notes) = Engine::spawn(
+        cfg,
+        enumerator(state.clone(), calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // Worker A is wedged inside its probe (generation 1).
+    probe_entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker A should enter its probe");
+
+    // Unplug + replug: A is retired and healthy worker B (generation 2) spawns.
+    *state.lock().unwrap() = Vec::new();
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+    assert!(snapshot(&cmds).is_empty(), "display should be gone");
+    *state.lock().unwrap() = vec![discovered(&id)];
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+
+    // B is live: a user write flows through it.
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 33,
+    })
+    .unwrap();
+    let (_c, seen) = drain_writes(&writes_rx, |f, v| f == Feature::Brightness && v == 33);
+    assert!(
+        seen.contains(&(Feature::Brightness, 33)),
+        "worker B should be the live worker"
+    );
+
+    // Release A: it finishes its probe and emits a STALE SoftwareFallback (gen 1).
+    release_tx.send(()).unwrap();
+
+    // The stale fallback must NOT downgrade the healthy display.
+    assert!(
+        !wait_kind(
+            &notes,
+            &id,
+            DisplayKind::SoftwareOnly,
+            Duration::from_millis(700)
+        ),
+        "a stale SoftwareFallback must not downgrade the fresh worker's display"
+    );
+    let snaps = snapshot(&cmds);
+    assert!(
+        snaps
+            .iter()
+            .any(|s| s.id == id && s.kind == DisplayKind::ExternalDdc),
+        "the display must remain hardware-backed after a stale fallback"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+/// A controller that announces it entered `probe`, blocks until released, then
+/// reports a configurable `hardware_range` — so a test can hold a probe in flight,
+/// force a respawn, and prove the stale fallback is ignored (generation match).
+#[derive(Debug)]
+struct GatedProbe {
+    entered: Sender<()>,
+    release: Receiver<()>,
+    hardware_range: bool,
+}
+
+impl BrightnessController for GatedProbe {
+    fn probe(&mut self) -> Result<Capabilities, ControlError> {
+        let _ = self.entered.send(());
+        let _ = self.release.recv();
+        Ok(caps_hw(self.hardware_range))
+    }
+    fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+        Ok(FeatureRange {
+            current: 50,
+            max: 100,
+        })
+    }
+    fn set(&mut self, _feature: Feature, _value: u16) -> Result<(), ControlError> {
+        Ok(())
+    }
+}
