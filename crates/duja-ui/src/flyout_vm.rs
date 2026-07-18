@@ -313,6 +313,11 @@ impl FlyoutVm {
     ///
     /// Tracked independently of [`set_displays`](Self::set_displays) so the
     /// greyed state survives snapshot refreshes. A no-op if no row matches.
+    ///
+    /// Membership note: reviving a row (`false`) does not re-enrol it into an
+    /// active "Link all" group until it is next dragged (re-enrolling at offset 0)
+    /// or the next `set_displays` runs, so a just-revived row can briefly stay put
+    /// while a *different* linked row is dragged — acceptable, documented behavior.
     pub fn set_unresponsive(&mut self, id: &StableDisplayId, unresponsive: bool) {
         if unresponsive {
             self.unresponsive.insert(id.clone());
@@ -344,18 +349,21 @@ impl FlyoutVm {
     /// touched row is updated and emitted.
     pub fn slider_changed(&mut self, row_index: usize, pct: u8) -> Vec<UiCommand> {
         let pct = pct.min(100);
-        let touchable = matches!(self.rows.get(row_index), Some(row) if !row.greyed);
-        if !touchable {
+        // A greyed row (or an out-of-range index) changes nothing and emits an
+        // empty vector. Capturing the id in the same guard gives the link branch an
+        // owned id (so no borrow of `rows` is held across the mutations below) at
+        // the same one-clone cost the unlinked branch already paid.
+        let Some(dragged_id) = self
+            .rows
+            .get(row_index)
+            .filter(|row| !row.greyed)
+            .map(|row| row.id.clone())
+        else {
             return Vec::new();
-        }
+        };
 
         let mut commands = Vec::new();
         if self.link_all {
-            // `touchable` guarantees the row exists and is non-greyed; take an owned
-            // id so the immutable borrow ends before we mutate rows below.
-            let Some(dragged_id) = self.rows.get(row_index).map(|r| r.id.clone()) else {
-                return commands;
-            };
             // Membership drift: a dragged row absent from the group (greyed when
             // link engaged and later revived, or an unenrolled hot-plug) joins at
             // offset 0 so its own slider is never frozen.
@@ -385,7 +393,7 @@ impl FlyoutVm {
         } else if let Some(row) = self.rows.get_mut(row_index) {
             row.level_pct = pct;
             commands.push(UiCommand::SetLevel {
-                id: row.id.clone(),
+                id: dragged_id,
                 pct,
             });
         }
@@ -757,6 +765,33 @@ mod tests {
             }]
         );
         // The greyed row keeps its old level and emits nothing.
+        assert_eq!(vm.rows().get(1).map(|r| r.level_pct), Some(50));
+    }
+
+    #[test]
+    fn link_all_suppresses_setlevel_for_row_greyed_after_link() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![
+            snap("A", "Left", 40, DisplayKind::ExternalDdc),
+            snap("B", "Right", 50, DisplayKind::ExternalDdc),
+        ]);
+        // Both non-greyed at link time, so B *joins* the group (A anchor offset 0,
+        // B offset +10) — unlike a row greyed before link, which never joins.
+        vm.link_toggled(true);
+        // B goes unresponsive AFTER the link engaged: it is still a group member,
+        // so fan_out yields a target for it, but the fan-out loop must skip it.
+        vm.set_unresponsive(&id_of("B"), true);
+        // Drag a *different* (non-greyed) row, A, to 30.
+        let cmds = vm.slider_changed(0, 30);
+        // Only A is commanded; the now-greyed member B emits no SetLevel...
+        assert_eq!(
+            cmds,
+            vec![UiCommand::SetLevel {
+                id: id_of("A"),
+                pct: 30,
+            }]
+        );
+        // ...and keeps its pre-grey level (fan_out would have put it at 40).
         assert_eq!(vm.rows().get(1).map(|r| r.level_pct), Some(50));
     }
 
