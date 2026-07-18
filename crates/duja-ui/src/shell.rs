@@ -111,7 +111,9 @@ impl FlyoutShell {
     /// Pure copy-out: rows, the link-all flag, the empty-state flag, and the
     /// theme. Call after any external mutation of the shared view-model.
     pub fn update_from_vm(&self, vm: &FlyoutVm) {
-        render_into(&self.ui, &self.rows, vm);
+        // External reflection (or any app-driven refresh): keep the resting glide
+        // so a monitor's own buttons still glide the thumb (never a link fan-out).
+        render_into(&self.ui, &self.rows, vm, false);
     }
 
     /// Register the command handler and wire every widget event to the shared
@@ -134,7 +136,12 @@ impl FlyoutShell {
                 let index = usize::try_from(idx).unwrap_or(usize::MAX);
                 let commands = vm.borrow_mut().slider_changed(index, clamp_pct(pct));
                 if let Some(ui) = weak.upgrade() {
-                    render_into(&ui, &rows, &vm.borrow());
+                    // A drag while "Link all" is on fans the master value out to
+                    // the other linked rows; those passive sliders must snap, not
+                    // glide (BUG 5). A lone drag renders with the glide untouched
+                    // (the dragged slider is already instant; nothing else moves).
+                    let vm = vm.borrow();
+                    render_into(&ui, &rows, &vm, vm.link_all());
                 }
                 let mut handler = handler.borrow_mut();
                 for command in commands {
@@ -153,7 +160,7 @@ impl FlyoutShell {
                 let index = usize::try_from(idx).unwrap_or(usize::MAX);
                 let command = vm.borrow_mut().toggle_dimming(index, on);
                 if let Some(ui) = weak.upgrade() {
-                    render_into(&ui, &rows, &vm.borrow());
+                    render_into(&ui, &rows, &vm.borrow(), false);
                 }
                 if let Some(command) = command {
                     (handler.borrow_mut())(command);
@@ -172,7 +179,7 @@ impl FlyoutShell {
             self.ui.on_link_toggled(move |on| {
                 vm.borrow_mut().link_toggled(on);
                 if let Some(ui) = weak.upgrade() {
-                    render_into(&ui, &rows, &vm.borrow());
+                    render_into(&ui, &rows, &vm.borrow(), false);
                 }
             });
         }
@@ -355,13 +362,40 @@ pub(crate) fn to_slint(rgba: crate::accent::Rgba) -> slint::Color {
     slint::Color::from_argb_u8(a, r, g, b)
 }
 
+/// The glide (ms) the *passive* sliders should use for one render.
+///
+/// A live "Link all" fan-out (`link_originated`) must land on the other linked
+/// sliders instantly — they track the dragged slider, so the premium glide reads
+/// as lag (BUG 5). Every other render keeps `base_glide_ms`, the external-change
+/// glide the app arms from the OS animation setting (already 0 under reduced
+/// motion / a hidden window). Mirrors the app's `motion::glide_for`: a small,
+/// pure motion-policy decision, unit-tested in isolation.
+fn sync_glide_ms(base_glide_ms: i32, link_originated: bool) -> i32 {
+    if link_originated { 0 } else { base_glide_ms }
+}
+
 /// Copy the view-model's state into the Slint component's properties.
-fn render_into(ui: &FlyoutWindow, rows: &VecModel<FlyoutRowData>, vm: &FlyoutVm) {
+///
+/// `link_originated` is true only when this render is a live "Link all" fan-out
+/// (the shell's `slider-changed` handler while linked): the *passive* linked
+/// sliders must then snap to their new value instantly, so the external-change
+/// glide does not read as lag (BUG 5). Every other render — notably an external
+/// reflection driven by [`FlyoutShell::update_from_vm`] — passes `false` and
+/// keeps the resting glide.
+fn render_into(
+    ui: &FlyoutWindow,
+    rows: &VecModel<FlyoutRowData>,
+    vm: &FlyoutVm,
+    link_originated: bool,
+) {
     let data: Vec<FlyoutRowData> = vm.rows().iter().map(row_to_data).collect();
     // Diff the rows model in place (never `set_vec`, which resets the repeater
     // and destroys the element a user is mid-drag on — P0 live-QA bug 3).
     crate::model_sync::sync(rows, data);
     ui.set_link_all(vm.link_all());
+    // Suppress the passive-slider glide for a link fan-out; keep it otherwise
+    // (`sync_glide_ms` is the pure policy; 0 ⇒ the passive sliders jump).
+    ui.set_instant_sync(sync_glide_ms(ui.get_glide_ms(), link_originated) == 0);
     ui.set_no_displays(vm.no_displays());
     let dark = matches!(vm.theme(), Theme::Dark);
     ui.set_dark(dark);
@@ -427,6 +461,16 @@ mod tests {
         assert_eq!(clamp_pct(100.0), 100);
         assert_eq!(clamp_pct(250.0), 100);
         assert_eq!(clamp_pct(f32::NAN), 0);
+    }
+
+    #[test]
+    fn sync_glide_ms_suppresses_only_a_link_fan_out() {
+        // A live "Link all" fan-out lands on the passive sliders instantly (BUG 5).
+        assert_eq!(sync_glide_ms(160, true), 0);
+        // Every other render keeps the resting external-reflection glide.
+        assert_eq!(sync_glide_ms(160, false), 160);
+        // Reduced motion / hidden (base 0) stays 0 regardless of origin.
+        assert_eq!(sync_glide_ms(0, false), 0);
     }
 
     #[test]
@@ -578,6 +622,62 @@ mod binding_tests {
             "VM link-all did not turn back off (the toggle was stuck on)"
         );
         assert_eq!(switch().accessible_checked(), Some(false));
+    }
+
+    // BUG 5: with "Link all" on, dragging one slider made the OTHER linked sliders
+    // glide slowly to their new value (the 160 ms external-reflection "premium"
+    // glide), which reads as lag. The glide must stay for an external reflection
+    // (a monitor's own buttons) but be instant for a live linked fan-out. This
+    // drives the real `.slint` binding through the shell's `slider-changed`
+    // handler: a link-originated render sets the flyout's `instant-sync` (the
+    // passive sliders jump), while an external reflection via `update_from_vm`
+    // leaves it clear (the glide stays) — even with "Link all" still on. Proven
+    // red against a `sync_glide_ms` that ignores the fan-out (the pre-fix
+    // behaviour: the passive glide stayed 160 during a linked drag).
+    #[test]
+    fn linked_slider_fan_out_is_instant_while_external_reflection_glides() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![snapshot("A", 40), snapshot("B", 70)]);
+        vm.link_toggled(true); // "Link all" on: a drag fans out to every row.
+        let vm = Rc::new(RefCell::new(vm));
+        let shell = FlyoutShell::new(vm.clone()).expect("shell instantiates");
+        shell.on_command(|_cmd| {});
+
+        // Arm the resting external-reflection glide, exactly as the app does on
+        // show (its `motion::glide_for` yields 160 ms when motion is allowed).
+        shell.set_glide_ms(160);
+
+        // Baseline: an external render keeps the glide (instant-sync clear), so the
+        // fan-out below is demonstrably what flips it.
+        shell.update_from_vm(&vm.borrow());
+        assert!(
+            !shell.ui.get_instant_sync(),
+            "baseline: an external render must keep the premium glide"
+        );
+
+        // A live linked drag on row A fans the master value out to row B; the
+        // passive slider (B) must snap, so instant-sync goes true.
+        shell.ui.invoke_slider_changed(0, 55.0);
+        assert!(
+            shell.ui.get_instant_sync(),
+            "a link-all fan-out must suppress the passive-slider glide (BUG 5)"
+        );
+
+        // An external reflection (a monitor's own buttons) on the SAME rows must
+        // restore the premium glide — instant-sync clears even though link is on.
+        vm.borrow_mut()
+            .set_displays(vec![snapshot("A", 42), snapshot("B", 70)]);
+        shell.update_from_vm(&vm.borrow());
+        assert!(
+            vm.borrow().link_all(),
+            "guard: the external reflection kept 'Link all' on"
+        );
+        assert!(
+            !shell.ui.get_instant_sync(),
+            "an external reflection must keep the glide even with 'Link all' on"
+        );
     }
 
     // Item 2: the per-row "Software dimming" toggle moved from its own row *under*

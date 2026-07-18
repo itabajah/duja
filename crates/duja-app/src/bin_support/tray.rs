@@ -779,6 +779,12 @@ impl AppState {
     /// Handle a UI command emitted by the flyout view-model.
     fn on_ui_command(&mut self, command: UiCommand) {
         match command {
+            // NB: unlike the other arms, SetLevel deliberately does NOT re-render
+            // the flyout. The render for a slider change is owned by the shell's
+            // `slider-changed` handler, which sets `instant-sync` for a link-all
+            // fan-out so the passive linked sliders snap instead of gliding (BUG 5);
+            // re-rendering here would clear that flag before the frame paints. See
+            // `set_user_level`.
             UiCommand::SetLevel { id, pct } => self.set_user_level(&id, pct),
             UiCommand::Refresh => {
                 let _ = self.engine_tx.send(EngineCommand::RefreshNow);
@@ -1206,6 +1212,14 @@ impl AppState {
         }
         self.apply_overlays();
         let _ = self.state.maybe_flush(now);
+        // Do NOT `self.render()` here. The flyout render for a slider change is
+        // owned by the shell's `slider-changed` handler (duja-ui), which sets
+        // `instant-sync` for a link-all fan-out so the passive linked sliders snap
+        // to their new value instead of gliding (BUG 5). A render here calls
+        // `update_from_vm` -> `render_into(link_originated = false)`, which clears
+        // `instant-sync` before the fan-out frame paints, so the linked sliders
+        // would re-gain the 160 ms glide — and with every test still green (the
+        // shell smoke test drives a no-op command handler and cannot see this path).
     }
 
     /// Handle an engine notification (runs on the Slint thread).
