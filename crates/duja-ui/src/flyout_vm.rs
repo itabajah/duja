@@ -40,9 +40,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use duja_core::continuum::{self, ContinuumConfig, SliderGeometry};
 use duja_core::id::StableDisplayId;
 use duja_core::model::{DimMode, DisplayKind, DisplaySnapshot};
+use duja_core::sync::SyncGroups;
 
 use crate::accent::AccentChoice;
 use crate::command::UiCommand;
+
+/// The single group name the flyout's "Link all" toggle uses in its
+/// [`SyncGroups`]. Every linked (non-greyed) row is a member of this one group.
+const LINK_GROUP: &str = "link";
 
 /// Which palette the flyout renders in.
 ///
@@ -169,6 +174,12 @@ pub struct FlyoutVm {
     /// as [`unresponsive`](Self::unresponsive).
     dimming: BTreeMap<StableDisplayId, DimmingInfo>,
     link_all: bool,
+    /// Session-only offset engine backing "Link all". While linked, every
+    /// non-greyed row is a member of the one [`LINK_GROUP`] with its offset from
+    /// the anchor; a drag fans a master value out to the members, preserving the
+    /// per-monitor gaps. Rebuilt on [`link_toggled`](Self::link_toggled) and never
+    /// persisted — the config `sync_group`/`sync_offset` schema is untouched.
+    link_group: SyncGroups,
     theme: Theme,
     /// The accent the palette is painted in. The shell resolves it against
     /// [`theme`](Self::theme) on every render, so a *theme* change automatically
@@ -191,6 +202,7 @@ impl FlyoutVm {
             unresponsive: BTreeSet::new(),
             dimming: BTreeMap::new(),
             link_all: false,
+            link_group: SyncGroups::new(),
             theme: Theme::default(),
             accent: AccentChoice::default(),
         }
@@ -228,6 +240,18 @@ impl FlyoutVm {
             rows.push(self.build_row(snap));
         }
         self.rows = rows;
+        // While linked, enrol any genuinely-new (hot-plugged) non-greyed row into
+        // the link group at offset 0 so it moves with the group instead of sitting
+        // frozen. Displays present at link time are already members and keep their
+        // recorded offset; offset 0 for a newcomer is a deliberate minimal choice
+        // (it tracks the anchor rather than trying to reconstruct a gap).
+        if self.link_all {
+            for row in &self.rows {
+                if !row.greyed && self.link_group.offset_of(&row.id).is_none() {
+                    self.link_group.add(LINK_GROUP, row.id.clone(), 0);
+                }
+            }
+        }
     }
 
     /// Build one presentation row from a snapshot, applying the independently
@@ -289,6 +313,11 @@ impl FlyoutVm {
     ///
     /// Tracked independently of [`set_displays`](Self::set_displays) so the
     /// greyed state survives snapshot refreshes. A no-op if no row matches.
+    ///
+    /// Membership note: reviving a row (`false`) does not re-enrol it into an
+    /// active "Link all" group until it is next dragged (re-enrolling at offset 0)
+    /// or the next `set_displays` runs, so a just-revived row can briefly stay put
+    /// while a *different* linked row is dragged — acceptable, documented behavior.
     pub fn set_unresponsive(&mut self, id: &StableDisplayId, unresponsive: bool) {
         if unresponsive {
             self.unresponsive.insert(id.clone());
@@ -307,33 +336,64 @@ impl FlyoutVm {
     /// `0..=100`), returning the resulting commands.
     ///
     /// A greyed row (or an out-of-range index) changes nothing and emits an
-    /// empty vector. When link-all is on, the same absolute percent is applied
-    /// to *every* non-greyed row and one [`UiCommand::SetLevel`] is emitted per
-    /// such row (P4 uses absolute, not relative, linking). Otherwise only the
+    /// empty vector. When link-all is on, the dragged slider sets the group's
+    /// *master* and every non-greyed member is re-derived as
+    /// `clamp(master + offset, 0, 100)`, preserving the per-monitor gaps captured
+    /// when the link engaged (see [`link_toggled`](Self::link_toggled)); one
+    /// [`UiCommand::SetLevel`] is emitted per moved member. Because each member is
+    /// derived from the master and its own offset — never its previous value —
+    /// pushing the group to a bound and back is drift-free: gaps saturate at 0/100
+    /// and reopen exactly. A member pinned at a bound can make the dragged slider
+    /// *saturate* before it reaches the pointer; that is margin preservation, not a
+    /// bug. Greyed members emit nothing and keep their value. Otherwise only the
     /// touched row is updated and emitted.
     pub fn slider_changed(&mut self, row_index: usize, pct: u8) -> Vec<UiCommand> {
         let pct = pct.min(100);
-        let touchable = matches!(self.rows.get(row_index), Some(row) if !row.greyed);
-        if !touchable {
+        // A greyed row (or an out-of-range index) changes nothing and emits an
+        // empty vector. Capturing the id in the same guard gives the link branch an
+        // owned id (so no borrow of `rows` is held across the mutations below) at
+        // the same one-clone cost the unlinked branch already paid.
+        let Some(dragged_id) = self
+            .rows
+            .get(row_index)
+            .filter(|row| !row.greyed)
+            .map(|row| row.id.clone())
+        else {
             return Vec::new();
-        }
+        };
 
         let mut commands = Vec::new();
         if self.link_all {
-            for row in &mut self.rows {
-                if row.greyed {
-                    continue;
+            // Membership drift: a dragged row absent from the group (greyed when
+            // link engaged and later revived, or an unenrolled hot-plug) joins at
+            // offset 0 so its own slider is never frozen.
+            let offset = if let Some(off) = self.link_group.offset_of(&dragged_id) {
+                off
+            } else {
+                self.link_group.add(LINK_GROUP, dragged_id, 0);
+                0
+            };
+            // Recover the master the dragged slider implies, then fan it out. The
+            // saturating clamp is what yields margin preservation at the bounds.
+            let master = i16::from(pct)
+                .checked_sub(i16::from(offset))
+                .unwrap_or(0)
+                .clamp(0, 100);
+            let master = u8::try_from(master).unwrap_or(0);
+            for (id, target) in self.link_group.fan_out(LINK_GROUP, master) {
+                // A member greyed after link engaged emits nothing / keeps its value.
+                if let Some(row) = self.rows.iter_mut().find(|r| r.id == id) {
+                    if row.greyed {
+                        continue;
+                    }
+                    row.level_pct = target;
+                    commands.push(UiCommand::SetLevel { id, pct: target });
                 }
-                row.level_pct = pct;
-                commands.push(UiCommand::SetLevel {
-                    id: row.id.clone(),
-                    pct,
-                });
             }
         } else if let Some(row) = self.rows.get_mut(row_index) {
             row.level_pct = pct;
             commands.push(UiCommand::SetLevel {
-                id: row.id.clone(),
+                id: dragged_id,
                 pct,
             });
         }
@@ -357,9 +417,38 @@ impl FlyoutVm {
         }
     }
 
-    /// Set the link-all toggle. Pure presentation state; emits no command.
+    /// Set the link-all toggle, (re)building the offset group. Pure presentation
+    /// state; emits no command.
+    ///
+    /// Turning link **on** snapshots the current gaps: the **first non-greyed row**
+    /// is the anchor (offset 0) and every other non-greyed row joins the group at
+    /// `its level − anchor level`. From then on a drag fans a
+    /// master out to those offsets (see [`slider_changed`](Self::slider_changed)),
+    /// so the gaps present at this instant are what is preserved. Turning link
+    /// **off** clears the group. Greyed rows are excluded; if one is later revived
+    /// and dragged it re-enrols at offset 0.
     pub fn link_toggled(&mut self, on: bool) {
         self.link_all = on;
+        self.link_group = SyncGroups::new();
+        if on {
+            let anchor_level = self.rows.iter().find(|r| !r.greyed).map(|r| r.level_pct);
+            if let Some(anchor_level) = anchor_level {
+                for row in &self.rows {
+                    if row.greyed {
+                        continue;
+                    }
+                    // level_pct and anchor_level are 0..=100, so the difference is
+                    // -100..=100 and fits an i8; the total-arithmetic forms keep the
+                    // lint wall happy and the fallbacks are unreachable.
+                    let offset = i16::from(row.level_pct)
+                        .checked_sub(i16::from(anchor_level))
+                        .unwrap_or(0)
+                        .clamp(-100, 100);
+                    let offset = i8::try_from(offset).unwrap_or(0);
+                    self.link_group.add(LINK_GROUP, row.id.clone(), offset);
+                }
+            }
+        }
     }
 
     /// The command for the refresh affordance (re-enumerate now).
@@ -596,34 +685,66 @@ mod tests {
     }
 
     #[test]
-    fn link_all_fans_out_to_every_non_greyed_row() {
+    fn link_all_preserves_offsets() {
         let mut vm = FlyoutVm::new();
+        // A=80 (anchor), B=50, C=60: B trails the anchor by 30, C by 20.
         vm.set_displays(vec![
-            snap("A", "Left", 40, DisplayKind::ExternalDdc),
+            snap("A", "Left", 80, DisplayKind::ExternalDdc),
             snap("B", "Right", 50, DisplayKind::ExternalDdc),
             snap("C", "Third", 60, DisplayKind::ExternalDdc),
         ]);
         vm.link_toggled(true);
-        let cmds = vm.slider_changed(1, 33);
+        // Drag the *non-anchor* B down 10 (50 → 40). The whole group slides down
+        // 10 in lock-step, keeping every gap — it does NOT snap all rows to 40.
+        let cmds = vm.slider_changed(1, 40);
         assert_eq!(
             cmds,
             vec![
                 UiCommand::SetLevel {
                     id: id_of("A"),
-                    pct: 33,
+                    pct: 70,
                 },
                 UiCommand::SetLevel {
                     id: id_of("B"),
-                    pct: 33,
+                    pct: 40,
                 },
                 UiCommand::SetLevel {
                     id: id_of("C"),
-                    pct: 33,
+                    pct: 50,
                 },
             ]
         );
-        // Every row now shows the same absolute level.
-        assert!(vm.rows().iter().all(|r| r.level_pct == 33));
+        // 80/50/60 all shifted down by 10 → 70/40/50; the 30- and 20-point gaps
+        // that existed before the drag are intact.
+        let levels: Vec<u8> = vm.rows().iter().map(|r| r.level_pct).collect();
+        assert_eq!(levels, vec![70, 40, 50]);
+    }
+
+    #[test]
+    fn link_all_offsets_saturate_and_reopen_without_drift() {
+        let mut vm = FlyoutVm::new();
+        // A=50 (anchor), B=80 (+30), C=60 (+10) — two members ABOVE the anchor.
+        vm.set_displays(vec![
+            snap("A", "Left", 50, DisplayKind::ExternalDdc),
+            snap("B", "Right", 80, DisplayKind::ExternalDdc),
+            snap("C", "Third", 60, DisplayKind::ExternalDdc),
+        ]);
+        vm.link_toggled(true);
+        // Push the anchor to the top: B (+30) and C (+10) both saturate at 100.
+        vm.slider_changed(0, 100);
+        let saturated: Vec<u8> = vm.rows().iter().map(|r| r.level_pct).collect();
+        assert_eq!(
+            saturated,
+            vec![100, 100, 100],
+            "members clamp at the 100 bound"
+        );
+        // Bring the anchor back down: every original gap reopens *exactly* — the
+        // saturated members carry no residue (fan_out re-derives from master +
+        // offset, never the clamped previous value). Mirrors sync.rs's
+        // `offset_clamps_at_bounds_without_drift`.
+        vm.slider_changed(0, 50);
+        let restored: Vec<u8> = vm.rows().iter().map(|r| r.level_pct).collect();
+        assert_eq!(restored, vec![50, 80, 60], "gaps restored with zero drift");
     }
 
     #[test]
@@ -645,6 +766,114 @@ mod tests {
         );
         // The greyed row keeps its old level and emits nothing.
         assert_eq!(vm.rows().get(1).map(|r| r.level_pct), Some(50));
+    }
+
+    #[test]
+    fn link_all_suppresses_setlevel_for_row_greyed_after_link() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![
+            snap("A", "Left", 40, DisplayKind::ExternalDdc),
+            snap("B", "Right", 50, DisplayKind::ExternalDdc),
+        ]);
+        // Both non-greyed at link time, so B *joins* the group (A anchor offset 0,
+        // B offset +10) — unlike a row greyed before link, which never joins.
+        vm.link_toggled(true);
+        // B goes unresponsive AFTER the link engaged: it is still a group member,
+        // so fan_out yields a target for it, but the fan-out loop must skip it.
+        vm.set_unresponsive(&id_of("B"), true);
+        // Drag a *different* (non-greyed) row, A, to 30.
+        let cmds = vm.slider_changed(0, 30);
+        // Only A is commanded; the now-greyed member B emits no SetLevel...
+        assert_eq!(
+            cmds,
+            vec![UiCommand::SetLevel {
+                id: id_of("A"),
+                pct: 30,
+            }]
+        );
+        // ...and keeps its pre-grey level (fan_out would have put it at 40).
+        assert_eq!(vm.rows().get(1).map(|r| r.level_pct), Some(50));
+    }
+
+    #[test]
+    fn link_all_dragged_row_absent_from_group_joins_at_offset_zero() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![
+            snap("A", "Left", 80, DisplayKind::ExternalDdc),
+            snap("B", "Right", 50, DisplayKind::ExternalDdc),
+            snap("C", "Third", 60, DisplayKind::ExternalDdc),
+        ]);
+        // B is greyed when link engages, so only the anchor A and C join the
+        // group (A offset 0, C offset -20). B is left out entirely.
+        vm.set_unresponsive(&id_of("B"), true);
+        vm.link_toggled(true);
+        // B returns responsive but is still absent from the group —
+        // `set_unresponsive` never touches membership (drift). Dragging B must not
+        // freeze it: it joins at offset 0 (tracking the anchor) while the
+        // established member C keeps its -20 offset. Absolute linking would drag C
+        // to 30 too; offset linking keeps it 20 below → 10.
+        vm.set_unresponsive(&id_of("B"), false);
+        let cmds = vm.slider_changed(1, 30);
+        assert_eq!(
+            cmds,
+            vec![
+                UiCommand::SetLevel {
+                    id: id_of("A"),
+                    pct: 30,
+                },
+                UiCommand::SetLevel {
+                    id: id_of("B"),
+                    pct: 30,
+                },
+                UiCommand::SetLevel {
+                    id: id_of("C"),
+                    pct: 10,
+                },
+            ]
+        );
+        let levels: Vec<u8> = vm.rows().iter().map(|r| r.level_pct).collect();
+        assert_eq!(
+            levels,
+            vec![30, 30, 10],
+            "B never freezes; C keeps its offset"
+        );
+    }
+
+    #[test]
+    fn link_all_hot_plugged_row_joins_the_group() {
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![
+            snap("A", "Left", 80, DisplayKind::ExternalDdc),
+            snap("B", "Right", 60, DisplayKind::ExternalDdc),
+        ]);
+        vm.link_toggled(true); // group: A offset 0, B offset -20
+        // C hot-plugs in while linked; a new non-greyed row enrols at offset 0 so
+        // it moves with the group instead of sitting frozen.
+        vm.set_displays(vec![
+            snap("A", "Left", 80, DisplayKind::ExternalDdc),
+            snap("B", "Right", 60, DisplayKind::ExternalDdc),
+            snap("C", "Third", 45, DisplayKind::ExternalDdc),
+        ]);
+        // Drag the anchor A down to 70: A and B keep their 20-point gap and C
+        // (offset 0) tracks the anchor.
+        let cmds = vm.slider_changed(0, 70);
+        assert_eq!(
+            cmds,
+            vec![
+                UiCommand::SetLevel {
+                    id: id_of("A"),
+                    pct: 70,
+                },
+                UiCommand::SetLevel {
+                    id: id_of("B"),
+                    pct: 50,
+                },
+                UiCommand::SetLevel {
+                    id: id_of("C"),
+                    pct: 70,
+                },
+            ]
+        );
     }
 
     #[test]
