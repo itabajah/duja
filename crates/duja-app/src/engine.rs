@@ -623,6 +623,26 @@ impl EngineState {
                     }
                 }
             }
+            AckOutcome::SoftwareFallback { generation } => {
+                // The worker proved this display has no working hardware brightness.
+                // Act only if the CURRENTLY registered worker is the one that
+                // reported it (generation match, exactly like `OpenFailed`), so a
+                // stale fallback from an already-replaced worker can never downgrade
+                // the fresh, healthy worker that superseded it. Flip the display to
+                // software-only and re-emit its snapshot so the app re-plans with the
+                // full-slider software continuum. `mark_software_only` reports a
+                // change only on the first flip, so this re-emits exactly once and
+                // never loops (a fresh worker re-detecting the same dead panel is a
+                // no-op).
+                if self
+                    .workers
+                    .get(&id)
+                    .is_some_and(|handle| handle.generation == generation)
+                    && self.manager.mark_software_only(&id)
+                {
+                    self.notify_displays_changed();
+                }
+            }
         }
     }
 

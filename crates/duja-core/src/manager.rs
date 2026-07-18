@@ -136,6 +136,11 @@ struct DisplayRecord {
     last_user_level: Option<u8>,
     /// `false` after the watchdog marks the display stuck, until re-sighted.
     responsive: bool,
+    /// Set once [`DisplayManager::mark_software_only`] downgrades this display at
+    /// runtime. While set, an enumeration's metadata refresh preserves the
+    /// [`DisplayKind::SoftwareOnly`] verdict instead of reverting to the platform's
+    /// static hardware classification (which cannot detect dead hardware).
+    software_forced: bool,
 }
 
 /// Pure hot-plug state: diffing, per-display state, and level restore.
@@ -227,6 +232,7 @@ impl DisplayManager {
                             capabilities: display.capabilities,
                             last_user_level: None,
                             responsive: true,
+                            software_forced: false,
                         },
                     );
                     events.push(ManagerEvent::Added { id });
@@ -236,7 +242,15 @@ impl DisplayManager {
                         matches!(record.state, DisplayState::Disconnected { .. });
                     let was_unresponsive = !record.responsive;
                     record.state = DisplayState::Connected { last_seen: now };
-                    record.kind = display.kind;
+                    // Preserve a runtime software-only downgrade: the platform
+                    // enumeration classifies hardware statically and re-advertises a
+                    // dead panel as hardware-backed, which would silently undo the
+                    // downgrade (and resurrect BUG 3) on any hot-plug pass.
+                    record.kind = if record.software_forced {
+                        DisplayKind::SoftwareOnly
+                    } else {
+                        display.kind
+                    };
                     record.name = display.name;
                     record.capabilities = display.capabilities;
                     record.responsive = true;
@@ -295,6 +309,34 @@ impl DisplayManager {
             Some(ManagerEvent::Unresponsive { id: id.clone() })
         } else {
             None
+        }
+    }
+
+    /// Downgrade a known display to [`DisplayKind::SoftwareOnly`] after the
+    /// engine's worker proves at runtime that it has no working hardware
+    /// brightness control (dead DDC / a probe reporting no hardware range).
+    ///
+    /// Returns `true` the first time the kind actually changes, `false` if the
+    /// id is unknown or the display is already software-only (idempotent — the
+    /// engine relies on this to re-emit its snapshot exactly once). The downgrade
+    /// is **sticky**: a later enumeration that re-sights the display refreshes its
+    /// metadata but must not silently revert the kind (the platform enumeration
+    /// classifies hardware statically and cannot know the hardware is dead), so
+    /// the software-only verdict is preserved until the record is forgotten.
+    pub fn mark_software_only(&mut self, id: &StableDisplayId) -> bool {
+        match self.records.get_mut(id) {
+            Some(record) if record.kind != DisplayKind::SoftwareOnly => {
+                record.kind = DisplayKind::SoftwareOnly;
+                record.software_forced = true;
+                true
+            }
+            Some(record) => {
+                // Already software-only: keep the sticky flag set (e.g. a fresh
+                // worker re-detecting the same dead panel) but report no change.
+                record.software_forced = true;
+                false
+            }
+            None => false,
         }
     }
 
@@ -777,6 +819,51 @@ mod tests {
             vec![ManagerEvent::Responsive { id: a() }]
         );
         assert_eq!(m.is_responsive(&a()), Some(true));
+    }
+
+    #[test]
+    fn mark_software_only_flips_kind_once_and_survives_re_enumeration() {
+        let mut m = DisplayManager::new();
+        // Added as an external DDC display.
+        let _ = m.apply_enumeration(vec![disc(&a())], now());
+        assert_eq!(
+            m.snapshots().first().unwrap().kind,
+            DisplayKind::ExternalDdc
+        );
+
+        // Runtime detection downgrades it: the first flip reports a change and the
+        // kind is now software-only.
+        assert!(
+            m.mark_software_only(&a()),
+            "first downgrade must report a change"
+        );
+        assert_eq!(
+            m.snapshots().first().unwrap().kind,
+            DisplayKind::SoftwareOnly
+        );
+
+        // Idempotent: a second downgrade is a no-op.
+        assert!(
+            !m.mark_software_only(&a()),
+            "re-marking an already software-only display must be idempotent"
+        );
+        assert_eq!(
+            m.snapshots().first().unwrap().kind,
+            DisplayKind::SoftwareOnly
+        );
+
+        // Sticky across a silent re-enumeration that re-advertises hardware: the
+        // static platform classification must NOT revert a runtime-proven
+        // software-only display (otherwise BUG 3 returns on the next hot-plug).
+        assert_eq!(m.apply_enumeration(vec![disc(&a())], now()), vec![]);
+        assert_eq!(
+            m.snapshots().first().unwrap().kind,
+            DisplayKind::SoftwareOnly,
+            "a silent re-enumeration must not revert a runtime software-only downgrade"
+        );
+
+        // Unknown id ⇒ no change.
+        assert!(!m.mark_software_only(&b()));
     }
 
     #[test]

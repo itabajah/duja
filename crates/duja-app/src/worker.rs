@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 
-use duja_core::controller::BrightnessController;
+use duja_core::controller::{BrightnessController, ControlError};
 use duja_core::id::StableDisplayId;
 use duja_core::model::Feature;
 
@@ -99,7 +99,15 @@ pub(crate) fn spawn_worker(
             });
             return;
         };
-        worker_loop(&id, controller, min_gap, &cmd_rx, &ack_tx, &worker_retired);
+        worker_loop(
+            &id,
+            controller,
+            min_gap,
+            generation,
+            &cmd_rx,
+            &ack_tx,
+            &worker_retired,
+        );
     });
     WorkerHandle {
         cmd_tx,
@@ -123,10 +131,177 @@ enum Wake {
 /// A queued write awaiting its min-gap: the latest value and its sequence.
 type Pending = (u16, u64);
 
+/// Read-back tolerance (raw units) for the first-write no-op check. Matches the
+/// DDC controller's own verify tolerance so a monitor that passes hardware verify
+/// is never second-guessed here.
+const BRIGHTNESS_VERIFY_TOLERANCE: u16 = 2;
+
+/// One-shot state for detecting a display with **no working hardware brightness**
+/// (BUG 3). A worker downgrades such a display to software-only exactly once, via
+/// the tightest available signal, then stops watching.
+#[derive(Debug, Default)]
+struct Verify {
+    /// Set once the worker has made its one-shot hardware determination — a probe
+    /// with no hardware range, a verified first write, or a rejected first write.
+    /// While set, no further downgrade is emitted (idempotent per worker).
+    settled: bool,
+    /// The most recent brightness value read back, used as the pre-write baseline
+    /// for the first-write verification.
+    last_known_brightness: Option<u16>,
+}
+
+/// Detection (a): probe the controller on open. Emits a single generation-tagged
+/// [`AckOutcome::SoftwareFallback`] and returns `true` (settled) when the probe
+/// reports **no hardware brightness range**. A probe that reports a hardware
+/// range, fails transiently, or panics leaves the worker watching writes as before
+/// (returns `false`). The worker keeps running either way — a downgraded display
+/// still exists and its overlay dims it.
+fn probe_on_open(
+    controller: &mut Box<dyn BrightnessController>,
+    id: &StableDisplayId,
+    generation: u64,
+    ack_tx: &Sender<WorkerAck>,
+) -> bool {
+    // RATIONALE(AssertUnwindSafe): as elsewhere in this module, a caught panic
+    // drops the controller with the worker; the first real op's panic path handles
+    // a genuinely broken controller.
+    match catch_unwind(AssertUnwindSafe(|| controller.probe())) {
+        Ok(Ok(caps)) if !caps.hardware_range => {
+            let _ = ack_tx.send(WorkerAck {
+                id: id.clone(),
+                outcome: AckOutcome::SoftwareFallback { generation },
+            });
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Whether a rejected write's error is a positive no-hardware signal, as opposed
+/// to a transient / gone condition that must **not** trigger a downgrade. A lone
+/// [`ControlError::Timeout`] or [`ControlError::Disconnected`] is transient (the
+/// panel may be momentarily busy or unplugging); [`ControlError::Unsupported`] and
+/// an opaque [`ControlError::Backend`] (e.g. a DDC write that never verified) mean
+/// the panel genuinely cannot do brightness.
+fn is_no_hardware_error(err: &ControlError) -> bool {
+    matches!(err, ControlError::Unsupported | ControlError::Backend(_))
+}
+
+/// Whether a first effective write was a **silent no-op**: the read-back neither
+/// reached the target nor moved from the pre-write value. Requiring BOTH (not
+/// merely "did not reach target") keeps the downgrade tight — a panel that moved
+/// but landed off-target, or whose read-back is merely noisy, stays hardware-backed.
+fn is_silent_noop(before: u16, target: u16, after: u16, tol: u16) -> bool {
+    after.abs_diff(target) > tol && after.abs_diff(before) <= tol
+}
+
+/// One-shot no-hardware check on the first *effective* brightness write, run
+/// after the write's ack. Returns `true` when the write proves the display has no
+/// working hardware brightness (the caller then emits a single
+/// [`AckOutcome::SoftwareFallback`]). Performs at most one extra read-back, and
+/// only for a write that commanded a meaningful change.
+fn check_first_write(
+    controller: &mut Box<dyn BrightnessController>,
+    verify: &mut Verify,
+    feature: Feature,
+    raw: u16,
+    result: &Result<(), ControlError>,
+) -> bool {
+    if verify.settled || feature != Feature::Brightness {
+        return false;
+    }
+    match result {
+        Ok(()) => {
+            // Only a write that commanded a meaningful change from the last known
+            // value is diagnostic; a trivial (no-delta) write proves nothing, so
+            // keep watching for the first real one (do not consume the one-shot).
+            let Some(before) = verify.last_known_brightness else {
+                return false;
+            };
+            if before.abs_diff(raw) <= BRIGHTNESS_VERIFY_TOLERANCE {
+                return false;
+            }
+            // The one-shot verification: consume it whatever the read-back shows.
+            verify.settled = true;
+            // RATIONALE(AssertUnwindSafe): mirrors the loop's other controller
+            // calls — a caught panic drops the controller with the worker, so no
+            // torn state is observed. A panicking / erroring read-back is treated
+            // as inconclusive (no downgrade), keeping the trigger tight.
+            if let Ok(Ok(range)) = catch_unwind(AssertUnwindSafe(|| controller.get(feature))) {
+                verify.last_known_brightness = Some(range.current);
+                return is_silent_noop(before, raw, range.current, BRIGHTNESS_VERIFY_TOLERANCE);
+            }
+            false
+        }
+        // A rejected first brightness write with a positive no-hardware error is
+        // itself the signal (debt #48: no longer swallowed as a clean Set).
+        Err(err) if is_no_hardware_error(err) => {
+            verify.settled = true;
+            true
+        }
+        // A transient error on the first write must not downgrade.
+        Err(_) => false,
+    }
+}
+
+/// Perform the queued reads (step 3a): each `get` acks its result and updates the
+/// brightness baseline. Returns `true` if the worker must stop — a read panicked,
+/// or the engine retired the worker mid-read (a detached worker must not linger).
+fn perform_reads(
+    gets: &mut Vec<(Feature, u64)>,
+    controller: &mut Box<dyn BrightnessController>,
+    verify: &mut Verify,
+    id: &StableDisplayId,
+    ack_tx: &Sender<WorkerAck>,
+    retired: &Arc<AtomicBool>,
+) -> bool {
+    for (feature, seq) in gets.drain(..) {
+        let outcome = match catch_unwind(AssertUnwindSafe(|| controller.get(feature))) {
+            Ok(result) => {
+                // Track the last brightness reading as the pre-write baseline for
+                // the first-write no-op check.
+                if feature == Feature::Brightness
+                    && !verify.settled
+                    && let Ok(range) = &result
+                {
+                    verify.last_known_brightness = Some(range.current);
+                }
+                AckOutcome::Get {
+                    feature,
+                    seq,
+                    result,
+                }
+            }
+            // RATIONALE(AssertUnwindSafe): the controller is dropped with this
+            // thread right after a caught panic (we `return` below), so no later
+            // reader can observe a torn state.
+            Err(_) => AckOutcome::Panicked {
+                key: InflightKey::Get(feature),
+                seq,
+            },
+        };
+        let is_panic = matches!(outcome, AckOutcome::Panicked { .. });
+        let _ = ack_tx.send(WorkerAck {
+            id: id.clone(),
+            outcome,
+        });
+        if is_panic {
+            return true;
+        }
+        // If the engine detached us during this read, exit before doing any more
+        // work (a detached worker must not linger).
+        if retired.load(Ordering::Acquire) {
+            return true;
+        }
+    }
+    false
+}
+
 fn worker_loop(
     id: &StableDisplayId,
     mut controller: Box<dyn BrightnessController>,
     min_gap: Duration,
+    generation: u64,
     cmd_rx: &Receiver<WorkerCommand>,
     ack_tx: &Sender<WorkerAck>,
     retired: &Arc<AtomicBool>,
@@ -135,6 +310,11 @@ fn worker_loop(
     // may next be written (its min-gap deadline).
     let mut latest: BTreeMap<Feature, Pending> = BTreeMap::new();
     let mut next_ok: BTreeMap<Feature, Instant> = BTreeMap::new();
+    // One-shot no-hardware detection (BUG 3). Detection (a) runs on open here.
+    let mut verify = Verify {
+        settled: probe_on_open(&mut controller, id, generation, ack_tx),
+        last_known_brightness: None,
+    };
 
     loop {
         // Reads are performed immediately (rare, on add); collect any that
@@ -172,34 +352,8 @@ fn worker_loop(
         }
 
         // 3a. Perform reads (not rate-limited).
-        for (feature, seq) in gets.drain(..) {
-            let outcome = match catch_unwind(AssertUnwindSafe(|| controller.get(feature))) {
-                Ok(result) => AckOutcome::Get {
-                    feature,
-                    seq,
-                    result,
-                },
-                // RATIONALE(AssertUnwindSafe): the controller is dropped with
-                // this thread right after a caught panic (we `return` below),
-                // so no later reader can observe a torn state.
-                Err(_) => AckOutcome::Panicked {
-                    key: InflightKey::Get(feature),
-                    seq,
-                },
-            };
-            let is_panic = matches!(outcome, AckOutcome::Panicked { .. });
-            let _ = ack_tx.send(WorkerAck {
-                id: id.clone(),
-                outcome,
-            });
-            if is_panic {
-                return;
-            }
-            // If the engine detached us during this read, exit before doing any
-            // more work (a detached worker must not linger; see below).
-            if retired.load(Ordering::Acquire) {
-                return;
-            }
+        if perform_reads(&mut gets, &mut controller, &mut verify, id, ack_tx, retired) {
+            return;
         }
 
         // 3b. Perform writes whose min-gap has elapsed.
@@ -220,23 +374,27 @@ fn worker_loop(
             let Some((raw, seq)) = latest.remove(&feature) else {
                 continue;
             };
-            let outcome = match catch_unwind(AssertUnwindSafe(|| controller.set(feature, raw))) {
-                Ok(_result) => AckOutcome::Set { feature, seq },
-                // RATIONALE(AssertUnwindSafe): see 3a — the controller does not
-                // outlive a caught panic.
-                Err(_) => AckOutcome::Panicked {
-                    key: InflightKey::Set(feature),
-                    seq,
-                },
+            // RATIONALE(AssertUnwindSafe): see 3a — the controller does not
+            // outlive a caught panic.
+            let Ok(inner) = catch_unwind(AssertUnwindSafe(|| controller.set(feature, raw))) else {
+                let _ = ack_tx.send(WorkerAck {
+                    id: id.clone(),
+                    outcome: AckOutcome::Panicked {
+                        key: InflightKey::Set(feature),
+                        seq,
+                    },
+                });
+                return;
             };
-            let is_panic = matches!(outcome, AckOutcome::Panicked { .. });
+            // Ack the Set regardless of the backend result: the worker completed the
+            // op and is not wedged, so the watchdog slot must clear. Debt #48 is
+            // addressed by ACTING on a rejected inner result below (a downgrade
+            // signal), never by dropping this ack — which would strand the watchdog
+            // armed and false-fire the display unresponsive.
             let _ = ack_tx.send(WorkerAck {
                 id: id.clone(),
-                outcome,
+                outcome: AckOutcome::Set { feature, seq },
             });
-            if is_panic {
-                return;
-            }
             // The write we just performed may have been a wedged call the engine
             // gave up on and detached us for (watchdog / shutdown). If so, exit NOW
             // — do not loop back to drain and coalesce the queued backlog into
@@ -244,6 +402,14 @@ fn worker_loop(
             // worker as a second writer on the same monitor (E-A / ADR-0017).
             if retired.load(Ordering::Acquire) {
                 return;
+            }
+            // Detection (b)/(c): one-shot no-hardware check on the first effective
+            // brightness write (a silent no-op read-back, or a rejected write).
+            if check_first_write(&mut controller, &mut verify, feature, raw, &inner) {
+                let _ = ack_tx.send(WorkerAck {
+                    id: id.clone(),
+                    outcome: AckOutcome::SoftwareFallback { generation },
+                });
             }
             next_ok.insert(feature, now.checked_add(min_gap).unwrap_or(now));
         }
@@ -483,6 +649,103 @@ mod tests {
             Some((Feature::Brightness, 77)),
             "last value must win"
         );
+
+        handle.cmd_tx.send(WorkerCommand::Shutdown).unwrap();
+        handle.join.join().unwrap();
+    }
+
+    /// A controller that probes with no hardware brightness range (its `set`/`get`
+    /// still succeed, so only the probe distinguishes it).
+    #[derive(Debug)]
+    struct NoHardware;
+
+    impl BrightnessController for NoHardware {
+        fn probe(&mut self) -> Result<Capabilities, ControlError> {
+            Ok(Capabilities {
+                features: std::collections::BTreeSet::new(),
+                hardware_range: false,
+                raw_capabilities: None,
+                allowed_inputs: Vec::new(),
+            })
+        }
+        fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+            Ok(FeatureRange {
+                current: 50,
+                max: 100,
+            })
+        }
+        fn set(&mut self, _feature: Feature, _value: u16) -> Result<(), ControlError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn probe_without_hardware_range_acks_software_fallback() {
+        // Detection (a): the probe-on-open must emit a generation-tagged
+        // SoftwareFallback for a controller reporting no hardware range.
+        let (ack_tx, ack_rx) = unbounded();
+        let opener: crate::ControllerOpener =
+            Box::new(|| Some(Box::new(NoHardware) as Box<dyn BrightnessController>));
+        let handle = spawn_worker(worker_id(), opener, Duration::from_millis(5), 9, ack_tx);
+
+        let mut saw_fallback = false;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if let Ok(ack) = ack_rx.recv_timeout(Duration::from_millis(200))
+                && matches!(ack.outcome, AckOutcome::SoftwareFallback { generation: 9 })
+            {
+                saw_fallback = true;
+                break;
+            }
+        }
+        assert!(
+            saw_fallback,
+            "a probe with no hardware range must ack SoftwareFallback with the worker's generation"
+        );
+
+        handle.cmd_tx.send(WorkerCommand::Shutdown).unwrap();
+        handle.join.join().unwrap();
+    }
+
+    #[test]
+    fn healthy_controller_never_acks_software_fallback() {
+        // False-downgrade guard at the worker level: a controller that probes
+        // hardware-backed and whose read-back reflects writes must never emit a
+        // SoftwareFallback, even after a meaningful first write.
+        let (writes_tx, _writes_rx) = unbounded();
+        let (ack_tx, ack_rx) = unbounded();
+        let opener: crate::ControllerOpener = Box::new(move || {
+            Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
+        });
+        let handle = spawn_worker(worker_id(), opener, Duration::from_millis(5), 1, ack_tx);
+
+        // Learn the level (50), then perform a meaningful write (10); Recording
+        // reflects writes, so the read-back proves the panel moved.
+        handle
+            .cmd_tx
+            .send(WorkerCommand::Get {
+                feature: Feature::Brightness,
+                seq: 1,
+            })
+            .unwrap();
+        handle
+            .cmd_tx
+            .send(WorkerCommand::Set {
+                feature: Feature::Brightness,
+                raw: 10,
+                seq: 2,
+            })
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_millis(800);
+        while Instant::now() < deadline {
+            if let Ok(ack) = ack_rx.recv_timeout(Duration::from_millis(100)) {
+                assert!(
+                    !matches!(ack.outcome, AckOutcome::SoftwareFallback { .. }),
+                    "a healthy, reflecting controller must never emit SoftwareFallback"
+                );
+            }
+        }
 
         handle.cmd_tx.send(WorkerCommand::Shutdown).unwrap();
         handle.join.join().unwrap();
