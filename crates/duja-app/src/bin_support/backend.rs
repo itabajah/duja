@@ -74,23 +74,49 @@ pub(crate) type DisplayGeom = (String, Option<DisplayBounds>, Option<String>);
 /// `None` bounds and `None` device (no monitor rect or GDI adapter is plumbed
 /// for them in P4). Never errors.
 pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<DisplayGeom>) {
-    let mut displays = Vec::new();
-    let mut geom = Vec::new();
+    let ddc: Vec<(DiscoveredDisplay, DisplayGeom)> = discover_ddc()
+        .into_iter()
+        .map(|(display, display_bounds, gdi_device)| {
+            let geom = (
+                display.id.as_str().to_owned(),
+                Some(display_bounds),
+                Some(gdi_device),
+            );
+            (display, geom)
+        })
+        .collect();
+    let panel: Vec<(DiscoveredDisplay, DisplayGeom)> = discover_panel()
+        .into_iter()
+        .map(|display| {
+            let geom = (display.id.as_str().to_owned(), None, None);
+            (display, geom)
+        })
+        .collect();
 
-    for (display, display_bounds, gdi_device) in discover_ddc() {
-        geom.push((
-            display.id.as_str().to_owned(),
-            Some(display_bounds),
-            Some(gdi_device),
-        ));
-        displays.push(display);
-    }
-    for display in discover_panel() {
-        geom.push((display.id.as_str().to_owned(), None, None));
-        displays.push(display);
-    }
+    dedup_displays(ddc, panel).into_iter().unzip()
+}
 
-    (displays, geom)
+/// Concatenate the DDC and panel display lists, dropping any DDC entry whose
+/// stable id also appears in the panel list.
+///
+/// On a laptop the DDC backend can enumerate the built-in panel's `HMONITOR`
+/// alongside its genuine external monitors; the `duja-panel` (WMI) backend
+/// enumerates that same panel as an [`DisplayKind::InternalPanel`]. When both
+/// resolve to the same [`StableDisplayId`], the WMI entry is authoritative — it
+/// carries the correct `InternalPanel` kind — so the DDC duplicate is dropped.
+/// This is defense-in-depth: the DDC backend already omits internal targets, so
+/// in practice no duplicate reaches here. Surviving DDC entries keep their
+/// order and precede the panels.
+fn dedup_displays(
+    ddc: Vec<(DiscoveredDisplay, DisplayGeom)>,
+    panel: Vec<(DiscoveredDisplay, DisplayGeom)>,
+) -> Vec<(DiscoveredDisplay, DisplayGeom)> {
+    let mut out: Vec<(DiscoveredDisplay, DisplayGeom)> = ddc
+        .into_iter()
+        .filter(|(display, _)| !panel.iter().any(|(p, _)| p.id == display.id))
+        .collect();
+    out.extend(panel);
+    out
 }
 
 #[cfg(windows)]
@@ -187,8 +213,11 @@ fn open_panel_controller(
 
 #[cfg(test)]
 mod tests {
-    use super::hardware_brightness_caps;
-    use duja_core::model::Feature;
+    use super::{DisplayGeom, dedup_displays, hardware_brightness_caps};
+    use duja_core::dimmer::DisplayBounds;
+    use duja_core::id::StableDisplayId;
+    use duja_core::manager::DiscoveredDisplay;
+    use duja_core::model::{DisplayKind, Feature};
 
     #[test]
     fn caps_are_brightness_only_hardware_backed() {
@@ -197,5 +226,73 @@ mod tests {
         assert!(!caps.supports(Feature::Contrast));
         assert!(caps.hardware_range);
         assert_eq!(caps.raw_capabilities, None);
+    }
+
+    /// A DDC-backed entry (external) for `id`, with dummy geometry.
+    fn ddc_entry(id: &StableDisplayId, name: &str) -> (DiscoveredDisplay, DisplayGeom) {
+        let display = DiscoveredDisplay {
+            id: id.clone(),
+            kind: DisplayKind::ExternalDdc,
+            name: Some(name.to_owned()),
+            capabilities: hardware_brightness_caps(),
+        };
+        let geom = (
+            id.as_str().to_owned(),
+            Some(DisplayBounds::new(0, 0, 100, 100)),
+            Some(r"\\.\display1".to_owned()),
+        );
+        (display, geom)
+    }
+
+    /// A WMI panel entry (internal) for `id`, with no geometry (matches how the
+    /// panel backend contributes `None` bounds/device).
+    fn panel_entry(id: &StableDisplayId, name: &str) -> (DiscoveredDisplay, DisplayGeom) {
+        let display = DiscoveredDisplay {
+            id: id.clone(),
+            kind: DisplayKind::InternalPanel,
+            name: Some(name.to_owned()),
+            capabilities: hardware_brightness_caps(),
+        };
+        (display, (id.as_str().to_owned(), None, None))
+    }
+
+    #[test]
+    fn dedup_drops_ddc_duplicate_of_internal_panel() {
+        // Same stable id appears in BOTH lists (the laptop internal panel), plus
+        // one genuine external monitor only in the DDC list.
+        let shared = StableDisplayId::from_parts("GSM", 0x5B09, Some("PANEL1")).unwrap();
+        let external = StableDisplayId::from_parts("DEL", 0xA131, Some("EXT1")).unwrap();
+
+        let ddc = vec![
+            ddc_entry(&shared, "internal-as-ddc"),
+            ddc_entry(&external, "real external"),
+        ];
+        let panel = vec![panel_entry(&shared, "Built-in")];
+
+        let out = dedup_displays(ddc, panel);
+
+        // The shared id survives exactly once, as the InternalPanel (WMI) entry.
+        let shared_hits: Vec<&DiscoveredDisplay> = out
+            .iter()
+            .map(|(display, _)| display)
+            .filter(|display| display.id == shared)
+            .collect();
+        assert_eq!(
+            shared_hits.len(),
+            1,
+            "internal panel must not be duplicated"
+        );
+        assert_eq!(
+            shared_hits.first().map(|display| display.kind),
+            Some(DisplayKind::InternalPanel),
+            "the surviving entry must be the WMI InternalPanel, not the DDC one"
+        );
+        // The genuine external monitor is untouched.
+        assert!(
+            out.iter()
+                .any(|(display, _)| display.id == external
+                    && display.kind == DisplayKind::ExternalDdc)
+        );
+        assert_eq!(out.len(), 2);
     }
 }

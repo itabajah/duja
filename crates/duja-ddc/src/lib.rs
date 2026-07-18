@@ -50,6 +50,12 @@ pub mod controller;
 pub mod ddcci;
 pub mod transport;
 
+// Pure path->EDID->identity correlation used by the Windows enumeration. It is
+// FFI-free, so it is compiled (and its tests run) on every OS under `test`;
+// outside tests only the Windows backend consumes it.
+#[cfg(any(windows, test))]
+mod correlate;
+
 #[cfg(windows)]
 mod win;
 
