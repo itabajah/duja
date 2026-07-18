@@ -1,7 +1,8 @@
 # Duja — Project Status
 
-_Last updated: 2026-07-17 (v0.1.1: post-v0.1.0 deep-review fix wave —
-correctness, safety, and supply-chain hardening across all crates)._
+_Last updated: 2026-07-18 (v0.1.2: multi-monitor & capability fix wave —
+display identity, capability detection, and linked control, from real-hardware
+laptop testing)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -20,7 +21,8 @@ The authoritative plan is the phase roadmap; architecture decisions live in
 | P4 Windows dimmer + UI (MVP) | `m4-win-mvp` | ✅ done |
 | P5 Power features (Windows complete) | `m5-win-full` | ✅ done |
 | **First release** | **`v0.1.0` (Windows)** | ✅ shipped — installer + portable zip, signed, auto-update loop |
-| **Deep-review fix wave** | **`v0.1.1` (Windows)** | 🚀 shipping — 10 fix PRs, all confirmed defects fixed test-first |
+| **Deep-review fix wave** | **`v0.1.1` (Windows)** | ✅ shipped — 10 fix PRs, all confirmed defects fixed test-first |
+| **Multi-monitor & capability fixes** | **`v0.1.2` (Windows)** | 🚀 shipping — 6 PRs (5 real-hardware bugs + 1 audit follow-up), test-first, audit + holistic reviewed |
 | P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 (app assembly + packaging) + gate remain |
 | P7 Linux port | `m7-linux` / `v0.3.0` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
@@ -38,7 +40,7 @@ end from day one. Distribution is a tag-triggered
 portable zip, each with `SHA256SUMS`, a minisign signature, and a build-provenance
 attestation.
 
-Health: **761 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
+Health: **796 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
 on stable, adversarial gate reviews at **P2, P3, P4, P5** plus a full post-v0.1.0
 **deep review** (14 module reviewers, every non-low finding adversarially
@@ -74,6 +76,37 @@ merge — the same discipline that has caught every real seam defect. Highlights
 Refactor/test debt this surfaced (tray.rs split, per-display HDR, a CI headless
 E2E smoke, the throttle-at-tray regression test, `ddc_broken` routing) is tracked
 in [debt.md](debt.md); ADRs **0017–0020** record the new contracts.
+
+### v0.1.2 — multi-monitor & capability fix wave (2026-07-18)
+
+Real-hardware testing on a laptop (internal panel + one external monitor,
+including Windows *Duplicate*/mirror mode and *Link all*) surfaced five defects in
+the one configuration the desktop dev box never exercised. Each was fixed
+test-first (red-first regression) and reviewed by a separate adversarial agent;
+after all five merged, an **audit sweep** + a **holistic integration review** ran
+on the combined result — the holistic came back **INTEGRATION CLEAN** across six
+cross-cutting paths, and the audit found two seam issues (an over-broad
+enumeration probe and a reattach-recovery gap) that a sixth PR fixed, its own
+review in turn catching and reverting a regressive over-eager cache drop before
+this tag. Six PRs (#57–#62):
+
+- **Display identity** (`ddc`): internal laptop panels are classified via
+  `outputTechnology` and deduped against WMI (no more "External" mislabel, no
+  duplicate row); *Duplicate*/mirror mode emits one controllable row per physical
+  panel via a paced-retried handle probe, bounded so a silent internal handle
+  can't stall enumeration.
+- **Capability detection** (`engine`): a monitor with no working DDC brightness
+  auto-downgrades to full-range software dimming — a retried verify-first-write
+  distinguishes a slow panel from a dead one, an overlay-based `software_forced`
+  flag survives a silent re-enumeration, and a poll-driven self-heal (plus a clean
+  replug re-detection) restores hardware control if the panel later proves live.
+- **Linked control** (`ui`): *Link all* preserves each monitor's offset
+  (drift-free `SyncGroups`) instead of snapping to one value, and the passive
+  linked sliders track instantly instead of gliding.
+
+Residuals (all narrow, self-bounding, hardware-conditional) are tracked in
+[debt.md](debt.md); the `ddc_broken`→SoftwareOnly routing deferred from v0.1.1 is
+now delivered by the capability-detection work.
 
 Measured (headless, P4/P5 gates): idle RSS **23.3 MB** (budget ≤ 35),
 idle CPU **0 ms over 20 s** — zero wakeups, by construction.
