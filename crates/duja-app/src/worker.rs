@@ -131,10 +131,28 @@ enum Wake {
 /// A queued write awaiting its min-gap: the latest value and its sequence.
 type Pending = (u16, u64);
 
-/// Read-back tolerance (raw units) for the first-write no-op check. Matches the
-/// DDC controller's own verify tolerance so a monitor that passes hardware verify
-/// is never second-guessed here.
+/// Read-back tolerance (raw units) for the first-write no-op check. On Duja's
+/// default DDC path a write is *not* hardware-verified, so this worker-side
+/// read-back (now retried, below) is the first and only confirmation that the
+/// write took; the ±2 units absorb a monitor rounding to its own step size.
 const BRIGHTNESS_VERIFY_TOLERANCE: u16 = 2;
+
+/// Read-back attempts for the first-write no-op check. A slow-but-working panel
+/// (behind a USB-C dock / MST hub / KVM) can lag a write by more than one pacing
+/// gap, so a single un-retried read would misread "slow" as "dead" and downgrade
+/// it permanently. Retrying lets a live panel reveal movement before we commit to
+/// the one-way downgrade; a truly dead panel never moves. Mirrors the DDC
+/// controller's verify-retry count.
+const BRIGHTNESS_VERIFY_ATTEMPTS: u32 = 3;
+
+/// Base back-off between read-back attempts, doubled each attempt up to
+/// [`BRIGHTNESS_VERIFY_BACKOFF_MAX`] — mirrors the DDC controller's retry back-off.
+/// On real hardware the DDC controller additionally paces every wire op, so a slow
+/// panel gets even more wall-clock to reflect than this alone provides.
+const BRIGHTNESS_VERIFY_BACKOFF_BASE: Duration = Duration::from_millis(20);
+
+/// Ceiling on a single read-back back-off.
+const BRIGHTNESS_VERIFY_BACKOFF_MAX: Duration = Duration::from_millis(320);
 
 /// One-shot state for detecting a display with **no working hardware brightness**
 /// (BUG 3). A worker downgrades such a display to software-only exactly once, via
@@ -195,43 +213,43 @@ fn is_silent_noop(before: u16, target: u16, after: u16, tol: u16) -> bool {
     after.abs_diff(target) > tol && after.abs_diff(before) <= tol
 }
 
+/// The exponential read-back back-off for a zero-based `attempt`, capped.
+fn verify_backoff(attempt: u32) -> Duration {
+    let factor = 1u32.checked_shl(attempt).unwrap_or(u32::MAX);
+    BRIGHTNESS_VERIFY_BACKOFF_BASE
+        .checked_mul(factor)
+        .unwrap_or(BRIGHTNESS_VERIFY_BACKOFF_MAX)
+        .min(BRIGHTNESS_VERIFY_BACKOFF_MAX)
+}
+
 /// One-shot no-hardware check on the first *effective* brightness write, run
 /// after the write's ack. Returns `true` when the write proves the display has no
 /// working hardware brightness (the caller then emits a single
-/// [`AckOutcome::SoftwareFallback`]). Performs at most one extra read-back, and
-/// only for a write that commanded a meaningful change.
+/// [`AckOutcome::SoftwareFallback`]). Only a write that commanded a meaningful
+/// change from the last known value is diagnostic; the read-back is retried (see
+/// [`verify_first_write`]).
 fn check_first_write(
     controller: &mut Box<dyn BrightnessController>,
     verify: &mut Verify,
     feature: Feature,
     raw: u16,
     result: &Result<(), ControlError>,
+    retired: &Arc<AtomicBool>,
 ) -> bool {
     if verify.settled || feature != Feature::Brightness {
         return false;
     }
     match result {
         Ok(()) => {
-            // Only a write that commanded a meaningful change from the last known
-            // value is diagnostic; a trivial (no-delta) write proves nothing, so
-            // keep watching for the first real one (do not consume the one-shot).
+            // A trivial (no-delta) write proves nothing, so keep watching for the
+            // first real one (do not consume the one-shot).
             let Some(before) = verify.last_known_brightness else {
                 return false;
             };
             if before.abs_diff(raw) <= BRIGHTNESS_VERIFY_TOLERANCE {
                 return false;
             }
-            // The one-shot verification: consume it whatever the read-back shows.
-            verify.settled = true;
-            // RATIONALE(AssertUnwindSafe): mirrors the loop's other controller
-            // calls — a caught panic drops the controller with the worker, so no
-            // torn state is observed. A panicking / erroring read-back is treated
-            // as inconclusive (no downgrade), keeping the trigger tight.
-            if let Ok(Ok(range)) = catch_unwind(AssertUnwindSafe(|| controller.get(feature))) {
-                verify.last_known_brightness = Some(range.current);
-                return is_silent_noop(before, raw, range.current, BRIGHTNESS_VERIFY_TOLERANCE);
-            }
-            false
+            verify_first_write(controller, verify, feature, before, raw, retired)
         }
         // A rejected first brightness write with a positive no-hardware error is
         // itself the signal (debt #48: no longer swallowed as a clean Set).
@@ -241,6 +259,60 @@ fn check_first_write(
         }
         // A transient error on the first write must not downgrade.
         Err(_) => false,
+    }
+}
+
+/// Read back the first effective brightness write with retries + back-off, to
+/// tell a **slow-but-working** panel (which moves within the retries) from a
+/// **dead** one (which never moves). Returns `true` only when *every* successful
+/// read-back is a silent no-op — a definitive downgrade signal.
+///
+/// The one-shot latch (`verify.settled`) is consumed **only on a definitive
+/// verdict**: movement seen (live) or a confirmed no-op (dead). An all-transient
+/// (or detached) verification leaves the latch open so a later write re-attempts,
+/// so a lone read glitch can never permanently disable detection.
+fn verify_first_write(
+    controller: &mut Box<dyn BrightnessController>,
+    verify: &mut Verify,
+    feature: Feature,
+    before: u16,
+    target: u16,
+    retired: &Arc<AtomicBool>,
+) -> bool {
+    let mut saw_definitive_noop = false;
+    for attempt in 0..BRIGHTNESS_VERIFY_ATTEMPTS {
+        if retired.load(Ordering::Acquire) {
+            // Detached mid-verify: the verdict is moot (a stale fallback would be
+            // dropped by the engine's generation match anyway). Do not latch.
+            return false;
+        }
+        // RATIONALE(AssertUnwindSafe): mirrors the loop's other controller calls —
+        // a caught panic drops the controller with the worker, so no torn state is
+        // observed; a panicking read is treated as inconclusive for this attempt.
+        if let Ok(Ok(range)) = catch_unwind(AssertUnwindSafe(|| controller.get(feature))) {
+            verify.last_known_brightness = Some(range.current);
+            if is_silent_noop(before, target, range.current, BRIGHTNESS_VERIFY_TOLERANCE) {
+                // A dead panel never moves; a slow one may still catch up, so keep
+                // retrying before committing.
+                saw_definitive_noop = true;
+            } else {
+                // Moved toward / to the target: the panel is live.
+                verify.settled = true;
+                return false;
+            }
+        }
+        if attempt.saturating_add(1) < BRIGHTNESS_VERIFY_ATTEMPTS {
+            thread::sleep(verify_backoff(attempt));
+        }
+    }
+    if saw_definitive_noop {
+        // Every successful read-back showed the panel unmoved: definitively dead.
+        verify.settled = true;
+        true
+    } else {
+        // No successful read-back (all transient): inconclusive — leave the latch
+        // open for a later write to re-attempt.
+        false
     }
 }
 
@@ -405,7 +477,7 @@ fn worker_loop(
             }
             // Detection (b)/(c): one-shot no-hardware check on the first effective
             // brightness write (a silent no-op read-back, or a rejected write).
-            if check_first_write(&mut controller, &mut verify, feature, raw, &inner) {
+            if check_first_write(&mut controller, &mut verify, feature, raw, &inner, retired) {
                 let _ = ack_tx.send(WorkerAck {
                     id: id.clone(),
                     outcome: AckOutcome::SoftwareFallback { generation },

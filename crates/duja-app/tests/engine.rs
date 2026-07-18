@@ -1890,6 +1890,54 @@ impl BrightnessController for AckNoopController {
     }
 }
 
+/// A controller that probes as hardware-backed and whose writes DO take, but only
+/// reflect on the read-back after `stale_reads` further reads (a slow panel behind
+/// a dock / MST hub / KVM). `stale_reads` reads after a `set` still report the old
+/// value; the next read reports (and settles at) the written value.
+#[derive(Debug)]
+struct LateReflectController {
+    shown: u16,
+    pending: Option<u16>,
+    stale_left: u32,
+    stale_reads: u32,
+}
+
+impl LateReflectController {
+    fn new(initial: u16, stale_reads: u32) -> Self {
+        LateReflectController {
+            shown: initial,
+            pending: None,
+            stale_left: 0,
+            stale_reads,
+        }
+    }
+}
+
+impl BrightnessController for LateReflectController {
+    fn probe(&mut self) -> Result<Capabilities, ControlError> {
+        Ok(caps())
+    }
+    fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+        if let Some(target) = self.pending {
+            if self.stale_left == 0 {
+                self.shown = target;
+                self.pending = None;
+            } else {
+                self.stale_left = self.stale_left.saturating_sub(1);
+            }
+        }
+        Ok(FeatureRange {
+            current: self.shown,
+            max: 100,
+        })
+    }
+    fn set(&mut self, _feature: Feature, value: u16) -> Result<(), ControlError> {
+        self.pending = Some(value);
+        self.stale_left = self.stale_reads;
+        Ok(())
+    }
+}
+
 /// A controller that probes as hardware-backed but REJECTS every write with
 /// `Unsupported` (the backend says the panel cannot do brightness). `get`
 /// succeeds at a fixed value so the initial learn completes.
@@ -2036,16 +2084,44 @@ fn ack_but_silent_noop_write_downgrades_to_software_only() {
 }
 
 #[test]
-fn working_controller_is_not_falsely_downgraded() {
-    // The critical false-downgrade guard: a genuinely working controller — writes
-    // take, read-back moves — must STAY hardware-backed. This exercises detection b
-    // on a healthy panel and asserts no SoftwareOnly downgrade ever fires.
-    let current = Arc::new(Mutex::new(60u16));
-    let (engine, notes, cmds, platform_tx) = spawn_polling(current.clone(), 100, 60);
+fn slow_but_working_controller_is_not_falsely_downgraded() {
+    // BLOCKER-1 guard (the one that must bite a naive single-read): a working panel
+    // that reflects a write LATE — the first read-back still shows the old value,
+    // a later one shows the new value — must NOT be downgraded. Detection (b)
+    // retries the read-back, so it observes the movement; a single un-retried read
+    // would misread "slow" as "dead" and permanently force software-only.
+    //
+    // `stale_reads = 1`: the first read-back after the write is stale, the second
+    // is fresh — inside the retry budget, outside a single read.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
 
-    // A real change: the write takes and the read-back moves to it.
+    let factory: duja_app::ControllerFactory = Box::new(|_id| {
+        Box::new(|| {
+            Some(Box::new(LateReflectController::new(60, 1)) as Box<dyn BrightnessController>)
+        }) as duja_app::ControllerOpener
+    });
+    let (engine, notes) = Engine::spawn(
+        EngineConfig::default(),
+        enumerator(state, calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // Learn the initial level (60), then drive a real, meaningful change.
+    assert!(
+        wait_note(&notes, Duration::from_secs(3), |n| matches!(
+            n,
+            EngineNotification::DisplaysChanged(s)
+                if s.first().map(|d| d.user_level_pct) == Some(60)
+        )),
+        "engine must learn the initial level 60"
+    );
     cmds.send(EngineCommand::SetUserLevel {
-        id: display_id(),
+        id: id.clone(),
         pct: 20,
     })
     .unwrap();
@@ -2053,18 +2129,89 @@ fn working_controller_is_not_falsely_downgraded() {
     assert!(
         !wait_kind(
             &notes,
-            &display_id(),
+            &id,
             DisplayKind::SoftwareOnly,
             Duration::from_secs(1)
         ),
-        "a working controller must never be downgraded to SoftwareOnly (false-downgrade guard)"
+        "a slow-but-working controller must never be downgraded (BLOCKER-1 false-downgrade guard)"
     );
     let snaps = snapshot(&cmds);
     assert!(
         snaps
             .iter()
-            .any(|s| s.id == display_id() && s.kind == DisplayKind::ExternalDdc),
-        "a working controller must stay hardware-backed (ExternalDdc)"
+            .any(|s| s.id == id && s.kind == DisplayKind::ExternalDdc),
+        "a slow-but-working controller must stay hardware-backed (ExternalDdc)"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn wrongly_forced_display_self_heals_to_hardware() {
+    // MAJOR-2 self-heal: a working-but-very-slow panel that detection (b) mistakes
+    // for dead (stale across ALL retries) must recover once a later poll read shows
+    // the hardware has actually MOVED to the value Duja wrote — proving it live. It
+    // must return to ExternalDdc without an app restart.
+    //
+    // `stale_reads = 6` outlasts detection (b)'s retries (so it IS wrongly forced),
+    // then reflects during polling (so it self-heals).
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    let factory: duja_app::ControllerFactory = Box::new(|_id| {
+        Box::new(|| {
+            Some(Box::new(LateReflectController::new(60, 6)) as Box<dyn BrightnessController>)
+        }) as duja_app::ControllerOpener
+    });
+    let (engine, notes) = Engine::spawn(
+        fast_poll_cfg(),
+        enumerator(state, calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // Learn 60, then a meaningful write the panel is too slow to reflect within the
+    // retries ⇒ wrongly forced software-only.
+    assert!(
+        wait_note(&notes, Duration::from_secs(3), |n| matches!(
+            n,
+            EngineNotification::DisplaysChanged(s)
+                if s.first().map(|d| d.user_level_pct) == Some(60)
+        )),
+        "engine must learn the initial level 60"
+    );
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 20,
+    })
+    .unwrap();
+    assert!(
+        wait_kind(
+            &notes,
+            &id,
+            DisplayKind::SoftwareOnly,
+            Duration::from_secs(3)
+        ),
+        "the very slow panel should first be (wrongly) forced software-only"
+    );
+
+    // Enable polling: a later poll reads the now-reflected value (20), which both
+    // matches what Duja wrote AND differs from the prior reading (60) ⇒ moved ⇒
+    // self-heal back to the real hardware kind.
+    cmds.send(EngineCommand::SetLevelPolling { on: true })
+        .unwrap();
+    assert!(
+        wait_kind(
+            &notes,
+            &id,
+            DisplayKind::ExternalDdc,
+            Duration::from_secs(5)
+        ),
+        "a wrongly-forced display must self-heal to ExternalDdc once proven live"
     );
 
     within(Duration::from_secs(2), move || engine.shutdown());

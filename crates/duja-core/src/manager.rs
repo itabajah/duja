@@ -126,7 +126,10 @@ pub enum DisplayState {
 struct DisplayRecord {
     /// Connected / disconnected, with the relevant instant.
     state: DisplayState,
-    /// Backend class, refreshed from the latest sighting.
+    /// The platform's real hardware classification, refreshed from the latest
+    /// sighting. Snapshots overlay [`DisplayKind::SoftwareOnly`] on top of this
+    /// while `software_forced` is set, but the real kind is always retained here
+    /// so a self-heal can restore it.
     kind: DisplayKind,
     /// Resolved name from the latest sighting, if any.
     name: Option<String>,
@@ -136,10 +139,12 @@ struct DisplayRecord {
     last_user_level: Option<u8>,
     /// `false` after the watchdog marks the display stuck, until re-sighted.
     responsive: bool,
-    /// Set once [`DisplayManager::mark_software_only`] downgrades this display at
-    /// runtime. While set, an enumeration's metadata refresh preserves the
-    /// [`DisplayKind::SoftwareOnly`] verdict instead of reverting to the platform's
-    /// static hardware classification (which cannot detect dead hardware).
+    /// The runtime "no working hardware" overlay. Set by
+    /// [`DisplayManager::mark_software_only`] and cleared by
+    /// [`DisplayManager::clear_software_forced`] (in-session self-heal). While set,
+    /// snapshots report [`DisplayKind::SoftwareOnly`] regardless of `kind`, so the
+    /// downgrade survives hot-plug metadata refreshes (which cannot detect dead
+    /// hardware) yet is trivially reversible.
     software_forced: bool,
 }
 
@@ -242,15 +247,13 @@ impl DisplayManager {
                         matches!(record.state, DisplayState::Disconnected { .. });
                     let was_unresponsive = !record.responsive;
                     record.state = DisplayState::Connected { last_seen: now };
-                    // Preserve a runtime software-only downgrade: the platform
-                    // enumeration classifies hardware statically and re-advertises a
-                    // dead panel as hardware-backed, which would silently undo the
-                    // downgrade (and resurrect BUG 3) on any hot-plug pass.
-                    record.kind = if record.software_forced {
-                        DisplayKind::SoftwareOnly
-                    } else {
-                        display.kind
-                    };
+                    // `kind` always tracks the platform's real hardware
+                    // classification. A runtime software-only downgrade lives in the
+                    // separate `software_forced` overlay (see `mark_software_only`),
+                    // which snapshots apply — so refreshing `kind` here can never
+                    // silently undo the downgrade (and resurrect BUG 3) on a hot-plug
+                    // pass, and the real kind is retained for in-session self-heal.
+                    record.kind = display.kind;
                     record.name = display.name;
                     record.capabilities = display.capabilities;
                     record.responsive = true;
@@ -316,35 +319,60 @@ impl DisplayManager {
     /// engine's worker proves at runtime that it has no working hardware
     /// brightness control (dead DDC / a probe reporting no hardware range).
     ///
-    /// Returns `true` the first time the kind actually changes, `false` if the
-    /// id is unknown or the display is already software-only (idempotent — the
-    /// engine relies on this to re-emit its snapshot exactly once). The downgrade
-    /// is **sticky**: a later enumeration that re-sights the display refreshes its
-    /// metadata but must not silently revert the kind (the platform enumeration
-    /// classifies hardware statically and cannot know the hardware is dead), so
-    /// the software-only verdict is preserved until the record is forgotten.
+    /// Sets the `software_forced` overlay (leaving the real `kind` intact for a
+    /// later self-heal). Returns `true` the first time the overlay is set, `false`
+    /// if the id is unknown or it was already set (idempotent — the engine relies
+    /// on this to re-emit its snapshot exactly once). The downgrade is **sticky**:
+    /// snapshots report software-only regardless of `kind`, so a later enumeration
+    /// that re-sights the display and refreshes its (statically-classified,
+    /// hardware-looking) metadata cannot silently revert it.
     pub fn mark_software_only(&mut self, id: &StableDisplayId) -> bool {
         match self.records.get_mut(id) {
-            Some(record) if record.kind != DisplayKind::SoftwareOnly => {
-                record.kind = DisplayKind::SoftwareOnly;
+            Some(record) if !record.software_forced => {
                 record.software_forced = true;
                 true
             }
-            Some(record) => {
-                // Already software-only: keep the sticky flag set (e.g. a fresh
-                // worker re-detecting the same dead panel) but report no change.
-                record.software_forced = true;
-                false
-            }
-            None => false,
+            _ => false,
         }
+    }
+
+    /// Clear the runtime software-only overlay for a display (in-session
+    /// self-heal), restoring its real hardware [`kind`](DisplayKind) to snapshots.
+    ///
+    /// Returns `true` the first time the overlay is cleared, `false` if the id is
+    /// unknown or was not forced (idempotent). The engine calls this when a later
+    /// hardware read proves the panel is actually live, so a mistaken downgrade is
+    /// not permanent until the app restarts.
+    pub fn clear_software_forced(&mut self, id: &StableDisplayId) -> bool {
+        match self.records.get_mut(id) {
+            Some(record) if record.software_forced => {
+                record.software_forced = false;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the runtime software-only overlay is currently set for `id`
+    /// (`false` for an unknown id). The engine consults this to route a poll
+    /// read: a forced display's hardware level is decoupled from the user's
+    /// perceived level (the overlay drives perception), so a poll is used only for
+    /// self-heal, never as an external-change signal.
+    #[must_use]
+    pub fn is_software_forced(&self, id: &StableDisplayId) -> bool {
+        self.records
+            .get(id)
+            .is_some_and(|record| record.software_forced)
     }
 
     /// UI-facing snapshots of every **connected** display, sorted by id.
     ///
     /// A display with no resolved name falls back to its id string; a display
     /// with no recorded level reports [`DEFAULT_USER_LEVEL_PCT`]. Unresponsive
-    /// displays are included (the UI greys them; it does not hide them).
+    /// displays are included (the UI greys them; it does not hide them). A display
+    /// with the `software_forced` overlay set reports [`DisplayKind::SoftwareOnly`]
+    /// regardless of its real hardware kind, so the app plans full-slider software
+    /// dimming for it.
     #[must_use]
     pub fn snapshots(&self) -> Vec<DisplaySnapshot> {
         self.records
@@ -353,7 +381,11 @@ impl DisplayManager {
             .map(|(id, record)| DisplaySnapshot {
                 id: id.clone(),
                 name: record.name.clone().unwrap_or_else(|| id.to_string()),
-                kind: record.kind,
+                kind: if record.software_forced {
+                    DisplayKind::SoftwareOnly
+                } else {
+                    record.kind
+                },
                 user_level_pct: record.last_user_level.unwrap_or(DEFAULT_USER_LEVEL_PCT),
                 capabilities: record.capabilities.clone(),
             })
@@ -864,6 +896,37 @@ mod tests {
 
         // Unknown id ⇒ no change.
         assert!(!m.mark_software_only(&b()));
+    }
+
+    #[test]
+    fn clear_software_forced_self_heals_to_the_real_kind() {
+        let mut m = DisplayManager::new();
+        let _ = m.apply_enumeration(vec![disc(&a())], now());
+        assert!(!m.is_software_forced(&a()));
+
+        // Wrongly forced software-only, then proven live: the overlay clears and the
+        // real hardware kind returns to snapshots.
+        assert!(m.mark_software_only(&a()));
+        assert!(m.is_software_forced(&a()));
+        assert_eq!(
+            m.snapshots().first().unwrap().kind,
+            DisplayKind::SoftwareOnly
+        );
+
+        assert!(
+            m.clear_software_forced(&a()),
+            "the first clear must report a change"
+        );
+        assert!(!m.is_software_forced(&a()));
+        assert_eq!(
+            m.snapshots().first().unwrap().kind,
+            DisplayKind::ExternalDdc,
+            "clearing the overlay must restore the real hardware kind"
+        );
+
+        // Idempotent: clearing again (or an unknown id) is a no-op.
+        assert!(!m.clear_software_forced(&a()));
+        assert!(!m.clear_software_forced(&b()));
     }
 
     #[test]
