@@ -258,6 +258,15 @@ impl DisplayManager {
                     record.capabilities = display.capabilities;
                     record.responsive = true;
                     if was_disconnected {
+                        // A physical replug gets a fresh controller that re-runs full
+                        // detection, so RESET the runtime software-only overlay: the
+                        // fresh verdict must decide, not a stale overlay a worker set
+                        // and never cleared. A genuinely dead panel is simply
+                        // re-forced by the fresh worker (a brief flap); a now-healthy
+                        // one recovers. This is the deliberate counterpart to a SILENT
+                        // re-enumeration (still connected), which PRESERVES the overlay
+                        // so a hot-plug metadata refresh cannot resurrect dead hardware.
+                        record.software_forced = false;
                         events.push(ManagerEvent::Reattached {
                             id: id.clone(),
                             restore_level: record.last_user_level,
@@ -927,6 +936,44 @@ mod tests {
         // Idempotent: clearing again (or an unknown id) is a no-op.
         assert!(!m.clear_software_forced(&a()));
         assert!(!m.clear_software_forced(&b()));
+    }
+
+    #[test]
+    fn reattach_clears_the_software_forced_overlay() {
+        // A physical replug must RESET the runtime software-only overlay: the
+        // fresh controller re-runs full detection and will re-force a genuinely
+        // dead panel, so a stale overlay must not linger and keep a now-healthy
+        // panel "Software" until the user drags it. This is the deliberate
+        // counterpart to `mark_software_only_flips_kind_once_and_survives_re_enumeration`:
+        // a SILENT re-enumeration (still connected) preserves the overlay, but a
+        // disconnect→reconnect (`Reattached`) clears it.
+        let mut m = DisplayManager::new();
+        let _ = m.apply_enumeration(vec![disc(&a())], now());
+        assert!(m.mark_software_only(&a()));
+        assert!(m.is_software_forced(&a()));
+        assert_eq!(
+            m.snapshots().first().unwrap().kind,
+            DisplayKind::SoftwareOnly
+        );
+
+        // Unplug, then replug the same EDID.
+        assert_eq!(m.apply_enumeration(vec![], now()), vec![removed(a())]);
+        assert_eq!(
+            m.apply_enumeration(vec![disc(&a())], now()),
+            vec![reattached(a(), None)]
+        );
+
+        // The overlay is gone: the reattached record reports its real hardware kind,
+        // deferring to the fresh controller's re-run detection.
+        assert!(
+            !m.is_software_forced(&a()),
+            "a reattach must clear the runtime software-only overlay"
+        );
+        assert_eq!(
+            m.snapshots().first().unwrap().kind,
+            DisplayKind::ExternalDdc,
+            "a cleared overlay must restore the real hardware kind on reattach"
+        );
     }
 
     #[test]

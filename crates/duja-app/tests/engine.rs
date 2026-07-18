@@ -2400,3 +2400,182 @@ impl BrightnessController for GatedProbe {
         Ok(())
     }
 }
+
+// --- software-forced overlay is reset on a physical replug (audit FIX 2) -----
+//
+// The runtime software-only overlay is only ever SET by a worker (proving no
+// hardware) and cleared by the poll self-heal. A worker that re-runs detection on
+// a fresh controller after a replug never CLEARS it, and the poll self-heal's
+// "did the hardware move?" guard is defeated when the reattach restore-write lands
+// the panel back at its retained level. So a display wrongly forced software-only
+// used to stay "Software" across a replug even when the fresh controller probed
+// healthy — until the user dragged to a different level. A `Reattached` (a
+// physical replug ⇒ a fresh controller that re-runs full detection) must clear the
+// overlay so that fresh detection, not a stale overlay, decides.
+
+#[test]
+fn healthy_reattach_clears_a_wrongly_forced_software_only_display() {
+    // FIX 2 (a) — the recovery case. The first controller probes no-hardware, so
+    // the display is forced SoftwareOnly; it is unplugged while still forced, then
+    // replugged with a fresh HEALTHY controller. The reattach must clear the
+    // overlay (a transient ExternalDdc), and the fresh healthy detection must keep
+    // it ExternalDdc. Pre-fix the overlay was never cleared on reattach, so the
+    // display stayed SoftwareOnly and the ExternalDdc wait below times out (RED).
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    // First controller probes no-hardware (⇒ forced SoftwareOnly); every later
+    // controller is healthy hardware.
+    let dead_first = Arc::new(Mutex::new(true));
+    let factory: duja_app::ControllerFactory = {
+        let dead_first = dead_first.clone();
+        Box::new(move |_id| {
+            let dead = {
+                let mut flag = dead_first.lock().unwrap();
+                let d = *flag;
+                *flag = false;
+                d
+            };
+            Box::new(move || {
+                Some(Box::new(ProbeController {
+                    hardware_range: !dead,
+                    sets: Arc::new(Mutex::new(0)),
+                }) as Box<dyn BrightnessController>)
+            }) as duja_app::ControllerOpener
+        })
+    };
+
+    let (engine, notes) = Engine::spawn(
+        EngineConfig::default(),
+        enumerator(state.clone(), calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // The dead first controller forces the display SoftwareOnly (probe-driven).
+    assert!(
+        wait_kind(
+            &notes,
+            &id,
+            DisplayKind::SoftwareOnly,
+            Duration::from_secs(3)
+        ),
+        "the no-hardware controller must first force the display SoftwareOnly"
+    );
+
+    // Unplug (barrier via Snapshot), then replug the same display -> fresh worker.
+    *state.lock().unwrap() = Vec::new();
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+    assert!(
+        snapshot(&cmds).is_empty(),
+        "the display should be gone after the unplug enumeration"
+    );
+    *state.lock().unwrap() = vec![discovered(&id)];
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+
+    // The reattach clears the overlay and the fresh healthy detection keeps the
+    // display hardware-backed: it returns to ExternalDdc.
+    assert!(
+        wait_kind(
+            &notes,
+            &id,
+            DisplayKind::ExternalDdc,
+            Duration::from_secs(3)
+        ),
+        "a healthy reattach must clear the software-only overlay and return to ExternalDdc"
+    );
+    // ...and it must STAY ExternalDdc — a healthy fresh worker never re-forces it.
+    assert!(
+        !wait_kind(
+            &notes,
+            &id,
+            DisplayKind::SoftwareOnly,
+            Duration::from_millis(500)
+        ),
+        "a healthy reattached display must not be re-forced software-only"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
+#[test]
+fn still_dead_reattach_is_re_forced_software_only() {
+    // FIX 2 (b) — the no-over-correction guard. A display forced SoftwareOnly whose
+    // reattached controller is STILL dead must end SoftwareOnly. The reattach clears
+    // the overlay (a transient ExternalDdc), but the fresh worker's detection
+    // re-runs and re-forces the genuinely dead panel. Pre-fix the overlay was never
+    // cleared, so the intermediate ExternalDdc never appears and that wait times out
+    // (RED); this pins down the acceptable ExternalDdc->SoftwareOnly flap.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    // Every controller probes no-hardware: dead before the unplug AND dead again on
+    // reattach.
+    let factory: duja_app::ControllerFactory = Box::new(|_id| {
+        Box::new(|| {
+            Some(Box::new(ProbeController {
+                hardware_range: false,
+                sets: Arc::new(Mutex::new(0)),
+            }) as Box<dyn BrightnessController>)
+        }) as duja_app::ControllerOpener
+    });
+
+    let (engine, notes) = Engine::spawn(
+        EngineConfig::default(),
+        enumerator(state.clone(), calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // Forced SoftwareOnly by the first dead controller.
+    assert!(
+        wait_kind(
+            &notes,
+            &id,
+            DisplayKind::SoftwareOnly,
+            Duration::from_secs(3)
+        ),
+        "the no-hardware controller must first force the display SoftwareOnly"
+    );
+
+    // Unplug (barrier), then replug -> fresh (still dead) worker.
+    *state.lock().unwrap() = Vec::new();
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+    assert!(
+        snapshot(&cmds).is_empty(),
+        "the display should be gone after the unplug enumeration"
+    );
+    *state.lock().unwrap() = vec![discovered(&id)];
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+
+    // The reattach first clears the overlay (transient ExternalDdc)...
+    assert!(
+        wait_kind(
+            &notes,
+            &id,
+            DisplayKind::ExternalDdc,
+            Duration::from_secs(3)
+        ),
+        "a reattach must clear the overlay first (a transient ExternalDdc)"
+    );
+    // ...then the fresh worker's detection re-forces the genuinely dead panel.
+    assert!(
+        wait_kind(
+            &notes,
+            &id,
+            DisplayKind::SoftwareOnly,
+            Duration::from_secs(3)
+        ),
+        "a still-dead reattach must be re-forced SoftwareOnly by the fresh worker's detection"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}

@@ -140,6 +140,28 @@ pub(crate) fn pair_handles_to_displays(
     (0..display_count).zip(responsive.chain(silent)).collect()
 }
 
+/// Whether a mirrored `HMONITOR`'s physical handles must be DDC-probed to bind
+/// each correlated display to the handle that answers.
+///
+/// A probe is a paced, retried DDC read **per handle** (~300 ms of `thread::sleep`
+/// for a silent handle), so it is only worth doing when there is a genuine
+/// ambiguity to resolve: **more physical handles than correlated displays, and at
+/// least one display to bind**.
+///
+/// - `handles_len <= matched_len` — every handle already has a display, so
+///   pairing is positional and no probe is needed.
+/// - `matched_len == 0` — this `HMONITOR` correlated to no external display (its
+///   handles are a dropped internal panel, or an external whose EDID failed to
+///   parse), so [`pair_handles_to_displays`] emits nothing regardless of the probe
+///   results. Probing its silent handles would only stall the caller for a result
+///   that is then discarded — the wasteful case this predicate exists to skip.
+///
+/// Returns `true` exactly when `handles_len > matched_len && matched_len > 0`.
+#[must_use]
+pub(crate) fn should_probe(handles_len: usize, matched_len: usize) -> bool {
+    handles_len > matched_len && matched_len > 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +454,34 @@ mod tests {
             !paired.contains(&1),
             "only the silent handle is left for the caller to release"
         );
+    }
+
+    // --- when to spend the paced DDC probe on a mirrored HMONITOR (perf) ---
+
+    #[test]
+    fn should_probe_only_with_a_real_ambiguity_to_resolve() {
+        // Probe only when there are MORE handles than displays AND at least one
+        // display to bind. The pre-fix inline gate was a bare `handles > matched`,
+        // which is TRUE for (2, 0) — a mirrored HMONITOR whose every target was
+        // dropped (a laptop's silent internal-panel handle is the archetype) — and
+        // so wasted ~300 ms of paced DDC reads per silent handle on a `matched`
+        // that emits nothing. The predicate returns false there, skipping the work.
+        assert!(
+            !should_probe(2, 0),
+            "no displays to bind ⇒ never probe (the wasteful bug)"
+        );
+        assert!(
+            should_probe(2, 1),
+            "an excess handle beside one real display ⇒ probe to disambiguate"
+        );
+        assert!(
+            !should_probe(1, 1),
+            "one handle per display ⇒ positional pairing, no probe"
+        );
+        assert!(
+            should_probe(3, 2),
+            "still an excess handle over the displays ⇒ probe"
+        );
+        assert!(!should_probe(0, 0), "nothing at all ⇒ no probe");
     }
 }

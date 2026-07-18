@@ -25,7 +25,7 @@ use windows::Win32::Foundation::HANDLE;
 
 use crate::clock::SystemClock;
 use crate::controller::DdcController;
-use crate::correlate::{CorrelatedDisplay, correlate, pair_handles_to_displays};
+use crate::correlate::{CorrelatedDisplay, correlate, pair_handles_to_displays, should_probe};
 use crate::transport::{TransportError, VcpReading, VcpTransport};
 
 /// A failure enumerating the attached displays.
@@ -198,18 +198,23 @@ pub fn enumerate() -> Result<Vec<DdcDisplay>, DdcError> {
             .filter(|c| c.gdi_device == gdi_key)
             .collect();
 
-        // Bind each matched display to one physical handle. Probe only when the
-        // HMONITOR carries MORE handles than displays — a laptop's eDP mirrored
-        // beside an external monitor (two handles, one external identity) — so the
+        // Bind each matched display to one physical handle. Probe only when
+        // `should_probe` sees a real ambiguity to resolve — MORE handles than
+        // displays AND at least one display to bind: a laptop's eDP mirrored
+        // beside an external monitor (two handles, one external identity), so the
         // external identity attaches to the handle that answers DDC, not the
         // silent eDP. `sys::handle_answers_ddc` is paced + retried (the P1 read
         // model), so a genuine external is not mis-read as silent — which would
-        // otherwise bind the display to, and keep, the wrong handle. With no
-        // excess handles (a lone monitor, or identical external twins whose
-        // handles drive interchangeable panels) probing is skipped and pairing is
-        // positional. Preserving handle order keeps the final interface-path sort
-        // — and thus twin `-slot<n>` routing — deterministic.
-        let answers: Vec<bool> = if handles.len() > matched.len() {
+        // otherwise bind the display to, and keep, the wrong handle. When every
+        // handle already has a display (a lone monitor, or identical external
+        // twins whose handles drive interchangeable panels), OR this HMONITOR
+        // correlated NO displays at all (its handles — a dropped internal panel,
+        // or an external whose EDID failed to parse — pair to nothing regardless),
+        // probing is skipped: those paced reads (~300 ms per silent handle, on the
+        // engine thread) would be pure waste. Preserving handle order keeps the
+        // final interface-path sort — and thus twin `-slot<n>` routing —
+        // deterministic.
+        let answers: Vec<bool> = if should_probe(handles.len(), matched.len()) {
             handles
                 .iter()
                 .map(|h| sys::handle_answers_ddc(h.raw))
