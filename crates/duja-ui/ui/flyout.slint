@@ -546,6 +546,11 @@ export component BrightnessSlider inherits Rectangle {
     // Glide duration (ms) for an external value change; 0 = instant (drag / hidden
     // / reduced-motion). Driven by the app from the OS animation setting.
     in property <int> glide-ms;
+    // Set true (by the shell) only for a link-all fan-out render, so the *passive*
+    // linked sliders snap to their new value with no glide — they track the
+    // dragged slider live, so the external-change glide reads as lag (BUG 5). An
+    // external reflection leaves it false and keeps the glide.
+    in property <bool> instant-sync;
     callback changed(float);
 
     min-width: 120px;
@@ -570,9 +575,11 @@ export component BrightnessSlider inherits Rectangle {
     property <float> drag-value: value;
     property <float> shown: active ? drag-value : value;
     property <float> shown-frac: shown / 100;
-    // Glide only an external change: never while dragging (0), never on a hidden
-    // window / reduced motion (the app passes glide-ms 0 then).
-    property <duration> glide: (root.active ? 0 : root.glide-ms) * 1ms;
+    // Glide only an external change: never while dragging (0), never during a
+    // link-all fan-out (`instant-sync`, so the passive linked sliders track the
+    // dragged one instantly), never on a hidden window / reduced motion (the app
+    // passes glide-ms 0 then).
+    property <duration> glide: ((root.active || root.instant-sync) ? 0 : root.glide-ms) * 1ms;
     // Hover-near-a-marker, derived from the main touch area's pointer position so
     // no overlapping TouchArea steals the drag. Off while dragging.
     property <bool> hover-a: touch.has-hover && !root.active
@@ -806,6 +813,10 @@ export component FlyoutWindow inherits Window {
     // Glide duration (ms) for external brightness changes; the app sets it from
     // the OS animation preference (0 = reduced motion / instant).
     in property <int> glide-ms;
+    // Set true by the shell for a link-all fan-out render so the passive linked
+    // sliders snap instantly (BUG 5); false for an external reflection, which
+    // keeps the glide. Threaded into every slider below.
+    in property <bool> instant-sync;
 
     // --- outputs to the Rust shell (mapped onto FlyoutVm calls) ---
     callback slider-changed(/* row-index */ int, /* percent */ float);
@@ -1064,6 +1075,7 @@ export component FlyoutWindow inherits Window {
                                     marker-a-fraction: row.marker-a-fraction;
                                     markers-coincide: row.markers-coincide;
                                     glide-ms: root.glide-ms;
+                                    instant-sync: root.instant-sync;
                                     changed(v) => {
                                         root.slider-changed(idx, v);
                                     }
