@@ -11,9 +11,10 @@
 //!   pixel bounds, carrying the overlay alpha and (opt-in) gamma from the
 //!   continuum. The batch is the *full* desired dimmer state: a display at
 //!   alpha 0 is included so [`Dimmer::apply`](duja_core::dimmer::Dimmer::apply)
-//!   removes any stale overlay. A display with no known bounds (e.g. an internal
-//!   panel we could not locate a monitor rect for) is omitted — it cannot be
-//!   overlaid, a documented P4 limitation.
+//!   removes any stale overlay. A display with no known bounds (a WMI internal
+//!   panel, for which no monitor rect is plumbed) is omitted — it cannot be
+//!   overlaid, a documented limitation; a DDC-fallback internal panel does carry
+//!   bounds and is dimmable.
 //!
 //! The module is OS-free and fully unit-tested; the app's notification loop
 //! calls it and hands the batch to the real `Dimmer`.

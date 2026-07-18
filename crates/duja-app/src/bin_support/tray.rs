@@ -393,8 +393,9 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
 
     // 7. Publish the shared state and wire every event source. The gamma channel
     //    correlates a resolved display id to its GDI device via the same bounds
-    //    map the overlay planner reads (external displays carry a device name;
-    //    panels do not, and gamma never targets them).
+    //    map the overlay planner reads (DDC displays — external monitors and a
+    //    DDC-fallback internal panel — carry a device name; WMI panels do not, so
+    //    gamma never targets those).
     let gamma = gamma::GammaBackend::new(paths.crash_marker.clone(), {
         let bounds = bounds.clone();
         move |id| bounds.lock().ok().and_then(|b| b.device_for(id))

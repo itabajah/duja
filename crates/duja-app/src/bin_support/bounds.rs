@@ -8,9 +8,9 @@
 //! resolved id reuses the same [`select_slot_match`] routing the
 //! controller factory uses, so an identical-twin `-slot<n>` id resolves to the
 //! Nth bare-id match — the same slot the manager assigned, because both walk the
-//! same input order. Panels contribute `None` bounds and `None` device (no
-//! monitor rect or GDI adapter is plumbed for them in P4); the GDI device name
-//! is the gamma channel's ramp target for external displays.
+//! same input order. WMI panels contribute `None` bounds and `None` device,
+//! whereas a DDC-fallback internal panel carries DDC geometry like any DDC
+//! display; the GDI device name is the gamma channel's ramp target.
 
 // RATIONALE: these pure modules are consumed only by the Windows tray assembly,
 // but stay cross-platform (not cfg-gated) so their unit tests run on every CI

@@ -19,7 +19,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 # MSRV policy: "stable minus 2" (toolchain is 1.96.1), floor-bounded by Slint's
 # MSRV once it lands. Verified by the `msrv` CI job.

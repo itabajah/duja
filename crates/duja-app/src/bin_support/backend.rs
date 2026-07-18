@@ -62,9 +62,10 @@ pub(crate) fn discover() -> Vec<DiscoveredDisplay> {
     discover_all().0
 }
 
-/// One display's app-side geometry: its bare id, pixel bounds (external
-/// displays only), and GDI device name (the gamma channel's ramp target — also
-/// external displays only).
+/// One display's app-side geometry: its bare id, pixel bounds, and GDI device
+/// name (the gamma channel's ramp target). Carried by DDC displays — external
+/// monitors and a DDC-fallback internal panel alike — but not by WMI panels,
+/// whose geometry is `None`.
 pub(crate) type DisplayGeom = (String, Option<DisplayBounds>, Option<String>);
 
 /// Enumerate displays **and** their pixel bounds + GDI device names in one pass.
@@ -72,9 +73,9 @@ pub(crate) type DisplayGeom = (String, Option<DisplayBounds>, Option<String>);
 /// Returns the [`DiscoveredDisplay`] list the engine consumes, plus a parallel
 /// [`DisplayGeom`] list in the *same* deterministic order (DDC first, then
 /// panels). The geometry list feeds an app-side
-/// [`BoundsMap`](crate::bin_support::bounds::BoundsMap); panels contribute
-/// `None` bounds and `None` device (no monitor rect or GDI adapter is plumbed
-/// for them in P4). Never errors.
+/// [`BoundsMap`](crate::bin_support::bounds::BoundsMap); WMI panels contribute
+/// `None` bounds and `None` device, whereas a DDC-fallback internal panel keeps
+/// the DDC geometry (bounds + GDI device) like any DDC display. Never errors.
 pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<DisplayGeom>) {
     let ddc: Vec<(DiscoveredDisplay, DisplayGeom)> = discover_ddc()
         .into_iter()

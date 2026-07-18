@@ -40,7 +40,7 @@ end from day one. Distribution is a tag-triggered
 portable zip, each with `SHA256SUMS`, a minisign signature, and a build-provenance
 attestation.
 
-Health: **796 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
+Health: **803 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
 on stable, adversarial gate reviews at **P2, P3, P4, P5** plus a full post-v0.1.0
 **deep review** (14 module reviewers, every non-low finding adversarially
@@ -115,6 +115,31 @@ update-check TLS stack plus the WinRT toast bindings added by the v0.1.0 smart
 update loop (`UI_Notifications`/`Data_Xml_Dom`). Tracked in
 [ADR-0012](adr/0012-binary-size-budget-variance.md)/[debt.md](debt.md); P8 owns
 the trim (fat LTO, feature-gating the update stack). `dujactl.exe` ~0.8 MB.
+
+### v0.1.3 — internal-panel fallback fix (2026-07-19)
+
+The v0.1.2 identity fix assumed the WMI panel backend (`duja-panel`) owns every
+internal panel, so DDC enumeration skipped internal targets. Real-hardware laptop
+testing then found the built-in screen **vanishing entirely** on a machine whose
+backlight is GPU/OEM-driven: Windows exposes no `WmiMonitorBrightness` for it, so
+the panel appeared in neither backend. Fixed in one adversarially-reviewed PR
+(#64), red-first:
+
+- **ddc**: `correlate` now surfaces internal targets (flagged `is_internal`)
+  instead of dropping them, and the Windows enumeration binds them **only to a
+  physical-monitor handle left over after external pairing** — so the v0.1.2
+  mirror-mode routing (external → the DDC-responsive handle) is bit-for-bit
+  unchanged.
+- **backend**: the discovery merge keeps a DDC-fallback internal panel **only when
+  WMI lists no panel** (WMI stays authoritative when it can drive the panel);
+  `open_controller` prefers WMI, then DDC-over-eDP, then the engine's software
+  overlay. The built-in screen is now always present and controllable.
+
+The review verified handle ownership (the external/internal handle-index sets are
+provably disjoint), the unchanged mirror probe count, and that the red-first
+`correlate` guard bites against the shipped bug. **Hardware confirmation on the
+reporting laptop is pending** (tracked as a QA gate); the fix is strictly additive
+— it can only restore the panel, never remove more than before.
 
 ## What is done
 
