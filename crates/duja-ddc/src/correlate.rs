@@ -98,6 +98,48 @@ pub(crate) fn correlate(
     out
 }
 
+/// Decide which physical-monitor handle drives each external display correlated
+/// to one `HMONITOR`, given a DDC probe result per handle.
+///
+/// In Windows Duplicate (mirror) mode a single GDI source — hence a single
+/// `HMONITOR` — fronts several physical panels, so [`correlate`] resolves more
+/// than one external [`CorrelatedDisplay`] to that source while
+/// `GetPhysicalMonitorsFromHMONITOR` hands back one handle per physical panel.
+/// This routes the two together.
+///
+/// `answers_ddc[i]` is whether physical handle `i` replied to a DDC probe; the
+/// caller fills it with real probe results only for an ambiguous set (more
+/// handles than displays — a laptop's silent eDP mirrored beside an external
+/// monitor) and otherwise passes all-`true` (a lone monitor, or identical
+/// external twins whose handles drive interchangeable panels, need no probe).
+/// `display_count` is how many external displays correlated to this source.
+///
+/// Returns `(display_index, handle_index)` pairs — one per emitted display,
+/// capped at the handle count so a missing handle never fabricates a row.
+/// DDC-responsive handles are consumed first, so a mirrored eDP handle that
+/// stays silent yields to the external panel's handle; within a responsiveness
+/// group (and whenever nothing was probed) handle order is preserved, keeping
+/// the downstream interface-path ordering intact. Any handle index absent from
+/// the result must be released by the caller.
+pub(crate) fn pair_handles_to_displays(
+    answers_ddc: &[bool],
+    display_count: usize,
+) -> Vec<(usize, usize)> {
+    // Order handle indices so DDC-responsive handles come first, each group
+    // preserving its original order: a display then binds to a real external
+    // handle before a silent eDP handle, yet identical mirrored twins (all
+    // responsive) and un-probed sets (all `true`) keep positional order.
+    let responsive = answers_ddc
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &answered)| answered.then_some(i));
+    let silent = answers_ddc
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &answered)| (!answered).then_some(i));
+    (0..display_count).zip(responsive.chain(silent)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +295,142 @@ mod tests {
         assert_eq!(out.first().map(|c| c.sort_key.as_str()), Some("iface-ext"));
         // The raw EDID is carried through verbatim.
         assert_eq!(out.first().map(|c| c.edid.clone()), Some(ext));
+    }
+
+    // --- mirror-mode cardinality at the pure correlate seam (BUG 2) ---
+
+    #[test]
+    fn mirrored_identical_externals_on_one_gdi_yield_two_colliding_ids() {
+        // Duplicate (mirror) mode with two identical external panels: they are two
+        // CCD targets sharing ONE GDI source. correlate emits one display PER
+        // target — two displays with identical bare ids (so the manager's
+        // `assign_twin_slots` later resolves them to `-slot0`/`-slot1`, exercised
+        // by `identical_twin_monitors_without_serial_get_distinct_slots` in
+        // duja-core) and the same GDI, but distinct interface-path sort keys.
+        let edid = synth_edid("DEL", 0xA131, Some("DELL TWIN"));
+        let id = StableDisplayId::from_edid(&edid).unwrap();
+        let targets = vec![
+            target("iface-a", "gdi-1", None, false),
+            target("iface-b", "gdi-1", None, false),
+        ];
+        let edids = vec![
+            ("iface-a".to_owned(), edid.clone()),
+            ("iface-b".to_owned(), edid),
+        ];
+        let out = correlate(&targets, &edids);
+        assert_eq!(
+            out.len(),
+            2,
+            "one display per mirrored target, not collapsed"
+        );
+        assert_eq!(out.first().map(|c| c.id.clone()), Some(id.clone()));
+        assert_eq!(out.get(1).map(|c| c.id.clone()), Some(id));
+        assert_eq!(out.first().map(|c| c.gdi_device.as_str()), Some("gdi-1"));
+        assert_eq!(out.get(1).map(|c| c.gdi_device.as_str()), Some("gdi-1"));
+        assert_ne!(
+            out.first().map(|c| c.sort_key.clone()),
+            out.get(1).map(|c| c.sort_key.clone()),
+            "the two mirrored twins must keep distinct interface-path sort keys"
+        );
+    }
+
+    #[test]
+    fn mirrored_internal_plus_external_on_one_gdi_keeps_only_external() {
+        // Laptop in Duplicate mode: the built-in eDP and an external monitor are
+        // two targets mirrored on ONE GDI source. correlate drops the internal
+        // target, leaving exactly one external display carrying that shared GDI.
+        // (The enumeration then probes the HMONITOR's two physical handles to bind
+        // this display to the external one, not the silent eDP.)
+        let ext = synth_edid("DEL", 0xA131, Some("DELL EXT"));
+        let intl = synth_edid("AUO", 0x1234, Some("INTERNAL"));
+        let id_ext = StableDisplayId::from_edid(&ext).unwrap();
+        let targets = vec![
+            target("iface-internal", "gdi-1", Some("Built-in"), true),
+            target("iface-ext", "gdi-1", None, false),
+        ];
+        let edids = vec![
+            ("iface-internal".to_owned(), intl),
+            ("iface-ext".to_owned(), ext),
+        ];
+        let out = correlate(&targets, &edids);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.first().map(|c| c.id.clone()), Some(id_ext));
+        assert_eq!(out.first().map(|c| c.gdi_device.as_str()), Some("gdi-1"));
+    }
+
+    // --- physical-handle ↔ display pairing for a mirrored HMONITOR (BUG 2) ---
+
+    #[test]
+    fn single_handle_single_display_pairs_positionally() {
+        // Regression guard: a normal single-monitor HMONITOR (one handle, one
+        // display) still emits exactly one pair — no behaviour change.
+        assert_eq!(pair_handles_to_displays(&[true], 1), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn identical_twin_mirror_pairs_each_display_to_a_distinct_handle() {
+        // Two identical external panels mirrored on one GDI: two displays, two
+        // handles, both answer DDC. Each display binds to its OWN handle (distinct
+        // indices) so both physical panels are independently driven — the core of
+        // BUG 2, where today only one handle survived.
+        assert_eq!(
+            pair_handles_to_displays(&[true, true], 2),
+            vec![(0, 0), (1, 1)]
+        );
+    }
+
+    #[test]
+    fn mirrored_edp_yields_to_the_external_handle() {
+        // Laptop eDP + external mirrored: one external display, two handles. The
+        // display must bind to the handle that answers DDC (the external), never
+        // the silent eDP — deterministically, regardless of handle order.
+        assert_eq!(pair_handles_to_displays(&[false, true], 1), vec![(0, 1)]);
+        assert_eq!(pair_handles_to_displays(&[true, false], 1), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn excess_silent_handles_are_left_unpaired_for_release() {
+        // The one responsive handle among several silent ones is chosen; the rest
+        // are absent from the pairing so the caller releases them (no leak).
+        assert_eq!(
+            pair_handles_to_displays(&[false, true, false], 1),
+            vec![(0, 1)]
+        );
+    }
+
+    #[test]
+    fn all_silent_multi_handle_falls_back_to_positional_pairing() {
+        // If nothing answered (a transient DDC failure while enumerating) the set
+        // is unresolvable; fall back to positional pairing rather than dropping the
+        // display. A wrong guess is caught downstream by the verify-first write.
+        assert_eq!(pair_handles_to_displays(&[false, false], 1), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn pairing_never_exceeds_the_handle_count() {
+        // Defensive: more correlated identities than physical handles cannot
+        // fabricate a handle — the pairing is capped at the handle count.
+        assert_eq!(pair_handles_to_displays(&[true], 2), vec![(0, 0)]);
+        assert!(pair_handles_to_displays(&[], 2).is_empty());
+    }
+
+    #[test]
+    fn a_responsive_handle_is_never_dropped_for_a_silent_one() {
+        // Defense-in-depth invariant: a handle that answered DDC must never be
+        // the one released while a display is bound to a silent handle. Two
+        // responsive handles (idx 0, 2) straddle a silent one (idx 1), with two
+        // displays: both displays take the responsive handles; the ONLY unpaired
+        // (caller-released) handle is the silent one.
+        let pairs = pair_handles_to_displays(&[true, false, true], 2);
+        assert_eq!(pairs, vec![(0, 0), (1, 2)]);
+        let paired: std::collections::BTreeSet<usize> = pairs.iter().map(|&(_, h)| h).collect();
+        assert!(
+            paired.contains(&0) && paired.contains(&2),
+            "both DDC-responsive handles are kept"
+        );
+        assert!(
+            !paired.contains(&1),
+            "only the silent handle is left for the caller to release"
+        );
     }
 }

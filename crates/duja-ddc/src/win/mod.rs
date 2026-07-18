@@ -15,6 +15,7 @@
 
 mod sys;
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use duja_core::dimmer::DisplayBounds;
@@ -24,7 +25,7 @@ use windows::Win32::Foundation::HANDLE;
 
 use crate::clock::SystemClock;
 use crate::controller::DdcController;
-use crate::correlate::correlate;
+use crate::correlate::{CorrelatedDisplay, correlate, pair_handles_to_displays};
 use crate::transport::{TransportError, VcpReading, VcpTransport};
 
 /// A failure enumerating the attached displays.
@@ -148,14 +149,26 @@ impl DdcDisplay {
 /// genuine EDID-derived [`StableDisplayId`]; each excluded target's
 /// physical-monitor handle is released.
 ///
+/// # Duplicate (mirror) mode
+/// One GDI source — hence one `HMONITOR` — can front several physical panels,
+/// each with its own physical-monitor handle. Enumeration emits **one
+/// [`DdcDisplay`] per external panel**, so a mirrored pair becomes two
+/// independently controllable rows (identical panels collide on their bare id
+/// and are later slotted `-slot0`/`-slot1`). When such an `HMONITOR` carries
+/// more handles than external identities (a laptop's built-in eDP mirrored with
+/// an external monitor), each handle is DDC-probed so the external identity
+/// binds to the handle that answers, and the eDP handle is released.
+///
 /// # Errors
 /// [`DdcError::Os`] if the `SetupAPI` device-information set cannot be opened.
 pub fn enumerate() -> Result<Vec<DdcDisplay>, DdcError> {
     let edids = sys::collect_monitor_edids()?;
     let targets = sys::monitor_paths();
     // Pure correlation of path -> EDID -> identity. Internal panels are omitted
-    // (they belong to `duja-panel`), so their `HMONITOR`s below match nothing
-    // and are dropped rather than mislabelled as external DDC monitors.
+    // (they belong to `duja-panel`), so their `HMONITOR`s below match nothing.
+    // In Duplicate (mirror) mode one GDI source fronts several targets, so
+    // `correlate` yields one external display PER mirrored external panel, all
+    // carrying that source's GDI name.
     let resolved = correlate(&targets, &edids);
 
     let mut displays = Vec::new();
@@ -163,39 +176,75 @@ pub fn enumerate() -> Result<Vec<DdcDisplay>, DdcError> {
         let Some((gdi, bounds)) = sys::gdi_device_and_bounds(hmon) else {
             continue;
         };
-        let Ok(handles) = sys::physical_monitors(hmon) else {
+        let Ok(raw_handles) = sys::physical_monitors(hmon) else {
             continue;
         };
-        let mut handles = handles.into_iter();
-        let Some(first) = handles.next() else {
-            continue;
-        };
-        // Wrap the primary handle immediately so every early-exit path below
-        // releases it via Drop. One HMONITOR yields one monitor identity, so any
-        // extra physical monitors (mirrored sets) are released explicitly.
-        let handle = PhysicalMonitorHandle { raw: first };
-        for extra in handles {
-            sys::destroy(extra);
-        }
+        // Own every physical handle immediately (RAII): from here on, however
+        // this iteration exits, each handle is released exactly once — moved into
+        // an emitted `DdcDisplay` or dropped. Nothing can leak or double-free, and
+        // no early-exit added below can regress that.
+        let handles: Vec<PhysicalMonitorHandle> = raw_handles
+            .into_iter()
+            .map(|raw| PhysicalMonitorHandle { raw })
+            .collect();
 
-        // Attach this HMONITOR's handle + bounds to its correlated external
-        // identity, matched by GDI adapter name. An HMONITOR with no external
-        // identity (the internal panel, or a monitor whose EDID failed to
-        // correlate) drops its handle here.
+        // Every external identity correlated to THIS HMONITOR's GDI source. A
+        // mirrored HMONITOR matches more than one — each becomes its own
+        // controllable row (BUG 2), where the old code kept only the first and
+        // destroyed the rest.
         let gdi_key = gdi.to_ascii_lowercase();
-        let Some(display) = resolved.iter().find(|c| c.gdi_device == gdi_key) else {
-            continue; // `handle` drops here, releasing the monitor.
-        };
+        let matched: Vec<&CorrelatedDisplay> = resolved
+            .iter()
+            .filter(|c| c.gdi_device == gdi_key)
+            .collect();
 
-        displays.push(DdcDisplay {
-            id: display.id.clone(),
-            name: display.name.clone(),
-            edid: display.edid.clone(),
-            bounds,
-            gdi_device: gdi,
-            handle,
-            sort_key: display.sort_key.clone(),
-        });
+        // Bind each matched display to one physical handle. Probe only when the
+        // HMONITOR carries MORE handles than displays — a laptop's eDP mirrored
+        // beside an external monitor (two handles, one external identity) — so the
+        // external identity attaches to the handle that answers DDC, not the
+        // silent eDP. `sys::handle_answers_ddc` is paced + retried (the P1 read
+        // model), so a genuine external is not mis-read as silent — which would
+        // otherwise bind the display to, and keep, the wrong handle. With no
+        // excess handles (a lone monitor, or identical external twins whose
+        // handles drive interchangeable panels) probing is skipped and pairing is
+        // positional. Preserving handle order keeps the final interface-path sort
+        // — and thus twin `-slot<n>` routing — deterministic.
+        let answers: Vec<bool> = if handles.len() > matched.len() {
+            handles
+                .iter()
+                .map(|h| sys::handle_answers_ddc(h.raw))
+                .collect()
+        } else {
+            vec![true; handles.len()]
+        };
+        let handle_to_display: BTreeMap<usize, usize> =
+            pair_handles_to_displays(&answers, matched.len())
+                .into_iter()
+                .map(|(display_idx, handle_idx)| (handle_idx, display_idx))
+                .collect();
+
+        // Consume every handle exactly once: a paired handle is MOVED into its
+        // `DdcDisplay`; an unpaired one (an HMONITOR with no external identity, or
+        // a mirrored eDP handle the probe ruled out) is dropped at the end of its
+        // turn, releasing the physical monitor. `pair_handles_to_displays` binds
+        // responsive handles first, so a handle that answered DDC on any attempt
+        // is never the one dropped here.
+        for (handle_idx, handle) in handles.into_iter().enumerate() {
+            if let Some(display) = handle_to_display
+                .get(&handle_idx)
+                .and_then(|&display_idx| matched.get(display_idx))
+            {
+                displays.push(DdcDisplay {
+                    id: display.id.clone(),
+                    name: display.name.clone(),
+                    edid: display.edid.clone(),
+                    bounds,
+                    gdi_device: gdi.clone(),
+                    handle,
+                    sort_key: display.sort_key.clone(),
+                });
+            }
+        }
     }
 
     displays.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
