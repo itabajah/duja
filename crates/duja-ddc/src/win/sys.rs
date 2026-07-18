@@ -454,6 +454,26 @@ fn read_reg_edid(hkey: HKEY) -> Option<Vec<u8>> {
     Some(data)
 }
 
+/// The MCCS luminance (brightness) VCP code, read once — off the hot path — only
+/// to probe whether a physical-monitor handle behind a mirrored `HMONITOR`
+/// actually speaks DDC/CI (see [`handle_answers_ddc`]). Kept in sync with
+/// `duja_core::model::Feature::Brightness`.
+const LUMINANCE_VCP_CODE: u8 = 0x10;
+
+/// Probe whether a physical-monitor handle answers DDC/CI, to disambiguate the
+/// panels behind a **mirrored** `HMONITOR` — e.g. a laptop's embedded eDP handle
+/// (which does not speak DDC) from the external monitor's handle (which does).
+///
+/// Reads the luminance feature once: a real external monitor replies, an
+/// embedded panel does not. Any failure — including a transient DDC no-reply —
+/// reports `false`; the caller treats an all-silent multi-handle set as
+/// unresolvable and falls back to positional pairing. Called only for the rare
+/// mirrored `HMONITOR` that carries more physical handles than correlated
+/// displays, never on the common single-handle path.
+pub(crate) fn handle_answers_ddc(handle: HANDLE) -> bool {
+    get_vcp(handle, LUMINANCE_VCP_CODE).is_ok()
+}
+
 /// Read a VCP feature, returning the current value and maximum.
 ///
 /// # Errors
