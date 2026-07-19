@@ -29,6 +29,7 @@ fn snapshot(serial: &str, level: u8) -> DisplaySnapshot {
         id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap(),
         name: format!("Monitor {serial}"),
         kind: DisplayKind::ExternalDdc,
+        software_only: false,
         user_level_pct: level,
         capabilities: Capabilities::default(),
     }

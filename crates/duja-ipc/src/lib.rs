@@ -129,6 +129,7 @@ mod tests {
             id: "GSM-5B09-312NTAB1C234".to_owned(),
             name: "LG UltraGear".to_owned(),
             kind: DisplayKindDto::ExternalDdc,
+            software_only: false,
             level_pct: 73,
             features: vec![FeatureDto::Brightness, FeatureDto::Contrast],
         }
@@ -195,6 +196,9 @@ mod tests {
             id: StableDisplayId::from_parts("GSM", 0x5B09, Some("312NTAB1C234")).unwrap(),
             name: "LG".to_owned(),
             kind: DisplayKind::InternalPanel,
+            // Software-only AND internal at once: the projection must carry both,
+            // never fold the flag back into the kind.
+            software_only: true,
             user_level_pct: 60,
             capabilities: Capabilities {
                 features: [Feature::Brightness].into_iter().collect(),
@@ -206,6 +210,7 @@ mod tests {
         let info = DisplayInfo::from_snapshot(&snapshot);
         assert_eq!(info.id, "GSM-5B09-312NTAB1C234");
         assert_eq!(info.kind, DisplayKindDto::InternalPanel);
+        assert!(info.software_only);
         assert_eq!(info.level_pct, 60);
         assert_eq!(info.features, vec![FeatureDto::Brightness]);
     }

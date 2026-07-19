@@ -550,8 +550,10 @@ struct AppState {
     /// restore executor). Drives [`DimCommand`]s carrying a gamma factor to the
     /// GPU ramp; identity-restored on quit/restore.
     gamma: gamma::GammaBackend,
-    /// The current display set (resolved id + class) from the last enumeration.
-    displays: Vec<(StableDisplayId, DisplayKind)>,
+    /// The current display set from the last enumeration: resolved id, physical
+    /// class, and the runtime software-only flag (`kind` is never overwritten to
+    /// encode software-only — the flag carries it, #67).
+    displays: Vec<(StableDisplayId, DisplayKind, bool)>,
     /// Displays the user has explicitly driven this session (slider / hotkey /
     /// IPC). Until a display is in this set, Duja only *adopts* its current
     /// hardware brightness (mirrors it into the UI, writes nothing — item 5); once
@@ -614,7 +616,7 @@ impl AppState {
     /// (clamped 0..=100), routing each change through the same user-level path
     /// the flyout slider uses so state, engine and overlays stay consistent.
     fn nudge_all(&mut self, delta: i16) {
-        let ids: Vec<StableDisplayId> = self.displays.iter().map(|(id, _)| id.clone()).collect();
+        let ids: Vec<StableDisplayId> = self.displays.iter().map(|(id, _, _)| id.clone()).collect();
         for id in ids {
             let current = i16::from(self.state.level(id.as_str()).unwrap_or(100));
             let next = current.saturating_add(delta).clamp(0, 100);
@@ -840,9 +842,10 @@ impl AppState {
         let info: BTreeMap<StableDisplayId, duja_ui::DimmingInfo> = self
             .displays
             .iter()
-            .map(|(id, kind)| {
+            .map(|(id, kind, software_only)| {
                 let monitor = settings::monitor_config(&self.config, id.as_str());
-                let cfg = settings::continuum_for(*kind, &monitor, self.gamma_allowed);
+                let cfg =
+                    settings::continuum_for(*kind, *software_only, &monitor, self.gamma_allowed);
                 (
                     id.clone(),
                     duja_ui::DimmingInfo {
@@ -851,6 +854,9 @@ impl AppState {
                         // Reflect the *configured* mode (not the HDR-guarded one)
                         // so the toggle shows what the user chose.
                         dimming_on: monitor.dim_mode != ConfigDimMode::Off,
+                        // A software-only display's toggle is forced-on + disabled in
+                        // the flyout (it is the only dimming channel), so carry the flag.
+                        software_only: *software_only,
                     },
                 )
             })
@@ -1079,10 +1085,11 @@ impl AppState {
     /// transition brightness. Clamping keeps the thumb and the screen in sync.
     fn reapply_display(&mut self, id: &StableDisplayId) {
         let level = self.state.level(id.as_str()).unwrap_or(100);
-        let clamped = match self.kind_of(id) {
-            Some(kind) => {
+        let clamped = match self.meta_of(id) {
+            Some((kind, software_only)) => {
                 let cfg = settings::continuum_for(
                     kind,
+                    software_only,
                     &settings::monitor_config(&self.config, id.as_str()),
                     self.gamma_allowed,
                 );
@@ -1204,8 +1211,8 @@ impl AppState {
         self.user_controlled.insert(id.as_str().to_owned());
         self.state.record(id.as_str(), pct, unix_now());
 
-        if let Some(kind) = self.kind_of(id) {
-            let hw = self.hardware_target(kind, id.as_str(), pct);
+        if let Some((kind, software_only)) = self.meta_of(id) {
+            let hw = self.hardware_target(kind, software_only, id.as_str(), pct);
             let _ = self.engine_tx.send(EngineCommand::SetUserLevel {
                 id: id.clone(),
                 pct: hw,
@@ -1251,11 +1258,12 @@ impl AppState {
     /// external change is reflected via [`reverse_map`] and updates the slider +
     /// overlays; it **never writes to hardware**.
     fn on_level_read(&mut self, id: &StableDisplayId, hw_pct: u8) {
-        let Some(kind) = self.kind_of(id) else {
+        let Some((kind, software_only)) = self.meta_of(id) else {
             return;
         };
         let cfg = settings::continuum_for(
             kind,
+            software_only,
             &settings::monitor_config(&self.config, id.as_str()),
             self.gamma_allowed,
         );
@@ -1319,7 +1327,10 @@ impl AppState {
         // forwarded by the engine as this notification). Throttled internally, so
         // a slider-drag echo that also lands here never hammers the DXGI probe.
         self.refresh_gamma_verdict();
-        self.displays = snapshots.iter().map(|s| (s.id.clone(), s.kind)).collect();
+        self.displays = snapshots
+            .iter()
+            .map(|s| (s.id.clone(), s.kind, s.software_only))
+            .collect();
         // Keep the full snapshots (with capabilities) for the settings sections,
         // and refresh the (possibly-open) settings window's per-monitor list.
         self.snapshots.clone_from(&snapshots);
@@ -1344,6 +1355,7 @@ impl AppState {
             .map(|s| {
                 settings::continuum_for(
                     s.kind,
+                    s.software_only,
                     &settings::monitor_config(&self.config, s.id.as_str()),
                     self.gamma_allowed,
                 )
@@ -1419,10 +1431,11 @@ impl AppState {
         let inputs: Vec<DisplayInput> = self
             .displays
             .iter()
-            .filter(|(id, _)| self.user_controlled.contains(id.as_str()))
-            .map(|(id, kind)| DisplayInput {
+            .filter(|(id, _, _)| self.user_controlled.contains(id.as_str()))
+            .map(|(id, kind, software_only)| DisplayInput {
                 id: id.clone(),
                 kind: *kind,
+                software_only: *software_only,
                 user_pct: self.state.level(id.as_str()).unwrap_or(100),
             })
             .collect();
@@ -1432,6 +1445,7 @@ impl AppState {
             |d| {
                 settings::continuum_for(
                     d.kind,
+                    d.software_only,
                     &settings::monitor_config(&self.config, d.id.as_str()),
                     self.gamma_allowed,
                 )
@@ -1442,9 +1456,16 @@ impl AppState {
     }
 
     /// The engine hardware target for a user level (continuum-floored).
-    fn hardware_target(&self, kind: DisplayKind, id: &str, user_pct: u8) -> u8 {
+    fn hardware_target(
+        &self,
+        kind: DisplayKind,
+        software_only: bool,
+        id: &str,
+        user_pct: u8,
+    ) -> u8 {
         let cfg = settings::continuum_for(
             kind,
+            software_only,
             &settings::monitor_config(&self.config, id),
             self.gamma_allowed,
         );
@@ -1453,12 +1474,12 @@ impl AppState {
             .unwrap_or(user_pct)
     }
 
-    /// The class of a known display id.
-    fn kind_of(&self, id: &StableDisplayId) -> Option<DisplayKind> {
+    /// The physical class and software-only flag of a known display id.
+    fn meta_of(&self, id: &StableDisplayId) -> Option<(DisplayKind, bool)> {
         self.displays
             .iter()
-            .find(|(known, _)| known == id)
-            .map(|(_, kind)| *kind)
+            .find(|(known, _, _)| known == id)
+            .map(|(_, kind, software_only)| (*kind, *software_only))
     }
 }
 
@@ -2067,6 +2088,7 @@ mod tests {
             id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap(),
             name: format!("Monitor {serial}"),
             kind: DisplayKind::ExternalDdc,
+            software_only: false,
             user_level_pct: reading_pct,
             capabilities: Capabilities::default(),
         }

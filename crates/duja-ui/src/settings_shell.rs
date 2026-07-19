@@ -646,6 +646,7 @@ mod tests {
             id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap(),
             name: format!("Monitor {serial}"),
             kind: DisplayKind::ExternalDdc,
+            software_only: false,
             user_level_pct: 50,
             capabilities: Capabilities::default(),
         }
@@ -725,6 +726,7 @@ mod tests {
             id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap(),
             name: format!("Monitor {serial}"),
             kind: DisplayKind::ExternalDdc,
+            software_only: false,
             user_level_pct: 50,
             capabilities: Capabilities {
                 allowed_inputs: inputs,
@@ -866,6 +868,7 @@ mod binding_tests {
             id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap(),
             name: format!("Monitor {serial}"),
             kind: DisplayKind::ExternalDdc,
+            software_only: false,
             user_level_pct: 50,
             capabilities: Capabilities::default(),
         }

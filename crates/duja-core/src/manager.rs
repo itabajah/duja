@@ -127,9 +127,11 @@ struct DisplayRecord {
     /// Connected / disconnected, with the relevant instant.
     state: DisplayState,
     /// The platform's real hardware classification, refreshed from the latest
-    /// sighting. Snapshots overlay [`DisplayKind::SoftwareOnly`] on top of this
-    /// while `software_forced` is set, but the real kind is always retained here
-    /// so a self-heal can restore it.
+    /// sighting. Always reported verbatim by snapshots: the runtime "no working
+    /// hardware" verdict rides the separate `software_forced` flag (surfaced as
+    /// [`DisplaySnapshot::software_only`]) rather than overwriting this kind, so
+    /// Internal/External provenance survives a downgrade — there is nothing to
+    /// restore because the kind was never lost.
     kind: DisplayKind,
     /// Resolved name from the latest sighting, if any.
     name: Option<String>,
@@ -139,12 +141,12 @@ struct DisplayRecord {
     last_user_level: Option<u8>,
     /// `false` after the watchdog marks the display stuck, until re-sighted.
     responsive: bool,
-    /// The runtime "no working hardware" overlay. Set by
+    /// The runtime "no working hardware" flag. Set by
     /// [`DisplayManager::mark_software_only`] and cleared by
     /// [`DisplayManager::clear_software_forced`] (in-session self-heal). While set,
-    /// snapshots report [`DisplayKind::SoftwareOnly`] regardless of `kind`, so the
-    /// downgrade survives hot-plug metadata refreshes (which cannot detect dead
-    /// hardware) yet is trivially reversible.
+    /// snapshots report [`software_only`](DisplaySnapshot::software_only)` == true`
+    /// (leaving `kind` untouched), so the downgrade survives hot-plug metadata
+    /// refreshes (which cannot detect dead hardware) yet is trivially reversible.
     software_forced: bool,
 }
 
@@ -324,17 +326,18 @@ impl DisplayManager {
         }
     }
 
-    /// Downgrade a known display to [`DisplayKind::SoftwareOnly`] after the
-    /// engine's worker proves at runtime that it has no working hardware
-    /// brightness control (dead DDC / a probe reporting no hardware range).
+    /// Flag a known display as software-only after the engine's worker proves at
+    /// runtime that it has no working hardware brightness control (dead DDC / a
+    /// probe reporting no hardware range).
     ///
-    /// Sets the `software_forced` overlay (leaving the real `kind` intact for a
-    /// later self-heal). Returns `true` the first time the overlay is set, `false`
-    /// if the id is unknown or it was already set (idempotent — the engine relies
-    /// on this to re-emit its snapshot exactly once). The downgrade is **sticky**:
-    /// snapshots report software-only regardless of `kind`, so a later enumeration
-    /// that re-sights the display and refreshes its (statically-classified,
-    /// hardware-looking) metadata cannot silently revert it.
+    /// Sets the `software_forced` flag (leaving the real `kind` intact). Returns
+    /// `true` the first time it is set, `false` if the id is unknown or it was
+    /// already set (idempotent — the engine relies on this to re-emit its snapshot
+    /// exactly once). The downgrade is **sticky**: snapshots report
+    /// [`software_only`](DisplaySnapshot::software_only)` == true` while the
+    /// unchanged `kind` is preserved, so a later enumeration that re-sights the
+    /// display and refreshes its (statically-classified, hardware-looking) metadata
+    /// cannot silently revert it.
     pub fn mark_software_only(&mut self, id: &StableDisplayId) -> bool {
         match self.records.get_mut(id) {
             Some(record) if !record.software_forced => {
@@ -379,9 +382,11 @@ impl DisplayManager {
     /// A display with no resolved name falls back to its id string; a display
     /// with no recorded level reports [`DEFAULT_USER_LEVEL_PCT`]. Unresponsive
     /// displays are included (the UI greys them; it does not hide them). A display
-    /// with the `software_forced` overlay set reports [`DisplayKind::SoftwareOnly`]
-    /// regardless of its real hardware kind, so the app plans full-slider software
-    /// dimming for it.
+    /// with the `software_forced` flag set reports its real physical
+    /// [`kind`](DisplaySnapshot::kind) together with
+    /// [`software_only`](DisplaySnapshot::software_only)` == true`, so the app plans
+    /// full-slider software dimming for it without losing Internal/External
+    /// provenance.
     #[must_use]
     pub fn snapshots(&self) -> Vec<DisplaySnapshot> {
         self.records
@@ -390,11 +395,11 @@ impl DisplayManager {
             .map(|(id, record)| DisplaySnapshot {
                 id: id.clone(),
                 name: record.name.clone().unwrap_or_else(|| id.to_string()),
-                kind: if record.software_forced {
-                    DisplayKind::SoftwareOnly
-                } else {
-                    record.kind
-                },
+                // The real physical kind is reported UNCONDITIONALLY; the runtime
+                // "no working hardware" verdict rides the separate `software_only`
+                // flag below, so Internal/External provenance is never collapsed.
+                kind: record.kind,
+                software_only: record.software_forced,
                 user_level_pct: record.last_user_level.unwrap_or(DEFAULT_USER_LEVEL_PCT),
                 capabilities: record.capabilities.clone(),
             })
@@ -863,48 +868,75 @@ mod tests {
     }
 
     #[test]
-    fn mark_software_only_flips_kind_once_and_survives_re_enumeration() {
+    fn mark_software_only_flags_once_and_survives_re_enumeration() {
         let mut m = DisplayManager::new();
-        // Added as an external DDC display.
+        // Added as an external DDC display: hardware-backed, not software-only.
         let _ = m.apply_enumeration(vec![disc(&a())], now());
-        assert_eq!(
-            m.snapshots().first().unwrap().kind,
-            DisplayKind::ExternalDdc
-        );
+        let snap = m.snapshots().into_iter().next().unwrap();
+        assert_eq!(snap.kind, DisplayKind::ExternalDdc);
+        assert!(!snap.software_only);
 
         // Runtime detection downgrades it: the first flip reports a change and the
-        // kind is now software-only.
+        // snapshot now carries the software-only FLAG — while its real physical kind
+        // is retained (no longer collapsed onto a removed `SoftwareOnly` kind).
         assert!(
             m.mark_software_only(&a()),
             "first downgrade must report a change"
         );
+        let snap = m.snapshots().into_iter().next().unwrap();
         assert_eq!(
-            m.snapshots().first().unwrap().kind,
-            DisplayKind::SoftwareOnly
+            snap.kind,
+            DisplayKind::ExternalDdc,
+            "the real physical kind must survive a software-only downgrade"
         );
+        assert!(snap.software_only, "the software-only flag must be set");
 
         // Idempotent: a second downgrade is a no-op.
         assert!(
             !m.mark_software_only(&a()),
             "re-marking an already software-only display must be idempotent"
         );
-        assert_eq!(
-            m.snapshots().first().unwrap().kind,
-            DisplayKind::SoftwareOnly
-        );
+        assert!(m.snapshots().first().unwrap().software_only);
 
         // Sticky across a silent re-enumeration that re-advertises hardware: the
         // static platform classification must NOT revert a runtime-proven
         // software-only display (otherwise BUG 3 returns on the next hot-plug).
         assert_eq!(m.apply_enumeration(vec![disc(&a())], now()), vec![]);
-        assert_eq!(
-            m.snapshots().first().unwrap().kind,
-            DisplayKind::SoftwareOnly,
+        let snap = m.snapshots().into_iter().next().unwrap();
+        assert!(
+            snap.software_only,
             "a silent re-enumeration must not revert a runtime software-only downgrade"
+        );
+        assert_eq!(
+            snap.kind,
+            DisplayKind::ExternalDdc,
+            "and the physical kind stays put across the re-enumeration"
         );
 
         // Unknown id ⇒ no change.
         assert!(!m.mark_software_only(&b()));
+    }
+
+    #[test]
+    fn snapshots_keep_the_real_kind_and_flag_software_only_for_both_kinds() {
+        // The #67 regression: a software-only downgrade must set the FLAG without
+        // collapsing the physical kind — for an internal panel AND an external
+        // monitor alike. (RED against the old `snapshots()` that reported a
+        // `DisplayKind::SoftwareOnly` in place of the real kind.)
+        for kind in [DisplayKind::InternalPanel, DisplayKind::ExternalDdc] {
+            let mut m = DisplayManager::new();
+            let disc = DiscoveredDisplay {
+                id: a(),
+                kind,
+                name: Some("Monitor".to_owned()),
+                capabilities: Capabilities::default(),
+            };
+            let _ = m.apply_enumeration(vec![disc], now());
+            assert!(m.mark_software_only(&a()));
+            let snap = m.snapshots().into_iter().next().unwrap();
+            assert_eq!(snap.kind, kind, "the physical kind must not be collapsed");
+            assert!(snap.software_only, "the software-only flag must be set");
+        }
     }
 
     #[test]
@@ -913,24 +945,26 @@ mod tests {
         let _ = m.apply_enumeration(vec![disc(&a())], now());
         assert!(!m.is_software_forced(&a()));
 
-        // Wrongly forced software-only, then proven live: the overlay clears and the
-        // real hardware kind returns to snapshots.
+        // Wrongly forced software-only, then proven live: the flag clears and the
+        // snapshot is hardware-backed again (its kind was never collapsed).
         assert!(m.mark_software_only(&a()));
         assert!(m.is_software_forced(&a()));
-        assert_eq!(
-            m.snapshots().first().unwrap().kind,
-            DisplayKind::SoftwareOnly
-        );
+        assert!(m.snapshots().first().unwrap().software_only);
 
         assert!(
             m.clear_software_forced(&a()),
             "the first clear must report a change"
         );
         assert!(!m.is_software_forced(&a()));
+        let snap = m.snapshots().into_iter().next().unwrap();
+        assert!(
+            !snap.software_only,
+            "clearing the flag must return the display to hardware-backed"
+        );
         assert_eq!(
-            m.snapshots().first().unwrap().kind,
+            snap.kind,
             DisplayKind::ExternalDdc,
-            "clearing the overlay must restore the real hardware kind"
+            "the physical kind is unchanged throughout"
         );
 
         // Idempotent: clearing again (or an unknown id) is a no-op.
@@ -951,10 +985,7 @@ mod tests {
         let _ = m.apply_enumeration(vec![disc(&a())], now());
         assert!(m.mark_software_only(&a()));
         assert!(m.is_software_forced(&a()));
-        assert_eq!(
-            m.snapshots().first().unwrap().kind,
-            DisplayKind::SoftwareOnly
-        );
+        assert!(m.snapshots().first().unwrap().software_only);
 
         // Unplug, then replug the same EDID.
         assert_eq!(m.apply_enumeration(vec![], now()), vec![removed(a())]);
@@ -963,17 +994,18 @@ mod tests {
             vec![reattached(a(), None)]
         );
 
-        // The overlay is gone: the reattached record reports its real hardware kind,
+        // The overlay is gone: the reattached record reports hardware-backed again,
         // deferring to the fresh controller's re-run detection.
         assert!(
             !m.is_software_forced(&a()),
             "a reattach must clear the runtime software-only overlay"
         );
-        assert_eq!(
-            m.snapshots().first().unwrap().kind,
-            DisplayKind::ExternalDdc,
-            "a cleared overlay must restore the real hardware kind on reattach"
+        let snap = m.snapshots().into_iter().next().unwrap();
+        assert!(
+            !snap.software_only,
+            "a cleared overlay must report hardware-backed on reattach"
         );
+        assert_eq!(snap.kind, DisplayKind::ExternalDdc);
     }
 
     #[test]

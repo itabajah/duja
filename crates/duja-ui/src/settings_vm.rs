@@ -603,6 +603,7 @@ mod tests {
             id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap(),
             name: name.to_owned(),
             kind: DisplayKind::ExternalDdc,
+            software_only: false,
             user_level_pct: 50,
             capabilities: Capabilities {
                 features: BTreeSet::new(),

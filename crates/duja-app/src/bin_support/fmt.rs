@@ -3,12 +3,11 @@
 
 use duja_core::model::{Capabilities, DisplayKind, Feature};
 
-/// A short, stable label for a [`DisplayKind`].
+/// A short, stable label for a [`DisplayKind`] (its physical provenance).
 pub(crate) fn kind_label(kind: DisplayKind) -> &'static str {
     match kind {
-        DisplayKind::ExternalDdc => "ddc",
-        DisplayKind::InternalPanel => "panel",
-        DisplayKind::SoftwareOnly => "software",
+        DisplayKind::ExternalDdc => "external",
+        DisplayKind::InternalPanel => "internal",
     }
 }
 
@@ -81,9 +80,8 @@ mod tests {
 
     #[test]
     fn kind_labels_are_stable() {
-        assert_eq!(kind_label(DisplayKind::ExternalDdc), "ddc");
-        assert_eq!(kind_label(DisplayKind::InternalPanel), "panel");
-        assert_eq!(kind_label(DisplayKind::SoftwareOnly), "software");
+        assert_eq!(kind_label(DisplayKind::ExternalDdc), "external");
+        assert_eq!(kind_label(DisplayKind::InternalPanel), "internal");
     }
 
     #[test]

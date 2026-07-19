@@ -419,6 +419,7 @@ fn row_to_data(row: &FlyoutRow) -> FlyoutRowData {
         greyed: row.greyed,
         slider_enabled: row.slider_enabled,
         dimming_on: row.dimming_on,
+        software_only: row.software_only,
         has_floor: row.has_hardware_floor(),
         marker_fraction: row.transition_fraction(),
         marker_a_fraction: row.hw_zero_fraction(),
@@ -448,6 +449,7 @@ mod tests {
             id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap(),
             name: format!("Monitor {serial}"),
             kind: DisplayKind::ExternalDdc,
+            software_only: false,
             user_level_pct: level,
             capabilities: Capabilities::default(),
         }
@@ -488,6 +490,7 @@ mod tests {
         assert_eq!(data.kind.as_str(), "External");
         assert!(data.greyed);
         assert!(!data.slider_enabled);
+        assert!(!data.software_only);
     }
 
     // Instantiating the Slint window needs a real backend/event loop, which is
@@ -573,6 +576,7 @@ mod binding_tests {
             id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap(),
             name: format!("Monitor {serial}"),
             kind: DisplayKind::ExternalDdc,
+            software_only: false,
             user_level_pct: level,
             capabilities: Capabilities::default(),
         }

@@ -35,8 +35,12 @@ use duja_core::model::DisplayKind;
 pub(crate) struct DisplayInput {
     /// Resolved display id (slot-suffixed for twins).
     pub(crate) id: StableDisplayId,
-    /// Backend class (selects hardware vs software-only continuum).
+    /// Physical class (provenance).
     pub(crate) kind: DisplayKind,
+    /// Whether the display is dimmed purely in software (no working hardware
+    /// brightness) — the runtime flag `continuum_for` routes on to pick the
+    /// software-only vs hardware continuum.
+    pub(crate) software_only: bool,
     /// The user's slider level, `0..=100`.
     pub(crate) user_pct: u8,
 }
@@ -101,6 +105,7 @@ mod tests {
         DisplayInput {
             id: id(serial),
             kind,
+            software_only: false,
             user_pct,
         }
     }
@@ -119,7 +124,7 @@ mod tests {
         let mon = monitor(30, ConfigDimMode::Overlay);
         let plan = plan(
             &displays,
-            |_| continuum_for(DisplayKind::ExternalDdc, &mon, true),
+            |_| continuum_for(DisplayKind::ExternalDdc, false, &mon, true),
             |_| Some(bounds()),
         );
         // Hardware pinned at the floor, not driven to zero.
@@ -137,7 +142,7 @@ mod tests {
         let mon = monitor(30, ConfigDimMode::Overlay); // default anchor 25
         let plan = plan(
             &displays,
-            |_| continuum_for(DisplayKind::ExternalDdc, &mon, true),
+            |_| continuum_for(DisplayKind::ExternalDdc, false, &mon, true),
             |_| Some(bounds()),
         );
         // Above the transition B = pos(30) = 47.5, slider 80 maps to hardware
@@ -158,7 +163,7 @@ mod tests {
         let mon = monitor(0, ConfigDimMode::Overlay); // floor 0, default anchor 25
         let plan = plan(
             &displays,
-            |_| continuum_for(DisplayKind::ExternalDdc, &mon, true),
+            |_| continuum_for(DisplayKind::ExternalDdc, false, &mon, true),
             |_| Some(bounds()),
         );
         // Hardware pinned at the floor 0; the overlay supplies the sub-anchor dim.
@@ -181,6 +186,7 @@ mod tests {
             |_| {
                 continuum_for(
                     DisplayKind::ExternalDdc,
+                    false,
                     &mon,
                     /* gamma_allowed */ false,
                 )
@@ -201,6 +207,7 @@ mod tests {
             |_| {
                 continuum_for(
                     DisplayKind::ExternalDdc,
+                    false,
                     &mon,
                     /* gamma_allowed */ true,
                 )
@@ -219,7 +226,7 @@ mod tests {
         let mon = monitor(40, ConfigDimMode::Overlay);
         let plan = plan(
             &displays,
-            |_| continuum_for(DisplayKind::InternalPanel, &mon, true),
+            |_| continuum_for(DisplayKind::InternalPanel, false, &mon, true),
             |_| None, // bounds unknown
         );
         assert!(plan.commands.is_empty());
@@ -228,11 +235,19 @@ mod tests {
 
     #[test]
     fn software_only_display_has_no_hardware_entry() {
-        let displays = [input("A", DisplayKind::SoftwareOnly, 0)];
+        // A software-only display — flagged at runtime, on any physical kind — has
+        // no hardware entry: the whole slider is software overlay. Route the
+        // continuum on the input's flag, exactly as the tray does.
+        let displays = [DisplayInput {
+            id: id("A"),
+            kind: DisplayKind::InternalPanel,
+            software_only: true,
+            user_pct: 0,
+        }];
         let mon = monitor(0, ConfigDimMode::Overlay);
         let plan = plan(
             &displays,
-            |_| continuum_for(DisplayKind::SoftwareOnly, &mon, true),
+            |d| continuum_for(d.kind, d.software_only, &mon, true),
             |_| Some(bounds()),
         );
         assert!(plan.hardware.is_empty());

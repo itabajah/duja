@@ -1821,8 +1821,8 @@ fn watchdog_recovery_restores_user_level_not_relearn() {
 // --- no-hardware software-only fallback (BUG 3) ----------------------------
 //
 // A display with no working hardware brightness must be detected at runtime and
-// downgraded to `DisplayKind::SoftwareOnly`, so software dimming spans the whole
-// slider. Detection is worker-side via three tight signals: a probe reporting no
+// flagged `software_only` (its physical kind untouched), so software dimming spans
+// the whole slider. Detection is worker-side via three tight signals: a probe reporting no
 // hardware range, a first effective brightness write whose read-back never moves
 // (a silent no-op), and a first brightness write the backend rejects.
 
@@ -1961,18 +1961,23 @@ impl BrightnessController for RejectWriteController {
     }
 }
 
-/// Wait for a `DisplaysChanged` whose snapshot for `id` has the given kind.
-fn wait_kind(
+/// Wait for a `DisplaysChanged` whose snapshot for `id` reports
+/// `software_only == want`.
+///
+/// Runtime no-hardware detection now rides the `software_only` FLAG (the physical
+/// `kind` is never collapsed), so tests wait on the flag transitioning rather than
+/// on the display kind changing.
+fn wait_software_only(
     notes: &Receiver<EngineNotification>,
     id: &StableDisplayId,
-    kind: DisplayKind,
+    want: bool,
     dur: Duration,
 ) -> bool {
     wait_note(notes, dur, |n| {
         matches!(
             n,
             EngineNotification::DisplaysChanged(snaps)
-                if snaps.iter().any(|s| s.id == *id && s.kind == kind)
+                if snaps.iter().any(|s| s.id == *id && s.software_only == want)
         )
     })
 }
@@ -1980,7 +1985,7 @@ fn wait_kind(
 #[test]
 fn probe_without_hardware_range_downgrades_to_software_only() {
     // BUG 3 core: a controller that probes `hardware_range: false` must downgrade
-    // the display to SoftwareOnly — driven by the PROBE alone, before (and without)
+    // the display to software-only — driven by the PROBE alone, before (and without)
     // any dead hardware brightness write.
     let id = display_id();
     let (platform_tx, platform_rx) = unbounded::<()>();
@@ -2008,13 +2013,8 @@ fn probe_without_hardware_range_downgrades_to_software_only() {
     );
 
     assert!(
-        wait_kind(
-            &notes,
-            &id,
-            DisplayKind::SoftwareOnly,
-            Duration::from_secs(3)
-        ),
-        "a probe reporting no hardware range must downgrade the display to SoftwareOnly"
+        wait_software_only(&notes, &id, true, Duration::from_secs(3)),
+        "a probe reporting no hardware range must downgrade the display to software-only"
     );
     assert_eq!(
         *sets.lock().unwrap(),
@@ -2070,13 +2070,8 @@ fn ack_but_silent_noop_write_downgrades_to_software_only() {
     .unwrap();
 
     assert!(
-        wait_kind(
-            &notes,
-            &id,
-            DisplayKind::SoftwareOnly,
-            Duration::from_secs(3)
-        ),
-        "an ACK-but-no-op first write must downgrade the display to SoftwareOnly"
+        wait_software_only(&notes, &id, true, Duration::from_secs(3)),
+        "an ACK-but-no-op first write must downgrade the display to software-only"
     );
 
     within(Duration::from_secs(2), move || engine.shutdown());
@@ -2127,20 +2122,15 @@ fn slow_but_working_controller_is_not_falsely_downgraded() {
     .unwrap();
 
     assert!(
-        !wait_kind(
-            &notes,
-            &id,
-            DisplayKind::SoftwareOnly,
-            Duration::from_secs(1)
-        ),
+        !wait_software_only(&notes, &id, true, Duration::from_secs(1)),
         "a slow-but-working controller must never be downgraded (BLOCKER-1 false-downgrade guard)"
     );
     let snaps = snapshot(&cmds);
     assert!(
         snaps
             .iter()
-            .any(|s| s.id == id && s.kind == DisplayKind::ExternalDdc),
-        "a slow-but-working controller must stay hardware-backed (ExternalDdc)"
+            .any(|s| s.id == id && s.kind == DisplayKind::ExternalDdc && !s.software_only),
+        "a slow-but-working controller must stay hardware-backed (not software-only)"
     );
 
     within(Duration::from_secs(2), move || engine.shutdown());
@@ -2190,12 +2180,7 @@ fn wrongly_forced_display_self_heals_to_hardware() {
     })
     .unwrap();
     assert!(
-        wait_kind(
-            &notes,
-            &id,
-            DisplayKind::SoftwareOnly,
-            Duration::from_secs(3)
-        ),
+        wait_software_only(&notes, &id, true, Duration::from_secs(3)),
         "the very slow panel should first be (wrongly) forced software-only"
     );
 
@@ -2205,12 +2190,7 @@ fn wrongly_forced_display_self_heals_to_hardware() {
     cmds.send(EngineCommand::SetLevelPolling { on: true })
         .unwrap();
     assert!(
-        wait_kind(
-            &notes,
-            &id,
-            DisplayKind::ExternalDdc,
-            Duration::from_secs(5)
-        ),
+        wait_software_only(&notes, &id, false, Duration::from_secs(5)),
         "a wrongly-forced display must self-heal to ExternalDdc once proven live"
     );
 
@@ -2222,7 +2202,7 @@ fn wrongly_forced_display_self_heals_to_hardware() {
 fn rejected_first_write_downgrades_to_software_only() {
     // Detection c (debt #48): a first brightness write the backend REJECTS
     // (`Ok(Err(Unsupported))`) is no longer swallowed as a clean Set — it is a
-    // no-hardware signal that downgrades the display to SoftwareOnly.
+    // no-hardware signal that downgrades the display to software-only.
     let id = display_id();
     let (platform_tx, platform_rx) = unbounded::<()>();
     let (calls_tx, _calls_rx) = unbounded();
@@ -2257,13 +2237,8 @@ fn rejected_first_write_downgrades_to_software_only() {
     .unwrap();
 
     assert!(
-        wait_kind(
-            &notes,
-            &id,
-            DisplayKind::SoftwareOnly,
-            Duration::from_secs(3)
-        ),
-        "a rejected first brightness write must downgrade the display to SoftwareOnly"
+        wait_software_only(&notes, &id, true, Duration::from_secs(3)),
+        "a rejected first brightness write must downgrade the display to software-only"
     );
 
     within(Duration::from_secs(2), move || engine.shutdown());
@@ -2354,19 +2329,14 @@ fn stale_software_fallback_does_not_downgrade_fresh_worker() {
 
     // The stale fallback must NOT downgrade the healthy display.
     assert!(
-        !wait_kind(
-            &notes,
-            &id,
-            DisplayKind::SoftwareOnly,
-            Duration::from_millis(700)
-        ),
+        !wait_software_only(&notes, &id, true, Duration::from_millis(700)),
         "a stale SoftwareFallback must not downgrade the fresh worker's display"
     );
     let snaps = snapshot(&cmds);
     assert!(
         snaps
             .iter()
-            .any(|s| s.id == id && s.kind == DisplayKind::ExternalDdc),
+            .any(|s| s.id == id && s.kind == DisplayKind::ExternalDdc && !s.software_only),
         "the display must remain hardware-backed after a stale fallback"
     );
 
@@ -2416,17 +2386,17 @@ impl BrightnessController for GatedProbe {
 #[test]
 fn healthy_reattach_clears_a_wrongly_forced_software_only_display() {
     // FIX 2 (a) — the recovery case. The first controller probes no-hardware, so
-    // the display is forced SoftwareOnly; it is unplugged while still forced, then
+    // the display is forced software-only; it is unplugged while still forced, then
     // replugged with a fresh HEALTHY controller. The reattach must clear the
     // overlay (a transient ExternalDdc), and the fresh healthy detection must keep
     // it ExternalDdc. Pre-fix the overlay was never cleared on reattach, so the
-    // display stayed SoftwareOnly and the ExternalDdc wait below times out (RED).
+    // display stayed software-only and the hardware-backed wait below times out (RED).
     let id = display_id();
     let (platform_tx, platform_rx) = unbounded::<()>();
     let (calls_tx, _calls_rx) = unbounded();
     let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
 
-    // First controller probes no-hardware (⇒ forced SoftwareOnly); every later
+    // First controller probes no-hardware (⇒ forced software-only); every later
     // controller is healthy hardware.
     let dead_first = Arc::new(Mutex::new(true));
     let factory: duja_app::ControllerFactory = {
@@ -2455,15 +2425,10 @@ fn healthy_reattach_clears_a_wrongly_forced_software_only_display() {
     );
     let cmds = engine.sender();
 
-    // The dead first controller forces the display SoftwareOnly (probe-driven).
+    // The dead first controller forces the display software-only (probe-driven).
     assert!(
-        wait_kind(
-            &notes,
-            &id,
-            DisplayKind::SoftwareOnly,
-            Duration::from_secs(3)
-        ),
-        "the no-hardware controller must first force the display SoftwareOnly"
+        wait_software_only(&notes, &id, true, Duration::from_secs(3)),
+        "the no-hardware controller must first force the display software-only"
     );
 
     // Unplug (barrier via Snapshot), then replug the same display -> fresh worker.
@@ -2479,22 +2444,12 @@ fn healthy_reattach_clears_a_wrongly_forced_software_only_display() {
     // The reattach clears the overlay and the fresh healthy detection keeps the
     // display hardware-backed: it returns to ExternalDdc.
     assert!(
-        wait_kind(
-            &notes,
-            &id,
-            DisplayKind::ExternalDdc,
-            Duration::from_secs(3)
-        ),
+        wait_software_only(&notes, &id, false, Duration::from_secs(3)),
         "a healthy reattach must clear the software-only overlay and return to ExternalDdc"
     );
     // ...and it must STAY ExternalDdc — a healthy fresh worker never re-forces it.
     assert!(
-        !wait_kind(
-            &notes,
-            &id,
-            DisplayKind::SoftwareOnly,
-            Duration::from_millis(500)
-        ),
+        !wait_software_only(&notes, &id, true, Duration::from_millis(500)),
         "a healthy reattached display must not be re-forced software-only"
     );
 
@@ -2504,12 +2459,12 @@ fn healthy_reattach_clears_a_wrongly_forced_software_only_display() {
 
 #[test]
 fn still_dead_reattach_is_re_forced_software_only() {
-    // FIX 2 (b) — the no-over-correction guard. A display forced SoftwareOnly whose
-    // reattached controller is STILL dead must end SoftwareOnly. The reattach clears
+    // FIX 2 (b) — the no-over-correction guard. A display forced software-only whose
+    // reattached controller is STILL dead must end software-only. The reattach clears
     // the overlay (a transient ExternalDdc), but the fresh worker's detection
     // re-runs and re-forces the genuinely dead panel. Pre-fix the overlay was never
     // cleared, so the intermediate ExternalDdc never appears and that wait times out
-    // (RED); this pins down the acceptable ExternalDdc->SoftwareOnly flap.
+    // (RED); this pins down the acceptable ExternalDdc->software-only flap.
     let id = display_id();
     let (platform_tx, platform_rx) = unbounded::<()>();
     let (calls_tx, _calls_rx) = unbounded();
@@ -2534,15 +2489,10 @@ fn still_dead_reattach_is_re_forced_software_only() {
     );
     let cmds = engine.sender();
 
-    // Forced SoftwareOnly by the first dead controller.
+    // Forced software-only by the first dead controller.
     assert!(
-        wait_kind(
-            &notes,
-            &id,
-            DisplayKind::SoftwareOnly,
-            Duration::from_secs(3)
-        ),
-        "the no-hardware controller must first force the display SoftwareOnly"
+        wait_software_only(&notes, &id, true, Duration::from_secs(3)),
+        "the no-hardware controller must first force the display software-only"
     );
 
     // Unplug (barrier), then replug -> fresh (still dead) worker.
@@ -2557,23 +2507,13 @@ fn still_dead_reattach_is_re_forced_software_only() {
 
     // The reattach first clears the overlay (transient ExternalDdc)...
     assert!(
-        wait_kind(
-            &notes,
-            &id,
-            DisplayKind::ExternalDdc,
-            Duration::from_secs(3)
-        ),
+        wait_software_only(&notes, &id, false, Duration::from_secs(3)),
         "a reattach must clear the overlay first (a transient ExternalDdc)"
     );
     // ...then the fresh worker's detection re-forces the genuinely dead panel.
     assert!(
-        wait_kind(
-            &notes,
-            &id,
-            DisplayKind::SoftwareOnly,
-            Duration::from_secs(3)
-        ),
-        "a still-dead reattach must be re-forced SoftwareOnly by the fresh worker's detection"
+        wait_software_only(&notes, &id, true, Duration::from_secs(3)),
+        "a still-dead reattach must be re-forced software-only by the fresh worker's detection"
     );
 
     within(Duration::from_secs(2), move || engine.shutdown());

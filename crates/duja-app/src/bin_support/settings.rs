@@ -3,12 +3,13 @@
 //!
 //! # Floor semantics
 //!
-//! A hardware-backed display (DDC or internal panel) always gets a
+//! A hardware-backed display (any [`DisplayKind`], DDC or internal panel) gets a
 //! [`ContinuumConfig::hardware`] with the configured `hw_floor_pct` — including
 //! `0`, which the continuum treats as "drive the full hardware range, no overlay
-//! until the very bottom". Only a [`DisplayKind::SoftwareOnly`] display (no
-//! hardware backlight at all) maps to [`ContinuumConfig::software_only`], where
-//! the overlay spans the whole slider.
+//! until the very bottom". A display flagged `software_only` at runtime (no working
+//! hardware backlight at all) maps instead to [`ContinuumConfig::software_only`],
+//! where the overlay spans the whole slider. This selection is by the **flag**
+//! alone, never the kind (#67).
 //!
 //! # HDR gamma guard
 //!
@@ -32,20 +33,32 @@ use duja_ui::Theme as UiTheme;
 
 /// Resolve the [`ContinuumConfig`] for one display from its per-monitor settings.
 ///
+/// Selection is by `software_only` alone: a `software_only` display (no working
+/// hardware brightness) gets the full-slider [`ContinuumConfig::software_only`]
+/// continuum; every hardware-backed display gets [`ContinuumConfig::hardware`] with
+/// its configured floor. The physical `kind` is accepted (every caller already
+/// holds it, and it keeps the door open for kind-specific policy) but does **not**
+/// select the continuum — that decoupling is the point of #67: a software-only
+/// internal panel must still dim in software.
+///
 /// `gamma_allowed` is the live HDR verdict, re-probed by the app on each
 /// enumeration: `false` forces every [`DimMode::Gamma`] display onto the overlay
 /// path.
 pub(crate) fn continuum_for(
     kind: DisplayKind,
+    software_only: bool,
     monitor: &MonitorConfig,
     gamma_allowed: bool,
 ) -> ContinuumConfig {
+    // `kind` is intentionally not consulted: the continuum is chosen by the runtime
+    // `software_only` flag, so a software-only display of ANY physical kind dims in
+    // software (#67). Bind it explicitly so the decoupling is visible and lint-clean.
+    let _ = kind;
     let mode = effective_mode(monitor.dim_mode.into(), gamma_allowed);
-    match kind {
-        DisplayKind::SoftwareOnly => ContinuumConfig::software_only(mode),
-        DisplayKind::ExternalDdc | DisplayKind::InternalPanel => {
-            ContinuumConfig::hardware(monitor.hw_floor_pct, monitor.min_perceived_pct, mode)
-        }
+    if software_only {
+        ContinuumConfig::software_only(mode)
+    } else {
+        ContinuumConfig::hardware(monitor.hw_floor_pct, monitor.min_perceived_pct, mode)
     }
 }
 
@@ -115,6 +128,7 @@ mod tests {
     fn hardware_display_uses_configured_floor() {
         let cfg = continuum_for(
             DisplayKind::ExternalDdc,
+            false,
             &monitor(20, ConfigDimMode::Overlay),
             true,
         );
@@ -122,13 +136,27 @@ mod tests {
     }
 
     #[test]
-    fn software_only_display_has_no_floor() {
-        let cfg = continuum_for(
-            DisplayKind::SoftwareOnly,
+    fn software_only_flag_selects_the_software_continuum_regardless_of_kind() {
+        // The #67 decouple: routing is by the FLAG, not the kind. An internal-panel
+        // OR external display with software_only == true both get the floorless
+        // full-slider software continuum. (RED if continuum_for routed on `kind`,
+        // which — with no SoftwareOnly kind left — would send both down the hardware
+        // path and yield Some(floor).)
+        for kind in [DisplayKind::InternalPanel, DisplayKind::ExternalDdc] {
+            let cfg = continuum_for(kind, true, &monitor(20, ConfigDimMode::Overlay), true);
+            assert_eq!(
+                cfg.hardware_floor, None,
+                "software_only ⇒ no hardware floor"
+            );
+        }
+        // ...and the SAME InternalPanel with software_only == false IS hardware.
+        let hw = continuum_for(
+            DisplayKind::InternalPanel,
+            false,
             &monitor(20, ConfigDimMode::Overlay),
             true,
         );
-        assert_eq!(cfg.hardware_floor, None);
+        assert_eq!(hw.hardware_floor, Some(20));
     }
 
     #[test]
@@ -151,6 +179,7 @@ mod tests {
     fn gamma_config_downgraded_end_to_end() {
         let cfg = continuum_for(
             DisplayKind::InternalPanel,
+            false,
             &monitor(10, ConfigDimMode::Gamma),
             false,
         );

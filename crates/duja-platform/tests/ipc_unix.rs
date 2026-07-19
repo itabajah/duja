@@ -52,6 +52,7 @@ fn fake_handler(req: Request) -> Response {
                 id: "GSM-5B09-abc".to_owned(),
                 name: "Fake".to_owned(),
                 kind: duja_ipc::DisplayKindDto::ExternalDdc,
+                software_only: false,
                 level_pct: 55,
                 features: vec![duja_ipc::FeatureDto::Brightness],
             }],
