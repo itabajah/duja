@@ -8,6 +8,8 @@
 //!   to [`duja_core::manager::DiscoveredDisplay`], plus a re-enumerate-and-open
 //!   controller factory and per-display bounds discovery.
 //! - [`bounds`] — the app-side resolved-id → pixel-bounds map (twin-slot aware).
+//! - [`clone_group`] — groups mirrored (Duplicate-mode) panels sharing one GDI
+//!   surface into a single control (one merged row, one overlay per surface).
 //! - [`counting`] — a [`counting::CountingController`] decorator that tallies
 //!   hardware set/get/error calls for the stress harness.
 //! - [`dimming`] — the pure continuum → dimmer planner (overlay/gamma + hardware).
@@ -41,6 +43,7 @@
 pub(crate) mod backend;
 pub(crate) mod bounds;
 pub(crate) mod cli;
+pub(crate) mod clone_group;
 pub(crate) mod counting;
 pub(crate) mod dimming;
 pub(crate) mod fmt;

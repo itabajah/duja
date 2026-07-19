@@ -56,6 +56,7 @@ use duja_ui::{
 };
 
 use crate::bin_support::bounds::BoundsMap;
+use crate::bin_support::clone_group::{self, CloneGrouping};
 use crate::bin_support::dimming::{self, DisplayInput};
 use crate::bin_support::hotkey::{self, Accelerator, HotkeyAction, Modifiers as AccelModifiers};
 use crate::bin_support::paths::DujaPaths;
@@ -422,6 +423,8 @@ pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
             engine_tx: engine.sender(),
             gamma,
             displays: Vec::new(),
+            groups: CloneGrouping::default(),
+            unresponsive: BTreeSet::new(),
             user_controlled: BTreeSet::new(),
             flyout_visible: false,
             last_hidden: None,
@@ -552,8 +555,23 @@ struct AppState {
     gamma: gamma::GammaBackend,
     /// The current display set from the last enumeration: resolved id, physical
     /// class, and the runtime software-only flag (`kind` is never overwritten to
-    /// encode software-only — the flag carries it, #67).
+    /// encode software-only — the flag carries it, #67). Kept per-panel (not
+    /// per-group) because the member→group mapping and the fan-out need every
+    /// physical panel; the flyout/state/overlays are keyed per group via
+    /// [`groups`](Self::groups).
     displays: Vec<(StableDisplayId, DisplayKind, bool)>,
+    /// Mirrored (Duplicate-mode) panels sharing one GDI surface, collapsed into one
+    /// control each (#66). Rebuilt from [`displays`](Self::displays) + the bounds
+    /// map on every enumeration, so it is always fresh across hot-plug and
+    /// Duplicate↔Extend transitions. The flyout row, the user level, the
+    /// user-controlled flag, and the one overlay/gamma command per surface are all
+    /// keyed under a group's stable anchor.
+    groups: CloneGrouping,
+    /// Per-**member** unresponsive set, aggregated per group: the merged row greys
+    /// only when every member of its group is unresponsive (any live member keeps
+    /// the slider interactive). Tracked here (not just in the flyout view-model)
+    /// because the view-model sees only the merged anchor rows.
+    unresponsive: BTreeSet<StableDisplayId>,
     /// Displays the user has explicitly driven this session (slider / hotkey /
     /// IPC). Until a display is in this set, Duja only *adopts* its current
     /// hardware brightness (mirrors it into the UI, writes nothing — item 5); once
@@ -616,12 +634,20 @@ impl AppState {
     /// (clamped 0..=100), routing each change through the same user-level path
     /// the flyout slider uses so state, engine and overlays stay consistent.
     fn nudge_all(&mut self, delta: i16) {
-        let ids: Vec<StableDisplayId> = self.displays.iter().map(|(id, _, _)| id.clone()).collect();
-        for id in ids {
-            let current = i16::from(self.state.level(id.as_str()).unwrap_or(100));
+        // Iterate group ANCHORS, not physical panels (#66): a mirrored set is one
+        // control, so nudging it once — not once per member — avoids applying the
+        // step N times to the same shared level.
+        let anchors: Vec<StableDisplayId> = self
+            .groups
+            .groups()
+            .iter()
+            .map(|group| group.anchor.clone())
+            .collect();
+        for anchor in anchors {
+            let current = i16::from(self.state.level(anchor.as_str()).unwrap_or(100));
             let next = current.saturating_add(delta).clamp(0, 100);
             let pct = u8::try_from(next).unwrap_or(0);
-            self.set_user_level(&id, pct);
+            self.set_user_level(&anchor, pct);
         }
     }
 
@@ -838,26 +864,34 @@ impl AppState {
     /// Rebuild the flyout's per-display dimming info (floor + on/off) from the
     /// current config and push it into the flyout view-model.
     fn refresh_flyout_dimming(&self) {
+        // One entry per clone group, keyed on the anchor (#66): the merged row's
+        // marker/toggle use the group's aggregated software-only flag + the anchor's
+        // per-monitor config.
         let info: BTreeMap<StableDisplayId, duja_ui::DimmingInfo> = self
-            .displays
+            .groups
+            .groups()
             .iter()
-            .map(|(id, kind, software_only)| {
-                let monitor = settings::monitor_config(&self.config, id.as_str());
-                let cfg =
-                    settings::continuum_for(*kind, *software_only, &monitor, self.gamma_allowed);
+            .map(|group| {
+                let monitor = settings::monitor_config(&self.config, group.anchor.as_str());
+                let cfg = settings::continuum_for(
+                    group.kind,
+                    group.software_only,
+                    &monitor,
+                    self.gamma_allowed,
+                );
                 (
-                    id.clone(),
+                    group.anchor.clone(),
                     duja_ui::DimmingInfo {
                         hardware_floor: cfg.hardware_floor,
                         min_perceived_pct: cfg.min_perceived_pct,
                         // Reflect the *configured* mode (not the HDR-guarded one) so
                         // the toggle shows what the user chose — except a software-only
-                        // display always reads on (the overlay is its only channel, and
+                        // group always reads on (the overlay is its only channel, and
                         // `continuum_for` forces its effective mode Off -> Overlay).
-                        dimming_on: settings::dimming_on(*software_only, monitor.dim_mode),
-                        // A software-only display's toggle is forced-on + disabled in
-                        // the flyout (it is the only dimming channel), so carry the flag.
-                        software_only: *software_only,
+                        dimming_on: settings::dimming_on(group.software_only, monitor.dim_mode),
+                        // A software-only group's toggle is forced-on + disabled in the
+                        // flyout (it is the only dimming channel), so carry the flag.
+                        software_only: group.software_only,
                     },
                 )
             })
@@ -1085,20 +1119,28 @@ impl AppState {
     /// strand the thumb below the new minimum while the screen jumps up to the
     /// transition brightness. Clamping keeps the thumb and the screen in sync.
     fn reapply_display(&mut self, id: &StableDisplayId) {
-        let level = self.state.level(id.as_str()).unwrap_or(100);
-        let clamped = match self.meta_of(id) {
+        // A mirrored set reapplies as one control: resolve to the anchor, clamp the
+        // level under the GROUP continuum, and route back through set_user_level
+        // (which fans out to the members) (#66).
+        let anchor = self
+            .groups
+            .anchor_of(id)
+            .cloned()
+            .unwrap_or_else(|| id.clone());
+        let level = self.state.level(anchor.as_str()).unwrap_or(100);
+        let clamped = match self.group_meta(&anchor) {
             Some((kind, software_only)) => {
                 let cfg = settings::continuum_for(
                     kind,
                     software_only,
-                    &settings::monitor_config(&self.config, id.as_str()),
+                    &settings::monitor_config(&self.config, anchor.as_str()),
                     self.gamma_allowed,
                 );
                 level.max(settings::min_reachable_pct(cfg))
             }
             None => level,
         };
-        self.set_user_level(id, clamped);
+        self.set_user_level(&anchor, clamped);
     }
 
     /// The manual update check (settings "Check now"): always runs regardless of
@@ -1205,17 +1247,27 @@ impl AppState {
     /// lands (see P4 gate Finding 1: a leading-edge UI throttle used to drop the
     /// final sample, leaving the hardware at an intermediate level).
     fn set_user_level(&mut self, id: &StableDisplayId, pct: u8) {
+        // Route to the group anchor: the flyout row, hotkey nudge, IPC and reflection
+        // all address a member id, but a mirrored set is ONE control keyed under its
+        // anchor (#66). State, the user-controlled flag and the overlay all live
+        // under the anchor; the hardware write fans out to the members.
+        let anchor = self
+            .groups
+            .anchor_of(id)
+            .cloned()
+            .unwrap_or_else(|| id.clone());
         let now = Instant::now();
-        // A genuine user action: this display is now user-controlled, so it writes
-        // to hardware here and its overlay/gamma may engage — and a later
-        // enumeration will not re-adopt (clobber) this level (item 5).
-        self.user_controlled.insert(id.as_str().to_owned());
-        self.state.record(id.as_str(), pct, unix_now());
+        // A genuine user action: this group is now user-controlled, so it writes to
+        // hardware here and its overlay/gamma may engage — and a later enumeration
+        // will not re-adopt (clobber) this level (item 5).
+        self.user_controlled.insert(anchor.as_str().to_owned());
+        self.state.record(anchor.as_str(), pct, unix_now());
 
-        if let Some((kind, software_only)) = self.meta_of(id) {
-            let hw = self.hardware_target(kind, software_only, id.as_str(), pct);
+        // Fan the level out to every member's hardware under the group rule, then
+        // send after the group borrow ends (apply_overlays needs &mut self).
+        for (member, hw) in self.group_hardware_writes(&anchor, pct) {
             let _ = self.engine_tx.send(EngineCommand::SetUserLevel {
-                id: id.clone(),
+                id: member,
                 pct: hw,
             });
         }
@@ -1234,15 +1286,9 @@ impl AppState {
     /// Handle an engine notification (runs on the Slint thread).
     fn on_notification(&mut self, notification: EngineNotification) {
         match notification {
-            EngineNotification::DisplaysChanged(snapshots) => self.on_displays_changed(snapshots),
-            EngineNotification::DisplayUnresponsive(id) => {
-                self.vm.borrow_mut().set_unresponsive(&id, true);
-                self.render();
-            }
-            EngineNotification::DisplayResponsive(id) => {
-                self.vm.borrow_mut().set_unresponsive(&id, false);
-                self.render();
-            }
+            EngineNotification::DisplaysChanged(snapshots) => self.on_displays_changed(&snapshots),
+            EngineNotification::DisplayUnresponsive(id) => self.on_member_responsive(&id, false),
+            EngineNotification::DisplayResponsive(id) => self.on_member_responsive(&id, true),
             EngineNotification::LevelRead { id, hw_pct } => self.on_level_read(&id, hw_pct),
         }
     }
@@ -1259,29 +1305,67 @@ impl AppState {
     /// external change is reflected via [`reverse_map`] and updates the slider +
     /// overlays; it **never writes to hardware**.
     fn on_level_read(&mut self, id: &StableDisplayId, hw_pct: u8) {
-        let Some((kind, software_only)) = self.meta_of(id) else {
+        // The engine polls each physical panel; map the member that answered to its
+        // group anchor and reflect onto the ONE merged row via the group continuum
+        // (#66). A software-only group has no hardware channel, so `reflected_level`
+        // returns None and it never reflects. (Residual: a mirror whose two panels
+        // report divergent backlights can nudge the merged slider between them until
+        // the user takes control — a physical-backlight difference, not a bug.)
+        let anchor = self
+            .groups
+            .anchor_of(id)
+            .cloned()
+            .unwrap_or_else(|| id.clone());
+        let Some((kind, software_only)) = self.group_meta(&anchor) else {
             return;
         };
         let cfg = settings::continuum_for(
             kind,
             software_only,
-            &settings::monitor_config(&self.config, id.as_str()),
+            &settings::monitor_config(&self.config, anchor.as_str()),
             self.gamma_allowed,
         );
         let current = self
             .state
-            .level(id.as_str())
+            .level(anchor.as_str())
             .unwrap_or(DEFAULT_USER_LEVEL_PCT);
         let Some(perceived) = reflected_level(current, hw_pct, cfg) else {
             return;
         };
-        self.state.record(id.as_str(), perceived, unix_now());
-        self.vm.borrow_mut().set_level(id, perceived);
+        self.state.record(anchor.as_str(), perceived, unix_now());
+        self.vm.borrow_mut().set_level(&anchor, perceived);
         self.render();
         // Re-plan overlays: an external change that crosses the transition must
         // clear/adjust any overlay a user-controlled display was showing.
         self.apply_overlays();
         let _ = self.state.maybe_flush(Instant::now());
+    }
+
+    /// Fold a per-member responsive/unresponsive notification into the merged row.
+    ///
+    /// The engine tracks health per physical panel, but the flyout shows one row per
+    /// clone group: grey the merged (anchor) row only when EVERY member is
+    /// unresponsive, and keep it live the moment any member answers (#66). An
+    /// ungrouped id greys its own row directly.
+    fn on_member_responsive(&mut self, id: &StableDisplayId, responsive: bool) {
+        if responsive {
+            self.unresponsive.remove(id);
+        } else {
+            self.unresponsive.insert(id.clone());
+        }
+        // Resolve to the group and aggregate before touching the view-model, so the
+        // group/unresponsive borrows end before the `vm` borrow.
+        let target = self.groups.group_of(id).map(|group| {
+            (
+                group.anchor.clone(),
+                clone_group::all_unresponsive(&group.members, &self.unresponsive),
+            )
+        });
+        match target {
+            Some((anchor, all_down)) => self.vm.borrow_mut().set_unresponsive(&anchor, all_down),
+            None => self.vm.borrow_mut().set_unresponsive(id, !responsive),
+        }
+        self.render();
     }
 
     /// Re-probe the live HDR gamma verdict into
@@ -1322,7 +1406,7 @@ impl AppState {
     /// only seeds the UI as a fallback while that reading is still the pre-probe
     /// placeholder (see [`adopt_position`]). Only a genuine user action
     /// ([`set_user_level`](Self::set_user_level)) writes to hardware thereafter.
-    fn on_displays_changed(&mut self, snapshots: Vec<DisplaySnapshot>) {
+    fn on_displays_changed(&mut self, snapshots: &[DisplaySnapshot]) {
         // Keep the HDR gamma verdict live across the session — this is the app's
         // enumeration path (a hot-plug, or a resume/session-unlock re-enumeration
         // forwarded by the engine as this notification). Throttled internally, so
@@ -1334,7 +1418,29 @@ impl AppState {
             .collect();
         // Keep the full snapshots (with capabilities) for the settings sections,
         // and refresh the (possibly-open) settings window's per-monitor list.
-        self.snapshots.clone_from(&snapshots);
+        self.snapshots = snapshots.to_vec();
+        // Rebuild the clone grouping (#66): mirrored panels sharing one GDI source
+        // collapse into a single control. Snapshot each display's device under the
+        // bounds lock — the enumerator populated the bounds map BEFORE this
+        // DisplaysChanged fired (engine `refresh` runs the enumerator, which writes
+        // the map, then reconciles workers and emits the notification), so
+        // `device_for` is fresh here. A transiently-`None` device degrades
+        // gracefully: that panel becomes its own singleton (two rows for one frame)
+        // and converges on the next pass, never stranding an overlay.
+        let members: Vec<clone_group::GroupMember> = {
+            let guard = self.bounds.lock().ok();
+            snapshots
+                .iter()
+                .map(|s| clone_group::GroupMember {
+                    id: s.id.clone(),
+                    kind: s.kind,
+                    software_only: s.software_only,
+                    device: guard.as_ref().and_then(|b| b.device_for(&s.id)),
+                    name: s.name.clone(),
+                })
+                .collect()
+        };
+        self.groups = clone_group::group_clones(&members);
         self.settings_vm.borrow_mut().set_displays(
             &self.snapshots,
             &self.config,
@@ -1363,23 +1469,53 @@ impl AppState {
             })
             .collect();
         adopt_enumeration(
-            &snapshots,
+            snapshots,
             &self.user_controlled,
             &cfgs,
             &mut self.state,
             unix_now(),
         );
 
-        // Rebuild the flyout rows showing the *user* levels (not the engine's
-        // hardware echo).
-        let rows: Vec<DisplaySnapshot> = snapshots
-            .into_iter()
-            .map(|mut s| {
-                s.user_level_pct = self.state.level(s.id.as_str()).unwrap_or(s.user_level_pct);
-                s
+        // Rebuild the flyout rows: ONE merged row per clone group (a mirrored set is
+        // one control, #66). Each row is the anchor's snapshot re-labelled with the
+        // merged name, carrying the group's aggregated software-only flag and the
+        // *user* level recorded under the anchor (not the engine's hardware echo).
+        let rows: Vec<DisplaySnapshot> = self
+            .groups
+            .groups()
+            .iter()
+            .filter_map(|group| {
+                let anchor = snapshots.iter().find(|s| s.id == group.anchor)?;
+                Some(DisplaySnapshot {
+                    name: group.name.clone(),
+                    software_only: group.software_only,
+                    user_level_pct: self
+                        .state
+                        .level(group.anchor.as_str())
+                        .unwrap_or(anchor.user_level_pct),
+                    ..anchor.clone()
+                })
             })
             .collect();
         self.vm.borrow_mut().set_displays(rows);
+        // Re-assert each merged row's greyed state from the per-member unresponsive
+        // set, so a grouping rebuilt with a CHANGED anchor (its lowest-id member
+        // unplugged) still greys correctly — the merged row greys only when every
+        // current member is unresponsive.
+        let greyed: Vec<(StableDisplayId, bool)> = self
+            .groups
+            .groups()
+            .iter()
+            .map(|group| {
+                (
+                    group.anchor.clone(),
+                    clone_group::all_unresponsive(&group.members, &self.unresponsive),
+                )
+            })
+            .collect();
+        for (anchor, all_down) in greyed {
+            self.vm.borrow_mut().set_unresponsive(&anchor, all_down);
+        }
         self.refresh_flyout_dimming();
         self.render();
         // Keep the content-driven height current if the flyout is open (the row
@@ -1429,15 +1565,20 @@ impl AppState {
     /// never restores an overlay/gamma on launch, it adopts the current screen
     /// (item 5). The batch is a diff, so an absent display is simply not dimmed.
     fn plan_commands(&self) -> Vec<DimCommand> {
+        // One input per user-controlled GROUP, keyed on its anchor (#66): a mirrored
+        // set shares one GDI surface, so it must emit exactly one overlay/gamma
+        // command — feeding both members (at identical bounds) would stack two
+        // overlays on the same pixels. The anchor's bounds are the shared surface.
         let inputs: Vec<DisplayInput> = self
-            .displays
+            .groups
+            .groups()
             .iter()
-            .filter(|(id, _, _)| self.user_controlled.contains(id.as_str()))
-            .map(|(id, kind, software_only)| DisplayInput {
-                id: id.clone(),
-                kind: *kind,
-                software_only: *software_only,
-                user_pct: self.state.level(id.as_str()).unwrap_or(100),
+            .filter(|group| self.user_controlled.contains(group.anchor.as_str()))
+            .map(|group| DisplayInput {
+                id: group.anchor.clone(),
+                kind: group.kind,
+                software_only: group.software_only,
+                user_pct: self.state.level(group.anchor.as_str()).unwrap_or(100),
             })
             .collect();
         let guard = self.bounds.lock().ok();
@@ -1454,6 +1595,55 @@ impl AppState {
             |id| guard.as_ref().and_then(|b| b.bounds_for(id)),
         );
         plan.commands
+    }
+
+    /// The per-member hardware writes a user level on the group anchored at
+    /// `anchor` fans out to.
+    ///
+    /// The group continuum maps the level to a hardware target, then
+    /// [`clone_group::fan_out_hardware`] applies the group rule: an all-hardware
+    /// group drives every member to that target; a software-only group pins its
+    /// hardware-capable members to MAX (100) so the single shared overlay is the
+    /// sole uniform dimmer (never a partial hardware level that double-dims). Falls
+    /// back to the lone display when `anchor` is not (yet) in a group.
+    fn group_hardware_writes(
+        &self,
+        anchor: &StableDisplayId,
+        pct: u8,
+    ) -> Vec<(StableDisplayId, u8)> {
+        match self.groups.group_of(anchor) {
+            Some(group) => {
+                let cfg = settings::continuum_for(
+                    group.kind,
+                    group.software_only,
+                    &settings::monitor_config(&self.config, anchor.as_str()),
+                    self.gamma_allowed,
+                );
+                let out = map_user_level(pct, &cfg);
+                clone_group::fan_out_hardware(&group.members, out.hardware_pct)
+            }
+            None => match self.meta_of(anchor) {
+                Some((kind, software_only)) => {
+                    vec![(
+                        anchor.clone(),
+                        self.hardware_target(kind, software_only, anchor.as_str(), pct),
+                    )]
+                }
+                None => Vec::new(),
+            },
+        }
+    }
+
+    /// The physical class and aggregated software-only flag of the group a display
+    /// id belongs to, falling back to the per-panel [`meta_of`](Self::meta_of) when
+    /// the id is not (yet) in a group. Group-level policy (continuum, clamp,
+    /// reflection) reads this so it uses the merged software-only verdict, not one
+    /// member's.
+    fn group_meta(&self, id: &StableDisplayId) -> Option<(DisplayKind, bool)> {
+        self.groups
+            .group_of(id)
+            .map(|group| (group.kind, group.software_only))
+            .or_else(|| self.meta_of(id))
     }
 
     /// The engine hardware target for a user level (continuum-floored).
@@ -2387,5 +2577,99 @@ mod tests {
             action_for(HotkeyAction::ToggleFlyout),
             Action::Toggle
         ));
+    }
+
+    /// The app-level apply rule for merged clone groups (#66): the exact
+    /// composition `set_user_level` performs on a group — group continuum →
+    /// `map_user_level` → `fan_out_hardware`. `AppState` cannot be built off a live
+    /// Slint/tray thread, so (as with the other tray-level pure tests) these drive
+    /// the underlying functions the method calls rather than the method itself.
+    mod clone_group_apply {
+        use crate::bin_support::clone_group::{GroupMember, fan_out_hardware, group_clones};
+        use crate::bin_support::settings::continuum_for;
+        use duja_core::config::{DimMode as ConfigDimMode, MonitorConfig};
+        use duja_core::continuum::map_user_level;
+        use duja_core::id::StableDisplayId;
+        use duja_core::model::DisplayKind;
+
+        fn id(serial: &str) -> StableDisplayId {
+            StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap()
+        }
+
+        /// A member on the shared GDI source `\\.\display1` (so the set mirrors).
+        fn member(serial: &str, kind: DisplayKind, software_only: bool) -> GroupMember {
+            GroupMember {
+                id: id(serial),
+                kind,
+                software_only,
+                device: Some(r"\\.\display1".to_owned()),
+                name: serial.to_owned(),
+            }
+        }
+
+        fn monitor(floor: u8) -> MonitorConfig {
+            MonitorConfig {
+                hw_floor_pct: floor,
+                dim_mode: ConfigDimMode::Overlay,
+                ..MonitorConfig::default()
+            }
+        }
+
+        #[test]
+        fn software_only_group_pins_hardware_members_to_max_and_is_one_surface() {
+            // A mixed mirror: one hardware clone + one software-only clone on one GDI
+            // source. The group is software-only, so a slider change pins the hardware
+            // clone to MAX (100) — never a partial hardware level — and the ONE shared
+            // overlay does all the dimming. (Pre-fix, two per-panel rows each drove
+            // their own hardware + overlay, double-dimming the shared pixels.)
+            let members = vec![
+                member("A", DisplayKind::ExternalDdc, false),
+                member("B", DisplayKind::InternalPanel, true),
+            ];
+            let grouping = group_clones(&members);
+            let group = grouping.group_of(&id("A")).expect("A grouped");
+            assert!(
+                group.software_only,
+                "any software-only member ⇒ software-only group"
+            );
+            let cfg = continuum_for(group.kind, group.software_only, &monitor(20), true);
+            let out = map_user_level(30, &cfg);
+            assert_eq!(
+                out.hardware_pct, None,
+                "a software-only group has no hardware channel"
+            );
+            let writes = fan_out_hardware(&group.members, out.hardware_pct);
+            assert_eq!(
+                writes,
+                vec![(id("A"), 100)],
+                "hardware clone pinned to MAX; software clone skipped"
+            );
+            // Exactly one group ⇒ plan_commands emits one overlay for the surface.
+            assert_eq!(grouping.groups().len(), 1);
+        }
+
+        #[test]
+        fn all_hardware_group_writes_every_member_the_same_target() {
+            // Every clone has working hardware: the level maps to a floored hardware
+            // target and a slider change sends ONE SetUserLevel per member, all equal.
+            let members = vec![
+                member("A", DisplayKind::ExternalDdc, false),
+                member("B", DisplayKind::ExternalDdc, false),
+            ];
+            let grouping = group_clones(&members);
+            let group = grouping.group_of(&id("A")).expect("A grouped");
+            assert!(!group.software_only);
+            let cfg = continuum_for(group.kind, group.software_only, &monitor(0), true);
+            let out = map_user_level(80, &cfg);
+            let writes = fan_out_hardware(&group.members, out.hardware_pct);
+            assert_eq!(writes.len(), 2, "one SetUserLevel per member");
+            let target = writes.first().map(|(_, hw)| *hw);
+            assert!(
+                writes.iter().all(|(_, hw)| Some(*hw) == target),
+                "same hardware target for the shared content"
+            );
+            let ids: Vec<StableDisplayId> = writes.iter().map(|(id, _)| id.clone()).collect();
+            assert_eq!(ids, vec![id("A"), id("B")]);
+        }
     }
 }

@@ -234,6 +234,44 @@ mod tests {
     }
 
     #[test]
+    fn one_group_input_yields_one_command_collapsing_the_mirror_double_overlay() {
+        // #66: two mirrored panels used to feed TWO DisplayInputs at IDENTICAL
+        // bounds, so the planner emitted TWO overlay commands stacked on the same
+        // shared pixels (the double-dim). The planner is 1:1 input→command by
+        // design and cannot dedupe that — so the fix collapses the mirror to ONE
+        // group input (the anchor) upstream, yielding exactly one overlay per
+        // surface.
+        let mon = monitor(30, ConfigDimMode::Overlay);
+        // The pre-fix reality: two ids at the same bounds ⇒ two overlays.
+        let both = [
+            input("A", DisplayKind::ExternalDdc, 0),
+            input("B", DisplayKind::ExternalDdc, 0),
+        ];
+        let two = plan(
+            &both,
+            |_| continuum_for(DisplayKind::ExternalDdc, false, &mon, true),
+            |_| Some(bounds()),
+        );
+        assert_eq!(
+            two.commands.len(),
+            2,
+            "two ids at identical bounds ⇒ two stacked overlays (the bug)"
+        );
+        // The fix: one merged group input ⇒ exactly one overlay for the surface.
+        let one = [input("A", DisplayKind::ExternalDdc, 0)];
+        let single = plan(
+            &one,
+            |_| continuum_for(DisplayKind::ExternalDdc, false, &mon, true),
+            |_| Some(bounds()),
+        );
+        assert_eq!(
+            single.commands.len(),
+            1,
+            "one group input ⇒ exactly one overlay per shared surface"
+        );
+    }
+
+    #[test]
     fn software_only_display_has_no_hardware_entry() {
         // A software-only display — flagged at runtime, on any physical kind — has
         // no hardware entry: the whole slider is software overlay. Route the
