@@ -1395,6 +1395,63 @@ impl AppState {
             duja_dimmer::gamma_support_from_hdr(duja_dimmer::is_hdr_active()).allows_gamma();
     }
 
+    /// Rebuild the clone grouping from a fresh enumeration, migrating group control
+    /// across an anchor move and pruning stale per-member ids (#66).
+    ///
+    /// Groups are keyed for state/overlay on their anchor (the lowest-id member),
+    /// which is stable over enumeration echoes but **not** over a membership change:
+    /// plugging a lower-id clone into a dimmed mirror, or unplugging the current
+    /// anchor, re-anchors the group and would orphan the anchor-keyed level +
+    /// user-controlled flag — silently snapping the user's dim back. Keyed on the
+    /// stable shared GDI device, [`clone_group::migrate_group_control`] transfers the
+    /// old anchor's level + control to the new anchor. This runs BEFORE adoption (so
+    /// adopt skips the now-controlled anchor) and before the row/plan build (so
+    /// `plan_commands` re-emits the overlay at the migrated level). The per-member
+    /// `unresponsive`/`user_controlled` sets are then pruned of ids no longer present
+    /// — after the migration inserts, so a just-migrated (current-member) anchor is
+    /// kept — bounding their growth over a long session.
+    fn rebuild_groups(&mut self, snapshots: &[DisplaySnapshot]) {
+        // Snapshot each display's device under the bounds lock — the enumerator
+        // populated the bounds map BEFORE this DisplaysChanged fired (engine
+        // `refresh` runs the enumerator, which writes the map, then reconciles and
+        // notifies), so `device_for` is fresh here. A transiently-`None` device
+        // degrades gracefully: that panel becomes its own singleton (two rows for one
+        // frame) and converges on the next pass, never stranding an overlay.
+        let members: Vec<clone_group::GroupMember> = {
+            let guard = self.bounds.lock().ok();
+            snapshots
+                .iter()
+                .map(|s| clone_group::GroupMember {
+                    id: s.id.clone(),
+                    kind: s.kind,
+                    software_only: s.software_only,
+                    device: guard.as_ref().and_then(|b| b.device_for(&s.id)),
+                    name: s.name.clone(),
+                })
+                .collect()
+        };
+        let new_groups = clone_group::group_clones(&members);
+        let migrations = clone_group::migrate_group_control(
+            &self.groups,
+            &new_groups,
+            &self.user_controlled,
+            |id| {
+                self.state
+                    .level(id.as_str())
+                    .unwrap_or(DEFAULT_USER_LEVEL_PCT)
+            },
+        );
+        self.groups = new_groups;
+        for (anchor, level) in migrations {
+            self.state.record(anchor.as_str(), level, unix_now());
+            self.user_controlled.insert(anchor.as_str().to_owned());
+        }
+        self.unresponsive
+            .retain(|id| members.iter().any(|m| &m.id == id));
+        self.user_controlled
+            .retain(|id| members.iter().any(|m| m.id.as_str() == id.as_str()));
+    }
+
     /// Adopt a fresh enumeration: mirror each display's CURRENT hardware brightness
     /// into the UI (writing NOTHING to the hardware — item 5), rebuild the flyout
     /// rows against *user* levels, and re-apply overlays for user-controlled
@@ -1419,28 +1476,9 @@ impl AppState {
         // Keep the full snapshots (with capabilities) for the settings sections,
         // and refresh the (possibly-open) settings window's per-monitor list.
         self.snapshots = snapshots.to_vec();
-        // Rebuild the clone grouping (#66): mirrored panels sharing one GDI source
-        // collapse into a single control. Snapshot each display's device under the
-        // bounds lock — the enumerator populated the bounds map BEFORE this
-        // DisplaysChanged fired (engine `refresh` runs the enumerator, which writes
-        // the map, then reconciles workers and emits the notification), so
-        // `device_for` is fresh here. A transiently-`None` device degrades
-        // gracefully: that panel becomes its own singleton (two rows for one frame)
-        // and converges on the next pass, never stranding an overlay.
-        let members: Vec<clone_group::GroupMember> = {
-            let guard = self.bounds.lock().ok();
-            snapshots
-                .iter()
-                .map(|s| clone_group::GroupMember {
-                    id: s.id.clone(),
-                    kind: s.kind,
-                    software_only: s.software_only,
-                    device: guard.as_ref().and_then(|b| b.device_for(&s.id)),
-                    name: s.name.clone(),
-                })
-                .collect()
-        };
-        self.groups = clone_group::group_clones(&members);
+        // Rebuild the clone grouping, migrating control across any anchor move and
+        // pruning stale per-member ids (#66) — before adoption + the row/plan build.
+        self.rebuild_groups(snapshots);
         self.settings_vm.borrow_mut().set_displays(
             &self.snapshots,
             &self.config,
@@ -1457,12 +1495,20 @@ impl AppState {
         // to the last-saved level on every launch (item 5).
         // Precompute each display's continuum config before the mutable `state`
         // borrow (a closure capturing `&self` would conflict with `&mut state`).
+        // Adopt through the GROUP continuum (#66): a mixed group whose anchor is the
+        // hardware member still applies as software-only, so the anchor's initial
+        // slider position must be reflected through the group's software-only verdict
+        // — not the anchor panel's own — or the adopted level would not match how the
+        // group actually dims. `group_meta` yields the group's `(kind, software_only)`
+        // (falling back to the panel's own when it is not grouped).
         let cfgs: Vec<ContinuumConfig> = snapshots
             .iter()
             .map(|s| {
+                let (kind, software_only) =
+                    self.group_meta(&s.id).unwrap_or((s.kind, s.software_only));
                 settings::continuum_for(
-                    s.kind,
-                    s.software_only,
+                    kind,
+                    software_only,
                     &settings::monitor_config(&self.config, s.id.as_str()),
                     self.gamma_allowed,
                 )

@@ -82,6 +82,11 @@ pub(crate) struct CloneGroup {
     pub(crate) name: String,
     /// Whether this is a genuine mirror of ≥ 2 panels (vs a lone display).
     pub(crate) mirrored: bool,
+    /// The members' shared, case-folded GDI device — the STABLE key that survives a
+    /// membership change (all clones share it, and it outlives an add/remove even
+    /// when the lowest-id anchor moves). `None` for a `None`-device singleton, which
+    /// is id-stable and never migrates. Used by [`migrate_group_control`].
+    pub(crate) device: Option<String>,
 }
 
 /// The full grouping of an enumeration, plus a member-id → group index.
@@ -154,6 +159,13 @@ fn build_group(mut members: Vec<GroupMember>) -> Option<CloneGroup> {
         let first = members.first()?;
         (first.id.clone(), first.kind)
     };
+    // The shared device, case-folded (all members of a keyed bucket agree; a
+    // singleton carries its own `Some` device or `None`). This is the stable key
+    // migration uses when the anchor moves.
+    let device = members
+        .first()
+        .and_then(|m| m.device.as_deref())
+        .map(str::to_ascii_lowercase);
     let mirrored = members.len() >= 2;
     // Software-only iff NOT every member has working hardware.
     let software_only = members.iter().any(|m| m.software_only);
@@ -168,7 +180,58 @@ fn build_group(mut members: Vec<GroupMember>) -> Option<CloneGroup> {
         software_only,
         name,
         mirrored,
+        device,
     })
+}
+
+/// Migrate group *control* across a membership change that MOVED an anchor.
+///
+/// A group is keyed for state/overlay purposes on its anchor (the lowest-id
+/// member), which is stable across enumeration echoes but **not** across a
+/// membership change: plugging a lower-id clone into a dimmed mirror — or
+/// unplugging the current anchor — re-anchors the group, orphaning the
+/// anchor-keyed level and user-controlled flag, so `plan_commands` would emit no
+/// command and the surviving overlay would be destroyed (the user's dim silently
+/// snaps back). The stable key across such a change is the shared GDI `device`
+/// (every clone shares it, and it survives add/remove).
+///
+/// Given the `old` and `new` groupings, the set of user-controlled anchor ids, and
+/// a `level_of` reader over the old state, this returns `(new_anchor, level)` for
+/// every controlled group whose anchor **moved** to a new id — the new anchor to
+/// mark user-controlled and the level to seed it with. No entry is produced when
+/// the anchor did not move (idempotent), for an uncontrolled group, or for a
+/// `None`-device group (id-stable — it never migrates).
+pub(crate) fn migrate_group_control(
+    old: &CloneGrouping,
+    new: &CloneGrouping,
+    user_controlled: &BTreeSet<String>,
+    level_of: impl Fn(&StableDisplayId) -> u8,
+) -> Vec<(StableDisplayId, u8)> {
+    // Index the OLD user-controlled groups by their stable shared device.
+    let mut controlled_by_device: BTreeMap<&str, &StableDisplayId> = BTreeMap::new();
+    for group in old.groups() {
+        if let Some(device) = group.device.as_deref()
+            && user_controlled.contains(group.anchor.as_str())
+        {
+            controlled_by_device.insert(device, &group.anchor);
+        }
+    }
+    // For each NEW group whose device matches a controlled OLD group AND whose anchor
+    // MOVED, transfer the old anchor's level to the new anchor. An unchanged anchor
+    // needs nothing (it is already controlled at its level); a `None`-device group is
+    // id-stable and skipped.
+    let mut migrations = Vec::new();
+    for group in new.groups() {
+        let Some(device) = group.device.as_deref() else {
+            continue;
+        };
+        if let Some(&old_anchor) = controlled_by_device.get(device)
+            && group.anchor != *old_anchor
+        {
+            migrations.push((group.anchor.clone(), level_of(old_anchor)));
+        }
+    }
+    migrations
 }
 
 /// The merged row label for a group's member names.
@@ -453,6 +516,91 @@ mod tests {
             writes,
             vec![(id("B"), 100)],
             "only the hardware member is pinned"
+        );
+    }
+
+    /// User-controlled anchor ids, as `AppState` tracks them (id strings).
+    fn controlled(ids: &[&str]) -> BTreeSet<String> {
+        ids.iter().map(|s| id(s).as_str().to_owned()).collect()
+    }
+
+    #[test]
+    fn migrate_transfers_control_when_a_lower_id_clone_joins_a_controlled_group() {
+        // OLD: mirror {B,C} on one GDI source, anchor B, user-dimmed to 20.
+        let old = group_clones(&[
+            member("B", DisplayKind::ExternalDdc, false, Some(DEV1), "B"),
+            member("C", DisplayKind::ExternalDdc, false, Some(DEV1), "C"),
+        ]);
+        assert_eq!(old.groups().first().expect("group").anchor, id("B"));
+        // NEW: a lower-id clone A joins the SAME source ⇒ the anchor MOVES to A.
+        let new = group_clones(&[
+            member("A", DisplayKind::ExternalDdc, false, Some(DEV1), "A"),
+            member("B", DisplayKind::ExternalDdc, false, Some(DEV1), "B"),
+            member("C", DisplayKind::ExternalDdc, false, Some(DEV1), "C"),
+        ]);
+        assert_eq!(new.groups().first().expect("group").anchor, id("A"));
+        // B held the group's control at 20; migration seeds the new anchor A with it
+        // (so plan_commands re-emits the overlay instead of destroying it).
+        let migrations = migrate_group_control(&old, &new, &controlled(&["B"]), |q| {
+            if *q == id("B") { 20 } else { 100 }
+        });
+        assert_eq!(migrations, vec![(id("A"), 20)]);
+    }
+
+    #[test]
+    fn migrate_transfers_control_to_the_survivor_when_the_anchor_unplugs() {
+        // OLD: mirror {B,C}, anchor B, controlled at 35.
+        let old = group_clones(&[
+            member("B", DisplayKind::ExternalDdc, false, Some(DEV1), "B"),
+            member("C", DisplayKind::ExternalDdc, false, Some(DEV1), "C"),
+        ]);
+        // NEW: the anchor B unplugs; the survivor C re-anchors the same source.
+        let new = group_clones(&[member(
+            "C",
+            DisplayKind::ExternalDdc,
+            false,
+            Some(DEV1),
+            "C",
+        )]);
+        assert_eq!(new.groups().first().expect("group").anchor, id("C"));
+        let migrations = migrate_group_control(&old, &new, &controlled(&["B"]), |q| {
+            if *q == id("B") { 35 } else { 100 }
+        });
+        assert_eq!(migrations, vec![(id("C"), 35)]);
+    }
+
+    #[test]
+    fn migrate_is_empty_when_nothing_moves_or_nothing_is_controlled() {
+        let same = group_clones(&[
+            member("B", DisplayKind::ExternalDdc, false, Some(DEV1), "B"),
+            member("C", DisplayKind::ExternalDdc, false, Some(DEV1), "C"),
+        ]);
+        // (i) No membership change, anchor controlled ⇒ the anchor did not move ⇒ no
+        // migration (idempotent).
+        assert!(
+            migrate_group_control(&same, &same, &controlled(&["B"]), |_| 20).is_empty(),
+            "an unchanged anchor never migrates"
+        );
+        // (ii) The anchor moved but the OLD group was NOT controlled ⇒ nothing to
+        // migrate (adoption handles a fresh group).
+        let expanded = group_clones(&[
+            member("A", DisplayKind::ExternalDdc, false, Some(DEV1), "A"),
+            member("B", DisplayKind::ExternalDdc, false, Some(DEV1), "B"),
+            member("C", DisplayKind::ExternalDdc, false, Some(DEV1), "C"),
+        ]);
+        assert!(
+            migrate_group_control(&same, &expanded, &controlled(&[]), |_| 20).is_empty(),
+            "an uncontrolled group never migrates"
+        );
+        // (iii) An EXTENDED pair on DISTINCT devices shares no surface, so a
+        // controlled one never migrates onto the other.
+        let ext = group_clones(&[
+            member("B", DisplayKind::ExternalDdc, false, Some(DEV1), "B"),
+            member("C", DisplayKind::ExternalDdc, false, Some(DEV2), "C"),
+        ]);
+        assert!(
+            migrate_group_control(&ext, &ext, &controlled(&["B", "C"]), |_| 20).is_empty(),
+            "distinct-device groups never share control"
         );
     }
 }
