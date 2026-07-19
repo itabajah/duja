@@ -426,9 +426,13 @@ install and stay current on:
   **build-provenance** attestation, and publishes the GitHub Release with
   git-cliff notes. A tag/version guard fails fast on a mismatched tag; a
   `workflow_dispatch` runs the whole thing as an artifacts-only dry run.
-- **Docs & brand.** A premium README (hero rendered from the faceted-gem
-  whirlpool mark, badges, install/verify sections), a social-preview card, and the
-  threat-model/SmartScreen/verification notes in [SECURITY.md](../SECURITY.md).
+- **Docs & brand.** A premium README (hero rendered from the dark whirlpool
+  mark — *duja* is Arabic for darkness, and the brand leans into it: near-black
+  gems with the swirl glowing in the four accent hues — badges, install/verify
+  sections), a social-preview card, and the threat-model/SmartScreen/verification
+  notes in [SECURITY.md](../SECURITY.md). The mark, exe icon, and banners all
+  regenerate from `dark_whirlpool_rgba` via `gen_exe_icon` +
+  `scripts/gen-social-preview.py`, drift-tested in `tests/exe_icon.rs`.
 - **Not signed.** No Authenticode certificate yet, so SmartScreen warns on first
   run; authenticity is via the checksums + minisign key + provenance. Binary size
   regressed to ~19 MB (P8 trim).
