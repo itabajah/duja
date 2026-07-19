@@ -238,6 +238,7 @@ mod tests {
             id: StableDisplayId::from_parts("GSM", 0x5B09, Some(serial)).unwrap(),
             name: "Panel".to_owned(),
             kind: DisplayKind::InternalPanel,
+            software_only: false,
             user_level_pct: level,
             capabilities: Capabilities::default(),
         }

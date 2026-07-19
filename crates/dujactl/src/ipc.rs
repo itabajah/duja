@@ -190,22 +190,29 @@ fn render_display_table(displays: &[DisplayInfo]) -> String {
             vec![
                 d.id.clone(),
                 kind_label(d.kind).to_owned(),
+                mode_label(d.software_only).to_owned(),
                 d.name.clone(),
                 format!("{}%", d.level_pct),
                 features_label(&d.features),
             ]
         })
         .collect();
-    render_table(&["id", "kind", "name", "level", "features"], &rows)
+    render_table(&["id", "kind", "mode", "name", "level", "features"], &rows)
 }
 
-/// A short label for a transported display kind.
+/// A short label for a transported display kind (its physical provenance).
 fn kind_label(kind: DisplayKindDto) -> &'static str {
     match kind {
-        DisplayKindDto::ExternalDdc => "ddc",
-        DisplayKindDto::InternalPanel => "panel",
-        DisplayKindDto::SoftwareOnly => "software",
+        DisplayKindDto::ExternalDdc => "external",
+        DisplayKindDto::InternalPanel => "internal",
     }
+}
+
+/// The control-mode indicator: `sw` when the display has no working hardware
+/// brightness (dimmed purely in software), else `hw`. Kept a separate column so
+/// software-only is never folded into the physical `kind`.
+fn mode_label(software_only: bool) -> &'static str {
+    if software_only { "sw" } else { "hw" }
 }
 
 /// A comma-separated label for transported features (`-` when none).
@@ -255,9 +262,39 @@ mod tests {
             id: id.to_owned(),
             name: "Fake".to_owned(),
             kind: DisplayKindDto::ExternalDdc,
+            software_only: false,
             level_pct: 50,
             features: vec![FeatureDto::Brightness],
         }
+    }
+
+    #[test]
+    fn kind_and_mode_labels_read_provenance_and_control_mode() {
+        assert_eq!(kind_label(DisplayKindDto::ExternalDdc), "external");
+        assert_eq!(kind_label(DisplayKindDto::InternalPanel), "internal");
+        assert_eq!(mode_label(false), "hw");
+        assert_eq!(mode_label(true), "sw");
+    }
+
+    #[test]
+    fn render_display_table_surfaces_software_only_as_its_own_column() {
+        let mut sw = display("GSM-5B09-a");
+        sw.software_only = true;
+        let table = render_display_table(&[display("GSM-5B09-b"), sw]);
+        // Software-only rides its own `mode` column, never folded into `kind`.
+        assert!(table.contains("mode"));
+        assert!(
+            table
+                .lines()
+                .any(|l| l.contains("GSM-5B09-a") && l.contains("sw"))
+        );
+        assert!(
+            table
+                .lines()
+                .any(|l| l.contains("GSM-5B09-b") && l.contains("hw"))
+        );
+        // The kind column stays pure provenance — never the string "software".
+        assert!(table.lines().all(|l| !l.contains("software")));
     }
 
     /// A live-server handler exposing two displays; each `SetBrightness` for a

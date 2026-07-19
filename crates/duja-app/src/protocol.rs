@@ -87,9 +87,10 @@ pub(crate) enum AckOutcome {
         generation: u64,
     },
     /// The worker determined at runtime that this display has **no working
-    /// hardware brightness control**, so the engine should downgrade it to
-    /// [`DisplayKind::SoftwareOnly`](duja_core::model::DisplayKind::SoftwareOnly)
-    /// and re-plan with the full-slider software continuum.
+    /// hardware brightness control**, so the engine should flag it
+    /// [`software_only`](duja_core::model::DisplaySnapshot::software_only) (its
+    /// physical kind is left intact) and re-plan with the full-slider software
+    /// continuum.
     ///
     /// Emitted (at most once per worker) from one of three tight signals: a
     /// probe reporting `hardware_range == false`, a first effective brightness

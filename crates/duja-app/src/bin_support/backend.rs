@@ -200,7 +200,7 @@ fn discover_panel() -> Vec<DiscoveredDisplay> {
 /// returns `None` for it and it falls through to `open_ddc`. A fallback internal
 /// panel that WMI cannot see likewise falls through to `open_ddc`, which
 /// re-matches it by id; the engine's verify-first write then routes it to real
-/// hardware (if DDC-over-eDP answers) or a `SoftwareOnly` overlay (if not).
+/// hardware (if DDC-over-eDP answers) or a software-only overlay (if not).
 pub(crate) fn open_controller(id: &StableDisplayId) -> Option<Box<dyn BrightnessController>> {
     open_panel(id).or_else(|| open_ddc(id))
 }

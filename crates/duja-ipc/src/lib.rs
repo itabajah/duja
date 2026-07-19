@@ -129,6 +129,7 @@ mod tests {
             id: "GSM-5B09-312NTAB1C234".to_owned(),
             name: "LG UltraGear".to_owned(),
             kind: DisplayKindDto::ExternalDdc,
+            software_only: false,
             level_pct: 73,
             features: vec![FeatureDto::Brightness, FeatureDto::Contrast],
         }
@@ -195,6 +196,9 @@ mod tests {
             id: StableDisplayId::from_parts("GSM", 0x5B09, Some("312NTAB1C234")).unwrap(),
             name: "LG".to_owned(),
             kind: DisplayKind::InternalPanel,
+            // Software-only AND internal at once: the projection must carry both,
+            // never fold the flag back into the kind.
+            software_only: true,
             user_level_pct: 60,
             capabilities: Capabilities {
                 features: [Feature::Brightness].into_iter().collect(),
@@ -206,6 +210,7 @@ mod tests {
         let info = DisplayInfo::from_snapshot(&snapshot);
         assert_eq!(info.id, "GSM-5B09-312NTAB1C234");
         assert_eq!(info.kind, DisplayKindDto::InternalPanel);
+        assert!(info.software_only);
         assert_eq!(info.level_pct, 60);
         assert_eq!(info.features, vec![FeatureDto::Brightness]);
     }
@@ -213,7 +218,7 @@ mod tests {
     #[test]
     fn request_rejects_unknown_fields() {
         // Extra key inside the variant object must be rejected (strict server).
-        let body = br#"{"v":1,"request":{"set_brightness":{"id":"GSM-5B09-x","pct":5,"evil":1}}}"#;
+        let body = br#"{"v":2,"request":{"set_brightness":{"id":"GSM-5B09-x","pct":5,"evil":1}}}"#;
         let frame = framed(body);
         let err = read_request(&mut Cursor::new(frame)).unwrap_err();
         assert!(matches!(err, IpcError::Json(_)), "got {err:?}");
@@ -221,7 +226,7 @@ mod tests {
 
     #[test]
     fn request_rejects_unknown_top_level_key() {
-        let body = br#"{"v":1,"request":"list_displays","extra":true}"#;
+        let body = br#"{"v":2,"request":"list_displays","extra":true}"#;
         let frame = framed(body);
         let err = read_request(&mut Cursor::new(frame)).unwrap_err();
         assert!(matches!(err, IpcError::Json(_)), "got {err:?}");
@@ -230,7 +235,7 @@ mod tests {
     #[test]
     fn response_ignores_unknown_fields() {
         // A newer server adds a field; an older client must still decode.
-        let body = br#"{"v":1,"response":{"kind":"ok"},"trailer":"future"}"#;
+        let body = br#"{"v":2,"response":{"kind":"ok"},"trailer":"future"}"#;
         let frame = framed(body);
         let got = read_response(&mut Cursor::new(frame)).unwrap();
         assert_eq!(got, Response::Ok);
@@ -246,7 +251,7 @@ mod tests {
                 err,
                 IpcError::UnsupportedVersion {
                     found: 99,
-                    expected: 1
+                    expected: 2
                 }
             ),
             "got {err:?}"
@@ -254,9 +259,31 @@ mod tests {
     }
 
     #[test]
+    fn v1_peer_is_rejected_after_the_v2_bump() {
+        // #67 bumped the wire to v2 (removed DisplayKindDto::SoftwareOnly and added
+        // the required DisplayInfo.software_only field). A v1 peer must hit the hard
+        // version wall — UnsupportedVersion — rather than silently misparsing the new
+        // shape in either direction.
+        assert_eq!(PROTOCOL_VERSION, 2, "the wire version must be v2");
+        let body = br#"{"v":1,"request":"list_displays"}"#;
+        let frame = framed(body);
+        let err = read_request(&mut Cursor::new(frame)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IpcError::UnsupportedVersion {
+                    found: 1,
+                    expected: 2
+                }
+            ),
+            "a v1 peer must be rejected under v2; got {err:?}"
+        );
+    }
+
+    #[test]
     fn decode_rejects_out_of_range_pct() {
         // pct=200 is a valid u8 and valid JSON, but validation must reject it.
-        let body = br#"{"v":1,"request":{"set_brightness":{"id":"GSM-5B09-x","pct":200}}}"#;
+        let body = br#"{"v":2,"request":{"set_brightness":{"id":"GSM-5B09-x","pct":200}}}"#;
         let frame = framed(body);
         let err = read_request(&mut Cursor::new(frame)).unwrap_err();
         assert!(
@@ -267,7 +294,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_bad_id_charset() {
-        let body = br#"{"v":1,"request":{"get_brightness":{"id":"bad id!"}}}"#;
+        let body = br#"{"v":2,"request":{"get_brightness":{"id":"bad id!"}}}"#;
         let frame = framed(body);
         let err = read_request(&mut Cursor::new(frame)).unwrap_err();
         assert!(

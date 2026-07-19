@@ -145,7 +145,7 @@ mod tests {
         // A validly-framed but out-of-range request: decode succeeds, validation
         // rejects it, and the server must answer with a structured error rather
         // than dropping the connection.
-        let body = br#"{"v":1,"request":{"set_brightness":{"id":"GSM-5B09-x","pct":200}}}"#;
+        let body = br#"{"v":2,"request":{"set_brightness":{"id":"GSM-5B09-x","pct":200}}}"#;
         let mut frame = u32::try_from(body.len()).unwrap().to_le_bytes().to_vec();
         frame.extend_from_slice(body);
 

@@ -94,15 +94,20 @@ pub enum DimMode {
     Off,
 }
 
-/// The class of a display, which selects the control backend.
+/// The physical class (provenance) of a display: external vs. built-in.
+///
+/// This is a **hardware** classification only, fixed at enumeration. Whether a
+/// display currently has no working hardware brightness — so Duja dims it purely
+/// in software — is a separate *runtime control-mode* flag,
+/// [`DisplaySnapshot::software_only`], **not** a kind: a panel can be an
+/// [`InternalPanel`](DisplayKind::InternalPanel) *and* software-only at the same
+/// time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayKind {
     /// An external monitor controlled over DDC/CI.
     ExternalDdc,
     /// A built-in laptop/all-in-one panel (WMI / `DisplayServices` / backlight).
     InternalPanel,
-    /// A display with no hardware brightness control; overlay-only.
-    SoftwareOnly,
 }
 
 /// An immutable, UI-facing view of a single display's current state.
@@ -112,8 +117,18 @@ pub struct DisplaySnapshot {
     pub id: StableDisplayId,
     /// Human-readable name for display in the UI.
     pub name: String,
-    /// Which backend class controls this display.
+    /// The display's physical class (external vs. built-in) — provenance only; see
+    /// [`software_only`](Self::software_only) for its runtime control mode.
     pub kind: DisplayKind,
+    /// Whether this display currently has **no working hardware brightness** and is
+    /// therefore dimmed purely in software (a full-slider overlay/gamma continuum).
+    ///
+    /// A runtime control-mode flag, independent of [`kind`](Self::kind): an
+    /// [`InternalPanel`](DisplayKind::InternalPanel) or
+    /// [`ExternalDdc`](DisplayKind::ExternalDdc) display can be software-only when
+    /// its hardware channel is dead. Enumeration never sets it; only the engine's
+    /// runtime no-hardware detection does (via the manager's software-only overlay).
+    pub software_only: bool,
     /// The single unified user brightness level, 0..=100.
     pub user_level_pct: u8,
     /// Probed capabilities.
@@ -206,8 +221,8 @@ mod tests {
 
     #[test]
     fn display_kind_variants_are_distinct() {
+        // Physical provenance only — no software-only kind (that is a runtime flag).
         assert_ne!(DisplayKind::ExternalDdc, DisplayKind::InternalPanel);
-        assert_ne!(DisplayKind::InternalPanel, DisplayKind::SoftwareOnly);
     }
 
     #[test]
@@ -216,13 +231,32 @@ mod tests {
             id: sample_id(),
             name: "Left".to_owned(),
             kind: DisplayKind::ExternalDdc,
+            software_only: false,
             user_level_pct: 42,
             capabilities: Capabilities::default(),
         };
         assert_eq!(snap.user_level_pct, 42);
         assert_eq!(snap.kind, DisplayKind::ExternalDdc);
+        assert!(!snap.software_only);
         assert_eq!(snap.name, "Left");
         assert!(snap.id.as_str().starts_with("AAA-0000-#h"));
         assert_eq!(snap.clone(), snap);
+    }
+
+    #[test]
+    fn display_snapshot_can_be_software_only_on_any_physical_kind() {
+        // The decouple: software-only is orthogonal to the physical kind, so an
+        // internal panel with a dead backlight channel is `InternalPanel` AND
+        // `software_only` — the kind is never overwritten to encode the mode.
+        let snap = DisplaySnapshot {
+            id: sample_id(),
+            name: "Internal".to_owned(),
+            kind: DisplayKind::InternalPanel,
+            software_only: true,
+            user_level_pct: 30,
+            capabilities: Capabilities::default(),
+        };
+        assert_eq!(snap.kind, DisplayKind::InternalPanel);
+        assert!(snap.software_only);
     }
 }

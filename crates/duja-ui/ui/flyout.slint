@@ -21,6 +21,9 @@ export struct FlyoutRowData {
     slider-enabled: bool,
     // Feature 1: software-dimming toggle + floor marker.
     dimming-on: bool,
+    // #67: no working hardware brightness — the "Software dimming" toggle is forced
+    // on and non-interactive (the overlay is the display's only dimming channel).
+    software-only: bool,
     has-floor: bool,
     // Line B: where hardware hands off to software dimming (the floor). 0..=1.
     marker-fraction: float,
@@ -1096,8 +1099,13 @@ export component FlyoutWindow inherits Window {
                                     HorizontalLayout {
                                         alignment: center;
                                         PillToggle {
-                                            checked: row.dimming-on;
-                                            enabled: row.slider-enabled;
+                                            // A software-only display has no hardware
+                                            // channel, so software dimming is its ONLY
+                                            // dimming: force the toggle on and make it
+                                            // non-interactive (dimmed, to show it is not
+                                            // usable). The slider stays the dim control.
+                                            checked: row.software-only || row.dimming-on;
+                                            enabled: row.software-only ? false : row.slider-enabled;
                                             label: @tr("Software dimming");
                                             toggled(on) => {
                                                 root.dimming-toggled(idx, on);

@@ -78,12 +78,22 @@ pub struct DimmingInfo {
     /// Whether software dimming is currently engaged (the configured dim mode is
     /// not `Off`).
     pub dimming_on: bool,
+    /// Whether the display has **no working hardware brightness** (software-only).
+    /// When set, the flyout forces its "Software dimming" toggle on and
+    /// non-interactive (the overlay is the display's only dimming channel).
+    /// Independent of the physical kind (#67).
+    pub software_only: bool,
 }
 
 /// One monitor's row, as the `.slint` list renders it.
 ///
 /// Every field is presentation-ready: the shell copies them straight into the
 /// Slint model without further logic.
+// RATIONALE: the four bools are independent, orthogonal presentation flags
+// (greyed, slider-enabled, dimming-on, software-only) the `.slint` layer reads
+// verbatim into `FlyoutRowData`; folding them into a state enum would obscure that
+// 1:1 mapping and buy nothing.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlyoutRow {
     /// Durable identity, used to address [`UiCommand::SetLevel`] and to sort.
@@ -92,7 +102,7 @@ pub struct FlyoutRow {
     pub display_name: String,
     /// Current unified user level, `0..=100`.
     pub level_pct: u8,
-    /// Short label for the control class (e.g. `External`, `Built-in`).
+    /// Short label for the physical provenance (e.g. `External`, `Internal`).
     pub kind_label: String,
     /// Whether the row is dimmed because the display is unresponsive.
     pub greyed: bool,
@@ -101,6 +111,11 @@ pub struct FlyoutRow {
     pub slider_enabled: bool,
     /// Whether software dimming is engaged for this display (drives the toggle).
     pub dimming_on: bool,
+    /// Whether the display is software-only (no working hardware brightness). Drives
+    /// the flyout's forced-on, non-interactive "Software dimming" toggle and makes
+    /// [`toggle_dimming`](FlyoutVm::toggle_dimming) a no-op for the row. It never
+    /// changes [`kind_label`](Self::kind_label) — provenance stays Internal/External.
+    pub software_only: bool,
     /// The hardware brightness floor percentage, or `None` for a software-only
     /// display. Feeds the slider's handoff marker via [`slider_geometry`](Self::slider_geometry).
     pub hardware_floor_pct: Option<u8>,
@@ -267,6 +282,9 @@ impl FlyoutVm {
             greyed,
             slider_enabled: !greyed,
             dimming_on: dim.dimming_on,
+            // Authoritative from the snapshot (a `set_dimming_info` refresh keeps it
+            // in sync from the DimmingInfo channel).
+            software_only: snap.software_only,
             hardware_floor_pct: dim.hardware_floor,
             min_perceived_pct: dim.min_perceived_pct,
         }
@@ -283,6 +301,7 @@ impl FlyoutVm {
         for row in &mut self.rows {
             let dim = self.dimming.get(&row.id).copied().unwrap_or_default();
             row.dimming_on = dim.dimming_on;
+            row.software_only = dim.software_only;
             row.hardware_floor_pct = dim.hardware_floor;
             row.min_perceived_pct = dim.min_perceived_pct;
         }
@@ -291,12 +310,16 @@ impl FlyoutVm {
     /// Toggle software dimming for the row at `row_index`, returning the command
     /// to persist and re-plan.
     ///
-    /// A greyed row (or an out-of-range index) changes nothing and returns
-    /// `None`. Otherwise the row's toggle state is updated optimistically and a
-    /// [`UiCommand::SetDimmingEnabled`] is emitted for the app to apply.
+    /// A greyed row, a **software-only** row, or an out-of-range index changes
+    /// nothing and returns `None`. A software-only display has no hardware channel,
+    /// so software dimming is the *only* dimming it has: its toggle is forced on and
+    /// non-interactive in the flyout, and this guard makes a stray toggle event a
+    /// no-op so the slider is never stranded. Otherwise the row's toggle state is
+    /// updated optimistically and a [`UiCommand::SetDimmingEnabled`] is emitted for
+    /// the app to apply.
     pub fn toggle_dimming(&mut self, row_index: usize, on: bool) -> Option<UiCommand> {
         let row = self.rows.get_mut(row_index)?;
-        if row.greyed {
+        if row.greyed || row.software_only {
             return None;
         }
         row.dimming_on = on;
@@ -507,8 +530,7 @@ impl FlyoutVm {
 fn kind_label(kind: DisplayKind) -> &'static str {
     match kind {
         DisplayKind::ExternalDdc => "External",
-        DisplayKind::InternalPanel => "Built-in",
-        DisplayKind::SoftwareOnly => "Software",
+        DisplayKind::InternalPanel => "Internal",
     }
 }
 
@@ -525,8 +547,22 @@ mod tests {
             id,
             name: name.to_owned(),
             kind,
+            software_only: false,
             user_level_pct: level,
             capabilities: Capabilities::default(),
+        }
+    }
+
+    /// A software-only display: a real physical `kind` plus the runtime flag set.
+    fn snap_software_only(
+        serial: &str,
+        name: &str,
+        level: u8,
+        kind: DisplayKind,
+    ) -> DisplaySnapshot {
+        DisplaySnapshot {
+            software_only: true,
+            ..snap(serial, name, level, kind)
         }
     }
 
@@ -549,7 +585,7 @@ mod tests {
         vm.set_displays(vec![
             snap("C", "Right", 30, DisplayKind::ExternalDdc),
             snap("A", "Left", 40, DisplayKind::InternalPanel),
-            snap("B", "Middle", 50, DisplayKind::SoftwareOnly),
+            snap("B", "Middle", 50, DisplayKind::InternalPanel),
         ]);
         let names: Vec<&str> = vm.rows().iter().map(|r| r.display_name.as_str()).collect();
         assert_eq!(names, vec!["Left", "Middle", "Right"]);
@@ -643,10 +679,11 @@ mod tests {
         vm.set_displays(vec![
             snap("A", "Ext", 10, DisplayKind::ExternalDdc),
             snap("B", "Int", 10, DisplayKind::InternalPanel),
-            snap("C", "Sw", 10, DisplayKind::SoftwareOnly),
         ]);
         let labels: Vec<&str> = vm.rows().iter().map(|r| r.kind_label.as_str()).collect();
-        assert_eq!(labels, vec!["External", "Built-in", "Software"]);
+        // Physical/provenance labels only — never "Software" (that is a runtime
+        // control-mode, carried by `software_only`, not a display kind).
+        assert_eq!(labels, vec!["External", "Internal"]);
     }
 
     #[test]
@@ -956,6 +993,7 @@ mod tests {
             hardware_floor: floor,
             min_perceived_pct: min_perceived,
             dimming_on: on,
+            software_only: false,
         }
     }
 
@@ -1043,11 +1081,11 @@ mod tests {
         let mut vm = FlyoutVm::new();
         vm.set_displays(vec![
             snap("A", "Ext", 60, DisplayKind::ExternalDdc),
-            snap("B", "Sw", 60, DisplayKind::SoftwareOnly),
+            snap_software_only("B", "Sw", 60, DisplayKind::InternalPanel),
         ]);
         let mut info = BTreeMap::new();
         info.insert(id_of("A"), dim(Some(0), 25, true)); // floor 0 ⇒ A == B
-        info.insert(id_of("B"), dim(None, 25, true)); // software-only ⇒ no markers
+        info.insert(id_of("B"), dim(None, 25, true)); // floorless (software-only) ⇒ no markers
         vm.set_dimming_info(info);
         assert!(vm.rows().iter().all(FlyoutRow::markers_coincide));
     }
@@ -1057,7 +1095,7 @@ mod tests {
         let mut vm = FlyoutVm::new();
         vm.set_displays(vec![
             snap("A", "Ext", 60, DisplayKind::ExternalDdc),
-            snap("B", "Sw", 60, DisplayKind::SoftwareOnly),
+            snap_software_only("B", "Sw", 60, DisplayKind::InternalPanel),
         ]);
         let mut info = BTreeMap::new();
         info.insert(id_of("A"), dim(Some(20), 25, true));
@@ -1127,5 +1165,46 @@ mod tests {
         vm.set_unresponsive(&id_of("A"), true);
         assert_eq!(vm.toggle_dimming(0, false), None);
         assert_eq!(vm.toggle_dimming(9, true), None);
+    }
+
+    #[test]
+    fn software_only_row_carries_the_flag_and_toggle_dimming_is_a_noop() {
+        // #67: a software-only display carries the flag straight off the snapshot,
+        // its "Software dimming" toggle can't be changed (the overlay is its only
+        // channel), and its kind label stays physical provenance — never "Software".
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![snap_software_only(
+            "A",
+            "Panel",
+            60,
+            DisplayKind::InternalPanel,
+        )]);
+        let row = vm.rows().first().unwrap();
+        assert!(
+            row.software_only,
+            "the row must carry the software-only flag"
+        );
+        assert_eq!(
+            row.kind_label, "Internal",
+            "label stays physical provenance"
+        );
+        assert!(!row.greyed, "software-only is not the same as unresponsive");
+
+        // The toggle is a no-op regardless of the requested state (forced on).
+        assert_eq!(vm.toggle_dimming(0, false), None);
+        assert_eq!(vm.toggle_dimming(0, true), None);
+    }
+
+    #[test]
+    fn no_row_ever_labels_a_kind_software() {
+        // Belt-and-braces: neither physical kind, nor a software-only display, ever
+        // yields the string "Software" as a kind label.
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![
+            snap("A", "Ext", 50, DisplayKind::ExternalDdc),
+            snap("B", "Int", 50, DisplayKind::InternalPanel),
+            snap_software_only("C", "SwPanel", 50, DisplayKind::InternalPanel),
+        ]);
+        assert!(vm.rows().iter().all(|r| r.kind_label != "Software"));
     }
 }

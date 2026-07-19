@@ -4,7 +4,7 @@
 //! # Envelope
 //!
 //! Every frame body is a JSON object carrying the protocol version and one
-//! message: `{"v":1,"request":<Request>}` or `{"v":1,"response":<Response>}`.
+//! message: `{"v":2,"request":<Request>}` or `{"v":2,"response":<Response>}`.
 //! The version is checked on decode; a mismatch is
 //! [`IpcError::UnsupportedVersion`] rather than a silent misparse.
 //!
@@ -32,7 +32,14 @@ use duja_core::model::{DisplayKind, DisplaySnapshot, Feature};
 use crate::frame::IpcError;
 
 /// The protocol version this build speaks. Bumped on any breaking wire change.
-pub const PROTOCOL_VERSION: u16 = 1;
+///
+/// v2 (#67) removed `DisplayKindDto::SoftwareOnly` and added the required
+/// [`DisplayInfo::software_only`] field. Because [`DisplayInfo`] is
+/// `deny_unknown_fields`, that is breaking in BOTH directions (a v1 client omits
+/// `software_only` / may send the removed variant; a v1 app rejects the new
+/// field), so the bump is a hard wall: a v1 peer is rejected with
+/// [`IpcError::UnsupportedVersion`] instead of silently misparsing.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// The maximum length, in characters, of a display id on the wire.
 pub const ID_MAX_LEN: usize = 64;
@@ -154,8 +161,12 @@ pub struct DisplayInfo {
     pub id: String,
     /// Human-readable name.
     pub name: String,
-    /// Which backend class controls the display.
+    /// The display's physical class (external vs. built-in).
     pub kind: DisplayKindDto,
+    /// Whether the display currently has no working hardware brightness and is
+    /// dimmed purely in software — a runtime control-mode flag, independent of
+    /// [`kind`](Self::kind).
+    pub software_only: bool,
     /// The unified user brightness level, `0..=100`.
     pub level_pct: u8,
     /// The features the display reports as controllable, sorted.
@@ -170,6 +181,7 @@ impl DisplayInfo {
             id: snapshot.id.as_str().to_owned(),
             name: snapshot.name.clone(),
             kind: snapshot.kind.into(),
+            software_only: snapshot.software_only,
             level_pct: snapshot.user_level_pct,
             features: snapshot
                 .capabilities
@@ -181,7 +193,9 @@ impl DisplayInfo {
     }
 }
 
-/// Transport mirror of [`duja_core::model::DisplayKind`].
+/// Transport mirror of [`duja_core::model::DisplayKind`] — physical provenance
+/// only. (Software-only is a separate flag, [`DisplayInfo::software_only`], not a
+/// kind.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayKindDto {
@@ -189,8 +203,6 @@ pub enum DisplayKindDto {
     ExternalDdc,
     /// Built-in laptop/all-in-one panel.
     InternalPanel,
-    /// Overlay-only, no hardware brightness control.
-    SoftwareOnly,
 }
 
 impl From<DisplayKind> for DisplayKindDto {
@@ -198,7 +210,6 @@ impl From<DisplayKind> for DisplayKindDto {
         match kind {
             DisplayKind::ExternalDdc => DisplayKindDto::ExternalDdc,
             DisplayKind::InternalPanel => DisplayKindDto::InternalPanel,
-            DisplayKind::SoftwareOnly => DisplayKindDto::SoftwareOnly,
         }
     }
 }
@@ -208,7 +219,6 @@ impl From<DisplayKindDto> for DisplayKind {
         match kind {
             DisplayKindDto::ExternalDdc => DisplayKind::ExternalDdc,
             DisplayKindDto::InternalPanel => DisplayKind::InternalPanel,
-            DisplayKindDto::SoftwareOnly => DisplayKind::SoftwareOnly,
         }
     }
 }
@@ -380,5 +390,35 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn display_kind_dto_round_trips_both_physical_kinds() {
+        // Exactly two variants — external and internal. Software-only is a flag, not
+        // a kind, so it can never appear on the wire as a kind.
+        for kind in [DisplayKind::ExternalDdc, DisplayKind::InternalPanel] {
+            let dto: DisplayKindDto = kind.into();
+            assert_eq!(DisplayKind::from(dto), kind);
+        }
+    }
+
+    #[test]
+    fn from_snapshot_carries_software_only_independently_of_kind() {
+        use duja_core::id::StableDisplayId;
+        use duja_core::model::{Capabilities, DisplaySnapshot};
+
+        let make = |software_only: bool| DisplaySnapshot {
+            id: StableDisplayId::from_parts("GSM", 0x5B09, Some("abc")).unwrap(),
+            name: "Panel".to_owned(),
+            kind: DisplayKind::InternalPanel,
+            software_only,
+            user_level_pct: 40,
+            capabilities: Capabilities::default(),
+        };
+        // The flag rides through the projection while the kind stays InternalPanel.
+        let sw = DisplayInfo::from_snapshot(&make(true));
+        assert!(sw.software_only);
+        assert_eq!(sw.kind, DisplayKindDto::InternalPanel);
+        assert!(!DisplayInfo::from_snapshot(&make(false)).software_only);
     }
 }

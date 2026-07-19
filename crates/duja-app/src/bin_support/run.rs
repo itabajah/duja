@@ -284,6 +284,7 @@ mod tests {
             id: id(serial),
             name: "Panel".to_owned(),
             kind: DisplayKind::InternalPanel,
+            software_only: false,
             user_level_pct: level,
             capabilities: Capabilities::default(),
         }
