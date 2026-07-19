@@ -4,7 +4,7 @@
 //! # Envelope
 //!
 //! Every frame body is a JSON object carrying the protocol version and one
-//! message: `{"v":1,"request":<Request>}` or `{"v":1,"response":<Response>}`.
+//! message: `{"v":2,"request":<Request>}` or `{"v":2,"response":<Response>}`.
 //! The version is checked on decode; a mismatch is
 //! [`IpcError::UnsupportedVersion`] rather than a silent misparse.
 //!
@@ -32,7 +32,14 @@ use duja_core::model::{DisplayKind, DisplaySnapshot, Feature};
 use crate::frame::IpcError;
 
 /// The protocol version this build speaks. Bumped on any breaking wire change.
-pub const PROTOCOL_VERSION: u16 = 1;
+///
+/// v2 (#67) removed `DisplayKindDto::SoftwareOnly` and added the required
+/// [`DisplayInfo::software_only`] field. Because [`DisplayInfo`] is
+/// `deny_unknown_fields`, that is breaking in BOTH directions (a v1 client omits
+/// `software_only` / may send the removed variant; a v1 app rejects the new
+/// field), so the bump is a hard wall: a v1 peer is rejected with
+/// [`IpcError::UnsupportedVersion`] instead of silently misparsing.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// The maximum length, in characters, of a display id on the wire.
 pub const ID_MAX_LEN: usize = 64;

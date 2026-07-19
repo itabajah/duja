@@ -838,7 +838,6 @@ impl AppState {
     /// Rebuild the flyout's per-display dimming info (floor + on/off) from the
     /// current config and push it into the flyout view-model.
     fn refresh_flyout_dimming(&self) {
-        use duja_core::config::DimMode as ConfigDimMode;
         let info: BTreeMap<StableDisplayId, duja_ui::DimmingInfo> = self
             .displays
             .iter()
@@ -851,9 +850,11 @@ impl AppState {
                     duja_ui::DimmingInfo {
                         hardware_floor: cfg.hardware_floor,
                         min_perceived_pct: cfg.min_perceived_pct,
-                        // Reflect the *configured* mode (not the HDR-guarded one)
-                        // so the toggle shows what the user chose.
-                        dimming_on: monitor.dim_mode != ConfigDimMode::Off,
+                        // Reflect the *configured* mode (not the HDR-guarded one) so
+                        // the toggle shows what the user chose — except a software-only
+                        // display always reads on (the overlay is its only channel, and
+                        // `continuum_for` forces its effective mode Off -> Overlay).
+                        dimming_on: settings::dimming_on(*software_only, monitor.dim_mode),
                         // A software-only display's toggle is forced-on + disabled in
                         // the flyout (it is the only dimming channel), so carry the flag.
                         software_only: *software_only,

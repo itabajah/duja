@@ -26,7 +26,7 @@
 // OS; the dead-code allow applies only where no consumer exists.
 #![cfg_attr(not(windows), allow(dead_code))]
 
-use duja_core::config::{Config, MonitorConfig, Theme as ConfigTheme};
+use duja_core::config::{Config, DimMode as ConfigDimMode, MonitorConfig, Theme as ConfigTheme};
 use duja_core::continuum::ContinuumConfig;
 use duja_core::model::{DimMode, DisplayKind};
 use duja_ui::Theme as UiTheme;
@@ -56,10 +56,31 @@ pub(crate) fn continuum_for(
     let _ = kind;
     let mode = effective_mode(monitor.dim_mode.into(), gamma_allowed);
     if software_only {
+        // A software-only display has no hardware channel, so `Off` (no software
+        // dimming) would leave it with NO brightness control at all — a full-slider
+        // overlay that never engages while the forced-on pill claims otherwise. Force
+        // the EFFECTIVE mode `Off -> Overlay` (persisted `dim_mode` is untouched, so
+        // the original returns if the display later clears `software_only`). `Gamma`
+        // is a valid backlight-free dim, so it is kept.
+        let mode = if mode == DimMode::Off {
+            DimMode::Overlay
+        } else {
+            mode
+        };
         ContinuumConfig::software_only(mode)
     } else {
         ContinuumConfig::hardware(monitor.hw_floor_pct, monitor.min_perceived_pct, mode)
     }
+}
+
+/// Whether the flyout's "Software dimming" pill reads as engaged for a display.
+///
+/// A software-only display always dims in software — the overlay is its only
+/// channel, and [`continuum_for`] forces its effective mode `Off → Overlay` — so
+/// the pill must read `on` regardless of the persisted `dim_mode`. Otherwise it
+/// tracks the configured mode (engaged for anything but `Off`).
+pub(crate) fn dimming_on(software_only: bool, dim_mode: ConfigDimMode) -> bool {
+    software_only || dim_mode != ConfigDimMode::Off
 }
 
 /// The dim mode actually used after applying the HDR gamma guard.
@@ -114,7 +135,6 @@ pub(crate) fn ui_theme(pref: ConfigTheme, os_dark: Option<bool>) -> UiTheme {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use duja_core::config::DimMode as ConfigDimMode;
 
     fn monitor(floor: u8, mode: ConfigDimMode) -> MonitorConfig {
         MonitorConfig {
@@ -157,6 +177,56 @@ mod tests {
             true,
         );
         assert_eq!(hw.hardware_floor, Some(20));
+    }
+
+    #[test]
+    fn software_only_off_dims_via_overlay_and_reads_the_pill_on() {
+        // Fix 2 (#67 follow-up): an External DDC display set to dim_mode=Off that
+        // loses DDC at runtime is flagged software_only. Its forced-on, locked pill
+        // must be truthful — the effective continuum forces Off -> Overlay so the
+        // slider actually dims (overlay_alpha > 0), and the row reports dimming_on.
+        // (RED against the old behavior: continuum_for gave software_only(Off) with
+        // overlay_alpha 0 everywhere, and dimming_on ignored software_only -> false.)
+        let cfg = continuum_for(
+            DisplayKind::ExternalDdc,
+            true,
+            &monitor(20, ConfigDimMode::Off),
+            true,
+        );
+        assert_eq!(
+            cfg.mode,
+            DimMode::Overlay,
+            "a software-only display's Off must become Overlay"
+        );
+        let out = duja_core::continuum::map_user_level(0, &cfg);
+        assert!(
+            out.overlay_alpha > 0.0,
+            "the slider must actually dim (overlay engages), not sit at alpha 0"
+        );
+        assert!(
+            dimming_on(true, ConfigDimMode::Off),
+            "a software-only row's pill must read on"
+        );
+
+        // Gamma is a valid backlight-free dim, so a selected Gamma mode survives.
+        let g = continuum_for(
+            DisplayKind::InternalPanel,
+            true,
+            &monitor(0, ConfigDimMode::Gamma),
+            true,
+        );
+        assert_eq!(g.mode, DimMode::Gamma);
+
+        // A HARDWARE display's Off is UNCHANGED: still hardware, mode Off, pill off.
+        let hw = continuum_for(
+            DisplayKind::ExternalDdc,
+            false,
+            &monitor(20, ConfigDimMode::Off),
+            true,
+        );
+        assert_eq!(hw.mode, DimMode::Off);
+        assert_eq!(hw.hardware_floor, Some(20));
+        assert!(!dimming_on(false, ConfigDimMode::Off));
     }
 
     #[test]
