@@ -703,6 +703,9 @@ mod binding_tests {
                 hardware_floor: Some(20),
                 min_perceived_pct: 25,
                 dimming_on: true,
+                // A hardware row so the toggle stays interactive (a software-only
+                // row's pill is forced on + disabled and could not round-trip).
+                software_only: false,
             },
         );
         vm.set_dimming_info(info);
