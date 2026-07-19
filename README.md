@@ -1,14 +1,16 @@
 <div align="center">
 
-<img src="docs/images/hero.svg" alt="Duja — the lightweight monitor brightness controller" width="820">
+<img src="docs/images/hero.svg" alt="Duja — the lightweight monitor brightness controller. duja is Arabic for darkness." width="820">
+
+<sub><em>duja (دُجى) — Arabic for darkness. This app takes your screens there.</em></sub>
 
 <br>
 
 [![CI](https://github.com/itabajah/duja/actions/workflows/ci.yml/badge.svg)](https://github.com/itabajah/duja/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/itabajah/duja?sort=semver&color=e5484d)](https://github.com/itabajah/duja/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/itabajah/duja/total?color=0f9f6e)](https://github.com/itabajah/duja/releases)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-3a72f0)](#license)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-9a93a6)](#support-matrix)
+[![Latest release](https://img.shields.io/github/v/release/itabajah/duja?sort=semver&color=a11d3f)](https://github.com/itabajah/duja/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/itabajah/duja/total?color=0b6e4a)](https://github.com/itabajah/duja/releases)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-2b4b9c)](#license)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-6f6879)](#support-matrix)
 
 **Hardware-first physical dimming (DDC/CI + native panel APIs), a seamless software floor
 down to true black, and a native tray UI — in a Rust binary that idles under 25&nbsp;MB.
