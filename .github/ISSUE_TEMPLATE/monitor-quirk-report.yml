@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks — quirk reports directly improve Duja for everyone with the same monitor.
+        Thanks! Quirk reports directly improve Duja for everyone with the same monitor.
         Please run `dujactl doctor --report` and paste its output below; it contains the
         monitor identity and probed capabilities (no personal data).
   - type: input

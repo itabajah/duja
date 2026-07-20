@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Duja — the lightweight monitor brightness controller. duja is Arabic for darkness.">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Duja, the lightweight monitor brightness controller.">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#0a0810"/>
@@ -34,7 +34,6 @@
   <text x="920" y="424" font-family="Segoe UI, Tahoma, 'Noto Naskh Arabic', sans-serif" font-size="48" font-weight="600" fill="#8b8598" direction="rtl">دُجى</text>
 
   <text x="640" y="490" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="30" font-weight="600" fill="#b9b3c4">The lightweight monitor brightness controller.</text>
-  <text x="640" y="537" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="22" font-weight="400" fill="#8b8598">Hardware-first DDC/CI · seamless software floor to true black · native tray · no Electron</text>
-  <text x="640" y="576" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="18" font-style="italic" fill="#6f6879">duja (دُجى) — Arabic for darkness. This app takes your screens there.</text>
+  <text x="640" y="537" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="22" font-weight="400" fill="#8b8598">Dim every screen from your tray, all the way down to black.</text>
   <text x="640" y="610" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="18" font-weight="400" fill="#565064">Windows · macOS · Linux · Rust + Slint</text>
 </svg>

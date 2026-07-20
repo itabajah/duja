@@ -1,8 +1,6 @@
 <div align="center">
 
-<img src="docs/images/hero.svg" alt="Duja — the lightweight monitor brightness controller. duja is Arabic for darkness." width="820">
-
-<sub><em>duja (دُجى) — Arabic for darkness. This app takes your screens there.</em></sub>
+<img src="docs/images/hero.svg" alt="Duja, the lightweight monitor brightness controller." width="820">
 
 <br>
 
@@ -12,9 +10,9 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-2b4b9c)](#license)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-6f6879)](#support-matrix)
 
-**Hardware-first physical dimming (DDC/CI + native panel APIs), a seamless software floor
-down to true black, and a native tray UI — in a Rust binary that idles under 25&nbsp;MB.
-No Electron anywhere.**
+**Control the brightness of every screen you own from one tray icon. Duja dims real
+monitors the way their own buttons do, and keeps going past their darkest setting
+all the way to true black. Tiny, native, and instant.**
 
 [**Download**](#install) · [Features](#why-duja) · [Verify a download](#verify-your-download) · [Build from source](#build-from-source) · [Status](docs/STATUS.md)
 
@@ -22,7 +20,7 @@ No Electron anywhere.**
 
 ---
 
-> **Duja `v0.1.0` — first public release (Windows).** An early build, but a real one: hardware
+> **Duja `v0.1.0`: first public release (Windows).** An early build, but a real one: hardware
 > control, software dimming, tray + flyout, settings, global hotkeys, input switching, and the
 > `dujactl` CLI all work on Windows. macOS backends have landed (Linux is next). Automatic update
 > notifications are built in, so you stay on the latest. See [docs/STATUS.md](docs/STATUS.md) for
@@ -30,30 +28,32 @@ No Electron anywhere.**
 
 ## Why Duja
 
-- **Ultra-lightweight.** Rust + [Slint](https://slint.dev) with a software renderer — no webview,
+- **Ultra-lightweight.** Rust + [Slint](https://slint.dev) with a software renderer: no webview,
   no bundled browser, no background runtime. Measured budgets: **≤ 35 MB idle RSS** (≈ 24 MB in
   practice), **zero idle CPU wakeups**, a single self-contained `duja.exe`.
 - **Hardware control first.** External monitors over DDC/CI (brightness, contrast, input source);
   laptop panels through each OS's native backlight API. Real physical dimming, not a dark overlay.
-- **Seamless software floor.** Displays without hardware control (TVs, docks, capture cards) — and
-  the range *below* hardware 0 % — are dimmed by a click-through overlay, so one continuous slider
+- **Seamless software floor.** Displays without hardware control (TVs, docks, capture cards), and
+  the range *below* hardware 0 %, are dimmed by a click-through overlay, so one continuous slider
   runs from 100 % all the way to true black.
 - **Perceptual slider.** The slider position *is* perceived brightness: "20 % looks 20 % bright"
   regardless of the panel's floor. Hardware hands off to the software floor with no visible jump.
 - **Multi-monitor native.** Sync groups, per-monitor settings keyed to stable display identity,
   hot-plug that never loses your levels, and live reflection when you turn a monitor's own buttons.
-- **Themed & premium.** Light/dark themes, five accent colours, and a resizable settings window —
+- **Themed & premium.** Light/dark themes, five accent colours, and a resizable settings window,
   all drawn natively.
 
 ## Screenshots
 
-> _Placeholder art below — real captures land with the release._
-
 <div align="center">
 
-| Flyout (dark) | Settings (dark) | Flyout (light) |
-|:---:|:---:|:---:|
-| <img src="docs/images/flyout-dark.png" width="240"> | <img src="docs/images/settings-dark.png" width="240"> | <img src="docs/images/flyout-light.png" width="240"> |
+| Flyout (dark) | Flyout (light) |
+|:---:|:---:|
+| <img src="docs/images/flyout-dark.png" alt="Duja tray flyout, dark theme" width="380"> | <img src="docs/images/flyout-light.png" alt="Duja tray flyout, light theme" width="380"> |
+
+<img src="docs/images/settings-dark.png" alt="Duja settings window, dark theme" width="330">
+
+<sub>Settings (dark)</sub>
 
 </div>
 
@@ -62,15 +62,15 @@ No Electron anywhere.**
 **Windows 10/11 (x64).** Grab the latest from the
 [**Releases page**](https://github.com/itabajah/duja/releases/latest):
 
-- **Installer (recommended)** — download **`duja-setup-<version>.exe`** and run it. It installs
+- **Installer (recommended)**: download **`duja-setup-<version>.exe`** and run it. It installs
   per-user (no admin prompt), adds a Start-Menu entry, and offers an optional *"launch at login"*.
-- **Portable** — download **`duja-<version>-windows-x64.zip`**, extract it anywhere, and run
+- **Portable**: download **`duja-<version>-windows-x64.zip`**, extract it anywhere, and run
   `duja.exe`. No install, no admin.
 
 > [!NOTE]
 > **SmartScreen.** The binaries are not yet code-signed, so Windows SmartScreen may show
 > *"Windows protected your PC"* on first run. Choose **More info → Run anyway**. You can confirm
-> the download is authentic first — see [Verify your download](#verify-your-download).
+> the download is authentic first; see [Verify your download](#verify-your-download).
 
 _Package managers (winget / Scoop) are planned once the release stabilises._
 
@@ -78,7 +78,7 @@ _Package managers (winget / Scoop) are planned once the release stabilises._
 
 Duja checks GitHub for a newer release about once a day (piggybacked on your own interaction, so it
 never wakes an idle machine) and, when one is out, adds an **"Update available"** item to the tray
-menu and shows a toast. Clicking it opens the releases page — Duja never downloads or installs
+menu and shows a toast. Clicking it opens the releases page; Duja never downloads or installs
 anything on its own. Turn it off with `update_check = false` under `[general]` in your config.
 
 ## Verify your download
@@ -133,8 +133,8 @@ The installer is built in CI with [Inno Setup](packaging/windows/duja.iss); the 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Monitor misbehaving? File a
-[quirk report](https://github.com/itabajah/duja/issues/new?template=monitor-quirk-report.yml) —
-reports seed the shared quirks database that makes Duja work on imperfect hardware.
+[quirk report](https://github.com/itabajah/duja/issues/new?template=monitor-quirk-report.yml).
+Reports seed the shared quirks database that makes Duja work on imperfect hardware.
 
 ## License
 

@@ -14,7 +14,7 @@ update check: while enabled (on by default; opt-out with
 `general.update_check = false`) it makes one HTTPS GET to the GitHub releases API
 **at most once a day**, piggybacked on a real user interaction so an idle machine
 never wakes for it. On a newer release it surfaces a tray item and a toast whose
-click opens the releases page — it **never downloads, installs, or executes
+click opens the releases page; it **never downloads, installs, or executes
 anything**. The response body is read-capped at 64 KiB before buffering, over
 rustls with a 5-second timeout.
 
@@ -25,7 +25,7 @@ Local attack surface and mitigations:
   flags, length-prefixed frames with a 64 KiB cap enforced before allocation,
   strict parameter validation, connection and read-timeout limits.
 - **Config & quirks files**: typed parsing only, size caps, no user-supplied
-  regex, parse failures fall back to embedded defaults — never abort, never
+  regex, parse failures fall back to embedded defaults: never abort, never
   execute content.
 - **Screen-state restitution**: gamma/overlay state is guarded so a crash
   cannot leave the screen unusable (`duja --restore`, crash-marker recovery).
@@ -36,19 +36,19 @@ Pinned lockfile; `cargo-deny` (advisories + license allowlist) on every PR **and
 again on the tagged commit at release time**; GitHub Actions pinned by commit SHA.
 Each tagged release
 ([`.github/workflows/release.yml`](.github/workflows/release.yml)) ships two
-binaries — the Windows installer (`.exe`) and a portable `.zip` — each carrying a
+binaries (the Windows installer `.exe` and a portable `.zip`), each carrying a
 GitHub **build-provenance attestation**. Alongside them a **SHA256SUMS** file
 lists their hashes, and a **minisign** signature (`.minisig`) covers each binary
 *and* `SHA256SUMS` itself. The minisigned `SHA256SUMS` is the root of trust:
 verify it, then its hashes chain to the two binaries. The provenance attestation
-covers **the two binaries only** — `SHA256SUMS` and the `.minisig` files are
+covers **the two binaries only**; `SHA256SUMS` and the `.minisig` files are
 verified through minisign, not attestation.
 
-The step-by-step release procedure — dry run, per-asset verification, and how to
-turn on Authenticode / Azure Trusted Signing later — is in
+The step-by-step release procedure (dry run, per-asset verification, and how to
+turn on Authenticode / Azure Trusted Signing later) is in
 [`docs/release-checklist.md`](docs/release-checklist.md).
 
-> **Note — code signing.** Release binaries are **not** yet signed with an
+> **Note on code signing.** Release binaries are **not** yet signed with an
 > Authenticode certificate, so Windows SmartScreen may warn on first run. Verify
 > authenticity with the checksums and minisign signature below instead.
 
@@ -72,7 +72,7 @@ So the verify command is:
 minisign -Vm SHA256SUMS -P RWSeL0en/zyHopbYOTmC4nwO4pLW0WN6awWsuhwoUZnSM+D0zukOl0UK
 ```
 
-You can also verify the build-provenance attestation on either binary — the
-installer `.exe` or the portable `.zip` — with
+You can also verify the build-provenance attestation on either binary (the
+installer `.exe` or the portable `.zip`) with
 `gh attestation verify <file> --repo itabajah/duja`. (`SHA256SUMS` and the
 `.minisig` files are not attested; they are covered by minisign above.)
