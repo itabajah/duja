@@ -9,7 +9,7 @@ There are five targets: `fuzz_caps_string` (the MCCS capability-string parser),
 `read_frame_bytes`), and `fuzz_ddc_packet` (the `duja-ddc` DDC/CI reply decoders
 `decode_get_vcp_reply` / `decode_caps_reply`). Each simply feeds the raw input
 bytes to its parser and relies on libFuzzer to flag any panic, hang, or
-out-of-memory — the parsers are contractually total, so a crash is a bug. This
+out-of-memory: the parsers are contractually total, so a crash is a bug. This
 crate is a **separate Cargo workspace** (see the `[workspace]` table in
 `Cargo.toml`) so the `libfuzzer-sys` dependency never enters the main build
 graph or release lockfile. It compiles under stable
@@ -27,13 +27,13 @@ timed session; `cargo +nightly fuzz list` shows all targets).
 running, prepend the MSVC host bin directory, e.g.
 `$env:Path = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\<ver>\bin\Hostx64\x64;$env:Path"`
 (otherwise the target exits with `0xc0000135`, a missing-DLL error). Do not
-retry with `-s none` after an ASan run without `cargo clean` — mixing sanitizer
+retry with `-s none` after an ASan run without `cargo clean`; mixing sanitizer
 modes produces an `unresolved external symbol __start___sancov_cntrs` link error.
 
 Last full burn (2026-07-08): 1,000,000 executions per target, zero crashes
 (`fuzz_caps_string` 52k exec/s, `fuzz_edid_parse` 200k exec/s,
 `fuzz_quirks_toml` 4.4k exec/s). Committed seeds
-live in `fuzz/corpus/<target>/` — the real MSI MP273QP capability string, a
+live in `fuzz/corpus/<target>/`: the real MSI MP273QP capability string, a
 valid synthetic 128-byte EDID, and the embedded `quirks.toml`. **Corpus
 policy:** keep the seeds small and meaningful (one valid, exercising sample per
 target is enough to bootstrap coverage); do not commit machine-generated corpus

@@ -5,7 +5,7 @@
 - **Trunk-based.** `main` is protected; work on short-lived branches
   (`feat/…`, `fix/…`, `refactor/…`, `chore/…`, `docs/…`) and squash-merge via PR.
   PR titles must be [conventional commits](https://www.conventionalcommits.org)
-  — they become the commit on `main`. Scopes are crate names:
+  since they become the commit on `main`. Scopes are crate names:
   `feat(core): continuum mapper`.
 - **TDD.** `duja-core` is written test-first, no exceptions. Backends must pass
   the shared `BrightnessController` contract suite
