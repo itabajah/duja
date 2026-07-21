@@ -8,7 +8,10 @@ Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
 replacement. This file is the human-readable snapshot of where the build stands.
 The authoritative plan is the phase roadmap; architecture decisions live in
-[docs/adr/](adr/).
+[docs/adr/](adr/). For a wide, post-1.0 brainstorm of everything Duja *could*
+grow into beyond brightness (the full DDC/CI feature set, OS-level color and
+display control, automation, and integrations), see
+[docs/future-vision.md](future-vision.md) — a triage menu, not a commitment.
 
 ## At a glance
 
