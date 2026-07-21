@@ -1925,8 +1925,16 @@ const RELAUNCH_POLL: Duration = Duration::from_millis(50);
 /// # Errors
 /// Propagates a failure to resolve the current executable or to spawn it.
 fn spawn_relaunch() -> std::io::Result<()> {
+    use std::process::Stdio;
     let exe = std::env::current_exe()?;
-    std::process::Command::new(exe).arg("--relaunch").spawn()?;
+    // Detach the child's std streams (the tray build has no console anyway) so it
+    // never shares an inherited stdio handle with this exiting process.
+    std::process::Command::new(exe)
+        .arg("--relaunch")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
     Ok(())
 }
 
