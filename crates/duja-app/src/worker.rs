@@ -823,6 +823,61 @@ mod tests {
         handle.join.join().unwrap();
     }
 
+    /// A controller whose probe fails transiently (an asleep/busy monitor) and
+    /// whose reads/writes also time out — it reports NO capabilities and NO
+    /// movement, yet none of that is a *definitive* no-hardware signal.
+    #[derive(Debug)]
+    struct AsleepController;
+
+    impl BrightnessController for AsleepController {
+        fn probe(&mut self) -> Result<Capabilities, ControlError> {
+            Err(ControlError::Timeout)
+        }
+        fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+            Err(ControlError::Timeout)
+        }
+        fn set(&mut self, _feature: Feature, _value: u16) -> Result<(), ControlError> {
+            Err(ControlError::Timeout)
+        }
+    }
+
+    #[test]
+    fn probe_error_never_acks_software_fallback() {
+        // The false-software-only fix at the worker seam: a probe that fails
+        // transiently (a live monitor that was asleep/busy at open time) must NOT
+        // be treated as "no hardware". `probe_on_open` only downgrades on a
+        // *definitive* `Ok(caps)` with `!hardware_range`; an `Err` is inconclusive,
+        // so no SoftwareFallback is emitted and the display stays hardware-backed.
+        let (ack_tx, ack_rx) = unbounded();
+        let opener: crate::ControllerOpener =
+            Box::new(|| Some(Box::new(AsleepController) as Box<dyn BrightnessController>));
+        let handle = spawn_worker(worker_id(), opener, Duration::from_millis(5), 4, ack_tx);
+
+        // Drive a write too, so both detection paths (probe + first write) get a
+        // chance; a transient write failure must likewise never downgrade.
+        handle
+            .cmd_tx
+            .send(WorkerCommand::Set {
+                feature: Feature::Brightness,
+                raw: 10,
+                seq: 1,
+            })
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < deadline {
+            if let Ok(ack) = ack_rx.recv_timeout(Duration::from_millis(100)) {
+                assert!(
+                    !matches!(ack.outcome, AckOutcome::SoftwareFallback { .. }),
+                    "a transient probe/read/write failure must never emit SoftwareFallback"
+                );
+            }
+        }
+
+        handle.cmd_tx.send(WorkerCommand::Shutdown).unwrap();
+        handle.join.join().unwrap();
+    }
+
     #[test]
     fn failed_open_acks_open_failed_and_exits() {
         // A deferred open that returns None must report OpenFailed and the

@@ -64,7 +64,8 @@ fn run(args: &[String]) -> anyhow::Result<ExitCode> {
             println!("{}", cli::USAGE);
             Ok(ExitCode::SUCCESS)
         }
-        Command::Tray { verbose } => run_tray(verbose),
+        Command::Tray { verbose } => run_tray(verbose, false),
+        Command::Relaunch => run_tray(false, true),
         Command::Once => Ok(bin_support::run::once()),
         Command::Headless => bin_support::run::headless(),
         Command::Restore => Ok(bin_support::run::restore()),
@@ -110,11 +111,12 @@ fn init_logging(command: Command) {
             // Console/verbose mode: stderr is live, so no crash file is needed.
             logging::install_panic_hook(None);
         }
-        Command::Tray { verbose: false } => {
+        Command::Tray { verbose: false } | Command::Relaunch => {
             // Derive the log paths through the SAME resolve-or-fallback the tray
             // runs from, so a host with no home dir still logs to the temp root
             // (previously logging was silently disabled while the tray itself ran
-            // on temp paths). Unchanged when a home dir resolves.
+            // on temp paths). Unchanged when a home dir resolves. A relaunch logs
+            // exactly like the plain tray it becomes.
             let paths = DujaPaths::resolve_or_fallback();
             logging::init(Some(&paths.log_dir), false);
             // The tray release build has no console; a panic (e.g. inside a Slint
@@ -125,10 +127,12 @@ fn init_logging(command: Command) {
     }
 }
 
-/// Run the tray application (Windows only).
+/// Run the tray application (Windows only). `relaunch` is set when this process
+/// was spawned by the tray "Restart" item, so startup waits for the outgoing
+/// instance to release the single-instance lock before taking over.
 #[cfg(windows)]
-fn run_tray(verbose: bool) -> anyhow::Result<ExitCode> {
-    bin_support::tray::run(verbose)
+fn run_tray(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
+    bin_support::tray::run(verbose, relaunch)
 }
 
 /// The tray app is Windows-only in this build; other targets report and exit
@@ -137,7 +141,7 @@ fn run_tray(verbose: bool) -> anyhow::Result<ExitCode> {
 // cfg-free; this stub itself can never fail.
 #[allow(clippy::unnecessary_wraps)]
 #[cfg(not(windows))]
-fn run_tray(_verbose: bool) -> anyhow::Result<ExitCode> {
+fn run_tray(_verbose: bool, _relaunch: bool) -> anyhow::Result<ExitCode> {
     eprintln!("duja: the tray application is only available on Windows in this build");
     Ok(ExitCode::from(1))
 }
