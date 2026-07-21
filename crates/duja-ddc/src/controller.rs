@@ -265,26 +265,54 @@ impl<T: VcpTransport, C: Clock> DdcController<T, C> {
     }
 
     /// Fallback discovery: attempt a direct read of brightness and contrast; a
-    /// successful read means the feature is present. A disconnected error is
-    /// propagated; any other read failure means the feature is simply absent.
+    /// successful read means the feature is present.
+    ///
+    /// Brightness is **load-bearing**: [`hardware_range`](Capabilities::hardware_range)
+    /// keys on it, and the app's worker turns a `hardware_range == false` probe
+    /// into a *sticky* software-only downgrade that is only re-evaluated when a
+    /// fresh worker is spawned — after a sleep/wake, a hot-plug, or an
+    /// unresponsive→responsive recovery. So a failed brightness read here must
+    /// **not** be read as "no brightness hardware": that is the very transient the
+    /// whole controller retries around (the P1 spike measured ~60–70% of unpaced
+    /// reads failing, and a monitor waking from DPMS or a momentarily busy bus can
+    /// outlast even the retries), and a real DDC monitor essentially always
+    /// supports `0x10`. Reporting it absent would false-downgrade a live external
+    /// monitor that simply was not answering at probe time — a downgrade the user
+    /// can only clear by restarting Duja. Instead we surface the failure as an
+    /// error so the probe stays *inconclusive* and the no-hardware verdict is left
+    /// to the retried first-write check (the intended detector; see `duja-app`'s
+    /// backend docs). A definitive `hardware_range == false` therefore comes only
+    /// from a *successful* capability read that omits brightness, or the
+    /// `ddc_broken` quirk — never from a read that merely failed. A
+    /// [`Disconnected`](TransportError::Disconnected) stays terminal (handle gone).
+    /// Contrast, by contrast, is genuinely optional: a failed contrast read just
+    /// means it is absent.
     fn probe_by_reads(&mut self) -> Result<Capabilities, TransportError> {
         let mut features = BTreeSet::new();
-        for feature in [Feature::Brightness, Feature::Contrast] {
-            match self.read_retry(feature.vcp_code()) {
-                Ok(_) => {
-                    features.insert(feature);
-                }
-                Err(TransportError::Disconnected) => return Err(TransportError::Disconnected),
-                Err(_) => {}
+        // Brightness first, and its failure is fatal to the probe (see the doc):
+        // an inconclusive read is surfaced as an error, not a false "absent".
+        match self.read_retry(Feature::Brightness.vcp_code()) {
+            Ok(_) => {
+                features.insert(Feature::Brightness);
             }
+            Err(err) => return Err(err),
         }
-        let hardware_range = features.contains(&Feature::Brightness);
+        // Contrast is optional: only a Disconnected (monitor vanished mid-probe)
+        // propagates; any other failure just means contrast is absent.
+        match self.read_retry(Feature::Contrast.vcp_code()) {
+            Ok(_) => {
+                features.insert(Feature::Contrast);
+            }
+            Err(TransportError::Disconnected) => return Err(TransportError::Disconnected),
+            Err(_) => {}
+        }
         // No capability string here, so the only input-source knowledge is a
         // quirk override (empty when there is none or switching is disabled).
         let allowed_inputs = self.resolve_allowed_inputs(Vec::new());
         Ok(Capabilities {
+            // Reached only after a successful brightness read, so hardware is real.
             features,
-            hardware_range,
+            hardware_range: true,
             raw_capabilities: None,
             allowed_inputs,
         })

@@ -14,6 +14,12 @@ pub(crate) enum Command {
         /// Whether `--verbose` was passed.
         verbose: bool,
     },
+    /// Run the tray application as a **relaunch** of a quitting instance (the
+    /// tray "Restart" item spawns `duja --relaunch`). Identical to [`Command::Tray`] except
+    /// startup first waits briefly for the outgoing instance to release the
+    /// single-instance lock, so the two do not collide. Internal — not advertised
+    /// in `--help`.
+    Relaunch,
     /// Assemble the real pipeline and run until the user quits (`q<Enter>`).
     Headless,
     /// Enumerate once, print a table, exit.
@@ -81,6 +87,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, CliError> {
 
     match mode.as_str() {
         "--verbose" => expect_end(iter, Command::Tray { verbose: true }),
+        "--relaunch" => expect_end(iter, Command::Relaunch),
         "--headless" => expect_end(iter, Command::Headless),
         "--once" => expect_end(iter, Command::Once),
         "--restore" => expect_end(iter, Command::Restore),
@@ -157,6 +164,13 @@ mod tests {
         );
         // `--verbose` takes no trailing argument.
         assert!(parse(&args(&["--verbose", "extra"])).is_err());
+    }
+
+    #[test]
+    fn relaunch_flag_selects_the_relaunch_tray() {
+        assert_eq!(parse(&args(&["--relaunch"])), Ok(Command::Relaunch));
+        // `--relaunch` takes no trailing argument.
+        assert!(parse(&args(&["--relaunch", "extra"])).is_err());
     }
 
     #[test]

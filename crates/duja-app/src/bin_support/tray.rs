@@ -304,6 +304,8 @@ enum Action {
     /// Open the GitHub releases page (the "Update available" menu item). Duja
     /// only ever opens the page — it never downloads.
     OpenReleases,
+    /// Restart: spawn a fresh instance that takes over once this one has quit.
+    Restart,
     /// Begin a clean shutdown.
     Quit,
 }
@@ -320,20 +322,32 @@ enum Action {
 // artificial extraction purely to satisfy the line count would scatter cohesive
 // wiring and read worse. Kept as one readable sequence until the split.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn run(verbose: bool) -> anyhow::Result<ExitCode> {
+pub(crate) fn run(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
     let _ = verbose; // logging is initialised by the caller.
     let paths = DujaPaths::resolve_or_fallback();
 
     // 1. Single-instance guard: a second launch asks the running instance to
-    //    surface its flyout over IPC, then exits 0.
-    let instance = duja_platform::SingleInstance::acquire();
+    //    surface its flyout over IPC, then exits 0. A `relaunch` (spawned by the
+    //    tray "Restart" item) instead WAITS for the outgoing instance to release
+    //    the lock, then takes over.
+    let instance = acquire_single_instance(relaunch);
     if instance.already_running() {
-        if ipc::show_running_instance() {
+        // A relaunch that timed out waiting for the outgoing instance falls
+        // through and starts anyway: bailing to "show the running flyout and exit"
+        // here would leave NO instance once the old one finishes quitting — a
+        // restart that killed the app. A brief two-instance overlap is the safer
+        // failure. A plain second launch still hands off and exits.
+        if relaunch {
+            warn!(
+                "relaunch: the previous instance is still present after waiting; starting anyway"
+            );
+        } else if ipc::show_running_instance() {
             info!("another duja instance is running; asked it to show its flyout");
+            return Ok(ExitCode::SUCCESS);
         } else {
             info!("another duja instance is already running; exiting");
+            return Ok(ExitCode::SUCCESS);
         }
-        return Ok(ExitCode::SUCCESS);
     }
 
     // 1b. Hold the fixed-name installer-detection mutex for our whole lifetime so
@@ -626,6 +640,7 @@ impl AppState {
             Action::Restore => self.restore_screen(),
             Action::Nudge(delta) => self.nudge_all(delta),
             Action::OpenReleases => open_url(updates::RELEASES_PAGE_URL),
+            Action::Restart => self.restart(),
             Action::Quit => self.begin_quit(),
         }
     }
@@ -773,6 +788,27 @@ impl AppState {
             failed = report.failed.len(),
             "restored screen on request"
         );
+    }
+
+    /// Restart Duja: spawn a fresh instance that waits for us to release the
+    /// single-instance lock, then cleanly quit this one so it takes over.
+    ///
+    /// The replacement is spawned **before** quitting; if it cannot be spawned we
+    /// stay running (a restart must never leave the user with nothing). The clean
+    /// [`begin_quit`](Self::begin_quit) that follows restores gamma/overlays and
+    /// flushes state, so the fresh instance adopts the same persisted levels — the
+    /// user's fix for a stuck session (e.g. a display wrongly stuck software-only)
+    /// without losing their settings.
+    fn restart(&mut self) {
+        match spawn_relaunch() {
+            Ok(()) => {
+                info!("restart requested: spawned a replacement instance; quitting this one");
+                self.begin_quit();
+            }
+            Err(e) => {
+                warn!(error = %e, "restart failed: could not spawn a replacement; staying running");
+            }
+        }
     }
 
     /// Clean shutdown: persist state, restore gamma, quit the event loop.
@@ -1873,6 +1909,64 @@ pub(crate) fn ipc_show_flyout() {
     });
 }
 
+/// How long a relaunched instance waits for the outgoing one to release the
+/// single-instance lock before giving up and starting anyway. The outgoing
+/// instance's own shutdown is bounded well below this (a ~2s worker-join budget),
+/// so the wait is comfortably longer than a clean quit takes.
+const RELAUNCH_WAIT: Duration = Duration::from_secs(5);
+
+/// The poll gap while waiting for the single-instance lock to free.
+const RELAUNCH_POLL: Duration = Duration::from_millis(50);
+
+/// Spawn a detached replacement `duja` (`--relaunch`) that takes over once this
+/// instance releases the single-instance lock. The child is an independent
+/// process, so it survives our own exit.
+///
+/// # Errors
+/// Propagates a failure to resolve the current executable or to spawn it.
+fn spawn_relaunch() -> std::io::Result<()> {
+    use std::process::Stdio;
+    let exe = std::env::current_exe()?;
+    // Detach the child's std streams (the tray build has no console anyway) so it
+    // never shares an inherited stdio handle with this exiting process.
+    std::process::Command::new(exe)
+        .arg("--relaunch")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
+/// Acquire the single-instance lock, waiting a bounded window when we were
+/// relaunched by "Restart" (the outgoing instance may still hold the lock for a
+/// moment after spawning us).
+///
+/// Each failed attempt **drops** its guard so its handle to the named object is
+/// closed; once the outgoing process also exits, no handle remains, the object is
+/// destroyed, and the next attempt creates it fresh (`already_running == false`).
+/// On timeout the last guard is returned as-is (still `already_running`), and the
+/// caller starts anyway rather than leaving the user with no instance.
+fn acquire_single_instance(relaunch: bool) -> duja_platform::SingleInstance {
+    let instance = duja_platform::SingleInstance::acquire();
+    if !relaunch || !instance.already_running() {
+        return instance;
+    }
+    // Release our handle before waiting so the named object can be torn down the
+    // instant the outgoing process closes its own.
+    drop(instance);
+    let start = Instant::now();
+    let deadline = start.checked_add(RELAUNCH_WAIT).unwrap_or(start);
+    loop {
+        std::thread::sleep(RELAUNCH_POLL);
+        let instance = duja_platform::SingleInstance::acquire();
+        if !instance.already_running() || Instant::now() >= deadline {
+            return instance;
+        }
+        drop(instance);
+    }
+}
+
 /// Dispatch an [`Action`] onto the Slint main thread.
 fn dispatch(action: Action) {
     let _ = slint::invoke_from_event_loop(move || {
@@ -1893,6 +1987,8 @@ fn wire_tray_handlers() {
             Action::OpenSettings
         } else if event.id() == &ids.restore {
             Action::Restore
+        } else if event.id() == &ids.restart {
+            Action::Restart
         } else if event.id() == &ids.update {
             Action::OpenReleases
         } else if event.id() == &ids.quit {
@@ -2113,6 +2209,7 @@ struct MenuIds {
     open: tray_icon::menu::MenuId,
     settings: tray_icon::menu::MenuId,
     restore: tray_icon::menu::MenuId,
+    restart: tray_icon::menu::MenuId,
     /// The "Update available" item — its id is recorded even though the item is
     /// not in the menu until a newer release is found, so the handler routes it.
     update: tray_icon::menu::MenuId,
@@ -2128,7 +2225,7 @@ struct TrayHandles {
 }
 
 /// Build the tray icon with its right-click menu (Open / Settings / Restore
-/// screen / Quit) plus a held-back "Update available" item.
+/// screen / Restart / Quit) plus a held-back "Update available" item.
 ///
 /// The icon is the accent-coloured display silhouette — the same glyph and colour
 /// the taskbar button carries (see [`duja_ui::icon`]).
@@ -2140,6 +2237,7 @@ fn build_tray(accent: AccentChoice) -> anyhow::Result<TrayHandles> {
     let open = MenuItem::new("Open", true, None);
     let settings = MenuItem::new("Settings", true, None);
     let restore = MenuItem::new("Restore screen", true, None);
+    let restart = MenuItem::new("Restart", true, None);
     let quit = MenuItem::new("Quit", true, None);
     // Built now (so its id is stable and known to the handler) but not appended:
     // it is prepended only when a background check finds a newer release.
@@ -2149,6 +2247,7 @@ fn build_tray(accent: AccentChoice) -> anyhow::Result<TrayHandles> {
         &settings,
         &restore,
         &PredefinedMenuItem::separator(),
+        &restart,
         &quit,
     ])
     .map_err(|e| anyhow::anyhow!("failed to build tray menu: {e}"))?;
@@ -2158,6 +2257,7 @@ fn build_tray(accent: AccentChoice) -> anyhow::Result<TrayHandles> {
             open: open.id().clone(),
             settings: settings.id().clone(),
             restore: restore.id().clone(),
+            restart: restart.id().clone(),
             update: update_item.id().clone(),
             quit: quit.id().clone(),
         };

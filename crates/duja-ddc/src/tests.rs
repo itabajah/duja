@@ -355,6 +355,61 @@ fn fallback_omits_a_feature_whose_direct_read_fails() {
     assert!(!caps.supports(Feature::Contrast));
 }
 
+#[test]
+fn asleep_monitor_probe_is_inconclusive_not_software_only() {
+    // THE false-software-only fix. A live external monitor that is momentarily
+    // not answering (asleep/DPMS-off, or a busy bus) at probe time: no capability
+    // string AND every VCP read times out. The OLD probe-by-reads reported this as
+    // `hardware_range == false` via a *successful* `Ok(caps)`, which the app's
+    // worker turns into a STICKY software-only downgrade — the "opened it after a
+    // while and my hardware monitor shows as software-only, restart fixes it" bug.
+    // The probe must instead be INCONCLUSIVE (an error), so a transient no-reply
+    // never downgrades a monitor that has hardware. RED against the old code, which
+    // returned `Ok` with `hardware_range == false`.
+    let t = FakeTransport::nominal()
+        .with_caps(None)
+        .failing(InjectKind::Timeout, usize::MAX, 0, 0);
+    let mut c = controller(t, ResolvedQuirks::default());
+    assert!(
+        matches!(c.probe(), Err(ControlError::Timeout)),
+        "a transient no-reply at probe time must be inconclusive, never a \
+         (sticky) software-only downgrade"
+    );
+}
+
+#[test]
+fn probe_by_reads_propagates_a_disconnect_on_the_brightness_read() {
+    // A monitor that vanishes at probe time (no caps, reads Disconnected) stays
+    // terminal — a Disconnected must not be swallowed into a false "no hardware".
+    let t = FakeTransport::nominal().with_caps(None).failing(
+        InjectKind::Disconnected,
+        usize::MAX,
+        0,
+        0,
+    );
+    let mut c = controller(t, ResolvedQuirks::default());
+    assert!(matches!(c.probe(), Err(ControlError::Disconnected)));
+}
+
+#[test]
+fn probe_by_reads_keeps_brightness_when_only_contrast_is_flaky() {
+    // Brightness answers, contrast times out: the probe still succeeds,
+    // hardware-backed, with contrast simply absent — a failed *contrast* read is
+    // genuinely "absent", unlike the load-bearing brightness read above.
+    let t = FakeTransport::nominal()
+        .with_caps(None)
+        .without_value(0x12)
+        .failing(InjectKind::Timeout, 0, 0, 0);
+    let mut c = controller(t, ResolvedQuirks::default());
+    let caps = c.probe().unwrap();
+    assert!(caps.supports(Feature::Brightness));
+    assert!(
+        caps.hardware_range,
+        "a readable brightness is hardware-backed"
+    );
+    assert!(!caps.supports(Feature::Contrast));
+}
+
 // --- quirks: max_brightness, ddc_broken, no_input_switch, input source ---
 
 #[test]
