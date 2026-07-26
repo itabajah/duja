@@ -1,32 +1,48 @@
 //! Screen geometry for anchoring a tray flyout: where the cursor is, which
 //! monitor's work area surrounds it, and that monitor's scale factor.
 //!
-//! # One coordinate space, normalized at the backend
+//! # Coordinate space
 //!
-//! Every coordinate this module hands out is in **physical device pixels, in the
-//! virtual-desktop space, with y increasing downward**. That is the space
-//! Windows already speaks, and it is the space a backend is required to convert
-//! *into* — not a description of what the OS happens to return.
+//! **Top-left origin, y increasing downward**, in the unit the platform's own
+//! window-positioning API expects: physical pixels on Windows (a
+//! Per-Monitor-V2 process), points on macOS.
 //!
-//! This matters more than it looks. The obvious alternative — pass each
-//! platform's native rectangle straight through and let the caller sort it out —
-//! is a silent-failure design, because the two platforms disagree in ways that
-//! still typecheck:
+//! Orientation is normalized by the backend; the *unit* deliberately is not.
+//! Both halves of that need justifying, because the obvious alternative — one
+//! global physical-pixel space everywhere — is not implementable:
 //!
-//! - **Units.** Win32 rects on a Per-Monitor-V2 process are physical pixels;
-//!   `CGDisplayBounds` and `NSScreen.visibleFrame` are **points**. On a Retina
-//!   display those differ by the backing scale factor, so an un-converted anchor
-//!   places the flyout at roughly double its intended offset. Nothing fails; the
-//!   window simply lands in the wrong place, and only on hardware the developer
-//!   may not own.
-//! - **Y axis.** Win32 is y-down; Cocoa is y-up. An un-flipped anchor mirrors the
-//!   flyout to the opposite edge of the screen.
+//! - **Y axis, normalized.** Win32 is y-down and Cocoa is y-up, so an un-flipped
+//!   anchor mirrors the flyout to the opposite screen edge. This crate is not the
+//!   first to hit that: `duja-dimmer`'s `mac_geom` already flips overlay frames,
+//!   and its `cocoa_overlay_frame` is the helper a macOS backend here should
+//!   reuse rather than re-derive. Note it needs a *reference height* (the primary
+//!   display's) to flip against — the flip is not a local operation.
+//! - **Unit, not normalized.** macOS has no coherent global physical-pixel
+//!   space: the global space is in points and each `NSScreen` carries its own
+//!   `backingScaleFactor`, so multiplying global point coordinates by any single
+//!   display's factor makes a Retina built-in and a non-Retina external stop
+//!   tiling. Points *are* macOS's window-positioning unit, so the honest common
+//!   contract is "the unit the window API takes", which costs the consumer
+//!   nothing: placement only ever compares the cursor against the work area and
+//!   clamps within it, and both are in the same unit by construction.
 //!
-//! Both would be caught instantly on a Mac and never in CI. So the conversion is
-//! the backend's job, done once, next to the FFI that knows the native
-//! convention — the same discipline [`PlatformEvent`](crate::PlatformEvent)
-//! applies to OS notifications, and for the same reason: the consumer should not
-//! have to know which OS it is running on.
+//! None of the underlying facts are new here — `duja-dimmer`'s `mac_geom` module
+//! docs and `docs/STATUS.md`'s "traps surfaced" paragraph have recorded the
+//! points-vs-pixels and y-flip divergences since P6 wave 1. What this module adds
+//! is a place for the conversion to *live*: at the backend, next to the FFI that
+//! knows the native convention, in the same spirit as
+//! [`PlatformEvent`](crate::PlatformEvent) normalizing OS notifications.
+//!
+//! ## Open question for the macOS backend
+//!
+//! The consumer converts a *logical* window size into anchor units by
+//! multiplying by [`TrayAnchor::scale`] (`positioning::physical_window_size` in
+//! `duja-app`). That is right on Windows, where anchor units are physical
+//! pixels. On macOS anchor units are already points — i.e. already logical — so
+//! that multiplication would double-scale on a Retina display. Resolving it
+//! (drop the multiply on macOS, or carry an explicit logical-to-anchor factor
+//! that is `scale` on Windows and `1.0` on macOS) belongs with the backend that
+//! makes it real, on hardware that can show whether it worked.
 //!
 //! # Never fails
 //!
@@ -35,19 +51,20 @@
 //! recourse would be to invent the same defaults: a flyout placed on a guessed
 //! 1080p work area is a cosmetic problem, while no flyout at all is a broken app.
 
-/// A rectangle in physical device pixels, virtual-desktop space, y-down.
+/// A rectangle in the platform's window-positioning unit, y-down — see the
+/// [module docs](self) for what that means per platform.
 ///
 /// The origin may be negative: a monitor placed left of or above the primary one
-/// has negative coordinates in the virtual desktop.
+/// has negative coordinates in the desktop space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkRect {
     /// Left edge.
     pub x: i32,
     /// Top edge.
     pub y: i32,
-    /// Width in physical pixels.
+    /// Width.
     pub w: u32,
-    /// Height in physical pixels.
+    /// Height.
     pub h: u32,
 }
 
@@ -59,7 +76,7 @@ pub struct WorkRect {
 /// to the full screen bounds is what keeps the flyout off the shell furniture.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TrayAnchor {
-    /// Cursor position, physical pixels, virtual-desktop space.
+    /// Cursor position in the space described by the [module docs](self).
     pub cursor: (i32, i32),
     /// Work area of the monitor under the cursor.
     pub work_area: WorkRect,
@@ -87,10 +104,14 @@ const DEFAULT_WORK: WorkRect = WorkRect {
     h: 1040,
 };
 
-/// Clamp a scale factor to something a layout can safely multiply by.
+/// Substitute 1.0 for a scale factor a layout could not safely multiply by.
 ///
-/// A non-finite or absurdly small value would silently collapse a window to
-/// nothing, so anything outside the plausible range falls back to 1.0.
+/// Guards the low end only: a non-finite or near-zero factor would collapse a
+/// window to nothing rather than merely mis-size it. There is deliberately **no
+/// upper bound** — `GetDpiForMonitor` cannot return one (72..960 DPI), and
+/// inventing a ceiling would silently cap a future high-density display instead
+/// of showing it. A backend whose source can produce garbage at the top end
+/// (a detached or zero-size `NSScreen`, say) must guard that itself.
 ///
 /// Shared by every backend that queries a real scale. Today that is Windows
 /// only, so it has no caller on other targets — but it stays cross-platform, and
@@ -206,6 +227,80 @@ mod platform {
             h,
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::rect_from;
+        use windows::Win32::Foundation::RECT;
+
+        /// The Win32 `RECT` conversion is the one piece of real arithmetic in
+        /// this module — sign-preserving edges plus two saturating widths — so it
+        /// is pinned here rather than at the app's four-field copy downstream,
+        /// which is where a regression could not plausibly be introduced.
+        ///
+        /// Windows-only, because `RECT` is a Win32 type. Stated rather than
+        /// glossed: these run on one of the three CI lanes.
+        #[test]
+        fn a_negative_origin_survives_the_conversion() {
+            // A monitor left of or above the primary one has negative
+            // virtual-desktop coordinates. Dropping the sign — or clamping the
+            // edges the way the extents are clamped — would place the flyout on
+            // the wrong screen entirely.
+            let converted = rect_from(RECT {
+                left: -1920,
+                top: -180,
+                right: 640,
+                bottom: 1220,
+            });
+            assert_eq!(converted.x, -1920);
+            assert_eq!(converted.y, -180);
+            assert_eq!(converted.w, 2560);
+            assert_eq!(converted.h, 1400);
+        }
+
+        #[test]
+        fn an_inverted_rect_yields_zero_extents_rather_than_underflowing() {
+            // `right < left` is degenerate, not impossible: a disconnected
+            // monitor can report one. The subtraction is signed and the result is
+            // `u32`, so an unguarded conversion would wrap to ~4 billion and hand
+            // placement an absurd work area.
+            let converted = rect_from(RECT {
+                left: 100,
+                top: 200,
+                right: 40,
+                bottom: 80,
+            });
+            assert_eq!(converted.w, 0);
+            assert_eq!(converted.h, 0);
+            assert_eq!(converted.x, 100, "the origin is reported as given");
+            assert_eq!(converted.y, 200);
+        }
+
+        #[test]
+        fn an_extreme_rect_saturates_instead_of_overflowing() {
+            // `right - left` across the full i32 range overflows a plain
+            // subtraction; `saturating_sub` is what keeps this finite.
+            let converted = rect_from(RECT {
+                left: i32::MIN,
+                top: i32::MIN,
+                right: i32::MAX,
+                bottom: i32::MAX,
+            });
+            assert_eq!(converted.w, i32::MAX as u32);
+            assert_eq!(converted.h, i32::MAX as u32);
+        }
+
+        #[test]
+        fn an_ordinary_primary_monitor_converts_unchanged() {
+            let converted = rect_from(RECT {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1040,
+            });
+            assert_eq!(converted, super::super::DEFAULT_WORK);
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -230,6 +325,18 @@ mod platform {
     /// to place would put an unverifiable conversion in the tree with no consumer
     /// to exercise it.
     pub(super) fn cursor_anchor() -> TrayAnchor {
+        // A placeholder that returns a plausible-looking anchor is indisting-
+        // uishable from a working backend: cursor (0, 0) on a Mac is the top-left
+        // corner, right where a menu-bar flyout belongs, so a missing
+        // implementation would read as "placed slightly oddly" rather than "not
+        // implemented". Fail loudly in debug builds so the first person to run
+        // the macOS app finds out immediately; release builds still degrade to a
+        // usable anchor rather than panicking at the user.
+        debug_assert!(
+            false,
+            "duja-platform: no screen-geometry backend on this target; \
+             cursor_anchor() is returning the placeholder fallback"
+        );
         TrayAnchor {
             cursor: (0, 0),
             work_area: DEFAULT_WORK,
@@ -249,7 +356,9 @@ pub fn cursor_anchor() -> TrayAnchor {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_WORK, cursor_anchor, sane_scale};
+    #[cfg(windows)]
+    use super::cursor_anchor;
+    use super::{DEFAULT_WORK, sane_scale};
 
     #[test]
     fn a_degenerate_scale_falls_back_to_one() {
@@ -277,12 +386,24 @@ mod tests {
         const { assert!(DEFAULT_WORK.w > 0 && DEFAULT_WORK.h > 0) };
     }
 
+    /// End-to-end smoke test of the real backend: it must not panic, and must
+    /// hand placement values it can actually use.
+    ///
+    /// Windows-only, and deliberately so — this calls the live Win32 query path.
+    /// On targets with no backend, [`cursor_anchor`] trips a `debug_assert`
+    /// announcing the placeholder, so calling it here would fail the test lane by
+    /// design rather than tell us anything.
+    #[cfg(windows)]
     #[test]
-    fn an_anchor_is_always_usable() {
-        // Whatever the host, and whether or not the OS answers: a scale a layout
-        // can multiply by, and a work area it can clamp into.
+    fn the_real_backend_returns_a_usable_anchor() {
         let anchor = cursor_anchor();
-        assert!(anchor.scale.is_finite() && anchor.scale >= 0.1);
-        assert!(anchor.work_area.w > 0 && anchor.work_area.h > 0);
+        assert!(
+            anchor.scale.is_finite() && anchor.scale >= 0.1,
+            "a layout multiplies by this"
+        );
+        assert!(
+            anchor.work_area.w > 0 && anchor.work_area.h > 0,
+            "placement clamps into this"
+        );
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "duja-platform"
-description = "OS integration for Duja: hot-plug & power events, single-instance, autostart."
+description = "OS integration for Duja: hot-plug & power events, single-instance, autostart, IPC, screen geometry."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

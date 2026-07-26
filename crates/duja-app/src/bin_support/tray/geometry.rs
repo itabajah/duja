@@ -2,8 +2,11 @@
 //!
 //! The Win32 calls this module used to make (`GetCursorPos`,
 //! `MonitorFromPoint`, `GetMonitorInfoW`, `GetDpiForMonitor`) now live in
-//! [`duja_platform::geometry`], which is where the project confines `unsafe` —
-//! the app binary is meant to be FFI-free. What is left here is the one thing
+//! [`duja_platform::geometry`], which is where the project confines `unsafe`.
+//! That does not make the binary FFI-free — `ShellExecuteW`, the toast's
+//! `AppUserModelID` and the reduced-motion query are still app-local, and are
+//! tracked in `docs/debt.md`. What it removes is the FFI that had a genuine
+//! cross-platform consumer. What is left here is the one thing
 //! that genuinely belongs to the app: converting the platform crate's
 //! [`WorkRect`] into the `positioning::Rect` the pure placement kernel
 //! is written against.

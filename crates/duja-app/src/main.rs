@@ -17,8 +17,14 @@
 //! keep the console subsystem so every mode prints normally.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 // RATIONALE: unlike the pure `duja-app` library (which keeps `#![forbid(unsafe_code)]`),
-// the *binary* wires the Windows tray, which needs a little documented FFI in
-// `bin_support::tray` (cursor/work-area geometry). Every `unsafe` block there
+// the *binary* wires the Windows shell, which needs a little documented FFI.
+// Exactly three call sites remain, named so this comment cannot quietly go stale
+// the way it did when the geometry moved out:
+//   - `bin_support::tray`    — `ShellExecuteW`, opening the releases page
+//   - `bin_support::toast`   — `SetCurrentProcessExplicitAppUserModelID`
+//   - `bin_support::motion`  — `SystemParametersInfoW`, the reduced-motion query
+// The cursor/work-area geometry that used to live here now sits in
+// `duja_platform::geometry`, where the project confines FFI. Every `unsafe` block
 // carries a `// SAFETY:` note and the workspace `unsafe_op_in_unsafe_fn` /
 // `undocumented_unsafe_blocks` denials still apply.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
