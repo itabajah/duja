@@ -233,6 +233,18 @@ fn wait_for_quit() {
     }
 }
 
+/// What `--restore` resets the gamma ramp *to*, which is not the same thing on
+/// both platforms — so the summary line must not claim it is.
+///
+/// Windows writes a linear ramp per display (`restore_identity`); macOS asks the
+/// window server to reload each display's `ColorSync` profile
+/// (`CGDisplayRestoreColorSyncSettings`), which for a calibrated display is by
+/// definition *not* identity.
+#[cfg(windows)]
+const RESTORE_SUMMARY: &str = "restored identity gamma on";
+#[cfg(target_os = "macos")]
+const RESTORE_SUMMARY: &str = "reset gamma to the ColorSync profile on";
+
 /// `--restore`: reset any persisted screen state.
 ///
 /// Overlay windows die with their owning process, so a separate `--restore`
@@ -240,37 +252,95 @@ fn wait_for_quit() {
 /// undo is the one piece of screen state that outlives a process — the gamma
 /// ramp — via `duja_dimmer::restore_all`. Exit is non-zero if any display
 /// could not be reset.
-#[cfg(windows)]
+///
+/// # What this actually rescues on macOS
+///
+/// Be precise about this, because the honest answer is narrower than "Duja's
+/// leftovers". `duja-app` has **no gamma-engage path on macOS at all** today:
+/// the only thing that ever sets a ramp is [`gamma::GammaBackend`], which is
+/// `cfg(windows)` and owned solely by the `cfg(windows)` tray. So on macOS this
+/// cannot be undoing state *Duja* created — there is none — and the window
+/// server restores gamma on process exit anyway, which is why the mac dimmer
+/// carries no crash-marker machinery.
+///
+/// What it is on macOS is a **general screen rescue**: it reloads every
+/// display's `ColorSync` profile, clearing a ramp left by *any* process (f.lux, a
+/// calibration loader, a crashed tool). That is a reasonable thing for a
+/// recovery command to do and it is safe — restoring the user's own calibration,
+/// not flattening it — but it is a different promise, and the command should
+/// keep it rather than the one the Windows path makes.
+///
+/// It becomes a true self-undo on macOS once the app assembly engages gamma
+/// there (P6 wave 2).
+///
+/// [`gamma::GammaBackend`]: super::gamma
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn restore() -> ExitCode {
     let report = duja_dimmer::restore_all();
-    if report.restored.is_empty() && report.failed.is_empty() {
-        println!("nothing to restore (no displays with a resettable gamma ramp)");
-        return ExitCode::SUCCESS;
+    let (lines, ok) = restore_outcome(report.restored.len(), &report.failed, RESTORE_SUMMARY);
+    for line in lines {
+        println!("{line}");
     }
-    println!(
-        "restored identity gamma on {} display(s)",
-        report.restored.len()
-    );
-    for (name, err) in &report.failed {
-        println!("  failed: {name}: {err}");
-    }
-    if report.is_clean() {
+    if ok {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
     }
 }
 
-/// `--restore` on non-Windows: software dimming is Windows-only for now.
-#[cfg(not(windows))]
+/// Pure core of [`restore`]: the lines to print and whether the run succeeded.
+///
+/// Split out because the interesting part is a four-way decision (nothing to do
+/// / summary / per-failure detail / exit code) over a report, and folding it into
+/// the `println!` path would leave the user-visible strings untested on every
+/// platform. Takes primitives rather than `&RestoreReport` so it stays
+/// cross-platform: the report type is per-backend, but its shape is not, and
+/// these tests then run on all three CI lanes.
+///
+/// The empty-report branch is reachable on Windows only. On macOS
+/// `restore_all` reports every enumerated display (falling back to the main
+/// display when enumeration is empty), so `restored` is never empty there and
+/// the "nothing to restore" line cannot fire — noted so nobody reads it as a
+/// macOS "Duja had nothing to clean up" signal.
+// RATIONALE (dead_code): the pure decision stays cross-platform so its tests run
+// on every CI OS, but it is only *called* from the gamma-capable arm above.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn restore_outcome(
+    restored: usize,
+    failed: &[(String, String)],
+    summary: &str,
+) -> (Vec<String>, bool) {
+    if restored == 0 && failed.is_empty() {
+        return (
+            vec!["nothing to restore (no displays with a resettable gamma ramp)".to_owned()],
+            true,
+        );
+    }
+    let mut lines = vec![format!("{summary} {restored} display(s)")];
+    lines.extend(
+        failed
+            .iter()
+            .map(|(name, err)| format!("  failed: {name}: {err}")),
+    );
+    (lines, failed.is_empty())
+}
+
+/// `--restore` where no dimmer backend exists (currently Linux): there is no
+/// gamma ramp Duja could have left behind, so there is nothing to undo.
+///
+/// Deliberately narrow. This arm used to cover macOS too and told the user
+/// "software dimming is Windows-only in this build", which stopped being true
+/// when the macOS dimmer landed in P6 wave 1 — a stub that had quietly become a
+/// false statement about the user's own screen.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn restore() -> ExitCode {
-    println!("nothing to restore (software dimming is Windows-only in this build)");
+    println!("nothing to restore (no software dimming backend on this platform)");
     ExitCode::SUCCESS
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{format_notification, summarize_snapshots};
+    use super::{format_notification, restore_outcome, summarize_snapshots};
     use duja_app::EngineNotification;
     use duja_core::id::StableDisplayId;
     use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
@@ -312,5 +382,63 @@ mod tests {
             format_notification(&EngineNotification::DisplayResponsive(id("A")))
                 .starts_with("display-responsive:")
         );
+    }
+
+    #[test]
+    fn restore_reports_nothing_to_do_only_when_the_report_is_wholly_empty() {
+        let (lines, ok) = restore_outcome(0, &[], "restored identity gamma on");
+        assert_eq!(
+            lines,
+            ["nothing to restore (no displays with a resettable gamma ramp)"]
+        );
+        assert!(ok);
+    }
+
+    #[test]
+    fn restore_summary_uses_the_platform_wording_it_is_given() {
+        // The summary is a parameter precisely because Windows writes a linear
+        // ramp while macOS reloads the ColorSync profile; "identity" is wrong on
+        // macOS, so the caller supplies the verb rather than this deciding.
+        let (win, _) = restore_outcome(2, &[], "restored identity gamma on");
+        assert_eq!(win, ["restored identity gamma on 2 display(s)"]);
+        let (mac, _) = restore_outcome(2, &[], "reset gamma to the ColorSync profile on");
+        assert_eq!(
+            mac,
+            ["reset gamma to the ColorSync profile on 2 display(s)"]
+        );
+    }
+
+    #[test]
+    fn restore_lists_each_failure_and_fails_the_exit_code() {
+        let failed = [
+            (
+                "\\\\.\\DISPLAY1".to_owned(),
+                "SetDeviceGammaRamp failed".to_owned(),
+            ),
+            ("\\\\.\\DISPLAY2".to_owned(), "access denied".to_owned()),
+        ];
+        let (lines, ok) = restore_outcome(1, &failed, "restored identity gamma on");
+        assert_eq!(
+            lines,
+            [
+                "restored identity gamma on 1 display(s)",
+                "  failed: \\\\.\\DISPLAY1: SetDeviceGammaRamp failed",
+                "  failed: \\\\.\\DISPLAY2: access denied",
+            ]
+        );
+        assert!(!ok, "any failure must make --restore exit non-zero");
+    }
+
+    #[test]
+    fn restore_reports_failures_even_when_nothing_was_restored() {
+        // Not the empty-report case: a run where every display failed must still
+        // say so and exit non-zero, rather than printing "nothing to restore".
+        let failed = [("\\\\.\\DISPLAY1".to_owned(), "access denied".to_owned())];
+        let (lines, ok) = restore_outcome(0, &failed, "restored identity gamma on");
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("restored identity gamma on 0 display(s)")
+        );
+        assert!(!ok);
     }
 }
