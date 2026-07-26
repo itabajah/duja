@@ -48,6 +48,7 @@ use duja_ui::{AccentChoice, FlyoutShell, FlyoutVm, SettingsShell, SettingsVm};
 
 use crate::bin_support::bounds::BoundsMap;
 use crate::bin_support::clone_group::CloneGrouping;
+use crate::bin_support::level_forward::{EngineLevelSink, LevelForwarder};
 use crate::bin_support::paths::DujaPaths;
 use crate::bin_support::state_store::StateStore;
 use crate::bin_support::{backend, gamma, ipc, run, settings, settings_apply, startup};
@@ -333,6 +334,7 @@ pub(crate) fn run(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
             state: StateStore::load(paths.state.clone()),
             crash_marker: paths.crash_marker.clone(),
             engine_tx: engine.sender(),
+            levels: LevelForwarder::new(EngineLevelSink::new(engine.sender())),
             gamma,
             displays: Vec::new(),
             groups: CloneGrouping::default(),

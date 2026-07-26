@@ -68,6 +68,14 @@ jobs:
       - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
         with:
           tool: cargo-nextest
+      # This is also the gate on the headless E2E smoke
+      # (`duja-app/tests/e2e_smoke.rs`: fake backend → engine → IPC bridge →
+      # real transport). It needs no job of its own — the matrix already covers
+      # both IPC transports (Windows named pipe, unix domain socket) on the same
+      # three OSes, and `--workspace --all-features` includes it. A separate
+      # `e2e-smoke` job would be a strict subset of this one *and* would sit
+      # outside branch protection's required checks, so it could go red while
+      # the PR still merged.
       - run: cargo nextest run --workspace --all-features
       - run: cargo test --doc --workspace --all-features
 

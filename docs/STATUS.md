@@ -27,7 +27,7 @@ display control, automation, and integrations), see
 | **Multi-monitor & capability fixes** | **`v0.1.2` (Windows)** | ✅ shipped — 6 PRs (5 real-hardware bugs + 1 audit follow-up), test-first, audit + holistic reviewed |
 | **Internal-panel fallback fix** | **`v0.1.3` (Windows)** | ✅ shipped — the built-in panel no longer vanishes on a GPU/OEM-driven backlight |
 | **Dark rebrand + mirror/software-only** | **`v0.1.4` (Windows)** | ✅ shipped — the dark brand identity plus the two laptop-reported issues (#66, #67) |
-| **Sticky software-only fix** | **`v0.1.5` (Windows)** | 🚀 shipping — a live monitor no longer sticks as "software-only"; tray Restart |
+| **Sticky software-only fix** | **`v0.1.5` (Windows)** | ✅ shipped — a live monitor no longer sticks as "software-only"; tray Restart. Release verified: 6 assets, SHA256SUMS, minisign, SLSA provenance, `/releases/latest` → v0.1.5 |
 | P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 (app assembly + packaging) + gate remain |
 | P7 Linux port | `m7-linux` / `v0.3.0` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
