@@ -684,6 +684,69 @@ mod binding_tests {
         );
     }
 
+    // REGRESSION (P4 gate Finding 1): a leading-edge throttle in the UI layer
+    // swallowed the *final* sample of a slider drag — the hardware stayed stranded
+    // at a mid-drag brightness while the slider, the overlay and the persisted
+    // state all showed the value the user released on.
+    //
+    // This is the pin for the two **duja-ui** re-introduction sites, driven through
+    // the real Slint binding so both are on the executed path in one test:
+    // `FlyoutShell::on_command`'s `slider-changed` handler (which could drop
+    // commands before calling the handler) and `FlyoutVm::slider_changed` (which
+    // could return an empty command vector). A pure view-model test misses the
+    // former; a `LevelForwarder` unit test misses both, because it is downstream of
+    // them.
+    //
+    // Note this asserts on the *emitted commands*, not on the rendered slider: the
+    // defect's signature is precisely that the widget shows the right number while
+    // nothing downstream is told about it.
+    #[test]
+    fn slider_drag_burst_emits_the_released_value_last() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let mut vm = FlyoutVm::new();
+        vm.set_displays(vec![snapshot("A", 50)]);
+        let vm = Rc::new(RefCell::new(vm));
+        let shell = FlyoutShell::new(vm).expect("shell instantiates");
+
+        let seen: Rc<RefCell<Vec<UiCommand>>> = Rc::new(RefCell::new(Vec::new()));
+        {
+            let seen = seen.clone();
+            shell.on_command(move |command| seen.borrow_mut().push(command));
+        }
+
+        // A drag is a back-to-back burst of samples over a few milliseconds; the
+        // user releases on 70.
+        for pct in 50..=70u8 {
+            shell.ui.invoke_slider_changed(0, f32::from(pct));
+        }
+
+        let seen = seen.borrow();
+        let levels: Vec<u8> = seen
+            .iter()
+            .filter_map(|command| match command {
+                UiCommand::SetLevel { pct, .. } => Some(*pct),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            levels.last().copied(),
+            Some(70),
+            "the value the user released on must be the last level emitted; a \
+             leading-edge throttle in the shell handler or the view-model strands \
+             the hardware at an intermediate level (emitted: {levels:?})"
+        );
+        // The other half of the contract: pacing belongs to the engine's
+        // `write_min_gap` last-wins coalescer, so the UI drops nothing. A short
+        // sample list is the fingerprint of a re-added throttle even when the final
+        // value happens to survive (a trailing-edge/debounce variant).
+        assert_eq!(
+            levels,
+            (50..=70u8).collect::<Vec<u8>>(),
+            "every drag sample must be emitted, in order, with no UI-side throttle"
+        );
+    }
+
     // Item 2: the per-row "Software dimming" toggle moved from its own row *under*
     // the slider to sit *inline beside* it. The wiring is unchanged, but the new
     // nesting (VerticalLayout > HorizontalLayout > PillToggle) could break the
