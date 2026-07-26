@@ -1,7 +1,7 @@
 # Duja — Project Status
 
-_Last updated: 2026-07-26 (v0.1.5: the sticky "software-only" probe fix and a
-tray Restart item)._
+_Last updated: 2026-07-26 (v0.1.5 shipped, then the structural wave: the tray.rs
+split and the throttle pin / E2E smoke, clearing the P6 prerequisite)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -28,7 +28,7 @@ display control, automation, and integrations), see
 | **Internal-panel fallback fix** | **`v0.1.3` (Windows)** | ✅ shipped — the built-in panel no longer vanishes on a GPU/OEM-driven backlight |
 | **Dark rebrand + mirror/software-only** | **`v0.1.4` (Windows)** | ✅ shipped — the dark brand identity plus the two laptop-reported issues (#66, #67) |
 | **Sticky software-only fix** | **`v0.1.5` (Windows)** | ✅ shipped — a live monitor no longer sticks as "software-only"; tray Restart. Release verified: 6 assets, SHA256SUMS, minisign, SLSA provenance, `/releases/latest` → v0.1.5 |
-| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 (app assembly + packaging) + gate remain |
+| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; the `tray.rs` split prerequisite is cleared; wave 2 (app assembly + packaging) + gate remain |
 | P7 Linux port | `m7-linux` / `v0.3.0` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
 
@@ -45,7 +45,7 @@ end from day one. Distribution is a tag-triggered
 portable zip, each with `SHA256SUMS`, a minisign signature, and a build-provenance
 attestation.
 
-Health: **853 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
+Health: **858 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
 on stable, adversarial gate reviews at **P2, P3, P4, P5** plus a full post-v0.1.0
 **deep review** (14 module reviewers, every non-low finding adversarially
@@ -216,6 +216,65 @@ binding decision; the *probe* path was the un-fixed twin:
 gets silently re-violated whenever a new code path performs the same primitive.
 When adding a read/write path, confirm it uses the project's paced/retried
 wrapper rather than a raw one-shot call making a decision.
+
+### Structural wave — the tray.rs split + test infra (2026-07-26, post-v0.1.5)
+
+Two PRs on top of v0.1.5, both behaviour-neutral, clearing P6's documented
+prerequisite. No release; these land on `main` ahead of the macOS port.
+
+**`#81` — the tray.rs split (2,821 → 612 lines).** The longest-deferred debt row
+in the project ([debt.md](debt.md) called it "the first task of the P6-wave-2
+session", because the macOS assembly doubles the `cfg` surface of that file).
+Seams that already existed in the file became modules: `tray/policy.rs` (the pure
+decision helpers and most of the tests), `tray/state.rs` (`AppState` + its impl),
+`tray/wiring.rs`, `tray/update_flow.rs`; `tray.rs` keeps `run()`, `ReentrantCell`
+and `with_app`. The full existing suite passing unchanged was the contract.
+
+The re-entrancy invariant came out **stronger** than it went in. `ReentrantCell`
+is the single serialising access path to `AppState` — it cures the `RefCell`
+double-borrow that aborted through Slint's FFI (`0xe06d7363` → `0xc0000409`) in
+live QA — but `wiring.rs` initially imported the raw `APP` thread-local for two
+setup borrows, widening the invariant's blast radius across a module boundary.
+The review caught it; the fix was to make `with_app_ref` a **real function**,
+which the `APP` doc comment had already falsely claimed existed. `APP` now
+appears in `tray.rs` alone, so no submodule can name it and take a raw borrow.
+
+**`#82` — the throttle pin + an E2E smoke.** A headless end-to-end test now
+drives the assembled app (real `Engine`, real IPC, real `PipeServer`, fake
+hardware) under the existing required `test` job, and the IPC handler moved
+bin→lib so the path serving every `dujactl` request is reachable from tests.
+
+The important part is what the review **rejected**. The throttle-final-value
+contract (a leading-edge UI throttle drops a drag's final sample, stranding the
+hardware mid-drag — the P4 gate's Finding 1, a defect that actually shipped once)
+was pinned against a freshly extracted `LevelForwarder`: a stateless three-line
+loop. The red-first evidence looked impeccable and protected nothing, because the
+bug had been inserted into the one function the test called directly. The
+reviewer dug the original defect out of git history (`git show 1902e13^` — the
+throttle lived **inside** `AppState::set_user_level`, wrapping the `engine_tx`
+send), re-created it *there*, and the whole suite passed. Same at the `duja-ui`
+end. The PR would also have deleted the debt row warning about this gap while its
+text was still literally true.
+
+The pin now lives at `duja-ui`'s Slint binding
+(`slider_drag_burst_emits_the_released_value_last`, verified to fail at both
+re-introduction sites), and the app-layer gap between UI and engine is documented
+as open rather than falsely claimed closed — `AppState` owns a concrete
+`tray_icon::TrayIcon` and two live Slint shells, so it cannot be constructed in a
+test without a refactor of its own. That refactor was deliberately not smuggled
+into a test-infra PR.
+
+**Two rules this cost us, now standing:**
+
+1. **Red-first is necessary but not sufficient — insert the bug where it
+   *historically occurred*, not where the test can reach it.** The question is
+   "if I re-add this defect at the line where it actually shipped, does the suite
+   fail?", not "does the test fail when I break the thing it calls?" Find the
+   commit; reproduce the defect there.
+2. **A false assurance is worse than an open gap.** Deleting a debt row while its
+   warning is still true, or adding a comment asserting protection that does not
+   exist, converts a tracked gap into a lie in the exact file a maintainer reads
+   before re-introducing the bug. Under-promise in comments; never over-promise.
 
 ## What is done
 
