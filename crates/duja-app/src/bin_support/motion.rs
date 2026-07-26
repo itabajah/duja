@@ -75,7 +75,7 @@ fn animations_enabled_from(queried: Option<i32>) -> bool {
 /// `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion`; returning a flat
 /// `true` overrides a user who has explicitly asked the system for less motion.
 /// It is left unimplemented here only because reaching `NSWorkspace` means
-/// adding the AppKit dependency to `duja-app`, which is part of the macOS app
+/// adding the `AppKit` dependency to `duja-app`, which is part of the macOS app
 /// assembly rather than something to smuggle in ahead of it — the flyout does
 /// not yet run on macOS, so nothing consumes this today.
 ///
