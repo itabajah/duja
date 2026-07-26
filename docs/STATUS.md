@@ -423,6 +423,35 @@ universal2 packaging, UI-launch CI smoke) is **wave 2**, not yet started, so
 `duja-app`/`duja-ui` still use their non-Windows stubs on macOS and there is no
 `m6-macos` tag or `v0.3.0-beta` yet.
 
+**`CFRunLoopStop` is not latched** (found 2026-07-26, fixed in the pump). It
+no-ops when the loop's `_currentMode` is `NULL`, i.e. when the loop is not
+*currently running* — the request is dropped, not remembered. `Pump::spawn`
+returns as soon as the pump thread pushes into a **buffered** `sync_channel(1)`,
+which happens several statements before it enters `CFRunLoopRun`, so an owner
+that shuts down promptly lands in exactly that window: the stop does nothing, the
+liveness source holds the loop open by construction, and the unbounded `join()`
+never returns. The Windows backend has no equivalent race because `PostMessageW`
+queues into a message queue that already exists when `spawn` returns.
+
+The cure is to signal a `CFRunLoopSource` instead — *that* is latched, as a flag
+on the source object honoured on the loop's first pass — and let its callback
+call `CFRunLoopStop` from inside the loop. The keep-alive and stop sources are
+now one source: unsignalled it plays its old liveness role, signalled it ends the
+loop.
+
+**The process lesson is the sharper one.** This shipped as a *documented flake*:
+`drop_shuts_down_without_hanging` was written off as virtualized-runner noise,
+with standing advice to rerun the job and not suspect your diff. Three CI runs
+(`29649998260`, `29824307450`, `29825848280`) were cancelled by hand with
+`test (macos-latest)` as the only genuine failure, one of them ending with the
+runner reaping an orphaned `duja_platform` test binary. A hang has no assertion
+text, so it produced no evidence trail and nobody looked twice for five days. The
+suite now carries a nextest `slow-timeout`/`terminate-after` guard
+([`.config/nextest.toml`](../.config/nextest.toml)) so the next wedge — in any
+crate, on any OS — is reported as a *failed test with a name* rather than a job
+someone has to cancel. **A flaky test is a finding, not noise**; that rule was
+already written down here, and it was not applied.
+
 ### Windows UI hardening (#27–#30, live-QA driven)
 
 Four rounds of on-hardware visual QA (real console session, external monitor)

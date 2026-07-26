@@ -155,10 +155,22 @@ impl PumpState {
 /// A retained handle to the pump thread's run loop plus its [`StopSource`], used
 /// by the owning [`super::Pump`] to stop the loop from another thread.
 ///
-/// Both references are retained for the handle's whole lifetime, so [`stop`] is
-/// safe to call at any time — including after the pump thread has already torn
-/// down, where signalling the (by then invalidated) source is a documented
-/// no-op rather than a use-after-free.
+/// Both references are retained for the handle's whole lifetime, which is what
+/// makes [`stop`] safe even when it races the pump thread's own teardown:
+///
+/// - **After the source is invalidated** (`teardown` ran, thread still alive):
+///   `CFRunLoopSourceSignal` is inert on an invalid source. That is not in
+///   Apple's API reference, which says only "marking it as ready to fire"; it is
+///   the `if (__CFIsValid(rls))` guard in CF's open-source `CFRunLoop.c`. An
+///   implementation guarantee, relied on deliberately.
+/// - **After the pump thread has exited**: `__CFFinalizeRunLoop` releases only
+///   the thread-local's own reference, so our `CFRetain` keeps the object
+///   allocated and `CFRunLoopWakeUp` does not touch freed memory.
+///
+/// Neither case actually arises through [`super::Pump`], which stops *before* it
+/// joins and takes the join handle so it can only stop once — the retains are
+/// belt-and-braces for a shape that is easy to get wrong later, not a licence to
+/// stop at arbitrary times.
 pub(super) struct RunLoopHandle {
     run_loop: CFRunLoopRef,
     stop_source: CFRunLoopSourceRef,
@@ -186,13 +198,22 @@ impl Drop for RunLoopHandle {
 ///
 /// Signals the [`StopSource`] rather than calling `CFRunLoopStop` directly, so a
 /// stop requested before `CFRunLoopRun` is entered is remembered instead of
-/// dropped — see the module docs. Safe to call more than once, and safe after
-/// teardown (signalling an invalidated source is a no-op).
+/// dropped — see the module docs. Safe to call more than once, and safe against
+/// a concurrent teardown; see [`RunLoopHandle`] for why.
 pub(super) fn stop(handle: &RunLoopHandle) {
-    // SAFETY: both refs are retained and live for the handle's lifetime, and both
-    // calls are thread-safe. Signalling latches the request on the source itself;
-    // the wake-up only matters when the loop is already blocked, and is harmless
-    // otherwise.
+    // SAFETY: both refs were CFRetain'd in `run_loop_handle` and are released
+    // only in `RunLoopHandle::drop`, so both objects are allocated for as long as
+    // `handle` exists, and both calls are thread-safe.
+    //
+    // The non-obvious case is `CFRunLoopWakeUp` after the pump thread has exited.
+    // `__CFFinalizeRunLoop` (the pthread-TSD destructor) drops only the
+    // thread-local's own reference, so our retain keeps the loop allocated and
+    // `_wakeUpPort` is not freed under us; the loop's per-run record is also back
+    // to its creation state, which has `ignoreWakeUps` set, so the call
+    // early-returns without touching the port. Signalling an already-invalidated
+    // source is likewise inert (`__CFIsValid` guard). Both are CF implementation
+    // guarantees rather than documented API contracts, which is why they are
+    // written down here.
     unsafe {
         CFRunLoopSourceSignal(handle.stop_source);
         CFRunLoopWakeUp(handle.run_loop);
@@ -230,7 +251,7 @@ pub(super) fn run_pump(
     // A private source that keeps `CFRunLoopRun` blocked even if the power source
     // is absent (graceful degradation), and that stops the loop when signalled.
     let stop_source = match StopSource::create(mode) {
-        Ok(k) => k,
+        Ok(s) => s,
         Err(e) => {
             remove_reconfiguration(state_ptr);
             let _ = on_ready(Err(e));
@@ -438,7 +459,7 @@ unsafe extern "C" fn power_callback(
     }
 }
 
-// -- Stop / keep-alive run-loop source ------------------------------------
+// -- The stop / liveness run-loop source ----------------------------------
 
 /// A private `CFRunLoopSource` that serves both liveness and shutdown.
 ///
