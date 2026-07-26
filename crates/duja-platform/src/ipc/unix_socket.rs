@@ -33,8 +33,8 @@
 //!   means a live server already owns the name and we refuse to start a second.
 //!   (On Windows the equivalent split is `FILE_FLAG_FIRST_PIPE_INSTANCE` plus the
 //!   named single-instance mutex; here the bound socket *is* the instance token.)
-//! - The same limits as the pipe: at most [`MAX_CONNECTIONS`](super::MAX_CONNECTIONS)
-//!   connections are in flight, [`MAX_HANDLER_THREADS`](super::MAX_HANDLER_THREADS)
+//! - The same limits as the pipe: at most [`MAX_CONNECTIONS`]
+//!   connections are in flight, [`MAX_HANDLER_THREADS`]
 //!   serve at once, and the frame codec caps a single body at 64 KiB **before**
 //!   allocating (enforced inside [`duja_ipc`], used here exactly as the pipe uses
 //!   it).
@@ -42,10 +42,10 @@
 //! # Threads
 //!
 //! A [`PipeServer`] owns one **listener** thread and a pool of at most
-//! [`MAX_HANDLER_THREADS`](super::MAX_HANDLER_THREADS) **handler** threads. The
+//! [`MAX_HANDLER_THREADS`] **handler** threads. The
 //! listener accepts connections and hands each to a handler over a bounded
 //! channel; an atomic in-flight counter caps the total accepted at
-//! [`MAX_CONNECTIONS`](super::MAX_CONNECTIONS), and while at capacity the listener
+//! [`MAX_CONNECTIONS`], and while at capacity the listener
 //! stops accepting so excess connections wait in the kernel backlog rather than
 //! growing the server (the unix analogue of the pipe's `nMaxInstances` ceiling).
 //!

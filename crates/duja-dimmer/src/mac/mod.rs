@@ -2,9 +2,9 @@
 //!
 //! [`MacDimmer`] cannot own a worker thread the way the Windows backend does:
 //! `AppKit` windows may only be created or mutated on the **main thread**, which
-//! in `duja-app` runs Slint's (winit's) `NSApplication` loop. So [`apply`] runs
+//! in `duja-app` runs Slint's (winit's) `NSApplication` loop. So [`apply`](MacDimmer::apply) runs
 //! the pure [`plan`](crate::plan) diff on the *calling* thread, then marshals
-//! the resulting [`OverlayOp`](crate::plan::OverlayOp)s onto the **main dispatch
+//! the resulting [`OverlayOp`]s onto the **main dispatch
 //! queue** (`dispatch_async`). The overlay `NSWindow`s live in a main-thread
 //! [`thread_local`] store keyed by dimmer instance, so nothing that is `!Send`
 //! ever crosses a thread — the marshalled closure captures only plain data.
@@ -13,7 +13,7 @@
 //!
 //! `dispatch_async` to the main queue only drains while an `NSApplication` (or a
 //! bare `CFRunLoop`) is running on the main thread. That is always true inside
-//! `duja-app`. If no main loop ever runs after an [`apply`], the overlay ops
+//! `duja-app`. If no main loop ever runs after an [`apply`](MacDimmer::apply), the overlay ops
 //! never execute (and the windows never appear) — the wave-2 assembly relies on
 //! this contract, and the live smoke test pumps a loop to satisfy it.
 //!
@@ -95,7 +95,7 @@ pub struct MacDimmer {
     /// Unique key into the main-thread [`OVERLAY_STORE`].
     instance: u64,
     /// The overlays this backend believes are on screen (the `plan` bookkeeping);
-    /// updated synchronously in [`apply`]/[`clear`], mirrors the stub/Windows
+    /// updated synchronously in [`apply`](MacDimmer::apply)/[`clear`](MacDimmer::clear), mirrors the stub/Windows
     /// backends. Exclusive via `&mut self`, so no lock is needed.
     current: Vec<OverlayEntry>,
 }

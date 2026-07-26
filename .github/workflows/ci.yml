@@ -49,23 +49,29 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # rustdoc only sees what the target compiles, so the Linux-only `docs` job
       # below has never doc-checked a single `#[cfg(windows)]` or
-      # `#[cfg(target_os = "macos")]` item — that is the whole Windows tray
-      # assembly and all four macOS FFI backends, none of them covered while
-      # `-D warnings` was enforced on everything else. Both are clean today;
-      # this keeps them clean as the macOS app assembly lands.
+      # `#[cfg(target_os = "macos")]` item — the whole Windows tray assembly and
+      # all four macOS FFI backends, uncovered while `-D warnings` was enforced
+      # on everything else.
       #
-      # It lives here, in the clippy matrix, rather than as a `rustdoc (os)`
-      # matrix of its own: `rustdoc` is a *required* status check by exact name,
-      # so turning it into a matrix would rename the context and leave every PR
-      # waiting forever on a check that can no longer report. A new job would
-      # need adding to branch protection to be anything but decoration, whereas
-      # `clippy (<os>)` is already required and already has the build cached.
-      # Linux is skipped because the `docs` job covers it.
+      # `--document-private-items` is load-bearing, not tidiness. rustdoc strips
+      # private items *before* it resolves intra-doc links, and every macOS
+      # backend is a private `mod mac;` — so without it this step would compile
+      # the code, report success, and check almost none of it. (The Windows tray
+      # would still be covered, but only by accident: Cargo passes the flag
+      # automatically for *binary* targets, and the tray lives in duja-app's bin.)
+      # Turning it on surfaced 15 genuinely broken doc links across both
+      # platforms, all fixed in this PR. Keep it in sync with the `docs` job.
+      #
+      # This lives in the clippy matrix rather than in a `rustdoc (<os>)` matrix
+      # of its own because `rustdoc` is a *required* status check matched by
+      # exact name: turning that job into a matrix would rename the context and
+      # leave every PR waiting forever on a check that can no longer report.
+      # `clippy (<os>)` is already required. Linux is covered by `docs`.
       - name: rustdoc (non-Linux targets)
         if: runner.os != 'Linux'
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc --workspace --no-deps --all-features
+        run: cargo doc --workspace --no-deps --all-features --document-private-items
 
   test:
     name: test (${{ matrix.os }})
@@ -141,7 +147,11 @@ jobs:
             libfontconfig1-dev libxkbcommon-dev libxcb1-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libwayland-dev
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo doc --workspace --no-deps --all-features
+      # `--document-private-items` matters here for the same reason it does in
+      # the clippy job's rustdoc step: without it rustdoc strips private items
+      # before resolving intra-doc links, so private modules go unchecked. Keep
+      # the two invocations in sync.
+      - run: cargo doc --workspace --no-deps --all-features --document-private-items
 
   commit-lint:
     name: conventional commits

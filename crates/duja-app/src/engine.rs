@@ -1,5 +1,5 @@
 //! The controller actor: one thread owning the
-//! [`DisplayManager`](duja_core::manager::DisplayManager) and all policy state.
+//! [`DisplayManager`] and all policy state.
 //!
 //! # Select loop, zero idle wakeups
 //!
@@ -279,7 +279,7 @@ impl EngineState {
         }
     }
 
-    /// Dispatch a brightness read for a poll (unlike [`dispatch_initial_get`] it
+    /// Dispatch a brightness read for a poll (unlike [`Self::dispatch_initial_get`] it
     /// does **not** set `pending_learn`, so its ack takes the external-change
     /// reflection path rather than the initial-learn path).
     fn dispatch_poll_get(&mut self, id: &StableDisplayId) {

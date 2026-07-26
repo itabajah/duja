@@ -6,7 +6,7 @@
 //! stable EDID-derived identity for each, resolves its I2C service, and returns
 //! a [`DdcDisplay`] per controllable monitor. [`DdcDisplay::into_controller`]
 //! turns one into a thread-owned [`DdcController`] over the cross-platform
-//! [`DdcCiTransport`](crate::ddcci::DdcCiTransport).
+//! [`DdcCiTransport`].
 //!
 //! This mirrors the Windows `win` module surface. The one shape difference:
 //! there is no GDI device on macOS, so [`DdcDisplay`] exposes the

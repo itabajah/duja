@@ -1,7 +1,7 @@
 //! Per-monitor worker threads.
 //!
 //! Each worker exclusively owns its
-//! [`BrightnessController`](duja_core::controller::BrightnessController)
+//! [`BrightnessController`]
 //! (**opened on this thread** via the injected [`ControllerOpener`] as the first
 //! thing the worker does — the trait's `&mut self` makes serialization a
 //! compile-time property, so no locking is needed). The loop:
