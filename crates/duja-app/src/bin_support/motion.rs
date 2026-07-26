@@ -68,7 +68,18 @@ fn animations_enabled_from(queried: Option<i32>) -> bool {
     queried.is_none_or(|enabled| enabled != 0)
 }
 
-/// Non-Windows: the flyout is Windows-only today; assume motion is fine.
+/// Non-Windows: no OS query yet, so take the documented motion-on default.
+///
+/// **This is a stub, and on macOS it will become an accessibility regression the
+/// moment the flyout ships there.** macOS answers this question directly, via
+/// `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion`; returning a flat
+/// `true` overrides a user who has explicitly asked the system for less motion.
+/// It is left unimplemented here only because reaching `NSWorkspace` means
+/// adding the AppKit dependency to `duja-app`, which is part of the macOS app
+/// assembly rather than something to smuggle in ahead of it — the flyout does
+/// not yet run on macOS, so nothing consumes this today.
+///
+/// Tracked in `docs/debt.md`; wire it up with the rest of the assembly.
 #[cfg(not(windows))]
 pub(crate) fn os_animations_enabled() -> bool {
     true

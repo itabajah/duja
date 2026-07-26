@@ -240,7 +240,14 @@ fn wait_for_quit() {
 /// undo is the one piece of screen state that outlives a process — the gamma
 /// ramp — via `duja_dimmer::restore_all`. Exit is non-zero if any display
 /// could not be reset.
-#[cfg(windows)]
+///
+/// Runs on macOS as well as Windows. It matters *less* there — the window server
+/// restores gamma when a process exits, which is why the mac dimmer has no
+/// crash-marker machinery at all — but "less" is not "never": the ramp still
+/// belongs to the session while some process holds it, and `restore_all` is a
+/// real, exported function on both platforms with an identical `RestoreReport`.
+/// The escape hatch should work wherever the thing it undoes can exist.
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn restore() -> ExitCode {
     let report = duja_dimmer::restore_all();
     if report.restored.is_empty() && report.failed.is_empty() {
@@ -261,10 +268,16 @@ pub(crate) fn restore() -> ExitCode {
     }
 }
 
-/// `--restore` on non-Windows: software dimming is Windows-only for now.
-#[cfg(not(windows))]
+/// `--restore` where no dimmer backend exists (currently Linux): there is no
+/// gamma ramp Duja could have left behind, so there is nothing to undo.
+///
+/// Deliberately narrow. This arm used to cover macOS too and told the user
+/// "software dimming is Windows-only in this build", which stopped being true
+/// when the macOS dimmer landed in P6 wave 1 — a stub that had quietly become a
+/// false statement about the user's own screen.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn restore() -> ExitCode {
-    println!("nothing to restore (software dimming is Windows-only in this build)");
+    println!("nothing to restore (no software dimming backend on this platform)");
     ExitCode::SUCCESS
 }
 
