@@ -35,11 +35,17 @@
 //!
 //! # Run loop liveness and shutdown
 //!
-//! A private no-op `CFRunLoopSource` is always added so `CFRunLoopRun` blocks
-//! even when the power source is absent. Teardown calls `CFRunLoopStop` from the
-//! owning handle (thread-safe), which returns the loop; the thread then removes
-//! every source and callback before its state drops, and the handle joins it.
-//! Idempotent, and also runs on `Drop`.
+//! A private `CFRunLoopSource` is always added so `CFRunLoopRun` blocks even when
+//! the power source is absent. Teardown *signals* that source from the owning
+//! handle (thread-safe) and its callback stops the loop from inside; the thread
+//! then removes every source and callback before its state drops, and the handle
+//! joins it. Idempotent, and also runs on `Drop`.
+//!
+//! The stop deliberately does **not** call `CFRunLoopStop` directly. That call is
+//! not latched — it no-ops when the loop is not currently running — and
+//! [`spawn`](Pump::spawn) can return, and its caller can shut down, while the
+//! pump thread is still on its way into `CFRunLoopRun`. See [`sys`] for the full
+//! argument and the regression test that pins the interleaving.
 
 mod sys;
 
@@ -51,8 +57,9 @@ use crossbeam_channel::{Receiver, Sender};
 use self::sys::RunLoopHandle;
 use crate::{PlatformError, PlatformEvent};
 
-/// A running macOS event pump: a retained handle to the thread's run loop (for
-/// cross-thread `CFRunLoopStop`) plus the join handle of its thread.
+/// A running macOS event pump: a retained handle to the thread's run loop and
+/// its stop source (for cross-thread shutdown) plus the join handle of its
+/// thread.
 pub struct Pump {
     run_loop: RunLoopHandle,
     join: Option<JoinHandle<()>>,
@@ -163,24 +170,24 @@ mod tests {
 
     /// A stop requested *before* the run loop starts must still stop it.
     ///
-    /// This is the deterministic form of the race that makes
+    /// This is the deterministic form of the race that made
     /// [`drop_shuts_down_without_hanging`] flaky on CI: `Pump::spawn` returns as
     /// soon as the pump thread pushes into a **buffered** `sync_channel(1)`,
     /// which happens at `sys.rs`'s `on_ready` call — *before* `CFRunLoopRun` is
     /// entered a few statements later. A `CFRunLoopStop` landing in that gap is
-    /// silently dropped (it no-ops when the loop's `_currentMode` is `NULL`), and
-    /// since the keep-alive source holds the loop open by construction, the loop
-    /// then runs forever and the owner's `join` blocks forever.
+    /// silently dropped (it no-ops when `_currentMode` is `NULL`), and since the
+    /// stop source keeps the loop alive by construction, the loop then runs
+    /// forever and the owner's `join` blocks forever.
     ///
     /// Rather than widen that window with a sleep and hope to lose the race, the
     /// test drives [`sys::run_pump`] directly and issues the stop from *inside*
-    /// the readiness callback — the one moment guaranteed to precede
+    /// the readiness callback — the one moment guaranteed to be before
     /// `CFRunLoopRun`. That is the same code path `Pump::spawn`/`shutdown` take,
-    /// with the interleaving pinned instead of sampled.
+    /// just with the interleaving pinned instead of sampled.
     ///
     /// It asserts by **timeout, not by hanging**: `run_pump` runs on its own
-    /// thread and the assertion is that it returns. So this fails in bounded time
-    /// rather than wedging the suite the way the flake does.
+    /// thread and the assertion is that it returns. Against the pre-fix code this
+    /// fails in bounded time; it does not wedge the suite the way the flake did.
     #[test]
     fn stop_requested_before_the_run_loop_starts_is_not_lost() {
         let (tx, _rx) = crossbeam_channel::unbounded::<PlatformEvent>();
