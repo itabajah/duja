@@ -165,8 +165,9 @@ bug:
   Windows *Duplicate* mode N panels share one framebuffer, so per-panel rows
   stacked two overlays on the same pixels. A mirror set is now grouped by its
   shared GDI device and driven once, with the group anchor a pure function of the
-  member *set* (never enumeration order) and group state keyed to the stable
-  device so a hot-plug that moves the anchor cannot lose the level.
+  member *set* (never enumeration order). Group state is keyed on that anchor,
+  and a hot-plug that *moves* the anchor migrates the state across via the stable
+  shared GDI device, so the user's level cannot be silently orphaned.
 
 Alongside, the **dark brand identity**: the whirlpool inverted to near-black gems
 whose spiral seams glow in the four accent hues, with the exe icon, README hero,
@@ -183,10 +184,14 @@ had already hardened against once. In v0.1.2 (#59) the *write*-path detector was
 fixed so a single retried-but-still-failing DDC read could not make a permanent
 binding decision; the *probe* path was the un-fixed twin:
 
-- The runtime "no working hardware" downgrade is **sticky** (`software_forced`)
-  and re-evaluated only when a **fresh worker** probes — which happens on
-  sleep/wake, a display-change re-enumeration, or an unresponsive→responsive
-  recovery, all of which occur routinely in a long session. `probe_by_reads` (the
+- The runtime "no working hardware" downgrade is **sticky** (`software_forced`).
+  It is re-evaluated by a **fresh worker** probe — on sleep/wake, a display-change
+  re-enumeration, or an unresponsive→responsive recovery, all of which occur
+  routinely in a long session — or by the **poll-driven self-heal**
+  (`engine.rs`), which additionally requires the panel to have actually *moved*
+  to Duja's last written raw level while the flyout is open and polling, so a
+  dead panel merely sitting at that value stays flagged. Neither path is
+  guaranteed to fire in a given session. `probe_by_reads` (the
   fallback taken when the capability string cannot be read) turned a **failed**
   brightness read into a *successful* `Ok(caps { hardware_range: false })`, so a
   live external monitor that merely was not answering at probe time — waking from
