@@ -35,11 +35,19 @@
 //!
 //! # Run loop liveness and shutdown
 //!
-//! A private no-op `CFRunLoopSource` is always added so `CFRunLoopRun` blocks
-//! even when the power source is absent. Teardown calls `CFRunLoopStop` from the
-//! owning handle (thread-safe), which returns the loop; the thread then removes
-//! every source and callback before its state drops, and the handle joins it.
-//! Idempotent, and also runs on `Drop`.
+//! A private `CFRunLoopSource` is always added so `CFRunLoopRun` blocks even when
+//! the power source is absent. Teardown *signals* that source from the owning
+//! handle (thread-safe) and its callback stops the loop from inside; the thread
+//! then removes every source and callback before its state drops, and the handle
+//! joins it. Idempotent, and also runs on `Drop`.
+//!
+//! The owner deliberately does **not** call `CFRunLoopStop` itself. That call is
+//! not latched — it no-ops when the loop is not currently running — and
+//! [`spawn`](Pump::spawn) can return, and its caller can shut down, while the
+//! pump thread is still on its way into `CFRunLoopRun`. `CFRunLoopStop` is still
+//! what ends the loop, but it is issued from the source's callback *on the pump
+//! thread, inside the running loop*, where it always takes effect. See [`sys`]
+//! for the full argument and the regression test that pins the interleaving.
 
 mod sys;
 
@@ -51,8 +59,9 @@ use crossbeam_channel::{Receiver, Sender};
 use self::sys::RunLoopHandle;
 use crate::{PlatformError, PlatformEvent};
 
-/// A running macOS event pump: a retained handle to the thread's run loop (for
-/// cross-thread `CFRunLoopStop`) plus the join handle of its thread.
+/// A running macOS event pump: a retained handle to the thread's run loop and
+/// its stop source (for cross-thread shutdown) plus the join handle of its
+/// thread.
 pub struct Pump {
     run_loop: RunLoopHandle,
     join: Option<JoinHandle<()>>,
@@ -154,11 +163,97 @@ mod tests {
         pump2.shutdown_for_test();
     }
 
+    /// Drop must stop-and-join promptly.
+    ///
+    /// This is the test that used to hang the macOS CI lane; the race it was
+    /// tripping over is pinned deterministically by
+    /// [`stop_requested_before_the_run_loop_starts_is_not_lost`] below. It is
+    /// kept because it is the tightest *cross-thread* shutdown in the suite —
+    /// `spawn` immediately followed by `drop`, with nothing in between to let the
+    /// pump thread win — so it still samples the real owner-thread path that the
+    /// deterministic test deliberately does not.
+    ///
+    /// Its failure mode is a hang rather than an assertion, which is why the
+    /// suite now carries a nextest `slow-timeout`/`terminate-after` guard
+    /// (`.config/nextest.toml`): if this ever wedges again it is reported as a
+    /// failed test with a name, instead of a job that has to be cancelled by hand.
     #[test]
     fn drop_shuts_down_without_hanging() {
         let (pump, _rx) = Pump::spawn().expect("spawn");
         // Dropping must not hang: stop-and-join completes promptly.
         drop(pump);
+    }
+
+    /// A stop requested *before* the run loop starts must still stop it.
+    ///
+    /// This is the deterministic form of the race that made
+    /// [`drop_shuts_down_without_hanging`] flaky on CI: `Pump::spawn` returns as
+    /// soon as the pump thread pushes into a **buffered** `sync_channel(1)`,
+    /// which happens at `sys.rs`'s `on_ready` call — *before* `CFRunLoopRun` is
+    /// entered a few statements later. A `CFRunLoopStop` landing in that gap is
+    /// silently dropped (it no-ops when `_currentMode` is `NULL`), and since the
+    /// stop source keeps the loop alive by construction, the loop then runs
+    /// forever and the owner's `join` blocks forever.
+    ///
+    /// Rather than widen that window with a sleep and hope to lose the race, the
+    /// test drives [`sys::run_pump`] directly and issues the stop from *inside*
+    /// the readiness callback — the one moment guaranteed to be before
+    /// `CFRunLoopRun`.
+    ///
+    /// # What this covers, and what it does not
+    ///
+    /// It pins the **mechanism** — a stop that precedes the loop must still be
+    /// honoured — not the production **path**. Two differences are deliberate,
+    /// and neither is covered here:
+    ///
+    /// - the stop is issued *on the pump thread*, so `RunLoopHandle`'s
+    ///   `unsafe impl Send` and the `sync_channel(1)` handoff — the two things
+    ///   that open the window in production — are not exercised;
+    /// - `handle` is a closure local, so it drops *before* teardown. The property
+    ///   that the handle's own retain keeps the source allocated *past*
+    ///   `StopSource::teardown` is therefore untested here.
+    ///
+    /// The cross-thread path is covered end to end by
+    /// [`pump_spawns_and_shuts_down_cleanly`] and
+    /// [`second_spawn_after_teardown_succeeds`], which stop from the owner thread
+    /// and assert more besides.
+    ///
+    /// It asserts by **timeout, not by hanging**: `run_pump` runs on its own
+    /// thread and the assertion is that it returns. Against the pre-fix code this
+    /// fails in bounded time; it does not wedge the suite the way the flake did.
+    #[test]
+    fn stop_requested_before_the_run_loop_starts_is_not_lost() {
+        let (tx, _rx) = crossbeam_channel::unbounded::<PlatformEvent>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        std::thread::Builder::new()
+            .name("pre-run-stop".to_owned())
+            .spawn(move || {
+                sys::run_pump(tx, |result| {
+                    let handle = result.expect("sources registered");
+                    // The race, pinned: the loop is not running yet.
+                    sys::stop(&handle);
+                    true
+                });
+                let _ = done_tx.send(());
+            })
+            .expect("spawn test pump thread");
+
+        // Distinguish the two failure modes: a timeout is the regression, while a
+        // disconnect means the closure panicked (e.g. source registration failed
+        // on the runner) and would otherwise be reported as the wrong bug.
+        match done_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!(
+                    "run_pump never returned: a stop requested before CFRunLoopRun \
+                     was entered got dropped, so the loop ran forever"
+                );
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the pump thread panicked before reporting; see its panic above");
+            }
+        }
     }
 
     impl Pump {

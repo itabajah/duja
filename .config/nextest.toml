@@ -1,0 +1,23 @@
+# nextest configuration.
+#
+# The only setting here is a hang guard, and it exists because of a specific
+# incident: `duja-platform`'s macOS pump had a shutdown race in which a stop
+# request issued before `CFRunLoopRun` was entered got silently dropped, leaving
+# the run loop spinning forever behind an unbounded `join()`. A wedged test has
+# no per-test deadline of its own, so those runs sat until GitHub's six-hour job
+# limit or until a human cancelled them: runs 29649998260, 29824307450 and
+# 29825848280 were all cancelled by hand with `test (macos-latest)` as the only
+# genuine failure, and 29825848280's log ends with the runner reaping an orphaned
+# `duja_platform` test binary.
+#
+# The race itself is fixed. This guard is here so that the *next* hang - in any
+# crate, on any OS - is reported as a failed test with a name attached, instead
+# of a silent job that has to be diagnosed from a cancellation.
+#
+# The margin is deliberately wide: the slowest test in the suite is ~6 s (the
+# `duja-platform` IPC read-timeout tests, which sleep on purpose), so 60 s is
+# ~10x the real worst case and termination at 180 s is ~30x. Nothing legitimate
+# should ever reach either. If a test does start tripping this, that is a
+# finding, not a threshold to raise.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 3 }
