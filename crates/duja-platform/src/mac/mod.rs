@@ -161,6 +161,51 @@ mod tests {
         drop(pump);
     }
 
+    /// A stop requested *before* the run loop starts must still stop it.
+    ///
+    /// This is the deterministic form of the race that makes
+    /// [`drop_shuts_down_without_hanging`] flaky on CI: `Pump::spawn` returns as
+    /// soon as the pump thread pushes into a **buffered** `sync_channel(1)`,
+    /// which happens at `sys.rs`'s `on_ready` call — *before* `CFRunLoopRun` is
+    /// entered a few statements later. A `CFRunLoopStop` landing in that gap is
+    /// silently dropped (it no-ops when the loop's `_currentMode` is `NULL`), and
+    /// since the keep-alive source holds the loop open by construction, the loop
+    /// then runs forever and the owner's `join` blocks forever.
+    ///
+    /// Rather than widen that window with a sleep and hope to lose the race, the
+    /// test drives [`sys::run_pump`] directly and issues the stop from *inside*
+    /// the readiness callback — the one moment guaranteed to precede
+    /// `CFRunLoopRun`. That is the same code path `Pump::spawn`/`shutdown` take,
+    /// with the interleaving pinned instead of sampled.
+    ///
+    /// It asserts by **timeout, not by hanging**: `run_pump` runs on its own
+    /// thread and the assertion is that it returns. So this fails in bounded time
+    /// rather than wedging the suite the way the flake does.
+    #[test]
+    fn stop_requested_before_the_run_loop_starts_is_not_lost() {
+        let (tx, _rx) = crossbeam_channel::unbounded::<PlatformEvent>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+        std::thread::Builder::new()
+            .name("pre-run-stop".to_owned())
+            .spawn(move || {
+                sys::run_pump(tx, |result| {
+                    let handle = result.expect("sources registered");
+                    // The race, pinned: the loop is not running yet.
+                    sys::stop(&handle);
+                    true
+                });
+                let _ = done_tx.send(());
+            })
+            .expect("spawn test pump thread");
+
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "run_pump never returned: a stop requested before CFRunLoopRun was \
+             entered got dropped, so the loop ran forever"
+        );
+    }
+
     impl Pump {
         /// Explicit teardown for tests (mirrors `EventPump::shutdown`).
         fn shutdown_for_test(mut self) {
