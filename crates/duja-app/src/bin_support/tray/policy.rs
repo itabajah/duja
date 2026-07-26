@@ -143,6 +143,12 @@ pub(super) fn clamp_flyout_height(content: f32, cap: f32) -> f32 {
     content.min(cap).max(FLYOUT_MIN_LOGICAL_HEIGHT)
 }
 
+/// The background update-check interval: at most once a day.
+///
+/// Lives here beside [`due_for_check`], the function it parameterises, so this
+/// leaf module carries no dependency on the update flow that consumes it.
+pub(super) const UPDATE_CHECK_INTERVAL_SECS: i64 = 24 * 60 * 60;
+
 /// Whether a background update check is due: never checked before, at least
 /// `interval_secs` have passed since `last_check_unix`, **or** that timestamp is
 /// in the future.
@@ -180,11 +186,10 @@ pub(super) fn verdict_probe_due(last: Option<Instant>, now: Instant, ttl: Durati
 mod tests {
     use super::{
         ContinuumConfig, DEFAULT_USER_LEVEL_PCT, GAMMA_VERDICT_TTL, TOGGLE_GUARD, ToggleDecision,
-        adopt_enumeration, adopt_position, clamp_flyout_height, due_for_check, reflected_level,
-        toggle_decision, verdict_probe_due,
+        UPDATE_CHECK_INTERVAL_SECS, adopt_enumeration, adopt_position, clamp_flyout_height,
+        due_for_check, reflected_level, toggle_decision, verdict_probe_due,
     };
     use crate::bin_support::state_store::StateStore;
-    use crate::bin_support::tray::update_flow::UPDATE_CHECK_INTERVAL_SECS;
     use duja_core::id::StableDisplayId;
     use duja_core::model::{Capabilities, DimMode, DisplayKind, DisplaySnapshot};
     use std::collections::BTreeSet;

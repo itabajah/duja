@@ -13,12 +13,9 @@ use tracing::warn;
 use crate::bin_support::toast;
 use crate::bin_support::updates::{self, HttpsTransport, UpdateOutcome};
 
-use super::policy::due_for_check;
+use super::policy::{UPDATE_CHECK_INTERVAL_SECS, due_for_check};
 use super::state::AppState;
 use super::{unix_now, with_app};
-
-/// The background update-check interval: at most once a day.
-pub(super) const UPDATE_CHECK_INTERVAL_SECS: i64 = 24 * 60 * 60;
 
 impl AppState {
     /// The manual update check (settings "Check now"): always runs regardless of

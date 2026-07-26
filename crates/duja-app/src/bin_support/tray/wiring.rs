@@ -19,34 +19,30 @@ use super::hotkey_os::{
     OsHotkeyRegistrar, install_hotkey_event_handler, log_hotkey_issues, outcomes_by_action,
 };
 use super::state::AppState;
-use super::{APP, Action, icon, with_app};
+use super::{Action, icon, with_app, with_app_ref};
 
 /// Wire the flyout's command fan-out to the app state.
 fn wire_ui_commands() {
     // Read-only setup borrow (runs once, never re-entrant): register the
     // handler, which routes every command through the re-entrancy-safe
     // [`with_app`] dispatcher.
-    APP.with(|cell| {
-        cell.with_ref(|app| {
-            app.shell.on_command(|command| {
-                with_app(move |app| app.on_ui_command(command));
-            });
-            // Click-outside-to-dismiss: hide the flyout when it loses focus,
-            // routed through the app so `flyout_visible` stays honest (bug 5).
-            app.shell.on_focus_lost(|| {
-                with_app(AppState::on_focus_lost);
-            });
+    with_app_ref(|app| {
+        app.shell.on_command(|command| {
+            with_app(move |app| app.on_ui_command(command));
+        });
+        // Click-outside-to-dismiss: hide the flyout when it loses focus,
+        // routed through the app so `flyout_visible` stays honest (bug 5).
+        app.shell.on_focus_lost(|| {
+            with_app(AppState::on_focus_lost);
         });
     });
 }
 
 /// Wire the settings window's command fan-out to the app state.
 fn wire_settings_commands() {
-    APP.with(|cell| {
-        cell.with_ref(|app| {
-            app.settings_shell.on_command(|command| {
-                with_app(move |app| app.on_settings_command(command));
-            });
+    with_app_ref(|app| {
+        app.settings_shell.on_command(|command| {
+            with_app(move |app| app.on_settings_command(command));
         });
     });
 }

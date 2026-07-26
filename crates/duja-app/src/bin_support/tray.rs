@@ -100,14 +100,14 @@ thread_local! {
 /// re-entrant [`with`](ReentrantCell::with) instead finds `busy == true`, queues its work,
 /// and returns immediately; the in-flight call drains the queue after its own
 /// borrow ends, so no two `with` bodies ever hold the borrow at once.
-/// One deferred unit of work queued by a re-entrant [`ReentrantCell::with`].
-type Deferred<T> = Box<dyn FnOnce(&mut T)>;
-
 struct ReentrantCell<T> {
     slot: RefCell<Option<T>>,
     busy: Cell<bool>,
     queue: RefCell<VecDeque<Deferred<T>>>,
 }
+
+/// One deferred unit of work queued by a re-entrant [`ReentrantCell::with`].
+type Deferred<T> = Box<dyn FnOnce(&mut T)>;
 
 impl<T> ReentrantCell<T> {
     const fn new() -> Self {
@@ -166,6 +166,17 @@ fn with_app(f: impl FnOnce(&mut AppState) + 'static) {
     APP.with(|cell| cell.with(f));
 }
 
+/// The read-only twin of [`with_app`], for the one-time setup borrows that only
+/// need `&AppState` (registering Slint callbacks). Returns `None` before the
+/// state is installed or while a `with` body holds the borrow.
+///
+/// This exists so [`APP`] stays confined to this module: a raw
+/// `APP.with(|cell| ...)` elsewhere could reach past the serialising cell and
+/// re-open the double-borrow abort described on [`ReentrantCell`].
+fn with_app_ref<R>(f: impl FnOnce(&AppState) -> R) -> Option<R> {
+    APP.with(|cell| cell.with_ref(f))
+}
+
 /// An action requested by a tray/menu/hotkey interaction, applied on the Slint
 /// thread.
 #[derive(Debug, Clone, Copy)]
@@ -198,12 +209,16 @@ enum Action {
 // single linear sequence of one-time wiring (paths, instance/installer guards,
 // crash recovery, HDR verdict, windows, engine, IPC, handlers) before the event
 // loop. The tray.rs module split has since happened, and it deliberately did NOT
-// shrink this function: every step here is a distinct one-time act on a distinct
-// resource, so the split moved the *bodies* out (`build_tray`, `init_hotkeys`,
-// `wire_event_sources`, …) and left the ordering — which is the load-bearing
-// part — visible in one place. A further extraction purely to satisfy the line
-// count would scatter that ordering across helpers that each run exactly once,
-// and hide the startup sequence the degradation story depends on.
+// shrink this function: the split moved the *bodies* out (`build_tray`,
+// `init_hotkeys`, `wire_event_sources`, …) and left the ordering — which is the
+// load-bearing part — visible in one place. Most of what remains is one-time
+// acts on distinct resources; the exception is the ~30-line `AppState` literal,
+// which is field assembly rather than a step, but extracting it would still
+// leave this well over the 100-line threshold while splitting the struct's
+// construction from the resource acquisition that feeds it. A further
+// extraction purely to satisfy the line count would scatter the ordering across
+// helpers that each run exactly once, and hide the startup sequence the
+// degradation story depends on.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
     let _ = verbose; // logging is initialised by the caller.
@@ -368,9 +383,6 @@ type SettingsSetup = (
     Option<Box<dyn Autostart>>,
 );
 
-/// Create the settings window shell + view-model and resolve the platform
-/// autostart backend.
-///
 /// Build the flyout window, seeded with the resolved theme and accent.
 ///
 /// The view-model carries both, so the shell's first render already paints the
@@ -396,6 +408,9 @@ fn build_flyout(
     Ok((shell, vm))
 }
 
+/// Create the settings window shell + view-model and resolve the platform
+/// autostart backend.
+///
 /// # Errors
 /// Returns an error if the settings window cannot be created (fatal, like the
 /// flyout). An autostart resolve failure is *not* fatal — it only disables the
