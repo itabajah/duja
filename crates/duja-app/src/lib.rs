@@ -40,6 +40,11 @@
 //!   [`BrightnessController`] for a
 //!   display id; tests inject fakes, integration injects the real backends.
 //!
+//! The [`ipc`] module adds a third seam: an [`IpcBridge`](ipc::IpcBridge) maps
+//! the local control API's requests onto a running app, so the whole
+//! transport → bridge → engine → worker path is drivable end-to-end against
+//! fakes (see `tests/e2e_smoke.rs`).
+//!
 //! # Example
 //!
 //! ```no_run
@@ -76,6 +81,7 @@ use duja_core::manager::DiscoveredDisplay;
 use duja_core::model::DisplaySnapshot;
 
 mod engine;
+pub mod ipc;
 mod protocol;
 mod worker;
 

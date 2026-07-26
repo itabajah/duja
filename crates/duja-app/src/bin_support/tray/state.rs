@@ -32,6 +32,7 @@ use crate::bin_support::bounds::BoundsMap;
 use crate::bin_support::clone_group::{self, CloneGrouping};
 use crate::bin_support::dimming::{self, DisplayInput};
 use crate::bin_support::hotkey::{self, Accelerator, HotkeyAction};
+use crate::bin_support::level_forward::{EngineLevelSink, LevelForwarder};
 use crate::bin_support::state_store::StateStore;
 use crate::bin_support::updates;
 use crate::bin_support::{gamma, motion, settings, settings_apply};
@@ -77,6 +78,14 @@ pub(super) struct AppState {
     pub(super) state: StateStore,
     pub(super) crash_marker: std::path::PathBuf,
     pub(super) engine_tx: Sender<EngineCommand>,
+    /// The slider → engine forwarding seam every user level change goes through.
+    ///
+    /// Held separately from [`engine_tx`](Self::engine_tx) (which carries the
+    /// non-level commands: refresh, polling, input, shutdown) so the level path
+    /// is injectable and its final-value contract is pinned by
+    /// [`crate::bin_support::level_forward`]'s tests — a UI-side throttle here
+    /// was a real shipped defect (P4 gate Finding 1).
+    pub(super) levels: LevelForwarder<EngineLevelSink>,
     /// The opt-in gamma sub-floor channel (RAII crash-marker owner + engage/
     /// restore executor). Drives [`DimCommand`]s carrying a gamma factor to the
     /// GPU ramp; identity-restored on quit/restore.
@@ -700,7 +709,9 @@ impl AppState {
     /// engine worker enforces `write_min_gap` with last-wins coalescing, which
     /// bounds the hardware write rate *and* guarantees the final value of a drag
     /// lands (see P4 gate Finding 1: a leading-edge UI throttle used to drop the
-    /// final sample, leaving the hardware at an intermediate level).
+    /// final sample, leaving the hardware at an intermediate level). That
+    /// contract is pinned at this layer by [`LevelForwarder`], which owns the
+    /// forwarding and is driven here.
     pub(super) fn set_user_level(&mut self, id: &StableDisplayId, pct: u8) {
         // Route to the group anchor: the flyout row, hotkey nudge, IPC and reflection
         // all address a member id, but a mirrored set is ONE control keyed under its
@@ -719,13 +730,9 @@ impl AppState {
         self.state.record(anchor.as_str(), pct, unix_now());
 
         // Fan the level out to every member's hardware under the group rule, then
-        // send after the group borrow ends (apply_overlays needs &mut self).
-        for (member, hw) in self.group_hardware_writes(&anchor, pct) {
-            let _ = self.engine_tx.send(EngineCommand::SetUserLevel {
-                id: member,
-                pct: hw,
-            });
-        }
+        // forward after the group borrow ends (apply_overlays needs &mut self).
+        let writes = self.group_hardware_writes(&anchor, pct);
+        self.levels.forward(&writes);
         self.apply_overlays();
         let _ = self.state.maybe_flush(now);
         // Do NOT `self.render()` here. The flyout render for a slider change is

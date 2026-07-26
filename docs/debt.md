@@ -44,7 +44,6 @@ detouring; delete entries when drained.
 | P6 (UI review 2026-07-14) | `duja-ui` `flyout.slint` | The per-row "Software dimming" caption lives in a fixed `54px` column at 9px so it wraps to two lines in English; a long non-breaking translation (e.g. German "Softwaredimmung") cannot wrap in 54px and would overrun/clip the column. Widen or `elide` the caption, or shorten the localized key, when translations land | Latent i18n-only — the shipping English string fits cleanly; a blind fixed-width/elide change can't be visually verified headless, so it waits for a locale pass |
 | P6 (accent themes 2026-07-14) | `duja-ui` `flyout.slint` | The slider's marker lines (`Palette.marker`, lines A and B) are drawn *over* the accent fill, so where the fill covers them they can go low-contrast under a light accent (Onyx-dark: 1.1:1). Mitigated by geometry — the markers are `track-h + 6/8 px` tall, so ~4px nubs protrude above/below the fill onto `surface` and stay legible; and they only render when a hardware floor is configured. Fix, if live QA rejects it: add a `marker-on-accent` family member | Cosmetic and partially self-mitigating. It must be a *hand-tuned* table cell rather than an automatic luminance rule — an automatic rule would flip ruby's markers, changing the look that shipped in #39 |
 | P6 (accent themes 2026-07-14) | `duja-ui` `flyout.slint` / `settings.slint` | The focus ring on a **checked** `PillToggle` / a **primary** `MiniButton` is drawn on top of the accent fill and is near-invisible there — ruby already scores 1.20:1 today. A one-line fix exists (`checked ? Palette.accent-on : Palette.focus-ring`) | **Pre-existing, not introduced by the accent work** (no accent is worse than ruby is today). The fix is a strict improvement but *visibly changes ruby's* focus ring from coral to white, so it needs an explicit design OK rather than being smuggled in |
-| v0.1.1 (deep review) | `.github/workflows/` + `duja-app` tests | Add a CI **headless E2E smoke** job (fake-backend `duja --headless`, drive IPC set/get, assert notifications) to catch assembly-seam regressions on every PR; and pin the **throttle-final-value** regression at the tray layer (extract slider→engine forwarding to an injectable sink) — today it's pinned only at the engine, so a re-added UI-side throttle passes all tests | Test-infra, not a shipped defect; deferred from the v0.1.1 wave to keep it focused on confirmed bugs. Wave 1 |
 | v0.1.1 (`#53`) | `duja-app` `tray.rs` | HDR gamma verdict is now **live** (re-probed per enumeration/interaction) but still a single **global** OR of `is_hdr_active`, not per-display. A mixed HDR/SDR multi-monitor setup applies the strictest verdict to all | Per-display HDR needs the verdict threaded through the plan per display; the global live verdict already fixes the frozen-at-launch brick. Future refinement |
 | v0.1.1 (`#55`) | `packaging/windows/duja.iss` + `duja-app` | Installer now **detects** a running instance (`AppMutex`), but seamless **auto-close** via the Restart Manager (`CloseApplications` + WM_QUERYENDSESSION handling in the winit pump) is not wired — an in-place upgrade still asks the user to close Duja | Detection is the high-value, low-risk half; auto-close needs message-pump work on the Slint/winit loop. Follow-up |
 | ~~v0.1.1 (`#54`)~~ | `duja-app` `worker.rs`/`engine.rs` | ~~Honor `ddc_broken` in the tray app~~ — **delivered in v0.1.2 (#59)**: the worker now probes on open, so a `ddc_broken` monitor (empty caps ⇒ `hardware_range: false`) is downgraded to `SoftwareOnly` full-range software dimming instead of getting dead VCP 0x10 writes | Was a documented-deferred static-caps design; the no-hardware detection wave now covers it (probe-on-open + verify-first-write) |
@@ -126,3 +125,18 @@ behaviour change, no signature change beyond `pub(super)`, and all 22 tests move
 with the code they cover. `run()` keeps its `#[allow(clippy::too_many_lines)]`
 with a rewritten rationale — the split deliberately did not shorten it (see the
 comment above `run`).
+
+Drained by the test-infra pass (2026-07-26): the v0.1.1 deep-review row is
+closed. The slider→engine forwarding is now an injectable sink
+(`bin_support/level_forward.rs`: a `LevelSink` trait + a `LevelForwarder` that
+owns it, the same shape as `GammaSink`/`IpcBridge`/`HotkeyRegistrar`), and the
+**throttle-final-value** contract is pinned there — the test was proven red by
+temporarily re-inserting the P4 leading-edge throttle (it delivered only `50` of
+a 50→70 drag burst) and green again with it removed. The **headless E2E smoke**
+landed as `crates/duja-app/tests/e2e_smoke.rs` plus its own `e2e-smoke` CI job on
+all three OS lanes (both IPC transports): a fake backend (injected enumerator +
+controllers, so no displays are needed) behind the real engine, the real
+`IpcBridge`/`handle_request` — hoisted out of the binary into the
+`duja_app::ipc` library module so an integration test can reach them — and the
+real OS transport, driven with `list`/`set`/`get`/`show-flyout` and asserted on
+the resulting hardware writes and snapshots.

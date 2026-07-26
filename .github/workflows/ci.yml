@@ -71,6 +71,36 @@ jobs:
       - run: cargo nextest run --workspace --all-features
       - run: cargo test --doc --workspace --all-features
 
+  e2e-smoke:
+    name: e2e smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both IPC transports are exercised: the Windows named pipe and the unix
+        # domain socket are separate implementations, so the smoke is run on a
+        # lane for each (ubuntu doubles as the Linux-port canary). No displays
+        # are needed — the backend is a fake enumerator + fake controllers.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Slint system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libxkbcommon-dev libxcb1-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libwayland-dev
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2
+        with:
+          tool: cargo-nextest
+      # Headless assembly seam: fake backend → engine → IPC bridge → real
+      # transport, driven with `list`/`set`/`get` and asserted on the resulting
+      # hardware writes and snapshots. Every wait is channel-based with a
+      # generous deadline, so a regression fails rather than hangs.
+      - run: cargo nextest run -p duja-app --test e2e_smoke --all-features
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

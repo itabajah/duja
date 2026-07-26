@@ -13,14 +13,19 @@
 //! - [`counting`] — a [`counting::CountingController`] decorator that tallies
 //!   hardware set/get/error calls for the stress harness.
 //! - [`dimming`] — the pure continuum → dimmer planner (overlay/gamma + hardware).
-//! - [`ipc`] — the app side of the local IPC server: the [`ipc::IpcBridge`]
-//!   trait, the [`ipc::handle_request`] request→response mapping, and the
-//!   tray/headless bridges that route `set` and `show-flyout` to the right path.
+//! - [`ipc`] — the binary's IPC wiring: starting the OS transport, the
+//!   second-instance handshake, and the tray bridge that routes `set` /
+//!   `show-flyout` onto the main thread. The transport-agnostic half (the
+//!   [`ipc::IpcBridge`] trait, [`ipc::handle_request`], and the headless bridge)
+//!   lives in the library so an integration test can drive the whole seam.
 //! - [`gamma`] — wires the opt-in gamma sub-floor channel: a pure engage/restore
 //!   coordinator (unit-tested with a fake sink) plus the Windows guard-backed
 //!   sink that drives the GPU ramp and owns the persistent-ramp crash marker.
 //! - [`hotkey`] — pure accelerator-string parsing + conflict detection for the
 //!   global-hotkey table (the Windows tray converts + registers the result).
+//! - [`level_forward`] — the slider → engine forwarding seam behind a
+//!   [`level_forward::LevelSink`], where the final-value-of-a-drag contract
+//!   (never throttle on the UI side) is pinned.
 //! - [`logging`] — `tracing` setup with a size-rotated file log.
 //! - [`num`] — pure percent ↔ raw brightness scaling.
 //! - [`paths`] — resolved config/state/marker/log locations (`ProjectDirs`).
@@ -50,6 +55,7 @@ pub(crate) mod fmt;
 pub(crate) mod gamma;
 pub(crate) mod hotkey;
 pub(crate) mod ipc;
+pub(crate) mod level_forward;
 pub(crate) mod logging;
 pub(crate) mod motion;
 pub(crate) mod num;
