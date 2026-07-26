@@ -741,9 +741,20 @@ exists, and clicking either opens the releases page.
 - **Session trap**: a disconnected session sees no displays — `duja-ddc`
   correctly returns nothing and `dujactl doctor` says so. Check `qwinsta`
   before blaming the code.
-- **Linux rustdoc trap**: the rustdoc CI job runs on ubuntu; intra-doc links
-  from cross-platform code to `#[cfg(windows)]`-only items break it. Use plain
-  backticks there. (Broke PRs #8, #10, #17.)
+- **Cross-platform rustdoc trap**: rustdoc only resolves links in code the
+  target actually compiles, so an intra-doc link from cross-platform code to a
+  `#[cfg]`-gated item breaks on every lane that cannot see it. Use plain
+  backticks there. (Broke PRs #8, #10, #17 on the Linux lane.) Since #85 the
+  hazard is symmetric — `cargo doc` runs on all three OSes — so a link into
+  `cfg(windows)` code now also breaks the macOS lane, and vice versa.
+- **rustdoc silently skips private items**, and it strips them *before*
+  resolving intra-doc links, so a plain `cargo doc` compiles a private module
+  and then checks almost nothing in it. Every macOS backend is a private
+  `mod mac;`, which is why 15 broken links sat undetected until #85 turned on
+  `--document-private-items`. Note the asymmetry that hid this: Cargo passes
+  that flag automatically for **binary** targets, so `duja-app`'s tray was
+  covered by accident while the library crates were not. Both CI doc
+  invocations now pass it explicitly and must stay in sync.
 - **Elevated-token trap**: an elevated process's default object owner is the
   Administrators group, not the user — the pipe's SDDL therefore sets the owner
   explicitly (`O:<sid>`), or the DACL owner assertion fails under CI.

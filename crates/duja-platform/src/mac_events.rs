@@ -6,14 +6,14 @@
 //! event, if any, do we emit?" — is kept here as small, side-effect-free
 //! functions with plain integer inputs. That lets the mapping be unit-tested on
 //! **every** host (Windows/Linux included), independent of the FFI in
-//! [`mac::sys`](crate::mac::sys) that feeds it.
+//! `mac::sys` that feeds it.
 //!
 //! The constants mirror the C headers:
 //! - display flags: `CGDisplayChangeSummaryFlags` (`CGDisplayConfiguration.h`);
 //! - power messages: `kIOMessage*` (`IOKit/IOMessage.h`), where
 //!   `sys_iokit | sub_iokit_common | code` resolves to `0xe000_0000 | code`.
 //!
-//! This module is compiled on macOS (where [`mac::sys`](crate::mac::sys) calls
+//! This module is compiled on macOS (where `mac::sys` calls
 //! it) and, under `cfg(test)`, on every host (so the tests below run in the
 //! ordinary `cargo test`).
 

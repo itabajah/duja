@@ -7,14 +7,14 @@
 //!
 //! [`apply`](WindowsDimmer::apply) diffs the desired [`DimCommand`] set against
 //! the overlays on screen using the pure [`plan`](crate::plan) kernel, then the
-//! worker executes the resulting [`OverlayOp`](crate::plan::OverlayOp)s. Commands
-//! travel over a channel and wake the worker with a posted private message, so
+//! worker executes the resulting [`OverlayOp`]s. Commands travel over a channel
+//! and wake the worker with a posted private message, so
 //! `apply`/`clear` are synchronous from the caller's view (they block on a reply)
 //! while all window ownership stays on the one thread Win32 requires.
 //!
 //! Gamma and the HDR probe live in [`gamma`] and [`hdr`]; they are deliberately
-//! **not** part of the overlay [`apply`] path (a routine dim never touches the
-//! persistent gamma ramp).
+//! **not** part of the overlay [`apply`](WindowsDimmer::apply) path (a routine
+//! dim never touches the persistent gamma ramp).
 
 // RATIONALE: the backend's public vocabulary (`WindowsDimmer`, `ScreenStateGuard`)
 // namespaces the crate concept; the qualified names read best at call sites.

@@ -8,11 +8,11 @@
 //! # Threads
 //!
 //! A [`PipeServer`] owns one **listener** thread and a pool of at most
-//! [`MAX_HANDLER_THREADS`](super::MAX_HANDLER_THREADS) **handler** threads. The
+//! [`MAX_HANDLER_THREADS`] **handler** threads. The
 //! listener creates pipe instances one at a time and waits for a client in an
 //! *overlapped* `ConnectNamedPipe`; on a connection it hands the connected
 //! instance to a handler over a bounded channel and creates the next instance.
-//! Because at most [`MAX_CONNECTIONS`](super::MAX_CONNECTIONS) instances exist at
+//! Because at most [`MAX_CONNECTIONS`] instances exist at
 //! once (the `nMaxInstances` ceiling), a flood past that is refused by the OS
 //! with `ERROR_PIPE_BUSY` rather than growing the server. The overlapped connect
 //! wait re-checks the shutdown flag on a short slice, so the listener tears down

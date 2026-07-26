@@ -3,7 +3,7 @@
 //! [`WindowsAutostart`] is [`RegistryAutostart`] over a real [`RunKey`] store
 //! (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`). The enable / disable
 //! / query *logic* lives in the store-generic [`RegistryAutostart`] and is unit
-//! tested against an in-memory [`FakeRegistry`]; the actual Win32 registry FFI
+//! tested against an in-memory `FakeRegistry`; the actual Win32 registry FFI
 //! is proved by one live test that round-trips a value under a throwaway
 //! `HKCU\Software\DujaTest\<pid>` scratch key (never the real Run key).
 
@@ -34,7 +34,7 @@ const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 ///
 /// This is the seam that lets the autostart *logic* be tested without the
 /// registry. The real implementation ([`RunKey`]) opens a registry key; the
-/// test double ([`FakeRegistry`]) is an in-memory map.
+/// test double (`FakeRegistry`) is an in-memory map.
 trait RegistryStore {
     /// Read the string value `name`, or `None` if it (or the key) is absent.
     fn read(&self, name: &str) -> Result<Option<String>, AutostartError>;

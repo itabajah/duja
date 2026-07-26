@@ -27,7 +27,10 @@
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace            # or: cargo nextest run --workspace
-cargo doc --workspace --no-deps   # RUSTDOCFLAGS="-D warnings" in CI
+# Match CI exactly. --document-private-items is not optional: without it
+# rustdoc strips private items before resolving intra-doc links, so private
+# modules compile but go unchecked.
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --document-private-items
 ```
 
 ## Architecture
