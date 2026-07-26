@@ -82,9 +82,13 @@ pub(super) struct AppState {
     ///
     /// Held separately from [`engine_tx`](Self::engine_tx) (which carries the
     /// non-level commands: refresh, polling, input, shutdown) so the level path
-    /// is injectable and its final-value contract is pinned by
-    /// [`crate::bin_support::level_forward`]'s tests — a UI-side throttle here
-    /// was a real shipped defect (P4 gate Finding 1).
+    /// is a named seam with an explicit no-throttle contract — a UI-side
+    /// throttle on this path was a real shipped defect (P4 gate Finding 1).
+    ///
+    /// Its tests in [`crate::bin_support::level_forward`] cover only the
+    /// forwarder itself; the callers above it in this file are unpinned. See
+    /// [`set_user_level`](Self::set_user_level) for exactly what is and is not
+    /// covered.
     pub(super) levels: LevelForwarder<EngineLevelSink>,
     /// The opt-in gamma sub-floor channel (RAII crash-marker owner + engage/
     /// restore executor). Drives [`DimCommand`]s carrying a gamma factor to the
@@ -373,6 +377,10 @@ impl AppState {
             // fan-out so the passive linked sliders snap instead of gliding (BUG 5);
             // re-rendering here would clear that flag before the frame paints. See
             // `set_user_level`.
+            //
+            // NB: this arm is on the untested side of the seam — no test executes
+            // `on_ui_command`. Never guard this call with a throttle/debounce; see
+            // the test-coverage note on `set_user_level`.
             UiCommand::SetLevel { id, pct } => self.set_user_level(&id, pct),
             UiCommand::Refresh => {
                 let _ = self.engine_tx.send(EngineCommand::RefreshNow);
@@ -709,9 +717,28 @@ impl AppState {
     /// engine worker enforces `write_min_gap` with last-wins coalescing, which
     /// bounds the hardware write rate *and* guarantees the final value of a drag
     /// lands (see P4 gate Finding 1: a leading-edge UI throttle used to drop the
-    /// final sample, leaving the hardware at an intermediate level). That
-    /// contract is pinned at this layer by [`LevelForwarder`], which owns the
-    /// forwarding and is driven here.
+    /// final sample, leaving the hardware at an intermediate level).
+    ///
+    /// # Test coverage of that contract — read this before adding rate limiting
+    ///
+    /// **This method and [`on_ui_command`](Self::on_ui_command) are NOT covered
+    /// by any test.** [`AppState`] cannot be constructed off a live Slint/tray
+    /// thread (see the note on the module's `tests`), so nothing executes either
+    /// of them; a leading-edge throttle added *here*, or in `on_ui_command`'s
+    /// `SetLevel` arm, compiles and passes the entire suite. This was verified,
+    /// not assumed. What **is** pinned:
+    ///
+    /// - the `duja-ui` half — `FlyoutVm::slider_changed` and
+    ///   `FlyoutShell::on_command`'s `slider-changed` handler — by
+    ///   `duja_ui::shell`'s `slider_drag_burst_emits_the_released_value_last`,
+    ///   which drives the real Slint binding;
+    /// - the engine's own last-wins coalescer, by `duja_app`'s worker tests;
+    /// - [`LevelForwarder`]'s own unconditional-forward behaviour, by
+    ///   [`crate::bin_support::level_forward`] — which is downstream of this
+    ///   method and therefore cannot see a throttle placed above it.
+    ///
+    /// The gap between the `duja-ui` pin and the engine pin is exactly this
+    /// method plus `on_ui_command`. It is tracked in `docs/debt.md`.
     pub(super) fn set_user_level(&mut self, id: &StableDisplayId, pct: u8) {
         // Route to the group anchor: the flyout row, hotkey nudge, IPC and reflection
         // all address a member id, but a mirrored set is ONE control keyed under its

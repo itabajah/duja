@@ -12,16 +12,36 @@
 //! became the single pacing authority — it bounds the hardware write rate *and*
 //! guarantees the last value of a burst lands.
 //!
-//! That regression was pinned only at the engine, so the UI side was free to
-//! re-grow a throttle with every test still green. [`LevelForwarder`] is the
-//! forwarding path extracted behind a [`LevelSink`]: production drives
-//! [`EngineLevelSink`] (one `SetUserLevel` per write), the tests below drive a
-//! recording fake. The **final-value contract** is asserted here, so a re-added
-//! UI-side throttle fails a test instead of shipping.
+//! [`LevelForwarder`] is that forwarding path extracted behind a [`LevelSink`]:
+//! production drives [`EngineLevelSink`] (one `SetUserLevel` per write), the
+//! tests below drive a recording fake. Same shape as the other injection seams
+//! in this binary — `GammaSink` (`gamma`), `IpcBridge` (`ipc`),
+//! `HotkeyRegistrar` (`hotkey`): a narrow trait, a real implementation, and a
+//! fake in the tests.
 //!
-//! Same shape as the other injection seams in this binary — `GammaSink`
-//! (`gamma`), `IpcBridge` (`ipc`), `HotkeyRegistrar` (`hotkey`): a narrow trait,
-//! a real implementation, and a fake in the tests.
+//! # What the tests below actually prove — and what they do not
+//!
+//! They prove that **this** type forwards unconditionally. They do **not**
+//! protect the slider → engine path as a whole, because [`LevelForwarder`] is
+//! the *last* link in it and a throttle is only ever re-added *upstream*. The
+//! test calls [`LevelForwarder::forward`] directly, so it cannot observe a
+//! caller that stopped calling it.
+//!
+//! The path, and where each segment is pinned:
+//!
+//! | Segment | Pinned by |
+//! | --- | --- |
+//! | `FlyoutVm::slider_changed` (`duja-ui`) | `duja_ui::shell`'s `slider_drag_burst_emits_the_released_value_last` (drives the real Slint binding) |
+//! | `FlyoutShell::on_command` slider handler (`duja-ui`) | the same test |
+//! | `AppState::on_ui_command` (`tray::state`) | **nothing** |
+//! | `AppState::set_user_level` (`tray::state`) — the historical defect site | **nothing** |
+//! | `LevelForwarder::forward` (here) | the tests below |
+//! | engine `write_min_gap` last-wins coalescing | `duja_app`'s worker tests |
+//!
+//! The two unpinned rows are the app layer: `AppState` owns two live Slint
+//! shells and a real tray icon and cannot be constructed off the tray thread,
+//! so no test executes either method. That gap is tracked in `docs/debt.md` —
+//! do not read the tests below as coverage of it.
 
 // RATIONALE: the forwarder and its sink are consumed only by the Windows tray
 // (`tray::state::AppState`), but they stay cross-platform so the final-value
@@ -75,6 +95,9 @@ impl LevelSink for EngineLevelSink {
 /// pacing is the engine's job (`write_min_gap`, last-wins), because only the
 /// engine's coalescer keeps the *final* value of a drag. Adding rate limiting
 /// here re-creates the P4 defect described in the module docs.
+///
+/// The same rule binds every caller above this type; see the module docs for
+/// which of those callers a test actually holds to it.
 pub(crate) struct LevelForwarder<S: LevelSink> {
     sink: S,
 }
@@ -124,31 +147,14 @@ mod tests {
     }
 
     #[test]
-    fn drag_burst_delivers_the_final_value_to_the_sink() {
-        // REGRESSION (P4 gate Finding 1, pinned at the tray layer): a slider drag
-        // delivers a back-to-back burst of samples in a few milliseconds. The
-        // value the user RELEASED on must reach the engine — a leading-edge
-        // throttle here forwards 50 and swallows everything up to 70, stranding
-        // the hardware mid-drag while the slider/overlay/state all read 70.
-        let (mut fwd, log) = forwarder();
-        for pct in 50..=70u8 {
-            fwd.forward(&[(id("A"), pct)]);
-        }
-
-        let seen = log.lock().unwrap();
-        assert_eq!(
-            seen.last().cloned(),
-            Some((id("A"), 70)),
-            "the final value of a drag must be the last write the sink sees; \
-             a UI-side throttle strands the hardware at an intermediate level"
-        );
-    }
-
-    #[test]
     fn no_ui_side_coalescing_every_sample_is_forwarded() {
-        // The other half of the contract: pacing belongs to the engine's
-        // `write_min_gap` (last-wins) coalescer, so this side drops nothing. A
-        // dropped sample count is the fingerprint of a re-added throttle.
+        // The forwarder's whole contract: pacing belongs to the engine's
+        // `write_min_gap` (last-wins) coalescer, so this side drops nothing —
+        // which implies the final value of a drag burst is also the last write
+        // the sink sees (the P4 gate Finding 1 symptom).
+        //
+        // Scope: this holds THIS type to the rule. It says nothing about its
+        // callers — see the module docs.
         let (mut fwd, log) = forwarder();
         for pct in 50..=70u8 {
             fwd.forward(&[(id("A"), pct)]);
