@@ -5,12 +5,12 @@
 //! [`duja_platform::geometry`], which is where the project confines `unsafe` —
 //! the app binary is meant to be FFI-free. What is left here is the one thing
 //! that genuinely belongs to the app: converting the platform crate's
-//! [`WorkRect`] into [`positioning::Rect`], the type the pure placement kernel
+//! [`WorkRect`] into the `positioning::Rect` the pure placement kernel
 //! is written against.
 //!
 //! The two structs are field-identical today, and the conversion is deliberately
 //! still written out rather than replaced by making them the same type. Keeping
-//! [`positioning`] free of any dependency is what lets its placement tests run
+//! `positioning` free of any dependency is what lets its placement tests run
 //! as pure arithmetic on every CI OS, with no platform crate in the graph.
 
 use duja_platform::WorkRect;
