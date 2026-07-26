@@ -269,16 +269,21 @@ impl<T: VcpTransport, C: Clock> DdcController<T, C> {
     ///
     /// Brightness is **load-bearing**: [`hardware_range`](Capabilities::hardware_range)
     /// keys on it, and the app's worker turns a `hardware_range == false` probe
-    /// into a *sticky* software-only downgrade that is only re-evaluated when a
-    /// fresh worker is spawned — after a sleep/wake, a hot-plug, or an
-    /// unresponsive→responsive recovery. So a failed brightness read here must
+    /// into a *sticky* software-only downgrade that is re-evaluated on only two
+    /// paths: when a fresh worker is spawned (after a sleep/wake, a hot-plug, or
+    /// an unresponsive→responsive recovery), and by the engine's poll-driven
+    /// self-heal, which clears the flag when a level poll observes the panel has
+    /// actually **moved** to (±1 raw) the value Duja last wrote — a panel merely
+    /// sitting at that value without moving does not qualify, so a genuinely dead
+    /// panel stays downgraded. So a failed brightness read here must
     /// **not** be read as "no brightness hardware": that is the very transient the
     /// whole controller retries around (the P1 spike measured ~60–70% of unpaced
     /// reads failing, and a monitor waking from DPMS or a momentarily busy bus can
     /// outlast even the retries), and a real DDC monitor essentially always
     /// supports `0x10`. Reporting it absent would false-downgrade a live external
-    /// monitor that simply was not answering at probe time — a downgrade the user
-    /// can only clear by restarting Duja. Instead we surface the failure as an
+    /// monitor that simply was not answering at probe time — a downgrade that
+    /// then clears only if one of those two paths fires (otherwise the user is
+    /// left restarting Duja). Instead we surface the failure as an
     /// error so the probe stays *inconclusive* and the no-hardware verdict is left
     /// to the retried first-write check (the intended detector; see `duja-app`'s
     /// backend docs). A definitive `hardware_range == false` therefore comes only
