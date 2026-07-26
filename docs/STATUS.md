@@ -45,7 +45,9 @@ end from day one. Distribution is a tag-triggered
 portable zip, each with `SHA256SUMS`, a minisign signature, and a build-provenance
 attestation.
 
-Health: **858 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
+Health: **858 tests (Windows lane) plus 10 doctests, green on 3 OSes** — the
+per-OS count differs because the `#![cfg(windows)]` and `#![cfg(unix)]`
+integration suites compile out on the other lanes; clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
 on stable, adversarial gate reviews at **P2, P3, P4, P5** plus a full post-v0.1.0
 **deep review** (14 module reviewers, every non-low finding adversarially
@@ -80,7 +82,9 @@ merge — the same discipline that has caught every real seam defect. Highlights
 
 Refactor/test debt this surfaced (tray.rs split, per-display HDR, a CI headless
 E2E smoke, the throttle-at-tray regression test, `ddc_broken` routing) is tracked
-in [debt.md](debt.md); ADRs **0017–0020** record the new contracts.
+in [debt.md](debt.md); ADRs **0017–0020** record the new contracts. The split and
+the E2E smoke have since landed, and the throttle pin moved to `duja-ui` — see
+the structural wave below.
 
 ### v0.1.2 — multi-monitor & capability fix wave (2026-07-18)
 
@@ -222,13 +226,16 @@ wrapper rather than a raw one-shot call making a decision.
 Two PRs on top of v0.1.5, both behaviour-neutral, clearing P6's documented
 prerequisite. No release; these land on `main` ahead of the macOS port.
 
-**`#81` — the tray.rs split (2,821 → 612 lines).** The longest-deferred debt row
-in the project ([debt.md](debt.md) called it "the first task of the P6-wave-2
-session", because the macOS assembly doubles the `cfg` surface of that file).
-Seams that already existed in the file became modules: `tray/policy.rs` (the pure
+**`#81` — the tray.rs split (2,821 → 612 lines).** The one debt row P6 wave 2 was
+explicitly blocked on: [debt.md](debt.md) named it the first task of that
+session, because the macOS assembly doubles the `cfg` surface of that file. Seams
+that already existed in the file became five modules: `tray/policy.rs` (the pure
 decision helpers and most of the tests), `tray/state.rs` (`AppState` + its impl),
-`tray/wiring.rs`, `tray/update_flow.rs`; `tray.rs` keeps `run()`, `ReentrantCell`
-and `with_app`. The full existing suite passing unchanged was the contract.
+`tray/wiring.rs`, `tray/update_flow.rs`, and `tray/hotkey_os.rs` (the
+`global-hotkey` registrar and accelerator conversion — the one whose `cfg`
+surface the macOS port touches directly); `tray.rs` keeps `run()`,
+`ReentrantCell`, `with_app` and `with_app_ref`. The full existing suite passing
+unchanged was the contract.
 
 The re-entrancy invariant came out **stronger** than it went in. `ReentrantCell`
 is the single serialising access path to `AppState` — it cures the `RefCell`
@@ -246,7 +253,7 @@ bin→lib so the path serving every `dujactl` request is reachable from tests.
 
 The important part is what the review **rejected**. The throttle-final-value
 contract (a leading-edge UI throttle drops a drag's final sample, stranding the
-hardware mid-drag — the P4 gate's Finding 1, a defect that actually shipped once)
+hardware mid-drag — the P4 gate's Finding 1, caught before the first release)
 was pinned against a freshly extracted `LevelForwarder`: a stateless three-line
 loop. The red-first evidence looked impeccable and protected nothing, because the
 bug had been inserted into the one function the test called directly. The
@@ -258,7 +265,8 @@ text was still literally true.
 
 The pin now lives at `duja-ui`'s Slint binding
 (`slider_drag_burst_emits_the_released_value_last`, verified to fail at both
-re-introduction sites), and the app-layer gap between UI and engine is documented
+`duja-ui` re-introduction sites — the shell's `slider-changed` handler and
+`FlyoutVm::slider_changed`), and the app-layer gap between UI and engine is documented
 as open rather than falsely claimed closed — `AppState` owns a concrete
 `tray_icon::TrayIcon` and two live Slint shells, so it cannot be constructed in a
 test without a refactor of its own. That refactor was deliberately not smuggled
@@ -268,7 +276,7 @@ into a test-infra PR.
 
 1. **Red-first is necessary but not sufficient — insert the bug where it
    *historically occurred*, not where the test can reach it.** The question is
-   "if I re-add this defect at the line where it actually shipped, does the suite
+   "if I re-add this defect at the line where it actually lived, does the suite
    fail?", not "does the test fail when I break the thing it calls?" Find the
    commit; reproduce the defect there.
 2. **A false assurance is worse than an open gap.** Deleting a debt row while its
