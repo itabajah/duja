@@ -112,29 +112,64 @@ impl BrightnessController for SmokeController {
 
 // --- the transport endpoint ----------------------------------------------
 
+/// A unique endpoint per test, plus whatever must stay alive to own it.
+///
+/// Named-pipe endpoints are kernel objects with no filesystem residue, so the
+/// Windows side owns nothing; the unix side owns the [`TempDir`] the socket
+/// lives in (see the `cfg(unix)` twin).
+///
+/// [`TempDir`]: tempfile::TempDir
+struct Endpoint {
+    name: String,
+    #[cfg(unix)]
+    _dir: tempfile::TempDir,
+}
+
 /// A unique endpoint per test so parallel tests (and a Duja running on the dev
 /// box) never collide.
 #[cfg(windows)]
-fn endpoint(tag: &str) -> String {
+fn endpoint(tag: &str) -> Endpoint {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!(r"\\.\pipe\duja-e2e-{}-{tag}-{n}", std::process::id())
+    Endpoint {
+        name: format!(r"\\.\pipe\duja-e2e-{}-{tag}-{n}", std::process::id()),
+    }
 }
 
-/// The unix twin: a socket under one per-process directory the server creates
-/// and `chmod 0700`s.
+/// The unix twin: a socket inside a private [`tempfile::TempDir`].
+///
+/// `PipeServer` unlinks the socket file itself, but nothing removes the
+/// directory holding it — so a fixed `/tmp/duja-e2e-<pid>/` leaked one directory
+/// per run, and being a predictable path it was also squattable. The `TempDir`
+/// is randomly named, is owned by the [`Smoke`] harness, and removes the whole
+/// directory on drop — including on an assertion-failure unwind.
 #[cfg(unix)]
-fn endpoint(tag: &str) -> String {
+fn endpoint(tag: &str) -> Endpoint {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("/tmp/duja-e2e-{}/{tag}-{n}.sock", std::process::id())
+    let dir = tempfile::Builder::new()
+        .prefix("duja-e2e-")
+        .tempdir()
+        .expect("a private endpoint directory");
+    let name = dir
+        .path()
+        .join(format!("{tag}-{n}.sock"))
+        .to_string_lossy()
+        .into_owned();
+    Endpoint { name, _dir: dir }
 }
 
 // --- the harness ----------------------------------------------------------
 
 /// The assembled headless pipeline: fake backend → engine → bridge → transport.
+///
+/// Teardown lives in [`Drop`](Smoke::drop), not in a method the test must
+/// remember to call last: an assertion that fails mid-test would otherwise drop
+/// the harness straight into `PipeServer::drop` and `Engine::drop`, whose joins
+/// are unguarded, and a shutdown regression would surface as a hung CI job on
+/// top of the real failure instead of as a failure.
 struct Smoke {
-    endpoint: String,
+    endpoint: Endpoint,
     engine: Option<Engine>,
     server: Option<PipeServer>,
     notifications: Receiver<EngineNotification>,
@@ -182,7 +217,7 @@ impl Smoke {
         let bridge: std::sync::Arc<dyn duja_app::ipc::IpcBridge> =
             std::sync::Arc::new(HeadlessBridge::new(engine.sender()));
         let endpoint = endpoint(tag);
-        let server = PipeServer::serve_named(&endpoint, move |request| {
+        let server = PipeServer::serve_named(&endpoint.name, move |request| {
             handle_request(bridge.as_ref(), request)
         })
         .expect("the IPC server must start on a fresh endpoint");
@@ -200,7 +235,7 @@ impl Smoke {
     /// One request/response exchange over a fresh client connection (how
     /// `dujactl` talks to a running Duja).
     fn ask(&self, request: &Request) -> Response {
-        let mut client = PipeClient::connect_named(&self.endpoint, CONNECT_TIMEOUT)
+        let mut client = PipeClient::connect_named(&self.endpoint.name, CONNECT_TIMEOUT)
             .expect("a running IPC server must accept a client");
         client.request(request).expect("the exchange must complete")
     }
@@ -249,13 +284,22 @@ impl Smoke {
             }
         }
     }
+}
 
+impl Drop for Smoke {
     /// Tear the pipeline down, asserting it completes inside [`DEADLINE`] — a
     /// shutdown regression must surface as a failure, not a hung CI job.
-    fn shutdown(mut self) {
+    ///
+    /// In `Drop` rather than an explicit last-statement call so it runs on
+    /// **every** exit path, including an assertion-failure unwind: the joins
+    /// inside `PipeServer::drop` / `Engine::drop` are themselves unguarded, so
+    /// dropping the harness without this would hang a failing test.
+    fn drop(&mut self) {
         let server = self.server.take();
         let engine = self.engine.take();
         let (done_tx, done_rx) = unbounded();
+        // Detached: the joins happen off this thread, so the wait below is
+        // bounded no matter how wedged the pipeline is.
         thread::spawn(move || {
             if let Some(server) = server {
                 server.shutdown();
@@ -265,8 +309,20 @@ impl Smoke {
             }
             let _ = done_tx.send(());
         });
+        let clean = done_rx.recv_timeout(DEADLINE).is_ok();
+        if thread::panicking() {
+            // Already unwinding from the real failure — panicking again here
+            // would abort the process and bury it. Report and let it through.
+            if !clean {
+                eprintln!(
+                    "warning: the headless pipeline did not shut down within \
+                     {DEADLINE:?} (secondary to the failure above)"
+                );
+            }
+            return;
+        }
         assert!(
-            done_rx.recv_timeout(DEADLINE).is_ok(),
+            clean,
             "the headless pipeline must shut down cleanly within {DEADLINE:?}"
         );
     }
@@ -332,7 +388,7 @@ fn headless_pipeline_serves_list_set_and_get_over_the_real_transport() {
     // 5. `show-flyout` is the documented headless no-op, still answered Ok.
     assert_eq!(smoke.ask(&Request::ShowFlyout), Response::Ok);
 
-    smoke.shutdown();
+    // Teardown is asserted by `Smoke::drop`, on this and every other exit path.
 }
 
 #[test]
@@ -355,6 +411,4 @@ fn unknown_display_is_refused_end_to_end() {
         matches!(response, Response::Error { ref code, .. } if code == "unknown_display"),
         "expected an unknown_display error, got {response:?}"
     );
-
-    smoke.shutdown();
 }

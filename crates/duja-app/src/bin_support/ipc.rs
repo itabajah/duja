@@ -83,6 +83,25 @@ pub(crate) fn show_running_instance() -> bool {
 /// `snapshot` reads the engine directly.
 #[cfg(windows)]
 pub(crate) struct TrayBridge {
+    /// A **fully functional** headless bridge, embedded only for its
+    /// [`snapshot`](IpcBridge::snapshot) (a plain engine read, identical in both
+    /// bridges).
+    ///
+    /// Never call `self.bridge.set_level(..)` or `self.bridge.show_flyout()`
+    /// from the tray path. Both compile and both look correct; they are wrong
+    /// here for two reasons:
+    ///
+    /// - `HeadlessBridge::set_level` sends `SetUserLevel` **straight to the
+    ///   engine**, bypassing the main-thread `AppState::set_user_level` that
+    ///   owns the persisted user level, the overlay/gamma batch and the flyout
+    ///   row. Hardware would move while state, overlay and slider stayed stale.
+    /// - It runs on the IPC server's own thread, so it also skips the
+    ///   [`slint::invoke_from_event_loop`] hop that puts the work on the Slint
+    ///   thread — the precondition of the tray's `ReentrantCell` re-entrancy
+    ///   rule (`AppState` is reachable only through `with_app`).
+    ///
+    /// The correct routes are [`set_level`](IpcBridge::set_level) and
+    /// [`show_flyout`](IpcBridge::show_flyout) below, which hop first.
     bridge: HeadlessBridge,
 }
 
