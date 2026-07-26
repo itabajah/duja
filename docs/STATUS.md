@@ -1,8 +1,7 @@
 # Duja — Project Status
 
-_Last updated: 2026-07-18 (v0.1.2: multi-monitor & capability fix wave —
-display identity, capability detection, and linked control, from real-hardware
-laptop testing)._
+_Last updated: 2026-07-26 (v0.1.5: the sticky "software-only" probe fix and a
+tray Restart item)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -25,7 +24,10 @@ display control, automation, and integrations), see
 | P5 Power features (Windows complete) | `m5-win-full` | ✅ done |
 | **First release** | **`v0.1.0` (Windows)** | ✅ shipped — installer + portable zip, signed, auto-update loop |
 | **Deep-review fix wave** | **`v0.1.1` (Windows)** | ✅ shipped — 10 fix PRs, all confirmed defects fixed test-first |
-| **Multi-monitor & capability fixes** | **`v0.1.2` (Windows)** | 🚀 shipping — 6 PRs (5 real-hardware bugs + 1 audit follow-up), test-first, audit + holistic reviewed |
+| **Multi-monitor & capability fixes** | **`v0.1.2` (Windows)** | ✅ shipped — 6 PRs (5 real-hardware bugs + 1 audit follow-up), test-first, audit + holistic reviewed |
+| **Internal-panel fallback fix** | **`v0.1.3` (Windows)** | ✅ shipped — the built-in panel no longer vanishes on a GPU/OEM-driven backlight |
+| **Dark rebrand + mirror/software-only** | **`v0.1.4` (Windows)** | ✅ shipped — the dark brand identity plus the two laptop-reported issues (#66, #67) |
+| **Sticky software-only fix** | **`v0.1.5` (Windows)** | 🚀 shipping — a live monitor no longer sticks as "software-only"; tray Restart |
 | P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 (app assembly + packaging) + gate remain |
 | P7 Linux port | `m7-linux` / `v0.3.0` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
@@ -43,7 +45,7 @@ end from day one. Distribution is a tag-triggered
 portable zip, each with `SHA256SUMS`, a minisign signature, and a build-provenance
 attestation.
 
-Health: **803 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
+Health: **853 tests + doctests green on 3 OSes**, clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
 on stable, adversarial gate reviews at **P2, P3, P4, P5** plus a full post-v0.1.0
 **deep review** (14 module reviewers, every non-low finding adversarially
@@ -143,6 +145,77 @@ provably disjoint), the unchanged mirror probe count, and that the red-first
 `correlate` guard bites against the shipped bug. **Hardware confirmation on the
 reporting laptop is pending** (tracked as a QA gate); the fix is strictly additive
 — it can only restore the panel, never remove more than before.
+
+### v0.1.4 — dark rebrand + the mirror/software-only pair (2026-07-19)
+
+Two issues filed from laptop testing (#66, #67) both traced to **one modelling
+gap**: "software-only" was a `DisplayKind` *variant*, conflating a display's
+physical provenance with its runtime control mode. Fixed across two
+adversarially-reviewed PRs, each of whose reviews caught a real change-blocking
+bug:
+
+- **`DisplayKind` is physical-only** (`ExternalDdc`/`InternalPanel`) and the
+  runtime verdict rides a separate `software_only` flag threaded through the
+  snapshot, the IPC DTOs, and the view-models. The flyout therefore labels a
+  display *Internal*/*External*, never "Software", and a software-only display's
+  dimming pill is forced on and disabled instead of being freely toggleable
+  (turning it off used to strand the slider). The IPC protocol bumped **v1 → v2**
+  for the removed variant plus the new required field.
+- **Mirrored displays merge into one control** (`bin_support/clone_group.rs`). In
+  Windows *Duplicate* mode N panels share one framebuffer, so per-panel rows
+  stacked two overlays on the same pixels. A mirror set is now grouped by its
+  shared GDI device and driven once, with the group anchor a pure function of the
+  member *set* (never enumeration order). Group state is keyed on that anchor,
+  and a hot-plug that *moves* the anchor migrates the state across via the stable
+  shared GDI device, so the user's level cannot be silently orphaned.
+
+Alongside, the **dark brand identity**: the whirlpool inverted to near-black gems
+whose spiral seams glow in the four accent hues, with the exe icon, README hero,
+and social card all regenerating from one code source (`dark_whirlpool_rgba`) and
+drift-tested. That drift test surfaced a **cross-platform libm determinism** trap
+— glibc rounds `exp`/`powf`/`atan2` differently from MSVC on a handful of 262k
+pixels — so the assertion pins the integer supersampled alpha bit-for-bit and
+allows a bounded RGB delta, which still catches a genuinely stale asset.
+
+### v0.1.5 — the sticky "software-only" probe fix (2026-07-26)
+
+Continued real-world use surfaced the **twin** of a defect class this codebase
+had already hardened against once. In v0.1.2 (#59) the *write*-path detector was
+fixed so a single retried-but-still-failing DDC read could not make a permanent
+binding decision; the *probe* path was the un-fixed twin:
+
+- The runtime "no working hardware" downgrade is **sticky** (`software_forced`).
+  It is re-evaluated by a **fresh worker** probe — on sleep/wake, a display-change
+  re-enumeration, or an unresponsive→responsive recovery, all of which occur
+  routinely in a long session — or by the **poll-driven self-heal**
+  (`engine.rs`), which additionally requires the panel to have actually *moved*
+  to Duja's last written raw level while the flyout is open and polling, so a
+  dead panel merely sitting at that value stays flagged. Neither path is
+  guaranteed to fire in a given session. `probe_by_reads` (the
+  fallback taken when the capability string cannot be read) turned a **failed**
+  brightness read into a *successful* `Ok(caps { hardware_range: false })`, so a
+  live external monitor that merely was not answering at probe time — waking from
+  DPMS, or a busy bus, exactly the ~60–70% unpaced-read failure rate the P1 spike
+  measured — was mislabeled software-only until the process restarted.
+- **Brightness is now load-bearing**: a failed brightness read is surfaced as an
+  error (inconclusive), never a false "absent". A definitive `hardware_range ==
+  false` comes only from a *successful* caps read omitting `0x10` or the
+  `ddc_broken` quirk; a genuinely dead panel is still caught by the retried
+  first-write check, the intended detector. Contrast stays optional. The residual
+  (a DDC panel that answers *nothing at all* stays hardware-backed with an inert
+  slider until the user flips the flyout pill) is recorded in
+  [debt.md](debt.md) — a rare edge with a user-accessible workaround, traded
+  against a false positive that needed a full restart.
+- Also a tray **Restart** item: the replacement instance is spawned *before* the
+  outgoing one quits (so a failed spawn leaves Duja running rather than gone) and
+  waits, bounded, for the single-instance lock; the outgoing instance takes the
+  normal clean-quit path so gamma and overlays are restored and state flushed
+  before the fresh instance adopts the same levels.
+
+**The lesson worth carrying**: a reliability fact the codebase already encodes
+gets silently re-violated whenever a new code path performs the same primitive.
+When adding a read/write path, confirm it uses the project's paced/retried
+wrapper rather than a raw one-shot call making a decision.
 
 ## What is done
 

@@ -19,6 +19,11 @@ advisory-drifted commit fails before anything is built.
 - [ ] **Bump the version and changelog.** Update the workspace `version` in
       `Cargo.toml` (refresh `Cargo.lock`), and move the `CHANGELOG.md` unreleased
       entries under a new `vX.Y.Z` heading. Merge that through CI first.
+- [ ] **Sync `docs/STATUS.md`.** Refresh the "last updated" stamp, flip the
+      previous release's At-a-glance row from "shipping" to "shipped", add a row
+      and a written section for the new one, and update the test count. This
+      drifted three releases behind once (caught at v0.1.5); it is cheap to do
+      here and invisible until someone reads a stale claim.
 - [ ] **Dry run.** Trigger the `release` workflow via **Run workflow**
       (`workflow_dispatch`) on the merged commit. Download the
       `duja-<ver>-windows-x64` artifact and confirm the installer, portable zip,

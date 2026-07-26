@@ -20,11 +20,12 @@ all the way to true black. Tiny, native, and instant.**
 
 ---
 
-> **Duja `v0.1.0`: first public release (Windows).** An early build, but a real one: hardware
-> control, software dimming, tray + flyout, settings, global hotkeys, input switching, and the
-> `dujactl` CLI all work on Windows. macOS backends have landed (Linux is next). Automatic update
-> notifications are built in, so you stay on the latest. See [docs/STATUS.md](docs/STATUS.md) for
-> the live picture.
+> **Windows is ready today.** An early build, but a real one: hardware control, software dimming,
+> tray + flyout, settings, global hotkeys, input switching, and the `dujactl` CLI all work on
+> Windows. macOS backends have landed (Linux is next). Automatic update notifications are built
+> in, so you stay on the latest. The current version is always on the
+> [releases page](https://github.com/itabajah/duja/releases/latest); see
+> [docs/STATUS.md](docs/STATUS.md) for the live picture.
 
 ## Why Duja
 
