@@ -30,6 +30,9 @@ windows = { version = "0.62", default-features = false, features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
+    # Tray-flyout geometry: the monitor scale under the cursor (GetDpiForMonitor),
+    # queried before the window is shown so it can be placed in one pass.
+    "Win32_UI_HiDpi",
     "Win32_System_RemoteDesktop",
     "Win32_System_LibraryLoader",
     "Win32_Devices_Display",

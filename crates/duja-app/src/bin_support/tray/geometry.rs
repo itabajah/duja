@@ -1,119 +1,63 @@
-//! The single Win32 geometry query the tray placement needs: the cursor
-//! position and the work area of the monitor under it.
+//! Adapts [`duja_platform`]'s screen anchor to the app's pure placement types.
 //!
-//! Kept tiny and isolated so the *placement* logic stays pure and unit-tested
-//! (see [`positioning`](crate::bin_support::positioning)); this only fetches the
-//! two rectangles to feed it. All `unsafe` here is documented FFI.
+//! The Win32 calls this module used to make (`GetCursorPos`,
+//! `MonitorFromPoint`, `GetMonitorInfoW`, `GetDpiForMonitor`) now live in
+//! [`duja_platform::geometry`], which is where the project confines `unsafe` —
+//! the app binary is meant to be FFI-free. What is left here is the one thing
+//! that genuinely belongs to the app: converting the platform crate's
+//! [`WorkRect`] into [`positioning::Rect`], the type the pure placement kernel
+//! is written against.
+//!
+//! The two structs are field-identical today, and the conversion is deliberately
+//! still written out rather than replaced by making them the same type. Keeping
+//! [`positioning`] free of any dependency is what lets its placement tests run
+//! as pure arithmetic on every CI OS, with no platform crate in the graph.
 
-// RATIONALE (clippy::cast_possible_truncation): the only cast here is a Win32
-// struct size (`MONITORINFO`) into the `u32` `cbSize` field — a tiny
-// compile-time constant that cannot truncate.
-#![allow(clippy::cast_possible_truncation)]
-
-use std::mem::size_of;
-
-use windows::Win32::Foundation::POINT;
-use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
-};
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use duja_platform::WorkRect;
 
 use crate::bin_support::positioning::Rect;
 
-/// A reasonable default work area if the OS queries fail (a 1080p desktop with a
-/// bottom taskbar).
-const DEFAULT_WORK: Rect = Rect {
-    x: 0,
-    y: 0,
-    w: 1920,
-    h: 1040,
-};
-
-/// The cursor position, the work area of the monitor under it, **and** that
-/// monitor's device scale factor (physical / logical pixels).
+/// The cursor position, the work area of the monitor under it, and that
+/// monitor's scale factor.
 ///
-/// The scale is queried up front (from the monitor handle, not the flyout window)
-/// so the flyout can be sized + placed correctly in physical pixels *before* it
-/// is shown — a one-shot present with no post-show resize, which is what stops
-/// the software renderer occasionally presenting a partial first frame (item 1).
-/// Every field falls back to a sane default if the OS call fails, so the caller
-/// always gets a usable anchor (never panics, never blocks).
+/// Coordinates are physical device pixels in the virtual-desktop space, y-down;
+/// [`duja_platform::geometry`] documents that contract and each backend converts
+/// into it. Never fails: every field falls back to a sane default, so the caller
+/// always gets a usable anchor.
 pub(super) fn cursor_work_area_and_scale() -> ((i32, i32), Rect, f32) {
-    let cursor = cursor_pos();
-    let point = POINT {
-        x: cursor.0,
-        y: cursor.1,
-    };
-    // SAFETY: `MonitorFromPoint` takes a POINT by value and returns a monitor
-    // handle (or the nearest one); no pointers are involved.
-    let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
-
-    let mut info = MONITORINFO {
-        cbSize: size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    // SAFETY: `info.cbSize` is set as documented; `GetMonitorInfoW` fills `info`
-    // for a valid monitor handle and returns FALSE otherwise (we fall back).
-    let ok = unsafe { GetMonitorInfoW(monitor, std::ptr::addr_of_mut!(info)) };
-    let work = if ok.as_bool() {
-        rect_from(info.rcWork)
-    } else {
-        DEFAULT_WORK
-    };
-    (cursor, work, monitor_scale(monitor))
+    let anchor = duja_platform::cursor_anchor();
+    (anchor.cursor, rect_from(anchor.work_area), anchor.scale)
 }
 
-/// The device scale factor of `monitor` (1.0 = 96 DPI), from its effective DPI.
-///
-/// The process is Per-Monitor-V2 DPI-aware (see `build.rs`), so this is the true
-/// physical scale. A failed query or a degenerate value falls back to `1.0`.
-fn monitor_scale(monitor: HMONITOR) -> f32 {
-    let mut dpi_x: u32 = 96;
-    let mut dpi_y: u32 = 96;
-    // SAFETY: `GetDpiForMonitor` writes the horizontal/vertical effective DPI into
-    // the two out-params for a valid monitor handle; `MDT_EFFECTIVE_DPI` is the
-    // documented type. On any error the values are left at our 96 (= 1.0) defaults.
-    let _ = unsafe {
-        GetDpiForMonitor(
-            monitor,
-            MDT_EFFECTIVE_DPI,
-            std::ptr::addr_of_mut!(dpi_x),
-            std::ptr::addr_of_mut!(dpi_y),
-        )
-    };
-    // RATIONALE (cast_precision_loss): an effective-DPI value is small (72..960)
-    // and exactly representable in f32.
-    #[allow(clippy::cast_precision_loss)]
-    let scale = dpi_x as f32 / 96.0;
-    if scale.is_finite() && scale >= 0.1 {
-        scale
-    } else {
-        1.0
-    }
-}
-
-/// The cursor position, or `(0, 0)` if it cannot be read.
-fn cursor_pos() -> (i32, i32) {
-    let mut point = POINT::default();
-    // SAFETY: `GetCursorPos` writes the cursor position into `point`.
-    let ok = unsafe { GetCursorPos(std::ptr::addr_of_mut!(point)) };
-    if ok.is_ok() {
-        (point.x, point.y)
-    } else {
-        (0, 0)
-    }
-}
-
-/// Convert a Win32 `RECT` to the pure [`Rect`], clamping a degenerate extent to
-/// zero rather than underflowing.
-fn rect_from(rect: windows::Win32::Foundation::RECT) -> Rect {
-    let w = u32::try_from(rect.right.saturating_sub(rect.left)).unwrap_or(0);
-    let h = u32::try_from(rect.bottom.saturating_sub(rect.top)).unwrap_or(0);
+/// Convert the platform crate's work rectangle to the placement kernel's.
+fn rect_from(rect: WorkRect) -> Rect {
     Rect {
-        x: rect.left,
-        y: rect.top,
-        w,
-        h,
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rect_from;
+    use duja_platform::WorkRect;
+
+    #[test]
+    fn conversion_preserves_every_field_including_a_negative_origin() {
+        // A monitor left of or above the primary one has negative virtual-desktop
+        // coordinates; dropping the sign would place the flyout on the wrong
+        // screen.
+        let converted = rect_from(WorkRect {
+            x: -1920,
+            y: -180,
+            w: 2560,
+            h: 1400,
+        });
+        assert_eq!(converted.x, -1920);
+        assert_eq!(converted.y, -180);
+        assert_eq!(converted.w, 2560);
+        assert_eq!(converted.h, 1400);
     }
 }
