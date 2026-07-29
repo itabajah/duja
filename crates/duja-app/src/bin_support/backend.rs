@@ -78,7 +78,7 @@ pub(crate) fn discover() -> Vec<DiscoveredDisplay> {
 }
 
 /// One display's app-side geometry: its bare id, its display bounds, and its
-/// gamma-target token. Carried by DDC displays — external monitors and a
+/// display-surface token. Carried by DDC displays — external monitors and a
 /// (Windows-only) DDC-fallback internal panel alike — but not by the panel
 /// backend's panels, whose geometry is `None`.
 ///
@@ -94,24 +94,49 @@ pub(crate) fn discover() -> Vec<DiscoveredDisplay> {
 /// because each side stays in its own unit, so nothing here may assume pixels or
 /// mix a bound with a physical-pixel quantity without scaling first.
 ///
-/// # Element 3 — an **opaque, platform-specific gamma-target token**
+/// # Element 3 — an **opaque, platform-specific display-surface token**
 ///
-/// Whatever the platform's gamma channel needs to address one display, carried as
-/// a `String` so this type stays uniform:
-/// - **Windows**: the GDI device name (e.g. `\\.\DISPLAY1`), which
-///   `duja_dimmer::GammaDisplay::from_device_name` turns into a ramp target.
-/// - **macOS**: the `CGDirectDisplayID` in decimal — the token
-///   `duja_dimmer::GammaDisplay::from_display_id` needs, recovered with a `u32`
-///   `parse`.
+/// A `String` so this type stays uniform, but it carries **two** invariants,
+/// because it has **two** consumers. The Windows value — the GDI device name
+/// (`MONITORINFOEX::szDevice`, e.g. `\\.\DISPLAY1`) — satisfies both:
 ///
-/// So it must never be shown to a user or parsed as a device path: it is a token,
-/// not a name. There is no macOS gamma sink yet (`gamma.rs`'s `GuardSink` is
-/// `cfg(windows)`), so on macOS the token is carried and **not yet consumed**; it
-/// is stamped now so the sink that lands with the macOS tray assembly has it
-/// waiting.
+/// - **(a) Addressable by the platform gamma channel.** `gamma.rs`'s `GuardSink`
+///   resolves a display id to this token and hands it to
+///   `duja_dimmer::GammaDisplay::from_device_name`.
+/// - **(b) Identical for every panel sharing one framebuffer.** `clone_group`'s
+///   `group_clones` buckets members on this exact string (case-folded), so token
+///   equality *is* the mirror-detection mechanism: it is what collapses a
+///   Duplicate-mode set into one control with one overlay, and what routes the
+///   "any member software-only ⇒ pin the hardware members to MAX" rule. See
+///   `clone_group`, `#66` and ADR-0018.
+///
+/// **macOS satisfies (a) only, and that is not yet fixed.** The token there is the
+/// `CGDirectDisplayID` in decimal — exactly what
+/// `duja_dimmer::GammaDisplay::from_display_id` needs, recovered with a `u32`
+/// `parse` — but a `CGDirectDisplayID` is unique **per display by construction**,
+/// so two mirrored Macs produce two *different* tokens at identical bounds.
+/// `group_clones` would then build two singletons instead of one mirror: two
+/// overlay windows stacked on the same pixels and the software-only pin rule
+/// skipped, which is exactly the `#66` defect the mirror merge cured.
+///
+/// **Standing rule, for whoever assembles the macOS tray:
+/// `BoundsMap::device_for` must NOT be fed into `clone_group` on macOS until this
+/// token satisfies (b).** The fix is to stamp the *surface*, not the display:
+/// `CGDisplayMirrorsDisplay(id)` when it is non-zero (the mirror-set master), else
+/// `id` itself — or any equivalent surface id — so every clone of one framebuffer
+/// renders the same string. It is deliberately not done in this PR: it is
+/// hardware-blind (Duja has no Mac on which to confirm the mirror-set semantics)
+/// and it belongs with the assembly that actually wires `clone_group`. Until then,
+/// a macOS gamma sink may consume the token; mirror grouping may not.
+///
+/// Either way it must never be shown to a user or parsed as a device path: it is a
+/// token, not a name. And there is no macOS gamma sink yet (`gamma.rs`'s
+/// `GuardSink` is `cfg(windows)`), so today macOS carries the token with **no**
+/// consumer at all; it is stamped now so the sink that lands with the tray
+/// assembly has it waiting.
 pub(crate) type DisplayGeom = (String, Option<DisplayBounds>, Option<String>);
 
-/// Enumerate displays **and** their bounds + gamma-target tokens in one pass.
+/// Enumerate displays **and** their bounds + display-surface tokens in one pass.
 ///
 /// Returns the [`DiscoveredDisplay`] list the engine consumes, plus a parallel
 /// [`DisplayGeom`] list in the *same* deterministic order (DDC first, then
@@ -123,11 +148,11 @@ pub(crate) type DisplayGeom = (String, Option<DisplayBounds>, Option<String>);
 pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<DisplayGeom>) {
     let ddc: Vec<(DiscoveredDisplay, DisplayGeom)> = discover_ddc()
         .into_iter()
-        .map(|(display, display_bounds, gamma_target)| {
+        .map(|(display, display_bounds, surface_token)| {
             let geom = (
                 display.id.as_str().to_owned(),
                 Some(display_bounds),
-                Some(gamma_target),
+                Some(surface_token),
             );
             (display, geom)
         })
@@ -229,9 +254,9 @@ fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
 
 #[cfg(target_os = "macos")]
 fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
-    // Same shape as the Windows arm — metadata, bounds and the gamma-target token,
-    // with each `DdcDisplay` dropped at the end of the closure so its I2C service
-    // handle is released promptly — with two platform differences:
+    // Same shape as the Windows arm — metadata, bounds and the display-surface
+    // token, with each `DdcDisplay` dropped at the end of the closure so its I2C
+    // service handle is released promptly — with two platform differences:
     //
     // 1. The kind is ALWAYS `ExternalDdc`. The macOS DDC backend filters built-in
     //    panels out at enumeration (`CGDisplayIsBuiltin`) and its `DdcDisplay` has
@@ -240,9 +265,14 @@ fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
     //    macOS internal panel can only come from `duja-panel`/`DisplayServices`; if
     //    that framework cannot control it, Duja cannot either, and no DDC entry
     //    will stand in for it.
-    // 2. The gamma-target token is the `CGDirectDisplayID` in decimal (Windows uses
-    //    the GDI device name). See `DisplayGeom`. `bounds` are points here, not
-    //    physical pixels — also `DisplayGeom`.
+    // 2. The display-surface token is the `CGDirectDisplayID` in decimal (Windows
+    //    uses the GDI device name), and `bounds` are points here, not physical
+    //    pixels. Both are specified on `DisplayGeom` — read its element-3 section
+    //    before consuming the token: a `CGDirectDisplayID` is unique per display, so
+    //    it does NOT carry the shared-framebuffer identity `clone_group` needs, and
+    //    feeding it there would re-introduce #66 (two overlays on one mirrored
+    //    surface). The gamma channel can use it as-is.
+
     match duja_ddc::enumerate() {
         Ok(displays) => displays
             .into_iter()

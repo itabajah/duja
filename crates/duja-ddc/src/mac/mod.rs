@@ -71,10 +71,14 @@ pub struct DdcDisplay {
     /// Bounds of this monitor in the global display coordinate space.
     ///
     /// These come from `CGDisplayBounds`, which returns **points, not physical
-    /// pixels** (a Retina display reports its logical point size). Duja records
-    /// them for parity with the Windows backend's pixel bounds; reconciling
-    /// points to physical pixels for an overlay dimmer is deferred to the macOS
-    /// dimmer work (there is no `duja-dimmer` macOS backend yet). See ADR-0013.
+    /// pixels** (a Retina display reports its logical point size). No conversion
+    /// to physical pixels is owed: `duja-dimmer`'s macOS overlay backend
+    /// (`MacDimmer`, which *is* its `PlatformDimmer` there) positions windows with
+    /// `NSWindow` frames, which are points as well, so this value flows to the
+    /// dimmer unconverted. That crate's `mac_geom` module owns the unit contract
+    /// and the Cocoa y-flip; the divergence from the Windows backend's
+    /// physical-pixel bounds is a property of the platform, not a pending fixup.
+    /// See ADR-0013.
     pub bounds: DisplayBounds,
     /// The CoreGraphics display id. This is the macOS analogue of the Windows
     /// backend's `gdi_device`: the token a later app-side gamma/overlay path

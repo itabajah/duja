@@ -1,24 +1,38 @@
 //! An app-side map from a **resolved** display id to its display bounds and
-//! gamma-target token.
+//! display-surface token.
 //!
-//! Both are platform-specific and this map is deliberately blind to which
+//! Both values are platform-specific and this map is deliberately blind to which
 //! platform it holds: the bounds are physical pixels on Windows and points on
 //! macOS, and the token is a GDI device name on Windows and a decimal
-//! `CGDirectDisplayID` on macOS. The names below say "GDI device" because the only
-//! consumer today is the Windows gamma sink; see
-//! [`DisplayGeom`](crate::bin_support::backend::DisplayGeom), which defines both
-//! elements, before adding a second one.
+//! `CGDirectDisplayID` on macOS. The accessors below are named after the Windows
+//! value they were written for; the contract lives on
+//! [`DisplayGeom`](crate::bin_support::backend::DisplayGeom) and **must** be read
+//! before using either on a new platform.
+//!
+//! [`BoundsMap::device_for`] has **two** consumers with different requirements:
+//!
+//! - the gamma sink (`gamma.rs`'s `GuardSink`) needs the token only to be
+//!   *addressable* by the platform gamma API;
+//! - [`clone_group::group_clones`](crate::bin_support::clone_group::group_clones)
+//!   needs the strictly stronger property that every panel sharing one
+//!   framebuffer yields the **same** string, because that equality is how a
+//!   mirrored set is detected and collapsed into one control (`#66`).
+//!
+//! `MONITORINFOEX::szDevice` has both. A macOS `CGDirectDisplayID` has only the
+//! first (it is unique per display), so `device_for` must not reach
+//! `group_clones` on macOS until the token carries surface identity — see
+//! `DisplayGeom`'s element-3 section for the fix and the standing rule.
 //!
 //! `duja-core`'s `DiscoveredDisplay` is frozen and carries no bounds, so the app
 //! keeps them here, refreshed on every enumeration. Entries are stored in the
 //! exact deterministic order the backend reports them (DDC first, then panels),
-//! each as `(bare id, Option<bounds>, Option<gdi device>)`. A lookup for a
+//! each as `(bare id, Option<bounds>, Option<surface token>)`. A lookup for a
 //! resolved id reuses the same [`select_slot_match`] routing the
 //! controller factory uses, so an identical-twin `-slot<n>` id resolves to the
 //! Nth bare-id match — the same slot the manager assigned, because both walk the
-//! same input order. WMI panels contribute `None` bounds and `None` device,
-//! whereas a DDC-fallback internal panel carries DDC geometry like any DDC
-//! display; the GDI device name is the gamma channel's ramp target.
+//! same input order. The panel backend's panels contribute `None` bounds and
+//! `None` token, whereas a (Windows) DDC-fallback internal panel carries DDC
+//! geometry like any DDC display.
 
 // RATIONALE: these pure modules are consumed only by the Windows tray assembly,
 // but stay cross-platform (not cfg-gated) so their unit tests run on every CI
@@ -28,14 +42,15 @@
 use duja_core::dimmer::DisplayBounds;
 use duja_core::id::{StableDisplayId, select_slot_match};
 
-/// Resolved-id → bounds + GDI device, backed by the ordered enumeration.
+/// Resolved-id → bounds + display-surface token, backed by the ordered
+/// enumeration.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BoundsMap {
     entries: Vec<(String, Option<DisplayBounds>, Option<String>)>,
 }
 
 impl BoundsMap {
-    /// Build from the ordered `(bare id, bounds, gdi device)` enumeration.
+    /// Build from the ordered `(bare id, bounds, surface token)` enumeration.
     pub(crate) fn new(entries: Vec<(String, Option<DisplayBounds>, Option<String>)>) -> Self {
         BoundsMap { entries }
     }
@@ -52,9 +67,13 @@ impl BoundsMap {
         self.entries.get(idx).and_then(|(_, bounds, _)| *bounds)
     }
 
-    /// The gamma-target token for a resolved display id — the GDI device name
+    /// The display-surface token for a resolved display id — the GDI device name
     /// (e.g. `\\.\DISPLAY1`) on Windows, a decimal `CGDirectDisplayID` on macOS —
     /// or `None` if unknown / panel.
+    ///
+    /// Feeds the gamma sink **and** the mirror grouping, which need different
+    /// guarantees from it; the macOS value satisfies only the gamma one. Read the
+    /// module docs (and `DisplayGeom`'s element 3) before adding a caller.
     pub(crate) fn device_for(&self, resolved: &StableDisplayId) -> Option<String> {
         let idx = self.index_of(resolved)?;
         self.entries
