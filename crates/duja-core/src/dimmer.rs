@@ -37,21 +37,38 @@ use crate::id::StableDisplayId;
 /// default) reaches true black instead and is unaffected by this bound.
 pub const GAMMA_FLOOR: f32 = 0.3;
 
-/// Physical-pixel bounds of one display in the virtual desktop.
+/// Bounds of one display in the OS's global display space (top-left origin,
+/// y-down).
+///
+/// # The unit is the platform's own, and is **not** always pixels
+///
+/// - **Windows**: virtual-desktop **physical pixels** (`MONITORINFO::rcMonitor`).
+/// - **macOS**: **points**. `CGDisplayBounds` (the enumeration source) and
+///   `NSWindow` frames (the overlay sink) both speak points, so a Retina display
+///   reports its logical point size and no scaling happens in between.
+///
+/// Each platform's producer and consumer agree within that platform and pass the
+/// value through verbatim, so nothing needs converting — but a **cross-platform**
+/// caller must not assume pixels, and must not mix these fields with a quantity
+/// known to be physical pixels without scaling. `duja-dimmer`'s `mac_geom` module
+/// documents the macOS side (its "Units" section) and `duja-app`'s `DisplayGeom`
+/// documents the app-side carrier.
 ///
 /// The origin can be negative: a monitor left of, or above, the primary sits at
-/// negative virtual-desktop coordinates. Width and height are unsigned because a
-/// zero-or-negative extent is not a display; a backend sizes an overlay window
-/// directly from these fields.
+/// negative coordinates. Width and height are unsigned because a zero-or-negative
+/// extent is not a display; a backend sizes an overlay window directly from these
+/// fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayBounds {
-    /// Left edge in virtual-desktop pixels (may be negative).
+    /// Left edge in the global display space, in the platform's unit (may be
+    /// negative).
     pub x: i32,
-    /// Top edge in virtual-desktop pixels (may be negative).
+    /// Top edge in the global display space, in the platform's unit (may be
+    /// negative).
     pub y: i32,
-    /// Width in pixels.
+    /// Width, in the same unit as `x`.
     pub width: u32,
-    /// Height in pixels.
+    /// Height, in the same unit as `y`.
     pub height: u32,
 }
 
@@ -67,7 +84,8 @@ impl DisplayBounds {
         }
     }
 
-    /// Whether the bounds enclose at least one pixel.
+    /// Whether the bounds are degenerate — zero width or height, enclosing no
+    /// area — so there is nothing for a backend to cover.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.width == 0 || self.height == 0

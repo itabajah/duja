@@ -8,13 +8,16 @@
 //!   floor below it (fed to the engine via `EngineCommand::SetUserLevel`, which
 //!   scales it onto the probed range);
 //! - **overlay/gamma commands** — one [`DimCommand`] per display that has known
-//!   pixel bounds, carrying the overlay alpha and (opt-in) gamma from the
+//!   bounds (physical pixels on Windows, points on macOS — see
+//!   [`DisplayBounds`]), carrying the overlay alpha and (opt-in) gamma from the
 //!   continuum. The batch is the *full* desired dimmer state: a display at
 //!   alpha 0 is included so [`Dimmer::apply`](duja_core::dimmer::Dimmer::apply)
-//!   removes any stale overlay. A display with no known bounds (a WMI internal
-//!   panel, for which no monitor rect is plumbed) is omitted — it cannot be
-//!   overlaid, a documented limitation; a DDC-fallback internal panel does carry
-//!   bounds and is dimmable.
+//!   removes any stale overlay. A display with no known bounds is omitted — it
+//!   cannot be overlaid, a documented limitation. That is any panel from the OS
+//!   panel backend: a Windows WMI panel (no monitor rect is plumbed) and equally a
+//!   macOS `DisplayServices` panel (no bounds are stamped for it yet, though its
+//!   `CGDirectDisplayID` makes them cheap to obtain — see `docs/debt.md`). A
+//!   Windows DDC-fallback internal panel does carry bounds and is dimmable.
 //!
 //! The module is OS-free and fully unit-tested; the app's notification loop
 //! calls it and hands the batch to the real `Dimmer`.
@@ -57,7 +60,10 @@ pub(crate) struct DimPlan {
 /// Plan the hardware levels and overlay commands for every display.
 ///
 /// `cfg_for` yields the (already HDR-guarded) [`ContinuumConfig`] for a display;
-/// `bounds_for` yields its pixel bounds, or `None` when they are unknown.
+/// `bounds_for` yields its bounds in the platform's unit (physical pixels on
+/// Windows, points on macOS — see [`DisplayBounds`]), or `None` when they are
+/// unknown. The planner is unit-agnostic: it copies the bounds into the
+/// [`DimCommand`] untouched, and the platform dimmer consumes its own unit.
 pub(crate) fn plan(
     displays: &[DisplayInput],
     cfg_for: impl Fn(&DisplayInput) -> ContinuumConfig,
