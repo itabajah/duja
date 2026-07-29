@@ -4,9 +4,16 @@
 //!
 //! `duja-ddc` external monitors map to [`DisplayKind::ExternalDdc`]; internal
 //! panels map to [`DisplayKind::InternalPanel`], whether they come from
-//! `duja-panel` (WMI) or, as a fallback when WMI cannot see the built-in panel,
-//! from `duja-ddc` (a DDC display flagged internal). Names come straight from
-//! each backend.
+//! `duja-panel` — the OS's native panel backend, WMI on Windows and the private
+//! `DisplayServices` framework on macOS — or, as a fallback when that backend
+//! cannot see the built-in panel, from `duja-ddc` (a DDC display flagged
+//! internal). Names come straight from each backend.
+//!
+//! The DDC internal-panel **fallback is Windows-only**. The macOS DDC backend
+//! filters built-in panels out at enumeration (`CGDisplayIsBuiltin`) and its
+//! `DdcDisplay` carries no `is_internal` flag at all, so every macOS DDC entry is
+//! an external monitor and a macOS internal panel can reach the tray only through
+//! `duja-panel`/`DisplayServices` (see `discover_ddc` and `merge_displays`).
 //!
 //! **Capabilities are set statically at enumeration** — brightness-only, with
 //! `hardware_range: true` — rather than probed here. This is the minimal correct
@@ -19,10 +26,13 @@
 //!
 //! # Handle hygiene
 //!
-//! `duja_ddc::enumerate()` hands back live physical-monitor handles inside each
-//! `DdcDisplay`. [`discover`] takes only the metadata and drops each display
-//! immediately (releasing its handle); [`open_controller`] converts exactly the
-//! one matched display into a controller and drops the rest.
+//! `duja_ddc::enumerate()` hands back a live, owned OS handle inside each
+//! `DdcDisplay`: a physical-monitor `HANDLE` on Windows, an I2C service handle
+//! (`IOAVService` on Apple Silicon, `IOI2CInterface` on Intel) on macOS. Both
+//! release it in `Drop`, so the discipline is identical on either platform:
+//! [`discover`] takes only the metadata and drops each display immediately
+//! (releasing its handle); [`open_controller`] converts exactly the one matched
+//! display into a controller — moving that handle into it — and drops the rest.
 //!
 //! # Identical-twin routing
 //!
@@ -33,10 +43,15 @@
 //! [`open_controller`] re-enumerates and, via
 //! [`select_slot_match`](duja_core::id::select_slot_match), selects the **Nth**
 //! bare-id match for a `-slot<n>` request. This is correct only because both
-//! sides walk the *same* deterministic order: `duja_ddc::enumerate()` sorts by
-//! device-interface path and `duja_panel::enumerate()` by WMI instance, and
+//! sides walk the *same* deterministic order: each backend's `enumerate()` fixes
+//! one — `duja_ddc` sorts by device-interface path on Windows and by
+//! `CGDirectDisplayID` on macOS, while `duja_panel` follows WMI instance order on
+//! Windows and `CGGetOnlineDisplayList` order on macOS — and
 //! [`assign_twin_slots`](duja_core::manager::assign_twin_slots) slots in that
-//! same input order — so slot `n` and "the Nth bare match" always coincide.
+//! same input order, so slot `n` and "the Nth bare match" always coincide. (In
+//! practice twin slotting only bites for DDC monitors: a machine has one internal
+//! panel outside exotic dual-panel laptops — see `docs/debt.md` — and macOS
+//! surfaces at most one built-in display.)
 
 use duja_core::controller::BrightnessController;
 use duja_core::dimmer::DisplayBounds;
@@ -62,28 +77,57 @@ pub(crate) fn discover() -> Vec<DiscoveredDisplay> {
     discover_all().0
 }
 
-/// One display's app-side geometry: its bare id, pixel bounds, and GDI device
-/// name (the gamma channel's ramp target). Carried by DDC displays — external
-/// monitors and a DDC-fallback internal panel alike — but not by WMI panels,
-/// whose geometry is `None`.
+/// One display's app-side geometry: its bare id, its display bounds, and its
+/// gamma-target token. Carried by DDC displays — external monitors and a
+/// (Windows-only) DDC-fallback internal panel alike — but not by the panel
+/// backend's panels, whose geometry is `None`.
+///
+/// # Element 2 — bounds, whose **unit differs by platform**
+///
+/// On **Windows** these are virtual-desktop **physical pixels**
+/// (`MONITORINFO::rcMonitor`). On **macOS** they are **points**, not pixels:
+/// `CGDisplayBounds` reports a Retina display's logical point size, and the macOS
+/// overlay/window layer speaks the same points (see `duja_dimmer`'s `mac_geom`
+/// "Units" section). Both are top-left origin, y-down. These bounds feed
+/// `bin_support::dimming`'s planner and the overlay `DimCommand`s, which pass them
+/// through to the platform dimmer verbatim — correct on both platforms precisely
+/// because each side stays in its own unit, so nothing here may assume pixels or
+/// mix a bound with a physical-pixel quantity without scaling first.
+///
+/// # Element 3 — an **opaque, platform-specific gamma-target token**
+///
+/// Whatever the platform's gamma channel needs to address one display, carried as
+/// a `String` so this type stays uniform:
+/// - **Windows**: the GDI device name (e.g. `\\.\DISPLAY1`), which
+///   `duja_dimmer::GammaDisplay::from_device_name` turns into a ramp target.
+/// - **macOS**: the `CGDirectDisplayID` in decimal — the token
+///   `duja_dimmer::GammaDisplay::from_display_id` needs, recovered with a `u32`
+///   `parse`.
+///
+/// So it must never be shown to a user or parsed as a device path: it is a token,
+/// not a name. There is no macOS gamma sink yet (`gamma.rs`'s `GuardSink` is
+/// `cfg(windows)`), so on macOS the token is carried and **not yet consumed**; it
+/// is stamped now so the sink that lands with the macOS tray assembly has it
+/// waiting.
 pub(crate) type DisplayGeom = (String, Option<DisplayBounds>, Option<String>);
 
-/// Enumerate displays **and** their pixel bounds + GDI device names in one pass.
+/// Enumerate displays **and** their bounds + gamma-target tokens in one pass.
 ///
 /// Returns the [`DiscoveredDisplay`] list the engine consumes, plus a parallel
 /// [`DisplayGeom`] list in the *same* deterministic order (DDC first, then
 /// panels). The geometry list feeds an app-side
-/// [`BoundsMap`](crate::bin_support::bounds::BoundsMap); WMI panels contribute
-/// `None` bounds and `None` device, whereas a DDC-fallback internal panel keeps
-/// the DDC geometry (bounds + GDI device) like any DDC display. Never errors.
+/// [`BoundsMap`](crate::bin_support::bounds::BoundsMap); the panel backend's
+/// panels contribute `None` bounds and `None` token, whereas a DDC display —
+/// including a Windows DDC-fallback internal panel — keeps its DDC geometry. See
+/// [`DisplayGeom`] for the per-platform unit and token. Never errors.
 pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<DisplayGeom>) {
     let ddc: Vec<(DiscoveredDisplay, DisplayGeom)> = discover_ddc()
         .into_iter()
-        .map(|(display, display_bounds, gdi_device)| {
+        .map(|(display, display_bounds, gamma_target)| {
             let geom = (
                 display.id.as_str().to_owned(),
                 Some(display_bounds),
-                Some(gdi_device),
+                Some(gamma_target),
             );
             (display, geom)
         })
@@ -101,37 +145,54 @@ pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<DisplayGeom>) {
 
 /// Merge the DDC and panel display lists into the tray's display set, applying
 /// the internal-panel fallback policy. Kept DDC entries retain their enumeration
-/// order and precede the panels; the WMI panels always follow.
+/// order and precede the panels; the panel-backend entries always follow.
 ///
-/// Truth table, per DDC entry (the WMI panels are always kept):
+/// "Panel backend" throughout is `duja-panel`: WMI on Windows, `DisplayServices`
+/// on macOS.
+///
+/// Truth table, per DDC entry (the panel-backend panels are always kept):
 /// - **External DDC display** — always kept; an external monitor is never in the
-///   WMI list, so nothing supersedes it.
-/// - **Internal DDC display, WMI returned ≥ 1 panel** — dropped. WMI is
-///   authoritative for an internal panel it can control, so its
+///   panel-backend list, so nothing supersedes it.
+/// - **Internal DDC display, panel backend returned ≥ 1 panel** — dropped. The
+///   panel backend is authoritative for an internal panel it can control, so its
 ///   [`DisplayKind::InternalPanel`] entry wins and the DDC duplicate is removed.
-///   The signal is "WMI listed *any* panel", not an id match: a serial-less panel
-///   derives DIFFERENT ids from the two backends (`from_edid` hashes the whole
-///   128-byte EDID; WMI's `from_parts` hashes only `"MFG-PROD"`), so id-matching
-///   alone could never dedup it — see
+///   The signal is "the panel backend listed *any* panel", not an id match: on
+///   Windows a serial-less panel derives DIFFERENT ids from the two backends
+///   (`from_edid` hashes the whole 128-byte EDID; WMI's `from_parts` hashes only
+///   `"MFG-PROD"`), so id-matching alone could never dedup it — see
 ///   `merge_drops_internal_ddc_duplicate_when_wmi_has_the_panel_serial_less`.
-/// - **Internal DDC display, WMI returned 0 panels** — KEPT, as the
+/// - **Internal DDC display, panel backend returned 0 panels** — KEPT, as the
 ///   [`DisplayKind::InternalPanel`] fallback. This is the fix: on a laptop whose
 ///   backlight is GPU/OEM-driven, WMI cannot see the panel and the DDC path is
 ///   its only carrier, so dropping it here would leave the built-in screen in
 ///   neither list, vanished (see `internal_panel_survives_when_wmi_is_empty`).
+///
+/// # On macOS the dedup is inert
+///
+/// The two backends cannot overlap there: the macOS DDC backend drops built-in
+/// panels at enumeration (`CGDisplayIsBuiltin`), so `discover_ddc` labels every
+/// macOS DDC entry [`DisplayKind::ExternalDdc`] and no internal DDC entry ever
+/// exists to drop — nor is there any DDC fallback carrier, so a macOS internal
+/// panel comes from `DisplayServices` or not at all. The policy below is
+/// byte-for-byte the same on both platforms; on macOS it simply never fires, and
+/// the truth table's second and third rows describe Windows alone.
 fn merge_displays(
     ddc: Vec<(DiscoveredDisplay, DisplayGeom)>,
     panel: Vec<(DiscoveredDisplay, DisplayGeom)>,
 ) -> Vec<(DiscoveredDisplay, DisplayGeom)> {
-    // WMI is authoritative for any internal panel it can see, so an internal DDC
-    // fallback survives only when WMI listed no panel at all. External DDC entries
-    // are always kept (an external is never in the WMI list). The dedup signal is
-    // "WMI listed any panel", NOT an id match, because a serial-less panel derives
-    // divergent ids across the two backends — see the truth table above.
-    let wmi_has_panel = !panel.is_empty();
+    // The panel backend is authoritative for any internal panel it can see, so an
+    // internal DDC fallback survives only when that backend listed no panel at all.
+    // External DDC entries are always kept (an external is never in the panel list).
+    // The dedup signal is "the panel backend listed any panel", NOT an id match,
+    // because on Windows a serial-less panel derives divergent ids across the two
+    // backends — see the truth table above. On macOS nothing here fires: no DDC
+    // entry is ever `InternalPanel`.
+    let panel_backend_has_panel = !panel.is_empty();
     let mut out: Vec<(DiscoveredDisplay, DisplayGeom)> = ddc
         .into_iter()
-        .filter(|(display, _)| display.kind != DisplayKind::InternalPanel || !wmi_has_panel)
+        .filter(|(display, _)| {
+            display.kind != DisplayKind::InternalPanel || !panel_backend_has_panel
+        })
         .collect();
     out.extend(panel);
     out
@@ -166,11 +227,52 @@ fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
+    // Same shape as the Windows arm — metadata, bounds and the gamma-target token,
+    // with each `DdcDisplay` dropped at the end of the closure so its I2C service
+    // handle is released promptly — with two platform differences:
+    //
+    // 1. The kind is ALWAYS `ExternalDdc`. The macOS DDC backend filters built-in
+    //    panels out at enumeration (`CGDisplayIsBuiltin`) and its `DdcDisplay` has
+    //    no `is_internal` flag, so unlike Windows there is no internal-DDC fallback
+    //    carrier to classify. The consequence is deliberate and worth stating: a
+    //    macOS internal panel can only come from `duja-panel`/`DisplayServices`; if
+    //    that framework cannot control it, Duja cannot either, and no DDC entry
+    //    will stand in for it.
+    // 2. The gamma-target token is the `CGDirectDisplayID` in decimal (Windows uses
+    //    the GDI device name). See `DisplayGeom`. `bounds` are points here, not
+    //    physical pixels — also `DisplayGeom`.
+    match duja_ddc::enumerate() {
+        Ok(displays) => displays
+            .into_iter()
+            .map(|d| {
+                let display = DiscoveredDisplay {
+                    id: d.id.clone(),
+                    kind: DisplayKind::ExternalDdc,
+                    name: d.name.clone(),
+                    capabilities: hardware_brightness_caps(),
+                };
+                (display, d.bounds, d.cg_display_id.to_string())
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// No DDC backend on this target: `duja-ddc` exposes `enumerate` only on Windows
+/// and macOS, so there is nothing to enumerate (Linux lands in P7).
+#[cfg(not(any(windows, target_os = "macos")))]
 fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
     Vec::new()
 }
 
+/// Enumerate the OS panel backend's internal panels as [`DiscoveredDisplay`]
+/// metadata. Not cfg-gated: `duja_panel::enumerate` exists on every target (it
+/// returns an empty list where there is no backend), so this reports real panels
+/// on Windows *and* macOS. `open_panel_controller` must therefore be able to open
+/// them on both — a table row stamped `hardware_range: true` that no opener can
+/// serve would claim control Duja does not have.
 fn discover_panel() -> Vec<DiscoveredDisplay> {
     match duja_panel::enumerate() {
         Ok(panels) => panels
@@ -192,20 +294,29 @@ fn discover_panel() -> Vec<DiscoveredDisplay> {
 /// This is the shape the engine's `ControllerFactory` needs: it re-enumerates
 /// on every call so a hot-plugged display always gets a freshly-opened handle.
 ///
-/// **WMI is tried before DDC.** A WMI-controllable internal panel must be driven
-/// by native WMI backlight, not DDC-over-eDP; and now that `duja_ddc::enumerate`
-/// also surfaces internal panels, a DDC-first order could wrongly open a DDC
-/// handle for a WMI-owned panel. An external monitor is never in the WMI list
-/// (WMI lists only `WmiMonitorBrightness` internal panels), so `open_panel`
-/// returns `None` for it and it falls through to `open_ddc`. A fallback internal
-/// panel that WMI cannot see likewise falls through to `open_ddc`, which
-/// re-matches it by id; the engine's verify-first write then routes it to real
-/// hardware (if DDC-over-eDP answers) or a software-only overlay (if not).
+/// **The panel backend is tried before DDC** — WMI on Windows, `DisplayServices`
+/// on macOS. A panel the native backlight API can control must be driven through
+/// it, not over DDC-on-eDP; and because `duja_ddc::enumerate` also surfaces
+/// internal panels on Windows, a DDC-first order could wrongly open a DDC handle
+/// for a WMI-owned panel. An external monitor is never in the panel list (WMI
+/// lists only `WmiMonitorBrightness` internal panels; `DisplayServices` only
+/// built-in ones), so `open_panel` returns `None` for it and it falls through to
+/// `open_ddc`. A fallback internal panel that WMI cannot see likewise falls
+/// through to `open_ddc`, which re-matches it by id; the engine's verify-first
+/// write then routes it to real hardware (if DDC-over-eDP answers) or a
+/// software-only overlay (if not). That fallback case is Windows-only — on macOS
+/// the lists cannot overlap (see [`merge_displays`]), so the order there just
+/// means "built-in panel first, external monitors second".
 pub(crate) fn open_controller(id: &StableDisplayId) -> Option<Box<dyn BrightnessController>> {
     open_panel(id).or_else(|| open_ddc(id))
 }
 
-#[cfg(windows)]
+/// Open the DDC display matching `id`. One definition for both DDC platforms: the
+/// `duja-ddc` surface (`enumerate` → `DdcDisplay { id, .. }` → `into_controller`)
+/// and its handle-release-on-drop discipline are identical on Windows and macOS,
+/// and both controllers implement `BrightnessController`, so this body is shared
+/// rather than copied per platform.
+#[cfg(any(windows, target_os = "macos"))]
 fn open_ddc(id: &StableDisplayId) -> Option<Box<dyn BrightnessController>> {
     let displays = duja_ddc::enumerate().ok()?;
     let candidates: Vec<&str> = displays.iter().map(|d| d.id.as_str()).collect();
@@ -216,7 +327,8 @@ fn open_ddc(id: &StableDisplayId) -> Option<Box<dyn BrightnessController>> {
     Some(Box::new(matched.into_controller()))
 }
 
-#[cfg(not(windows))]
+/// No DDC backend on this target, so nothing can be opened (Linux lands in P7).
+#[cfg(not(any(windows, target_os = "macos")))]
 fn open_ddc(_id: &StableDisplayId) -> Option<Box<dyn BrightnessController>> {
     None
 }
@@ -229,7 +341,12 @@ fn open_panel(id: &StableDisplayId) -> Option<Box<dyn BrightnessController>> {
     open_panel_controller(&matched)
 }
 
-#[cfg(windows)]
+/// Open a controller for one enumerated panel. One definition for both panel
+/// platforms: `PanelDisplay::open` exists on Windows and macOS with the same
+/// signature shape (`Result<PanelController<_>, PanelError>`), and
+/// `PanelController` is generic over its transport, so the WMI and
+/// `DisplayServices` controllers box identically.
+#[cfg(any(windows, target_os = "macos"))]
 fn open_panel_controller(
     panel: &duja_panel::PanelDisplay,
 ) -> Option<Box<dyn BrightnessController>> {
@@ -239,7 +356,9 @@ fn open_panel_controller(
         .map(|c| Box::new(c) as Box<dyn BrightnessController>)
 }
 
-#[cfg(not(windows))]
+/// No panel backend on this target: `duja-panel` enumerates nothing there, so
+/// this is unreachable in practice (Linux lands in P7).
+#[cfg(not(any(windows, target_os = "macos")))]
 fn open_panel_controller(
     _panel: &duja_panel::PanelDisplay,
 ) -> Option<Box<dyn BrightnessController>> {

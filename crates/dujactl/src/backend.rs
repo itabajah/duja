@@ -3,8 +3,23 @@
 //! `dujactl` this phase talks straight to `duja-ddc` and `duja-panel`: it
 //! enumerates, opens a controller for a display on demand, and does one paced
 //! read/write. Handle hygiene mirrors the app's: [`discover`] keeps only
-//! metadata (dropping each backend display immediately), and [`open`] converts
-//! exactly the matched display.
+//! metadata (dropping each backend display immediately — releasing its
+//! physical-monitor handle on Windows, its I2C service handle on macOS), and
+//! [`open`] converts exactly the matched display.
+//!
+//! # Deliberate duplication
+//!
+//! This mapping is a knowing copy of `duja-app`'s `bin_support::backend`, not a
+//! shared crate. `dujactl` is a ~0.8 MB companion binary that deliberately does
+//! **not** depend on `duja-app`, and the two mappings are not the same function:
+//! the app produces `DiscoveredDisplay` + geometry (bounds and a gamma-target
+//! token) for the engine and the dimmer, while this one produces the three fields
+//! [`CtlDisplay`] prints. Hoisting them would couple the CLI to the tray app's
+//! surface to save a dozen lines. Keep them in step by hand.
+//!
+//! Both DDC platforms — Windows and macOS — are wired: `duja-ddc` and
+//! `duja-panel` expose the same `enumerate`/open surface on each, so one
+//! definition serves both and only a target with no backend at all gets a stub.
 
 use duja_core::controller::BrightnessController;
 use duja_core::id::StableDisplayId;
@@ -53,7 +68,18 @@ pub fn panel_count() -> usize {
     discover_panel().len()
 }
 
-#[cfg(windows)]
+/// Map the DDC backend's displays onto [`CtlDisplay`]. One definition for both
+/// DDC platforms: this reads only `id` and `name`, which the Windows and macOS
+/// `DdcDisplay` share, so nothing here needs adapting per platform (the app's
+/// mapping does, because it also reads bounds and the platform gamma token).
+///
+/// On macOS [`DisplayKind::ExternalDdc`] is exactly right: that backend filters
+/// built-in panels out at enumeration (`CGDisplayIsBuiltin`), so every entry it
+/// yields *is* an external monitor. On **Windows** the same label is also applied
+/// to a DDC-fallback *internal* panel, which the app's mapping classifies
+/// `InternalPanel` instead — a pre-existing divergence deliberately left alone by
+/// the macOS wiring (as is [`open`]'s DDC-first order); both get their own fix.
+#[cfg(any(windows, target_os = "macos"))]
 fn discover_ddc() -> Vec<CtlDisplay> {
     match duja_ddc::enumerate() {
         Ok(displays) => displays
@@ -68,7 +94,9 @@ fn discover_ddc() -> Vec<CtlDisplay> {
     }
 }
 
-#[cfg(not(windows))]
+/// No DDC backend on this target: `duja-ddc` exposes `enumerate` only on Windows
+/// and macOS (Linux lands in P7).
+#[cfg(not(any(windows, target_os = "macos")))]
 fn discover_ddc() -> Vec<CtlDisplay> {
     Vec::new()
 }
@@ -93,7 +121,10 @@ pub fn open(id: &str) -> Option<Box<dyn BrightnessController>> {
     open_ddc(id).or_else(|| open_panel(id))
 }
 
-#[cfg(windows)]
+/// Open the DDC display matching `id`. Shared by both DDC platforms: the
+/// `enumerate` → `into_controller` surface and the drop-releases-the-handle
+/// discipline are identical on Windows and macOS.
+#[cfg(any(windows, target_os = "macos"))]
 fn open_ddc(id: &str) -> Option<Box<dyn BrightnessController>> {
     let displays = duja_ddc::enumerate().ok()?;
     let candidates: Vec<&str> = displays.iter().map(|d| d.id.as_str()).collect();
@@ -102,7 +133,8 @@ fn open_ddc(id: &str) -> Option<Box<dyn BrightnessController>> {
     Some(Box::new(matched.into_controller()))
 }
 
-#[cfg(not(windows))]
+/// No DDC backend on this target, so nothing can be opened (Linux lands in P7).
+#[cfg(not(any(windows, target_os = "macos")))]
 fn open_ddc(_id: &str) -> Option<Box<dyn BrightnessController>> {
     None
 }
@@ -115,7 +147,11 @@ fn open_panel(id: &str) -> Option<Box<dyn BrightnessController>> {
     open_panel_controller(&matched)
 }
 
-#[cfg(windows)]
+/// Open a controller for one enumerated panel. Shared by both panel platforms:
+/// `PanelDisplay::open` exists on Windows (WMI) and macOS (`DisplayServices`) with
+/// the same signature shape, and `PanelController` is generic over its transport,
+/// so both box identically.
+#[cfg(any(windows, target_os = "macos"))]
 fn open_panel_controller(
     panel: &duja_panel::PanelDisplay,
 ) -> Option<Box<dyn BrightnessController>> {
@@ -125,7 +161,9 @@ fn open_panel_controller(
         .map(|c| Box::new(c) as Box<dyn BrightnessController>)
 }
 
-#[cfg(not(windows))]
+/// No panel backend on this target: `duja-panel` enumerates nothing there, so
+/// this is unreachable in practice (Linux lands in P7).
+#[cfg(not(any(windows, target_os = "macos")))]
 fn open_panel_controller(
     _panel: &duja_panel::PanelDisplay,
 ) -> Option<Box<dyn BrightnessController>> {

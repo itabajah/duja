@@ -1,5 +1,13 @@
-//! An app-side map from a **resolved** display id to its pixel bounds and GDI
-//! device name.
+//! An app-side map from a **resolved** display id to its display bounds and
+//! gamma-target token.
+//!
+//! Both are platform-specific and this map is deliberately blind to which
+//! platform it holds: the bounds are physical pixels on Windows and points on
+//! macOS, and the token is a GDI device name on Windows and a decimal
+//! `CGDirectDisplayID` on macOS. The names below say "GDI device" because the only
+//! consumer today is the Windows gamma sink; see
+//! [`DisplayGeom`](crate::bin_support::backend::DisplayGeom), which defines both
+//! elements, before adding a second one.
 //!
 //! `duja-core`'s `DiscoveredDisplay` is frozen and carries no bounds, so the app
 //! keeps them here, refreshed on every enumeration. Entries are stored in the
@@ -44,8 +52,9 @@ impl BoundsMap {
         self.entries.get(idx).and_then(|(_, bounds, _)| *bounds)
     }
 
-    /// The GDI device name (e.g. `\\.\DISPLAY1`) for a resolved display id — the
-    /// gamma channel's ramp target — or `None` if unknown / panel.
+    /// The gamma-target token for a resolved display id — the GDI device name
+    /// (e.g. `\\.\DISPLAY1`) on Windows, a decimal `CGDirectDisplayID` on macOS —
+    /// or `None` if unknown / panel.
     pub(crate) fn device_for(&self, resolved: &StableDisplayId) -> Option<String> {
         let idx = self.index_of(resolved)?;
         self.entries
