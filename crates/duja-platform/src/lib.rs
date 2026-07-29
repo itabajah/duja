@@ -40,6 +40,13 @@ mod mac;
 #[cfg(any(test, target_os = "macos"))]
 mod mac_events;
 
+// Pure Cocoa → tray-anchor geometry (the y-flip, the clamps, the screen choice)
+// for the macOS `geometry` backend. Same shape and same reason as `mac_events`:
+// compiled on macOS, where `geometry::platform` calls it, and under `cfg(test)`
+// on every host so the conversion arithmetic is tested without a Mac.
+#[cfg(any(test, target_os = "macos"))]
+mod mac_geometry;
+
 pub mod autostart;
 pub mod geometry;
 mod installer_guard;
@@ -47,7 +54,7 @@ pub mod ipc;
 mod single_instance;
 
 pub use autostart::{Autostart, AutostartError};
-pub use geometry::{TrayAnchor, WorkRect, cursor_anchor};
+pub use geometry::{AnchorUnit, TrayAnchor, WorkRect, cursor_anchor};
 pub use installer_guard::InstallerGuard;
 pub use ipc::{IpcTransportError, PipeClient, PipeServer};
 pub use single_instance::SingleInstance;

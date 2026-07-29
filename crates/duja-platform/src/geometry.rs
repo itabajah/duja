@@ -13,10 +13,12 @@
 //!
 //! - **Y axis, normalized.** Win32 is y-down and Cocoa is y-up, so an un-flipped
 //!   anchor mirrors the flyout to the opposite screen edge. This crate is not the
-//!   first to hit that: `duja-dimmer`'s `mac_geom` already flips overlay frames,
-//!   and its `cocoa_overlay_frame` is the helper a macOS backend here should
-//!   reuse rather than re-derive. Note it needs a *reference height* (the primary
-//!   display's) to flip against — the flip is not a local operation.
+//!   first to hit that: `duja-dimmer`'s `mac_geom` already flips overlay frames
+//!   with `cocoa_overlay_frame`, and the `mac_geometry` module here carries the
+//!   *inverse* flip (Cocoa y-up → this crate's y-down). The two must agree; they
+//!   are separate helpers only because `duja-platform` may not depend on
+//!   `duja-dimmer`. Note the flip needs a *reference height* (the primary
+//!   display's) to flip against — it is not a local operation.
 //! - **Unit, not normalized.** macOS has no coherent global physical-pixel
 //!   space: the global space is in points and each `NSScreen` carries its own
 //!   `backingScaleFactor`, so multiplying global point coordinates by any single
@@ -33,16 +35,31 @@
 //! knows the native convention, in the same spirit as
 //! [`PlatformEvent`](crate::PlatformEvent) normalizing OS notifications.
 //!
-//! ## Open question for the macOS backend
+//! ## Which unit, and the two conversion factors
 //!
-//! The consumer converts a *logical* window size into anchor units by
-//! multiplying by [`TrayAnchor::scale`] (`positioning::physical_window_size` in
-//! `duja-app`). That is right on Windows, where anchor units are physical
-//! pixels. On macOS anchor units are already points — i.e. already logical — so
-//! that multiplication would double-scale on a Retina display. Resolving it
-//! (drop the multiply on macOS, or carry an explicit logical-to-anchor factor
-//! that is `scale` on Windows and `1.0` on macOS) belongs with the backend that
-//! makes it real, on hardware that can show whether it worked.
+//! Because the unit is not normalized, a consumer cannot know it from the type
+//! alone — so the anchor names it. [`AnchorUnit`] says which space the
+//! coordinates are in, and two derived factors say what to multiply by rather
+//! than making the caller branch on the variant:
+//!
+//! - [`TrayAnchor::logical_to_anchor`] — logical (design-unit) window size →
+//!   anchor units. `scale` on Windows, `1.0` on macOS (points *are* logical).
+//! - [`TrayAnchor::anchor_to_physical`] — an anchor-space coordinate → the
+//!   physical pixels `slint::PhysicalPosition`/winit want. `1.0` on Windows,
+//!   `scale` on macOS.
+//!
+//! Their product is always the (sanitised) `scale`: logical→winit-physical is
+//! `×scale` on every platform, and the two factors are only *where* that single
+//! multiplication is split. That is the invariant the unit tests pin, and it is
+//! what closes the question [ADR-0021] records: multiplying a logical size by
+//! `scale` (as the consumer did before this contract existed) is right on
+//! Windows and double-scales on a Retina Mac, where anchor units are already
+//! logical.
+//!
+//! Nothing outside this crate should read [`TrayAnchor::scale`] for placement
+//! arithmetic; it is the monitor's DPI/backing scale, not a conversion factor.
+//!
+//! [ADR-0021]: https://github.com/itabajah/duja/blob/main/docs/adr/0021-tray-anchor-coordinate-contract.md
 //!
 //! # Never fails
 //!
@@ -68,6 +85,33 @@ pub struct WorkRect {
     pub h: u32,
 }
 
+/// The unit a [`TrayAnchor`]'s coordinates are expressed in.
+///
+/// The orientation of the anchor space is normalized by every backend (top-left
+/// origin, y-down); the unit deliberately is not, for the reason the [module
+/// docs](self) give. This enum is how a consumer learns which one it got —
+/// though it should normally use [`TrayAnchor::logical_to_anchor`] and
+/// [`TrayAnchor::anchor_to_physical`] instead of matching on the variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorUnit {
+    /// Physical device pixels, as Win32 reports them to a Per-Monitor-V2
+    /// process: monitor rects, the cursor position, and `SetWindowPos` all speak
+    /// this one space, so no conversion happens anywhere on the path.
+    ///
+    /// Produced by the Windows backend. Also used by the no-backend placeholder,
+    /// where the scale is a flat 1.0, so both conversion factors are 1.0 and the
+    /// distinction cannot matter.
+    PhysicalPixels,
+    /// Points: macOS's backing-independent unit, and the one every
+    /// window-positioning API there takes.
+    ///
+    /// Produced by the macOS backend. Points are already *logical*, so a Retina
+    /// display's `backingScaleFactor` never enters the placement arithmetic —
+    /// but it does enter the final hand-off, because Slint/winit want physical
+    /// pixels (see [`TrayAnchor::anchor_to_physical`]).
+    Points,
+}
+
 /// Where to hang a tray flyout: the cursor, the work area of the monitor under
 /// it, and that monitor's scale.
 ///
@@ -87,7 +131,67 @@ pub struct TrayAnchor {
     /// and placed before it is ever shown — a one-shot present with no post-show
     /// resize, which is what stops a software renderer presenting a partial
     /// first frame.
+    ///
+    /// **This is not a conversion factor.** It is the monitor's DPI/backing
+    /// scale, and *which* conversion it participates in depends on [`unit`]:
+    /// nothing outside this crate should multiply by it for placement. Use
+    /// [`logical_to_anchor`] and [`anchor_to_physical`] instead — reading
+    /// `scale` directly is exactly the mistake that would double-scale a Retina
+    /// Mac.
+    ///
+    /// [`unit`]: Self::unit
+    /// [`logical_to_anchor`]: Self::logical_to_anchor
+    /// [`anchor_to_physical`]: Self::anchor_to_physical
     pub scale: f32,
+    /// Which unit [`cursor`](Self::cursor) and [`work_area`](Self::work_area)
+    /// are in — set by the backend that produced them.
+    pub unit: AnchorUnit,
+}
+
+impl TrayAnchor {
+    /// Multiply a *logical* (design-unit) window size by this to get anchor
+    /// units, i.e. the space [`cursor`](Self::cursor) and
+    /// [`work_area`](Self::work_area) live in.
+    ///
+    /// [`AnchorUnit::PhysicalPixels`] ⇒ the (sanitised) [`scale`](Self::scale),
+    /// because a logical size must grow to physical pixels before it can be
+    /// clamped against a physical work area. [`AnchorUnit::Points`] ⇒ `1.0`,
+    /// because points already *are* logical units.
+    ///
+    /// See [`anchor_to_physical`](Self::anchor_to_physical) for the invariant the
+    /// two factors satisfy together.
+    #[must_use]
+    pub fn logical_to_anchor(&self) -> f32 {
+        match self.unit {
+            AnchorUnit::PhysicalPixels => sane_scale(self.scale),
+            AnchorUnit::Points => 1.0,
+        }
+    }
+
+    /// Multiply an anchor-space coordinate by this to get the physical pixels
+    /// `slint::PhysicalPosition` (and winit's `set_outer_position` beneath it)
+    /// expect.
+    ///
+    /// [`AnchorUnit::PhysicalPixels`] ⇒ `1.0`: the anchor is already in that
+    /// space. [`AnchorUnit::Points`] ⇒ the (sanitised) [`scale`](Self::scale),
+    /// because winit converts a physical position back to points by *dividing*
+    /// by the window's scale factor, so a caller with points in hand has to
+    /// pre-multiply for the round trip to be the identity.
+    ///
+    /// # Invariant
+    ///
+    /// `logical_to_anchor() * anchor_to_physical()` equals the sanitised
+    /// [`scale`](Self::scale) on **every** variant: logical → winit-physical is
+    /// `×scale` everywhere, and the two factors only say where that single
+    /// multiplication is split. A backend that gets the split wrong is caught by
+    /// the unit test that asserts this.
+    #[must_use]
+    pub fn anchor_to_physical(&self) -> f32 {
+        match self.unit {
+            AnchorUnit::PhysicalPixels => 1.0,
+            AnchorUnit::Points => sane_scale(self.scale),
+        }
+    }
 }
 
 /// The fallback work area when the OS cannot tell us: a 1080p desktop with a
@@ -113,14 +217,12 @@ const DEFAULT_WORK: WorkRect = WorkRect {
 /// of showing it. A backend whose source can produce garbage at the top end
 /// (a detached or zero-size `NSScreen`, say) must guard that itself.
 ///
-/// Shared by every backend that queries a real scale. Today that is Windows
-/// only, so it has no caller on other targets — but it stays cross-platform, and
-/// unit-tested on every CI OS, because the next backend to land needs exactly
-/// this guard and should not re-derive it.
-// RATIONALE (dead_code): no non-Windows backend queries a scale yet; the helper
-// and its tests stay cross-platform so the macOS implementation inherits both.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn sane_scale(scale: f32) -> f32 {
+/// Shared by every backend that queries a real scale (Windows' effective DPI,
+/// macOS' `backingScaleFactor`) **and** by the two conversion factors on
+/// [`TrayAnchor`], which is why it now has a live caller on every target and no
+/// longer carries a dead-code allow: a degenerate scale must be neutralised
+/// once, at the single place both factors read it.
+pub(crate) fn sane_scale(scale: f32) -> f32 {
     if scale.is_finite() && scale >= 0.1 {
         scale
     } else {
@@ -139,10 +241,11 @@ mod platform {
     use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
-    use super::{DEFAULT_WORK, TrayAnchor, WorkRect, sane_scale};
+    use super::{AnchorUnit, DEFAULT_WORK, TrayAnchor, WorkRect, sane_scale};
 
     /// Windows needs no coordinate conversion: a Per-Monitor-V2 process already
-    /// receives physical, y-down, virtual-desktop coordinates.
+    /// receives physical, y-down, virtual-desktop coordinates — which is exactly
+    /// [`AnchorUnit::PhysicalPixels`].
     pub(super) fn cursor_anchor() -> TrayAnchor {
         let cursor = cursor_pos();
         let point = POINT {
@@ -175,6 +278,7 @@ mod platform {
             cursor,
             work_area,
             scale: monitor_scale(monitor),
+            unit: AnchorUnit::PhysicalPixels,
         }
     }
 
@@ -303,11 +407,113 @@ mod platform {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 mod platform {
-    use super::{DEFAULT_WORK, TrayAnchor};
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSEvent, NSScreen};
+    use objc2_foundation::{NSPoint, NSRect};
 
-    /// No screen-geometry backend on this platform yet.
+    use super::{AnchorUnit, DEFAULT_WORK, TrayAnchor};
+    use crate::mac_geometry::{CocoaPoint, CocoaRect, CocoaScreen, anchor_from_screens};
+
+    /// The anchor used when the `AppKit` query cannot run at all — see
+    /// [`cursor_anchor`] for when that is.
+    ///
+    /// [`AnchorUnit::Points`] with a 1.0 scale, so both conversion factors are
+    /// 1.0 and the fallback behaves identically to the Windows one.
+    const FALLBACK: TrayAnchor = TrayAnchor {
+        cursor: (0, 0),
+        work_area: DEFAULT_WORK,
+        scale: 1.0,
+        unit: AnchorUnit::Points,
+    };
+
+    /// The macOS anchor: `NSEvent`'s global mouse location and the `NSScreen`
+    /// under it, converted from Cocoa's bottom-left/y-up points into this
+    /// module's top-left/y-down points.
+    ///
+    /// Falls back to [`FALLBACK`] when the query cannot run — either because
+    /// there is no [`MainThreadMarker`] (`NSScreen` is a main-thread-only API) or
+    /// because `AppKit` reports no screens at all. Both are **guards, not the
+    /// normal path**: every call site is a tray/flyout action dispatched on the
+    /// Slint main thread, which is the process's real main thread, so the marker
+    /// is available. Guarding rather than asserting is what keeps
+    /// [`cursor_anchor`](super::cursor_anchor)'s "never fails" contract true if a
+    /// future caller reaches it from a worker.
+    pub(super) fn cursor_anchor() -> TrayAnchor {
+        query_anchor().unwrap_or(FALLBACK)
+    }
+
+    /// Collect the live `AppKit` geometry and hand it to the pure conversion.
+    ///
+    /// The FFI here is deliberately dumb — read the cursor, read every screen's
+    /// `frame`/`visibleFrame`/`backingScaleFactor`, copy them into plain `f64`
+    /// structs — so that every decision (which screen, how to flip y, how to
+    /// clamp a degenerate value) lives in `mac_geometry`, where it is unit-tested
+    /// on every CI host including the ones with no Mac.
+    fn query_anchor() -> Option<TrayAnchor> {
+        let mtm = MainThreadMarker::new()?;
+        // `visibleFrame` is *already* the work area: `AppKit` subtracts the menu
+        // bar and the Dock from it, so no shell-furniture arithmetic is needed
+        // here (unlike Win32, which reports `rcMonitor` and `rcWork` separately).
+        let screens = NSScreen::screens(mtm);
+        let count = screens.count();
+        let mut collected: Vec<CocoaScreen> = Vec::with_capacity(count);
+        for index in 0..count {
+            let screen = screens.objectAtIndex(index);
+            collected.push(CocoaScreen {
+                frame: rect_from(screen.frame()),
+                visible_frame: rect_from(screen.visibleFrame()),
+                backing_scale: screen.backingScaleFactor(),
+            });
+        }
+        // The flip's reference height is the *first* screen's — not the largest,
+        // and not the one under the cursor. Cocoa's global coordinate origin is
+        // the bottom-left corner of the screen carrying the menu bar, and that is
+        // index 0 of `NSScreen::screens` (the screen whose `frame.origin` is
+        // `(0, 0)`); `NSScreen::mainScreen` is a different thing — it follows the
+        // *key window*, so it moves as the user clicks around and is the wrong
+        // reference. Using any other screen's height offsets every flipped
+        // coordinate by the difference of the two heights, which is what
+        // `mac_geometry`'s `the_flip_reference_is_the_first_screens_height_not_the_cursors`
+        // pins.
+        anchor_from_screens(point_from(NSEvent::mouseLocation()), &collected)
+    }
+
+    /// Copy an `NSPoint` into the pure Cocoa point type.
+    ///
+    /// The fields move across unconverted because `CGFloat` is `f64` on every
+    /// 64-bit Apple target, which is every target Duja builds for (aarch64 and
+    /// `x86_64` macOS). Were it ever `f32`, these would stop compiling rather than
+    /// silently narrow.
+    fn point_from(point: NSPoint) -> CocoaPoint {
+        CocoaPoint {
+            x: point.x,
+            y: point.y,
+        }
+    }
+
+    /// Copy an `NSRect` into the pure Cocoa rect type (still y-up).
+    fn rect_from(rect: NSRect) -> CocoaRect {
+        CocoaRect {
+            x: rect.origin.x,
+            y: rect.origin.y,
+            w: rect.size.width,
+            h: rect.size.height,
+        }
+    }
+
+    // No unit tests here, deliberately: every line above is either an `AppKit`
+    // call or a field-for-field copy of one, and neither can be exercised without
+    // a Mac with a window server. The arithmetic they feed is tested in
+    // `mac_geometry`; a test here could only assert that a struct copy copies.
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+mod platform {
+    use super::{AnchorUnit, DEFAULT_WORK, TrayAnchor};
+
+    /// No screen-geometry backend on this platform yet (Linux, P7).
     ///
     /// **This is a placeholder, not a supported configuration**, and it is
     /// documented as such rather than presented as a query that succeeded. It
@@ -315,23 +521,19 @@ mod platform {
     /// caller gets a usable anchor and a flyout lands *somewhere* plausible
     /// instead of not at all.
     ///
-    /// The macOS implementation belongs with the app assembly that consumes it
-    /// (P6 wave 2): `NSEvent.mouseLocation` for the cursor,
-    /// `NSScreen.visibleFrame` for the work area (which is already the work area
-    /// — it excludes the menu bar and Dock), and `backingScaleFactor` for the
-    /// scale. All three need converting into this module's coordinate space:
-    /// multiply points by the backing scale, and flip y from Cocoa's y-up origin
-    /// to the y-down virtual-desktop space. Writing that before there is a tray
-    /// to place would put an unverifiable conversion in the tree with no consumer
-    /// to exercise it.
+    /// The Linux backend (P7) has to answer the same two questions the Windows
+    /// and macOS ones did: which unit its window-positioning API takes (which
+    /// picks the [`AnchorUnit`]), and whether its y axis needs flipping. It is
+    /// declared [`AnchorUnit::PhysicalPixels`] here purely because the scale is a
+    /// flat 1.0, so both conversion factors are 1.0 and the choice cannot affect
+    /// anything until a real backend replaces it.
     pub(super) fn cursor_anchor() -> TrayAnchor {
         // A placeholder that returns a plausible-looking anchor is indisting-
-        // uishable from a working backend: cursor (0, 0) on a Mac is the top-left
-        // corner, right where a menu-bar flyout belongs, so a missing
-        // implementation would read as "placed slightly oddly" rather than "not
-        // implemented". Fail loudly in debug builds so the first person to run
-        // the macOS app finds out immediately; release builds still degrade to a
-        // usable anchor rather than panicking at the user.
+        // uishable from a working backend, so a missing implementation would read
+        // as "placed slightly oddly" rather than "not implemented". Fail loudly
+        // in debug builds so the first person to run it finds out immediately;
+        // release builds still degrade to a usable anchor rather than panicking
+        // at the user.
         debug_assert!(
             false,
             "duja-platform: no screen-geometry backend on this target; \
@@ -341,6 +543,7 @@ mod platform {
             cursor: (0, 0),
             work_area: DEFAULT_WORK,
             scale: 1.0,
+            unit: AnchorUnit::PhysicalPixels,
         }
     }
 }
@@ -358,7 +561,79 @@ pub fn cursor_anchor() -> TrayAnchor {
 mod tests {
     #[cfg(windows)]
     use super::cursor_anchor;
-    use super::{DEFAULT_WORK, sane_scale};
+    use super::{AnchorUnit, DEFAULT_WORK, TrayAnchor, WorkRect, sane_scale};
+
+    /// An anchor with the given unit and scale; the coordinates are irrelevant to
+    /// the conversion factors, which read only those two fields.
+    fn anchor(unit: AnchorUnit, scale: f32) -> TrayAnchor {
+        TrayAnchor {
+            cursor: (0, 0),
+            work_area: WorkRect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1040,
+            },
+            scale,
+            unit,
+        }
+    }
+
+    fn approx(got: f32, want: f32) {
+        assert!((got - want).abs() < 1e-6, "expected ~{want}, got {got}");
+    }
+
+    #[test]
+    fn physical_pixel_anchors_scale_the_logical_size_and_pass_the_position_through() {
+        // Windows: the anchor space *is* physical pixels, so a logical window
+        // size must grow into it and the resulting position needs no further
+        // conversion. Swapping the two factors would shrink the window's
+        // clamp box to logical size and then blow the position up by the scale —
+        // the flyout would land far off-screen on a 200 % display.
+        let a = anchor(AnchorUnit::PhysicalPixels, 2.0);
+        approx(a.logical_to_anchor(), 2.0);
+        approx(a.anchor_to_physical(), 1.0);
+    }
+
+    #[test]
+    fn point_anchors_leave_the_logical_size_alone_and_scale_the_position() {
+        // macOS: points are already logical, so the size passes through and only
+        // the final hand-off to `slint::PhysicalPosition` multiplies. This is the
+        // half that the pre-contract `logical × scale` got wrong.
+        let a = anchor(AnchorUnit::Points, 2.0);
+        approx(a.logical_to_anchor(), 1.0);
+        approx(a.anchor_to_physical(), 2.0);
+    }
+
+    #[test]
+    fn the_two_factors_always_multiply_to_the_sane_scale() {
+        // The invariant: logical -> winit-physical is `x scale` on every
+        // platform; the unit only decides *where* that multiplication happens.
+        // A backend that scales in both halves (or neither) fails here.
+        for scale in [1.0f32, 1.25, 1.5, 2.0, 3.0, 0.0, -4.0, f32::NAN] {
+            for unit in [AnchorUnit::PhysicalPixels, AnchorUnit::Points] {
+                let a = anchor(unit, scale);
+                approx(
+                    a.logical_to_anchor() * a.anchor_to_physical(),
+                    sane_scale(scale),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_degenerate_scale_is_neutralised_in_both_factors() {
+        // Both factors route through `sane_scale`, so neither can hand a layout a
+        // NaN or a zero — which would collapse the window or park it at the
+        // origin rather than merely mis-place it.
+        for scale in [f32::NAN, f32::INFINITY, 0.0, -2.0] {
+            for unit in [AnchorUnit::PhysicalPixels, AnchorUnit::Points] {
+                let a = anchor(unit, scale);
+                approx(a.logical_to_anchor(), 1.0);
+                approx(a.anchor_to_physical(), 1.0);
+            }
+        }
+    }
 
     #[test]
     fn a_degenerate_scale_falls_back_to_one() {
@@ -396,14 +671,21 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_real_backend_returns_a_usable_anchor() {
-        let anchor = cursor_anchor();
+        let live = cursor_anchor();
         assert!(
-            anchor.scale.is_finite() && anchor.scale >= 0.1,
-            "a layout multiplies by this"
+            live.scale.is_finite() && live.scale >= 0.1,
+            "both conversion factors are derived from this"
         );
         assert!(
-            anchor.work_area.w > 0 && anchor.work_area.h > 0,
+            live.work_area.w > 0 && live.work_area.h > 0,
             "placement clamps into this"
         );
+        assert_eq!(
+            live.unit,
+            AnchorUnit::PhysicalPixels,
+            "a Per-Monitor-V2 process gets physical coordinates from Win32"
+        );
+        approx(live.anchor_to_physical(), 1.0);
+        approx(live.logical_to_anchor(), live.scale);
     }
 }

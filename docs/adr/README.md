@@ -24,6 +24,7 @@ MADR-lite format. Accepted ADRs are changed by superseding, not editing.
 | [0018](0018-app-owns-continuum-engine-owns-pacing.md) | App owns the continuum; the engine owns pacing (single write authority) | accepted |
 | [0019](0019-version-ladder-and-release-trains.md) | Version ladder & release trains (v0.1.x Windows, v0.2 macOS, v0.3 Linux, v1.0) | accepted |
 | [0020](0020-release-integrity-and-signing-readiness.md) | Release integrity & signing readiness (no injection, gated publish, hermetic, Azure-ready) | accepted |
+| [0021](0021-tray-anchor-coordinate-contract.md) | Tray-anchor coordinate contract (y-down normalized, unit named, two derived factors) | accepted |
 
 Spike evidence lives on branches `spike/eventloop`, `spike/ddc`,
 `spike/overlay` (code is not merged; findings are).
