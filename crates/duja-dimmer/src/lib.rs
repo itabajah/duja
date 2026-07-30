@@ -108,11 +108,17 @@ pub type PlatformDimmer = StubDimmer;
 /// other way (ADR-0003's overlay is the answer, and `duja-app`'s `dimming::plan`
 /// does exactly that).
 ///
-/// On Windows this is `MIN_ACCEPTED_GAMMA` (`0.5`): `SetDeviceGammaRamp` validates
-/// every ramp so an application cannot blank the screen, and refuses one whose
-/// entries stray more than 32768 (of 65535) from the identity. See that constant
-/// for the derivation and the hardware measurement behind it. `GAMMA_FLOOR` is
+/// On Windows this is `MIN_ACCEPTED_GAMMA` (`0.5`). Microsoft's
+/// [Using gamma correction](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/using-gamma-correction)
+/// states the rule: *"any entry in the ramp must be within 32768 of the identity
+/// value"*, so no application can blank the display. See that constant for the
+/// derivation and the hardware measurement that confirms it. `GAMMA_FLOOR` is
 /// therefore **unreachable** on Windows.
+///
+/// Staying at or above this bound is also the only *reliable* protection, because a
+/// refusal is not always reported: the same API is documented as able to *"fail
+/// silently (that is, it returns TRUE, but it doesn't set your ramp)"*. See
+/// `docs/debt.md`.
 #[cfg(windows)]
 #[must_use]
 pub fn min_gamma_factor() -> f32 {

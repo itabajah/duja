@@ -33,26 +33,33 @@ pub type GammaRamp = [[u16; 256]; 3];
 /// The largest deviation from the identity ramp Windows will accept in a
 /// `SetDeviceGammaRamp` write.
 ///
-/// Windows validates every ramp so that an application cannot blank the screen:
-/// a ramp straying too far from the identity is refused (and refused *silently* —
-/// see [`ramp_failure_message`]). The cut-off is this many units of the 16-bit
-/// ramp value.
+/// # The rule is documented, not inferred
 ///
-/// # Where the number comes from
+/// Microsoft states it verbatim in
+/// [Using gamma correction](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/using-gamma-correction):
+/// *"any entry in the ramp must be within 32768 of the identity value. This
+/// restriction means that no app can turn the display completely black or to some
+/// other unreadable color."* It is enforced by GDI, not by an individual driver,
+/// which is what makes the constant a property of **Windows** rather than of the
+/// one display it was first observed on.
 ///
-/// Measured, then derived, and the two agree — which is the strongest part of
-/// the evidence.
+/// # And it is confirmed by measurement
 ///
 /// The hardware sweep `report_which_gamma_factors_the_driver_accepts`
 /// (`tests/windows_live.rs`, `#[ignore]`d and `DUJA_HW_TESTS`-gated) walked
 /// factors 1.00 → 0.30 in 0.05 steps on an MSI MP273QP and reported **every step
 /// down to and including 0.50 accepted, and every step from 0.45 down refused**.
 /// Since [`gamma_ramp`] sets entry `i` to `i * 257 * f`, the largest deviation
-/// from the identity is at `i = 255`, i.e. `65535 * (1 - f)`: that is 32767 at
-/// `f = 0.50` (accepted) and 36044 at `f = 0.45` (refused). The sweep therefore
-/// brackets the limit in `32767 < limit <= 36044`, and 32768 — half the 16-bit
-/// range, and the documented Windows rule — is the value in that interval. The
+/// from the identity is at `i = 255`, i.e. `65535 * (1 - f)`: entry 255 is 32768
+/// at `f = 0.50`, a deviation of **32767** (accepted), and 29491 at `f = 0.45`, a
+/// deviation of **36044** (refused). Two adjacent 0.05 steps therefore bracket the
+/// cut-off in `32767 <= limit <= 36043` — an interval of 3277 integers, so the
+/// measurement alone does not pin a value; 32768 is the documented rule, sits
+/// inside that interval, and is the tightest figure consistent with both. The
 /// arithmetic is pinned by `measured_gamma_boundary_matches_the_deviation_limit`.
+///
+/// Note that 32767 is one unit inside the limit under either a `<` or a `<=`
+/// reading of "within", so the fix does not depend on which Microsoft meant.
 ///
 /// This is a **platform** limit. It is unrelated to
 /// [`GAMMA_FLOOR`](duja_core::dimmer::GAMMA_FLOOR), which is Duja's own
@@ -63,20 +70,21 @@ const MAX_RAMP_DEVIATION: u32 = 32_768;
 ///
 /// Derived from [`MAX_RAMP_DEVIATION`]: [`gamma_ramp`]'s worst deviation is
 /// `65535 * (1 - f)`, so an accepted ramp needs `65535 * (1 - f) <= 32768`, i.e.
-/// `f >= 0.499_992_4`. `0.5` is therefore the lowest factor Windows will take,
-/// and it is exactly the lowest step the hardware sweep measured as accepted.
+/// `f >= 0.499_992_4`. `0.5` is the smallest `f32` that satisfies that under every
+/// reading of the rule, and it is exactly the lowest step the hardware sweep
+/// measured as accepted.
 ///
-/// Two things a caller must know before relying on this:
+/// What a caller must know before relying on this:
 ///
 /// - [`GAMMA_FLOOR`](duja_core::dimmer::GAMMA_FLOOR) (`0.3`) is **unreachable on
 ///   Windows**. Asking for anything below `0.5` yields a refusal, not a darker
 ///   screen, so the caller has to realise that part of the range some other way —
 ///   `duja-app`'s `dimming::plan` plans an overlay instead.
-/// - The 0.5 figure was observed on **one** driver. The derivation, not the
-///   sweep, is what makes it exact; the sweep only confirms that this driver
-///   applies the documented rule. If some other GPU enforced a *tighter* rule the
-///   write would still be refused and the caller would still have to fall back,
-///   so being wrong here degrades safely rather than dangerously.
+/// - A refusal is **not** always observable. Microsoft documents the same call as
+///   able to *"fail silently (that is, it returns TRUE, but it doesn't set your
+///   ramp)"*, so asking below this bound can also produce a ramp that is not live
+///   with no error at all. Staying at or above it is the only reliable protection;
+///   see [`ramp_failure_message`] and `docs/debt.md`.
 pub const MIN_ACCEPTED_GAMMA: f32 = 0.5;
 
 /// Build a linear gamma ramp that scales output brightness by `factor`.
@@ -241,6 +249,16 @@ fn max_identity_deviation(ramp: &GammaRamp) -> u32 {
 /// So: when the OS reported no error code there is no OS error to relay, and this
 /// says what actually happened and names the limit that explains it. When there
 /// *is* a real code, the OS's own text is passed through unchanged.
+///
+/// # This covers only the failure shape that *reports* itself
+///
+/// Microsoft documents a second shape on the same API: a ramp violating the
+/// heuristics can make the call *"fail silently (that is, it returns TRUE, but it
+/// doesn't set your ramp)"*. Nothing here — and nothing reachable from the write
+/// alone — sees that case; it needs a `GetDeviceGammaRamp` read-back comparison
+/// (ADR-0002's verify-by-readback idiom). Recorded in `docs/debt.md`, because the
+/// comparison tolerance has to be tuned against real hardware: the same page notes
+/// the hardware LUT can be lower precision than the 16-bit values written.
 fn ramp_failure_message(os_code: i32, os_error: &str, deviation: u32) -> String {
     if os_code == 0 {
         format!(
@@ -569,8 +587,9 @@ mod tests {
         // at i = 255: 0.50 ⇒ 32767 (accepted), 0.45 ⇒ 36044 (refused).
         assert_eq!(max_identity_deviation(&gamma_ramp(0.50)), 32_767);
         assert_eq!(max_identity_deviation(&gamma_ramp(0.45)), 36_044);
-        // ...which is exactly a limit of 32768: the accepted ramp is within it and
-        // the refused one is not.
+        // ...which is consistent with the documented limit of 32768: the accepted
+        // ramp is within it and the refused one is not. (32767 is one unit inside
+        // under either a `<` or a `<=` reading of Microsoft's "within 32768".)
         assert!(
             max_identity_deviation(&gamma_ramp(0.50)) <= MAX_RAMP_DEVIATION,
             "the measured lowest ACCEPTED factor must be within the limit"
@@ -588,9 +607,11 @@ mod tests {
             "MIN_ACCEPTED_GAMMA must itself be acceptable"
         );
         // And it is the boundary, not merely somewhere inside: a hair below it the
-        // deviation already exceeds the limit.
+        // deviation already exceeds the limit. Written relative to the constant, so
+        // raising MIN_ACCEPTED_GAMMA (which would needlessly shrink the reachable
+        // gamma range) reds here instead of passing silently.
         assert!(
-            max_identity_deviation(&gamma_ramp(0.499)) > MAX_RAMP_DEVIATION,
+            max_identity_deviation(&gamma_ramp(MIN_ACCEPTED_GAMMA - 0.001)) > MAX_RAMP_DEVIATION,
             "MIN_ACCEPTED_GAMMA must be at the boundary, not comfortably above it"
         );
         // The consequence the app has to live with: Duja's own cross-platform
