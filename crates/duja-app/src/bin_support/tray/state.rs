@@ -209,6 +209,18 @@ impl AppState {
         use crate::bin_support::positioning::{
             anchor_window_size, flyout_height_cap, flyout_origin,
         };
+        // Re-resolve the palette before showing. `System` must FOLLOW the OS, not
+        // freeze at launch: the settings window already re-resolves on every open
+        // (`rebuild_settings` → `resolved_dark`), so a flyout that only ever read
+        // the OS once could render the opposite palette to the settings window
+        // after the user switched the OS theme mid-session — two windows of one
+        // app, side by side, disagreeing.
+        //
+        // Re-reading on show rather than reacting to an event is deliberate:
+        // neither winit/Slint nor `PlatformEvent` carries a theme-change
+        // notification, and this is one registry read (or one `NSUserDefaults`
+        // read) per flyout open, on a path that is already opening a window.
+        self.refresh_system_theme();
         let anchor = geometry::cursor_anchor();
         // Drive the window height from the row count (a no-frame window is not
         // auto-grown to its content preferred size), but never exceed the work
@@ -655,8 +667,7 @@ impl AppState {
     /// refreshes the settings view-model so its window follows the same palette
     /// (the caller re-renders the settings shell after this returns).
     fn apply_theme(&mut self, _choice: ThemeChoice) {
-        let theme = settings::ui_theme(self.config.general.theme, os_dark_theme());
-        self.vm.borrow_mut().set_theme(theme);
+        self.refresh_system_theme();
         self.rebuild_settings();
         self.render();
     }
@@ -685,6 +696,18 @@ impl AppState {
         self.settings_shell.set_icon_rgb(rgb);
 
         self.render();
+    }
+
+    /// Re-read the OS light/dark preference and push the resolved palette into the
+    /// flyout view-model.
+    ///
+    /// A no-op when the preference is `Light`/`Dark` (the OS is not consulted),
+    /// and cheap when it is `System`. Called before every show so the flyout and
+    /// the settings window — which re-resolves on every open — cannot end up
+    /// displaying opposite palettes.
+    fn refresh_system_theme(&mut self) {
+        let theme = settings::ui_theme(self.config.general.theme, os_dark_theme());
+        self.vm.borrow_mut().set_theme(theme);
     }
 
     /// The resolved palette (`true` = dark) for the current theme preference — the

@@ -757,8 +757,8 @@ fn bounds_updating_enumerator(bounds: Arc<Mutex<BoundsMap>>) -> duja_app::Enumer
 /// The platform call itself lives in `duja_platform::desktop`; this wrapper is
 /// only the logging policy, which is the app's to decide.
 fn open_url(url: &str) {
-    if !duja_platform::open_url(url) {
-        warn!(url, "failed to open the releases page");
+    if let Err(failure) = duja_platform::open_url(url) {
+        warn!(url, code = ?failure.code, "failed to open the releases page");
     }
 }
 

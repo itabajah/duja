@@ -97,17 +97,27 @@ objc2-app-kit = { workspace = true, features = [
 ] }
 # NSPoint / NSRect (aliases of CGPoint / CGRect) as the FFI copies them out.
 #
-# The last two features are redundant *today* — verified: strip either and this
-# crate still compiles for aarch64-apple-darwin, because objc2-app-kit's `NSScreen`
-# feature turns on `objc2-foundation/NSArray` and
-# `objc2-foundation/objc2-core-foundation` and cargo unifies them in. They are
-# declared anyway, and that is the deliberate choice, not a copy of another crate's
-# list (duja-dimmer's objc2-foundation entry omits `objc2-core-foundation`): this
-# crate names `NSPoint`/`NSRect` and calls `NSArray::count`/`objectAtIndex`
-# directly, so its own manifest should say so. Leaning on a sibling dependency's
-# feature selection means dropping `NSScreen` from the list above — or an upstream
-# narrowing its feature graph — turns into an unresolved-import error here with no
-# hint about which manifest line was actually load-bearing.
+# Of the entries below, only `NSUserDefaults` is load-bearing. `NSGeometry`,
+# `NSArray`, `objc2-core-foundation`, `NSString` and `NSURL` are all redundant
+# *today* — measured one at a time, by deleting the line from THIS block and
+# re-running `cargo check -p duja-platform --target aarch64-apple-darwin
+# --all-features`, which still compiles in each case: objc2-app-kit's `NSScreen`
+# and `NSWorkspace` features turn them on transitively and cargo unifies them in.
+# (The `objc2-core-foundation` entry in the objc2-app-kit block above is a
+# different feature and IS load-bearing, as are `NSWorkspace` and
+# `NSAccessibility`.)
+#
+# They are declared anyway, and that is the deliberate choice, not a copy of
+# another crate's list (duja-dimmer's objc2-foundation entry omits
+# `objc2-core-foundation`): this crate names `NSPoint`/`NSRect`/`NSString`/`NSURL`
+# and calls `NSArray::count`/`objectAtIndex` directly, so its own manifest should
+# say so. Leaning on a sibling dependency's feature selection means dropping
+# `NSScreen` from the list above — or an upstream narrowing its feature graph —
+# turns into an unresolved-import error here with no hint about which manifest line
+# was actually load-bearing.
+#
+# Named individually rather than as "the last two", which is how the previous
+# version of this comment silently became false the moment the list grew.
 objc2-foundation = { workspace = true, features = [
     "std",
     "NSGeometry",
