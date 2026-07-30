@@ -110,8 +110,10 @@ become a false statement the moment macOS landed.
   `(y0, y0 + h]` — closed at the top, so the topmost cursor row reads exactly the
   screen's top edge — while a rectangle hit test is naturally half-open the other
   way. Unbiased, that gives every menu-bar click to a screen mounted *above* the
-  primary. `mac_geometry` handles it once, at the boundary where cursor reports
-  enter (a half-point downward bias), rather than distorting the containment
+  primary, or (with nothing above) to the primary via the no-match fallback.
+  `mac_geometry` handles it once, at the boundary where cursor reports enter — a
+  quarter-point downward bias, whose safety condition is `0 < ε <= δ` for a cursor
+  step `δ = 1/backingScaleFactor` — rather than distorting the containment
   predicate, which also has to serve the x axis where Quartz's convention is the
   opposite. A future backend should expect its own version of this and resolve it
   the same way: at the read, not in shared geometry.
@@ -120,8 +122,10 @@ become a false statement the moment macOS landed.
   on, not the one being targeted. On a mixed-DPI Mac a flyout moving between a
   Retina and a non-Retina screen can therefore land off by the scale ratio. The
   contract is correct per-anchor; the residual is a winit-side property that
-  needs real hardware to observe. It, and the half-point residual of the cursor
-  bias above, are recorded in `docs/debt.md` rather than papered over.
+  needs real hardware to observe. It is recorded in `docs/debt.md` rather than
+  papered over — and it is the **only** such row this decision leaves open: the
+  cursor bias above was first filed as debt too, then drained once its safety
+  condition showed there was nothing for hardware to decide.
 
 ## Alternatives considered
 

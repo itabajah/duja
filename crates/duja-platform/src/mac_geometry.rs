@@ -215,36 +215,55 @@ fn scale_from_cocoa(backing_scale: f64) -> f32 {
 /// use *opposite* half-open conventions on the y axis, and on a screen boundary
 /// that difference sends the click to the wrong screen:
 ///
-/// - Quartz reports the cursor top-down over `0.0 .. frame.height`, and Cocoa
-///   converts with `y_cocoa = primary_h - y_quartz`. So on the menu-bar screen the
-///   reported y covers `(0.0, primary_h]` — it never reaches `0`, and the topmost
-///   cursor row reports **exactly** `primary_h`, the screen's own top edge.
+/// - Quartz reports the cursor **top-down within each screen**, over that screen's
+///   own `[top, top + height)` in the global Quartz space — which is *not*
+///   `0.0 .. height`: only the menu-bar screen's top is `0`, and a screen mounted
+///   above the primary has a negative Quartz top. Cocoa converts with
+///   `y_cocoa = primary_h - y_quartz`, so the reported y of any screen covers
+///   `(y0, y0 + h]`: it never reaches the screen's bottom edge, and its topmost
+///   cursor row reports **exactly** the screen's top edge.
 /// - `contains` is half-open the other way (`>= y`, `< y + h`), which is the right
-///   convention for x (Quartz x is `[0, width)`, un-flipped) and the wrong one for
-///   a y that arrives already closed at the top.
+///   convention for x (Quartz x is `[x0, x0 + w)`, un-flipped) and the wrong one
+///   for a y that arrives already closed at the top.
 ///
 /// Unbiased, a status-item click — i.e. **every** anchor query a menu-bar app
-/// makes — reports `y == primary_h`, which the primary screen rejects and a screen
-/// mounted *above* it accepts, so the flyout opens on the other monitor. The
-/// mirror case is just as real: the topmost row of a screen mounted *below* the
-/// primary reports `y == 0`, which the primary wrongly claims.
+/// makes — reports `y == primary_h`, which the primary rejects and a screen mounted
+/// *above* it accepts, so the flyout opens on the other monitor. Where nothing is
+/// mounted above, the probe instead matches *no* frame and takes the deterministic
+/// `Some(0)` fallback, which is equally wrong for a non-primary screen: in a plain
+/// side-by-side layout the external's top row silently resolves to the primary.
 ///
-/// **Why half a point.** The bias models "the pointer occupies the point *below*
-/// the edge it reports", turning the reported `(y0, y0 + h]` into the `[y0, y0 + h)`
-/// that `contains` (and the x axis) already use. Half a point is the midpoint of a
-/// 1-point row.
+/// **Why a quarter point.** The bias models "the pointer occupies the point
+/// *below* the edge it reports", turning the reported `(y0, y0 + h]` into the
+/// `[y0, y0 + h)` that `contains` (and the x axis) already use. Its safety
+/// condition is one inequality, in both directions:
 ///
-/// **Residual, stated rather than glossed.** Any `ε > 0` fixes both boundary
-/// cases, and a *smaller* `ε` is strictly safer at the far end: a cursor within
-/// `ε` of a screen's **bottom** edge biases out of that screen and into one
-/// mounted below it. At 1× and 2× the band is unreachable (the smallest reported
-/// `y_cocoa` is 1.0 and 0.5 respectively, and both stay `>= y0` after a 0.5 bias);
-/// at 3×, where the step is a third of a point, it is reachable. That trade is
-/// deliberate — it swaps a guaranteed wrong screen at the top edge, where every
-/// click lands, for a possible wrong screen within half a point of the bottom
-/// edge, where no anchor query happens. `ε` is the knob if a Mac ever shows
-/// otherwise.
-const CURSOR_HIT_TEST_BIAS: f64 = 0.5;
+/// ```text
+/// 0 < ε <= δ        where δ = the reachable cursor step = 1 / backingScaleFactor
+/// ```
+///
+/// `ε > 0` is what repairs the top edge. `ε <= δ` is what keeps the **bottom** edge
+/// intact: the lowest row a screen can report sits `δ` above its bottom edge, so it
+/// must survive the subtraction (`δ - ε >= 0`, and `contains` is inclusive there).
+/// `δ` is `1.0` at 1×, `0.5` at 2× and `1/3` at 3×, so `ε = 0.25` satisfies the
+/// condition for **every backing scale up to and including 4×** — twice the
+/// density Apple ships. A brute-force sweep of seven screen layouts × those four
+/// scales × every reachable reported row and column confirms it, and
+/// `the_lowest_row_of_a_screen_still_belongs_to_that_screen` pins the boundary
+/// cases permanently.
+///
+/// The earlier value, `0.5`, was the *largest* admissible `ε` rather than a safe
+/// one: correct at 1× and 2× but wrong at 3×, where it pushes the bottom row off
+/// its own screen. Since the condition is `ε <= δ` and hardware could only ever
+/// reveal a *smaller* `δ`, there was never anything for a Mac to decide here —
+/// smaller is monotonically safer, so the value was narrowed rather than carried as
+/// deferred debt.
+///
+/// The one assumption left is that the window server quantizes cursor positions to
+/// backing pixels (`δ = 1 / backingScaleFactor`). If some future display reported
+/// finer steps than a quarter point — a backing scale above 4×, which has never
+/// shipped — the remedy is to shrink this constant, and nothing else changes.
+const CURSOR_HIT_TEST_BIAS: f64 = 0.25;
 
 /// Which screen in `screens` the cursor is on.
 ///
@@ -409,6 +428,12 @@ mod tests {
     /// More than one is a defect on its own: `position` would silently take the
     /// lowest index, so the flyout would jump between monitors along the shared
     /// line depending on enumeration order.
+    ///
+    /// **This re-implements the bias rather than calling through
+    /// `screen_index_for_cursor`, so it does not exercise the production probe.**
+    /// It is only a *counting* helper — every caller also asserts
+    /// `screen_index_for_cursor` directly, which is what actually covers the probe.
+    /// Do not extend a test to rely on this alone.
     fn claim_count(reported: CocoaPoint, screens: &[CocoaScreen]) -> usize {
         let probe = CocoaPoint {
             x: reported.x,
@@ -634,17 +659,21 @@ mod tests {
         // lands exactly on it — a reachable position on a Retina display, whose
         // cursor steps in half points.
         //
-        // Reported 1080.5 → probe 1080.0, which is `above_primary`'s bottom edge.
-        // Exclusive (correct): the primary rejects it (`1080 < 1080` is false) and
-        // only the upper screen claims it. Inclusive: **both** claim it and
-        // `position` silently takes the primary — the lower index, not the right
+        // Reported `1080 + ε` → probe exactly 1080.0, which is `above_primary`'s
+        // bottom edge. Exclusive (correct): the primary rejects it (`1080 < 1080` is
+        // false) and only the upper screen claims it. Inclusive: **both** claim it
+        // and `position` silently takes the primary — the lower index, not the right
         // screen. Without this case, making the upper bounds inclusive changes no
         // test outcome at all, because every other probe here sits strictly inside a
         // frame.
+        //
+        // The reported value is derived from the constant rather than written out:
+        // the whole point is that the *probe* lands on the boundary, so hardcoding
+        // it would decouple the moment the bias changed (it did change, 0.5 → 0.25).
         let stacked = [primary(), above_primary()];
         let reported = CocoaPoint {
             x: 100.0,
-            y: 1080.5,
+            y: 1080.0 + CURSOR_HIT_TEST_BIAS,
         };
         assert_eq!(
             claim_count(reported, &stacked),
@@ -739,17 +768,49 @@ mod tests {
     }
 
     #[test]
-    fn the_bottom_row_of_the_primary_still_belongs_to_the_primary() {
-        // The bias's cost, pinned so it cannot silently grow: a cursor on the
-        // primary's bottom row must stay on the primary even with a screen mounted
-        // directly below it. `mouseLocation` reports that row as `1.0` at 1x and
-        // `0.5` at 2x — both still `>= 0` after the 0.5 bias.
-        let screens = [primary(), below_primary()];
-        for y in [1.0, 0.5] {
+    fn the_lowest_row_of_a_screen_still_belongs_to_that_screen() {
+        // The bias's cost, pinned so it cannot silently grow again. The lowest row a
+        // screen can report sits one cursor step `δ` above its bottom edge, so it
+        // must survive the subtraction: the safety condition is `ε <= δ`, and
+        // `δ = 1 / backingScaleFactor`.
+        //
+        // Both failure shapes are covered, because they are different bugs:
+        //
+        //  - with a screen mounted *below*, an over-large ε pushes the probe into
+        //    that screen (a wrong, plausible-looking answer);
+        //  - with nothing below, it pushes the probe out of every frame and into the
+        //    `Some(0)` primary fallback — which is silently wrong for any
+        //    *non-primary* screen, including in a plain side-by-side layout. That
+        //    shape had no test until a brute-force sweep surfaced it.
+        //
+        // The 0.25 case is the tightest: at 4× the probe lands exactly on the bottom
+        // edge, where `contains` is inclusive. ε = 0.5 fails the 1/3 and 0.25 rows.
+        let steps = [1.0, 0.5, 1.0 / 3.0, 0.25];
+
+        let stacked = [primary(), below_primary()];
+        for delta in steps {
             assert_eq!(
-                screen_index_for_cursor(CocoaPoint { x: 100.0, y }, &screens),
+                screen_index_for_cursor(CocoaPoint { x: 100.0, y: delta }, &stacked),
                 Some(0),
-                "reported y {y} is the primary's bottom row"
+                "reported y {delta} is the primary's lowest row (step {delta})"
+            );
+        }
+
+        // Side-by-side: the external's own lowest row. Its Cocoa bottom edge is 0
+        // like the primary's, and nothing is mounted below either of them, so an
+        // over-large bias resolves this to the primary via the fallback.
+        let side_by_side = [primary(), right_of_primary()];
+        for delta in steps {
+            assert_eq!(
+                screen_index_for_cursor(
+                    CocoaPoint {
+                        x: 2000.0,
+                        y: delta
+                    },
+                    &side_by_side
+                ),
+                Some(1),
+                "the external's lowest row must not fall back to the primary (step {delta})"
             );
         }
     }
