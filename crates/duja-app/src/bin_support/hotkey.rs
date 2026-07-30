@@ -3,7 +3,7 @@
 //! This module is **std-only and platform-independent** so its unit tests run on
 //! every CI OS: it turns the `[hotkeys]` config table (action → accelerator
 //! string) into a validated, typed [`HotkeyPlan`], and never touches the OS.
-//! The Windows tray assembly (the Windows-only `bin_support::tray`) converts each parsed
+//! The tray assembly (`bin_support::tray`, Windows and macOS) converts each parsed
 //! [`Accelerator`] into a `global_hotkey::hotkey::HotKey` at the boundary and
 //! registers it.
 //!
@@ -21,7 +21,7 @@
 // that converts + registers accelerators is Windows-only, so on other targets
 // the public surface is unused. This mirrors the sibling `settings`/`dimming`
 // modules' dead-code allow.
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

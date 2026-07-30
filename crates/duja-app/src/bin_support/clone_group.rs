@@ -26,14 +26,14 @@
 //! across the frequent `DisplaysChanged` echoes and the anchor-keyed state (level,
 //! user-controlled, overlay) stays put.
 //!
-//! The module is OS-free and fully unit-tested; the Windows tray assembly builds a
+//! The module is OS-free and fully unit-tested; the tray assembly builds a
 //! [`CloneGrouping`] on every enumeration and routes every group operation through
 //! it.
 
-// RATIONALE: these pure modules are consumed only by the Windows tray assembly,
+// RATIONALE: these pure modules are consumed only by the tray assembly (Windows and macOS),
 // but stay cross-platform (not cfg-gated) so their unit tests run on every CI
 // OS; the dead-code allow applies only where no consumer exists.
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet};
 

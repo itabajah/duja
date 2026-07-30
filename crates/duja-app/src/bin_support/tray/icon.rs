@@ -12,7 +12,32 @@
 /// The tray icon side length in pixels. The shared art is designed on a 64px canvas
 /// and scales down to this cleanly (guarded by `duja-ui`'s
 /// `glyph_survives_the_32px_tray_scale`).
+///
+/// **32 on Windows**, whose notification area asks for a 32×32 buffer at 200 % and
+/// scales it down otherwise.
+#[cfg(not(target_os = "macos"))]
 const SIZE: u32 = 32;
+
+/// The status-item icon side length in pixels on macOS: **36**, not 32.
+///
+/// The menu bar gives a status item an 18×18 **point** slot, and every Mac that
+/// ships today is Retina, so the buffer that lands 1:1 is 18 × 2 = 36 physical
+/// pixels. Handing `tray-icon` a 32px buffer would make `AppKit` scale 32 → 36 —
+/// a non-integer 1.125× upsample of a glyph whose whole design constraint is
+/// legibility at tiny sizes, which is exactly where resampling shows.
+///
+/// Deliberately a constant rather than a `backingScaleFactor` query: the menu bar
+/// lives on one screen at a time and the status item follows it, so there is no
+/// per-display answer to give, and a 1× Mac simply gets a cleanly halved 36 → 18.
+///
+/// The icon is **not** marked as a template image, so it keeps its accent colour
+/// rather than adopting the menu bar's foreground — the accent is the glyph's
+/// identity and is user-configurable. `duja-ui`'s `icon_rgb_reads_on_both_taskbars`
+/// already proves every accent clears 3:1 against light and dark chrome, so the
+/// idle icon is covered; the *highlight* state, while a right-click menu is open,
+/// is not modelled by anything and is recorded in `docs/debt.md`.
+#[cfg(target_os = "macos")]
+const SIZE: u32 = 36;
 
 /// Build the tray icon in `rgb` (the accent's [`duja_ui::accent::icon_rgb`]).
 ///

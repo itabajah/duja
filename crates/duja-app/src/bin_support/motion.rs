@@ -14,7 +14,7 @@
 
 // RATIONALE: consumed only by the tray assembly, which is not built on every
 // target; the pure policy stays cross-platform so its tests run on every CI OS.
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
 /// The thumb's glide duration (ms) when motion is enabled and the window is
 /// visible. Short enough to feel responsive, long enough to read as a glide.

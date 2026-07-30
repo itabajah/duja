@@ -4,7 +4,7 @@
 //! run it, translate the outcome into an exit code.
 //!
 //! The default (no args) is the **tray application** (tray icon + flyout, engine,
-//! dimmer, config/state — see the Windows-only `bin_support::tray`). The console modes
+//! dimmer, config/state — see `bin_support::tray`). The console modes
 //! (`--headless`, `--once`, `--stress`, `--restore`) remain for development and
 //! degrade cleanly when no monitors are visible.
 //!
@@ -136,21 +136,21 @@ fn init_logging(command: Command) {
     }
 }
 
-/// Run the tray application (Windows only). `relaunch` is set when this process
-/// was spawned by the tray "Restart" item, so startup waits for the outgoing
-/// instance to release the single-instance lock before taking over.
-#[cfg(windows)]
+/// Run the tray application. `relaunch` is set when this process was spawned by
+/// the tray "Restart" item, so startup waits for the outgoing instance to release
+/// the single-instance lock before taking over.
+#[cfg(any(windows, target_os = "macos"))]
 fn run_tray(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
     bin_support::tray::run(verbose, relaunch)
 }
 
-/// The tray app is Windows-only in this build; other targets report and exit
-/// non-zero rather than silently doing nothing.
-// RATIONALE: the Result wrapper mirrors the Windows signature so the caller is
+/// The tray app has no backend on this target yet (Linux lands in P7); report and
+/// exit non-zero rather than silently doing nothing.
+// RATIONALE: the Result wrapper mirrors the real signature so the caller is
 // cfg-free; this stub itself can never fail.
 #[allow(clippy::unnecessary_wraps)]
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn run_tray(_verbose: bool, _relaunch: bool) -> anyhow::Result<ExitCode> {
-    eprintln!("duja: the tray application is only available on Windows in this build");
+    eprintln!("duja: the tray application is not available on this platform in this build");
     Ok(ExitCode::from(1))
 }

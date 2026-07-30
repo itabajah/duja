@@ -255,26 +255,33 @@ const RESTORE_SUMMARY: &str = "reset gamma to the ColorSync profile on";
 ///
 /// # What this actually rescues on macOS
 ///
-/// Be precise about this, because the honest answer is narrower than "Duja's
-/// leftovers". `duja-app` has **no gamma-engage path on macOS at all** today —
-/// but no longer for the reason this used to give. [`gamma::GammaBackend`] now
-/// has a macOS implementation; what is still `cfg(windows)` is its only
-/// consumer, the tray. So the conclusion holds and its lifetime is now short:
-/// the moment the tray is un-gated, this *can* be undoing a ramp Duja set, and
-/// this section needs rewriting rather than re-checking. The window server is
-/// also believed to restore gamma on process exit, which is why the mac dimmer
-/// carries no crash-marker machinery (see `gamma.rs` for how well established
-/// that is).
+/// This section previously said `duja-app` had no gamma-engage path on macOS and
+/// pre-registered its own rewrite for "the moment the tray is un-gated". That is
+/// this commit, so here is the rewrite.
 ///
-/// What it is on macOS is a **general screen rescue**: it reloads every
-/// display's `ColorSync` profile, clearing a ramp left by *any* process (f.lux, a
-/// calibration loader, a crashed tool). That is a reasonable thing for a
-/// recovery command to do and it is safe — restoring the user's own calibration,
-/// not flattening it — but it is a different promise, and the command should
-/// keep it rather than the one the Windows path makes.
+/// **`--restore` on macOS now does two jobs at once**, and they are worth keeping
+/// apart:
 ///
-/// It becomes a true self-undo on macOS once the app assembly engages gamma
-/// there (P6 wave 2).
+/// - It can undo **Duja's own** ramp. [`gamma::GammaBackend`]'s macOS sink and its
+///   only consumer, the tray, both exist now, so a `dim_mode = "gamma"` display
+///   engaged by a previous run is genuinely something this can be reversing.
+/// - It remains a **general screen rescue**: `CGDisplayRestoreColorSyncSettings`
+///   reloads *every* display's `ColorSync` profile, clearing a ramp left by any
+///   process (f.lux, a calibration loader, a crashed tool), whether or not Duja
+///   put it there.
+///
+/// The second is why the blast radius is wider than the Windows path's, which
+/// touches only the displays it recorded. It is safe — it restores the user's own
+/// calibration rather than flattening it to identity — but it is a different
+/// promise from "undo Duja's leftovers", and the command keeps the wider one.
+///
+/// One asymmetry survives from before: a *dirty exit* on macOS is believed to need
+/// no rescue at all, because the window server restores a process's transfer tables
+/// when it exits, which is why the mac dimmer carries no crash-marker machinery.
+/// How well established that belief is — widely observed, undocumented by Apple —
+/// is set out in `gamma.rs`. If it is ever found to be wrong, this command is the
+/// only recovery macOS has, since nothing writes a marker for
+/// `startup::recover_from_crash_marker` to find.
 ///
 /// [`gamma::GammaBackend`]: super::gamma
 #[cfg(any(windows, target_os = "macos"))]

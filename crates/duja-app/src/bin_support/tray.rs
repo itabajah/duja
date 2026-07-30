@@ -631,6 +631,11 @@ fn assemble_with_loop_running(resources: LoopStartResources) -> anyhow::Result<O
         notifications,
     } = resources;
 
+    // Become a menu-bar-only app on macOS. No-op elsewhere. FIRST, and inside the
+    // loop rather than before it — see `become_accessory_app` for why the obvious
+    // placement does not work.
+    become_accessory_app();
+
     // Tray icon + menu on the Slint main thread (glyph/colour shared with the
     // taskbar icons via `duja_ui::icon`), plus the update-surface handles.
     let TrayHandles {
@@ -854,6 +859,80 @@ fn load_config(paths: &DujaPaths) -> Config {
         }
     }
 }
+
+/// Make this a menu-bar-only application on macOS: no Dock icon, no app menu,
+/// no window in the ⌘-Tab switcher. A no-op on every other platform.
+///
+/// `NSApplicationActivationPolicy::Accessory` is the supported way to say "I am a
+/// status-item app". Without it Duja takes a Dock tile and a menu bar of its own,
+/// which for a tray utility is wrong on both counts.
+///
+/// The Dock tile and the menu bar are genuinely prevented. **Focus is not, quite:**
+/// winit calls `activateIgnoringOtherApps(true)` eleven lines before it dispatches
+/// `StartCause::Init`, so the activation request is already with the window server
+/// by the time this downgrades the policy. The practical effect is likely nil — at
+/// that instant Duja has no visible window, and an accessory app with none holds
+/// nothing meaningful — but it is unverified, so this claims the two halves it
+/// actually delivers.
+///
+/// # Why this is called from inside the running loop
+///
+/// The obvious placement — early in `run`, before any window exists — **does not
+/// work**, and the reasoning that recommends it is backwards. winit sets the
+/// policy itself, later, and would overwrite an early call:
+///
+/// - Slint never specifies one. `i-slint-backend-winit` builds the
+///   `EventLoopBuilder` and calls only `with_default_menu(false)`, so winit's
+///   `activation_policy` stays `None`.
+/// - With `None` **and an unbundled process**, winit's
+///   `applicationDidFinishLaunching` forces `Regular` — the branch exists so a
+///   *bundled* app can express `LSUIElement` in its `Info.plist` instead. Duja is
+///   unbundled until the packaging work lands, so that branch is the one taken.
+/// - That override runs *before* `dispatch_init_events`, i.e. before
+///   `StartCause::Init`, which is what fires `#94`'s queued
+///   [`slint::Timer::single_shot`].
+///
+/// So the loop-time assembly is not merely an acceptable home for this, it is the
+/// only one that survives — the opposite of the ordering `#94` established for the
+/// tray icon, and worth stating plainly because the intuition points the other way.
+/// winit's own comment gives the same advice from the other side: it delays setting
+/// the policy "until `applicationDidFinishLaunching` has been called" because
+/// otherwise "the menu bar is initially unresponsive on macOS 10.15".
+///
+/// # The better fix, once there is a bundle
+///
+/// C6 gives Duja a signed `.app`, and `LSUIElement` in its `Info.plist` is the
+/// declarative way to say the same thing — at which point winit's `is_bundled`
+/// branch stops overriding anything and this call becomes belt-and-braces. Setting
+/// it here as well is still right: a portable/unbundled binary has no `Info.plist`
+/// to read.
+///
+/// `NSApplication::sharedApplication` creates the shared instance if none exists,
+/// which is harmless here — winit 0.30 deliberately swizzles rather than
+/// subclassing `NSApplication` precisely so the app object can be someone else's.
+/// (This is why `desktop::os_dark_theme` still avoids it: there, creating the app
+/// object would be a side effect rather than the point.)
+#[cfg(target_os = "macos")]
+fn become_accessory_app() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+
+    // `run` is called from `main` on the process's main thread, so this marker is
+    // always available; if that ever stops being true, silently skipping is the
+    // right degrade — a Dock icon is a cosmetic wart, not a broken app.
+    let Some(mtm) = MainThreadMarker::new() else {
+        warn!("not on the main thread; leaving the activation policy alone");
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    if !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory) {
+        warn!("could not set the accessory activation policy; Duja may show a Dock icon");
+    }
+}
+
+/// No activation policy to set on this platform.
+#[cfg(not(target_os = "macos"))]
+const fn become_accessory_app() {}
 
 /// The OS dark/light preference, for the `System` theme setting.
 ///

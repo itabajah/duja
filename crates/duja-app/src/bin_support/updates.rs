@@ -268,7 +268,7 @@ fn read_capped(reader: impl Read, max: usize) -> std::io::Result<Vec<u8>> {
 /// The real HTTPS transport: `ureq` (rustls) with fixed short timeouts and a
 /// read-limited body.
 ///
-/// Only linked into the update-check paths (the CLI flag and the Windows tray
+/// Only linked into the update-check paths (the CLI flag and the tray
 /// action). Its one live test hits the network and is `#[ignore]`d.
 pub struct HttpsTransport;
 

@@ -140,11 +140,12 @@ fn rect_from(rect: WorkRect) -> Rect {
     }
 }
 
-// These tests run on the Windows lane only: the whole `tray` module is
-// `cfg(windows)` (it owns the tray icon and the Slint shells). The
+// These tests run on the Windows **and macOS** lanes — the `tray` module is
+// `cfg(any(windows, target_os = "macos"))` (it owns the tray icon and the Slint
+// shells), so they no longer sit on one lane. Not on Linux, until P7. The
 // platform-independent half of the same arithmetic — which factor is which, and
-// that they multiply to the scale — is pinned cross-platform in
-// `duja-platform`'s `geometry` and `mac_geometry` tests.
+// that they multiply to the scale — is pinned on every lane in `duja-platform`'s
+// `geometry` and `mac_geometry` tests.
 #[cfg(test)]
 mod tests {
     use super::{rect_from, to_physical_position};
