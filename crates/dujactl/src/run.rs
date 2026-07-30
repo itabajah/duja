@@ -257,25 +257,31 @@ pub fn input(id: &str, value: Option<&str>) -> u8 {
 }
 
 /// `doctor`: environment / backend / quirk diagnostics. Always exit 0.
+///
+/// The two counts are derived from the same merged, deduplicated display set the
+/// per-display listing below walks, so the summary and the detail can never
+/// disagree — and a built-in panel the DDC backend also surfaces is counted as an
+/// internal panel rather than an external monitor (see
+/// [`backend::external_count`]).
 pub fn doctor() -> u8 {
-    let ddc = backend::ddc_count();
-    let panel = backend::panel_count();
+    let displays = backend::discover();
+    let external = backend::external_count(&displays);
+    let internal = backend::internal_count(&displays);
 
     println!("duja doctor");
     if ipc::server_reachable() {
-        println!("  ipc server:     reachable (running app will serve dujactl)");
+        println!("  ipc server:        reachable (running app will serve dujactl)");
     } else {
-        println!("  ipc server:     not running (dujactl uses the direct backend)");
+        println!("  ipc server:        not running (dujactl uses the direct backend)");
     }
-    println!("  ddc displays:   {ddc}");
-    println!("  panel displays: {panel}");
-    if ddc == 0 && panel == 0 {
+    println!("  external monitors: {external}");
+    println!("  internal panels:   {internal}");
+    if displays.is_empty() {
         println!(
             "  no displays visible — if you expect some, check you are in an interactive console session (qwinsta)"
         );
     }
 
-    let displays = backend::discover();
     if !displays.is_empty() {
         println!();
         let db = QuirkDb::embedded();
