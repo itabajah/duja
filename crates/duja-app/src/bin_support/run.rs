@@ -256,12 +256,15 @@ const RESTORE_SUMMARY: &str = "reset gamma to the ColorSync profile on";
 /// # What this actually rescues on macOS
 ///
 /// Be precise about this, because the honest answer is narrower than "Duja's
-/// leftovers". `duja-app` has **no gamma-engage path on macOS at all** today:
-/// the only thing that ever sets a ramp is [`gamma::GammaBackend`], which is
-/// `cfg(windows)` and owned solely by the `cfg(windows)` tray. So on macOS this
-/// cannot be undoing state *Duja* created — there is none — and the window
-/// server restores gamma on process exit anyway, which is why the mac dimmer
-/// carries no crash-marker machinery.
+/// leftovers". `duja-app` has **no gamma-engage path on macOS at all** today —
+/// but no longer for the reason this used to give. [`gamma::GammaBackend`] now
+/// has a macOS implementation; what is still `cfg(windows)` is its only
+/// consumer, the tray. So the conclusion holds and its lifetime is now short:
+/// the moment the tray is un-gated, this *can* be undoing a ramp Duja set, and
+/// this section needs rewriting rather than re-checking. The window server is
+/// also believed to restore gamma on process exit, which is why the mac dimmer
+/// carries no crash-marker machinery (see `gamma.rs` for how well established
+/// that is).
 ///
 /// What it is on macOS is a **general screen rescue**: it reloads every
 /// display's `ColorSync` profile, clearing a ramp left by *any* process (f.lux, a
