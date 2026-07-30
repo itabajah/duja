@@ -118,8 +118,12 @@ pub(crate) fn min_reachable_pct(cfg: ContinuumConfig) -> u8 {
 /// Map the config's [`ConfigTheme`] preference onto the flyout's [`UiTheme`].
 ///
 /// `System` resolves to the OS light/dark preference when `os_dark` is known
-/// (`Some`), else defaults to dark (the flyout's Fluent-dark default; see the
-/// deviation note — OS theme detection is best-effort in P4).
+/// (`Some`), else defaults to dark (the flyout's Fluent-dark default).
+///
+/// `None` used to be the only answer on every platform — the caller returned it
+/// unconditionally — so `System` silently meant "dark". It is now a genuine
+/// unknown: `duja_platform::desktop` queries the OS directly, and only Windows can
+/// still answer `None`, when the `AppsUseLightTheme` value is absent.
 pub(crate) fn ui_theme(pref: ConfigTheme, os_dark: Option<bool>) -> UiTheme {
     match pref {
         ConfigTheme::Light => UiTheme::Light,

@@ -750,36 +750,15 @@ fn bounds_updating_enumerator(bounds: Arc<Mutex<BoundsMap>>) -> duja_app::Enumer
     })
 }
 
-/// Open `url` in the user's default browser via `ShellExecuteW`. Best-effort:
-/// a failure is logged, never fatal. Duja only ever opens the releases *page* —
-/// it never downloads anything.
+/// Open `url` in the user's default browser. Best-effort: a failure is logged,
+/// never fatal. Duja only ever opens the releases *page* — it never downloads
+/// anything.
+///
+/// The platform call itself lives in `duja_platform::desktop`; this wrapper is
+/// only the logging policy, which is the app's to decide.
 fn open_url(url: &str) {
-    use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    use windows::core::{PCWSTR, w};
-
-    let wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: `wide` is a NUL-terminated wide string that outlives the call;
-    // the "open" verb (`w!`) is a static NUL-terminated literal. Passing a null
-    // HWND/dir/params is valid for opening a URL. The returned HINSTANCE is a
-    // legacy success/error code we do not dereference.
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            w!("open"),
-            PCWSTR(wide.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    // ShellExecuteW returns a value > 32 on success (legacy convention).
-    if result.0 as usize <= 32 {
-        warn!(
-            url,
-            code = result.0 as usize,
-            "failed to open the releases page"
-        );
+    if !duja_platform::open_url(url) {
+        warn!(url, "failed to open the releases page");
     }
 }
 
@@ -871,12 +850,15 @@ fn load_config(paths: &DujaPaths) -> Config {
     }
 }
 
-/// Best-effort OS dark-theme detection. Not trivially available through
-/// winit/slint in this version, so P4 returns `None` (⇒ the flyout defaults to
-/// its dark theme). Documented deviation; a real query lands with the settings
-/// window.
+/// The OS dark/light preference, for the `System` theme setting.
+///
+/// Answered by `duja_platform::desktop` straight from the OS (Windows'
+/// `AppsUseLightTheme`, macOS' `AppleInterfaceStyle`) rather than through
+/// winit/Slint, neither of which exposes it in the pinned versions — which is why
+/// this returned a flat `None` from P4 until now. `None` still means "no answer",
+/// and `settings::ui_theme` still resolves that to dark.
 fn os_dark_theme() -> Option<bool> {
-    None
+    duja_platform::os_dark_theme()
 }
 
 /// Seconds since the Unix epoch (saturating; `0` if the clock is before epoch).

@@ -41,7 +41,10 @@ windows = { version = "0.62", default-features = false, features = [
     "Win32_System_Threading",
     "Win32_Security",
     # Autostart: HKCU ...\CurrentVersion\Run value read/write/delete (P5).
+    # Also the `desktop` module's AppsUseLightTheme dark-mode read.
     "Win32_System_Registry",
+    # `desktop::open_url`: ShellExecuteW's "open" verb (the default browser).
+    "Win32_UI_Shell",
     # IPC named-pipe transport (P5): pipe create/connect/peek, file read/write,
     # the explicit DACL (SDDL → security descriptor), and the client PID/session
     # check.
@@ -87,6 +90,10 @@ objc2-app-kit = { workspace = true, features = [
     "NSScreen",
     # NSEvent: the class-level mouseLocation (Cocoa global points).
     "NSEvent",
+    # `desktop`: NSWorkspace's openURL (default browser) and, through the
+    # NSAccessibility category it also unlocks, accessibilityDisplayShouldReduceMotion.
+    "NSWorkspace",
+    "NSAccessibility",
 ] }
 # NSPoint / NSRect (aliases of CGPoint / CGRect) as the FFI copies them out.
 #
@@ -107,6 +114,11 @@ objc2-foundation = { workspace = true, features = [
     # NSArray's count/objectAtIndex, used to walk NSScreen::screens.
     "NSArray",
     "objc2-core-foundation",
+    # `desktop`: NSString (both queries), NSURL (open_url), and NSUserDefaults
+    # (the AppleInterfaceStyle dark-mode read).
+    "NSString",
+    "NSURL",
+    "NSUserDefaults",
 ] }
 # CGFloat, the return type of backingScaleFactor and the field type of NSRect.
 objc2-core-foundation = { workspace = true, features = ["std", "CFCGTypes"] }
