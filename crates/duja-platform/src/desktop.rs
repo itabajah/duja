@@ -519,6 +519,23 @@ mod tests {
     /// what [`a_written_dword_round_trips_through_the_production_read`] does,
     /// under a throwaway per-process key and never against the real theme value.
     ///
+    /// # What these still cannot pin
+    ///
+    /// The call *shape* is covered; the call's **identity** is not. Swapping the
+    /// subkey and value arguments, truncating the subkey, or reading
+    /// `SystemUsesLightTheme` (Windows' separate taskbar/Start setting) instead of
+    /// `AppsUseLightTheme` each leave every test green while making `os_dark_theme`
+    /// wrong on every machine — the first two answer `Absent` ⇒ light everywhere,
+    /// the third silently follows a setting the user can set independently.
+    ///
+    /// That is structural rather than an omission: `Absent` deliberately merges
+    /// "value missing" and "key missing" — the right product decision, since a stock
+    /// profile has neither — so nothing reading through `read_dword` can distinguish
+    /// a correct path from a wrong one. The only real defence would be distinct
+    /// newtypes for the two `PCWSTR` arguments, which is more machinery than the
+    /// risk earns for two `w!` literals at a single call site. Recorded so the next
+    /// reader knows which half is guarded.
+    ///
     /// [`RegGetValueW`]: https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-reggetvaluew
     /// [`a_written_dword_round_trips_through_the_production_read`]: live::a_written_dword_round_trips_through_the_production_read
     #[cfg(windows)]
@@ -526,7 +543,8 @@ mod tests {
         use windows::Win32::Foundation::ERROR_SUCCESS;
         use windows::Win32::System::Registry::{
             HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE,
-            REG_SAM_FLAGS, RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW,
+            REG_SAM_FLAGS, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteKeyW,
+            RegSetValueExW,
         };
         use windows::core::{PCWSTR, w};
 
@@ -566,7 +584,33 @@ mod tests {
             assert_eq!(
                 after,
                 AppsUseLightTheme::Value(SENTINEL),
-                "the value we wrote must come back byte-for-byte; a `Value` with                  any other payload means the OS never wrote our buffer"
+                "the value we wrote must come back byte-for-byte; a `Value` with \
+                 any other payload means the OS never wrote our buffer"
+            );
+        }
+
+        /// A value of the wrong **type** must be refused, not decoded.
+        ///
+        /// `RRF_RT_REG_DWORD` is what makes that true, and it is the last property
+        /// of the call shape the round trip above cannot see: relax it to
+        /// `RRF_RT_ANY` and a `REG_SZ` is copied into the `u32` buffer verbatim, so
+        /// a one-letter string reads back as `Value(0x41)` and decodes to a
+        /// perfectly confident *light*. The probe is written four bytes wide on
+        /// purpose — it would **fit** the buffer, so only the type restriction can
+        /// reject it.
+        #[test]
+        fn a_value_of_the_wrong_type_is_unreadable_not_decoded() {
+            let scratch = ScratchKey::new("wrongtype");
+            scratch.write_string_probe();
+
+            // SAFETY: the scratch path outlives the call (owned by `scratch`); the
+            // value name is a `w!` literal.
+            let read = unsafe { read_dword(scratch.path(), w!("Probe")) };
+            assert_eq!(
+                read,
+                AppsUseLightTheme::Unreadable,
+                "a REG_SZ under a DWORD name must be refused on type; decoding its \
+                 bytes would fabricate a theme out of text"
             );
         }
 
@@ -624,6 +668,19 @@ mod tests {
 
             /// Set `Probe` to `value` as a `REG_DWORD`.
             fn write_dword(&self, value: u32) {
+                self.write_probe(REG_DWORD, &value.to_ne_bytes());
+            }
+
+            /// Set `Probe` to a one-character `REG_SZ`, for the type-restriction
+            /// test. Deliberately four bytes wide (the UTF-16 encoding of a single letter plus its terminator), so it would
+            /// *fit* a DWORD buffer — the restriction flag has to reject it on type,
+            /// not on size.
+            fn write_string_probe(&self) {
+                self.write_probe(REG_SZ, &[0x41, 0x00, 0x00, 0x00]);
+            }
+
+            /// Write `Probe` with an explicit type and payload.
+            fn write_probe(&self, kind: REG_VALUE_TYPE, bytes: &[u8]) {
                 let mut handle = HKEY::default();
                 // SAFETY: as in `new` — the path outlives the call and `phkresult`
                 // points at a live `HKEY` written only on success.
@@ -641,12 +698,10 @@ mod tests {
                     )
                 };
                 assert_eq!(rc, ERROR_SUCCESS, "could not open the scratch key");
-                let bytes = value.to_ne_bytes();
                 // SAFETY: `handle` is an open key from the successful create above;
-                // the name is a `w!` literal; `bytes` is a live 4-byte buffer
-                // matching the declared `REG_DWORD` type and length.
-                let rc =
-                    unsafe { RegSetValueExW(handle, w!("Probe"), None, REG_DWORD, Some(&bytes)) };
+                // the name is a `w!` literal; `bytes` is a live buffer matching the
+                // declared type and length.
+                let rc = unsafe { RegSetValueExW(handle, w!("Probe"), None, kind, Some(bytes)) };
                 // SAFETY: `handle` came from `RegCreateKeyExW`, closed exactly once.
                 unsafe {
                     let _ = RegCloseKey(handle);
@@ -666,9 +721,14 @@ mod tests {
                 // `RegCreateKeyExW` also created the shared `Software\DujaTest`
                 // parent, so removing only our own key still leaves an empty key in
                 // the user's registry. Sweep it best-effort: `RegDeleteKeyW` refuses
-                // a key that still has subkeys, so this is a no-op while any other
-                // scratch key (this module's or `autostart`'s) is live, and the last
-                // guard out cleans up.
+                // a key that still has subkeys, so this can never delete a key a
+                // sibling test is using.
+                //
+                // It does NOT guarantee the parent is gone — `autostart/win.rs`
+                // creates leaves under the same parent and now has the same guard,
+                // but which process drops last is a race, and any future scratch key
+                // added WITHOUT a guard reintroduces the residue. Best-effort is the
+                // honest description; measured to clear it in the common case.
                 let parent = wide(r"Software\DujaTest");
                 // SAFETY: `parent` is a NUL-terminated wide string live for the
                 // call; the delete is refused rather than recursive if non-empty.
