@@ -60,19 +60,21 @@ windows = { workspace = true, features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 tray-icon.workspace = true
 global-hotkey.workspace = true
-# The status item needs two things `tray-icon` does not expose: the activation
-# policy (`.accessory`, so Duja has no Dock icon and no menu bar of its own) and
-# the menu-bar thickness the icon must be rendered for. Both are `NSApplication` /
-# `NSStatusBar` reads on the main thread. Same objc2 pins the other crates use, so
-# nothing new enters Cargo.lock.
+# The status item needs exactly one thing `tray-icon` does not expose: the
+# activation policy (`.accessory`, so Duja has no Dock tile and no menu bar of its
+# own), which is an `NSApplication` call on the main thread. Same objc2 pins the
+# other crates use, so nothing new enters Cargo.lock.
+#
+# Minimal, and measured rather than assumed: `NSStatusBar` and `NSResponder` were
+# declared here first with a justification about reading the menu bar's thickness
+# for the icon size. No such read exists — `tray/icon.rs` uses a documented
+# constant and says why — and stripping both still compiles for
+# aarch64-apple-darwin.
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = [
     "std",
     # NSApplication: sharedApplication + setActivationPolicy.
     "NSApplication",
-    # NSStatusBar: the system-wide bar's thickness, for the icon size.
-    "NSStatusBar",
-    "NSResponder",
 ] }
 
 [build-dependencies]

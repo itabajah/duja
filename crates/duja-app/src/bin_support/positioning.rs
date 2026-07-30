@@ -29,7 +29,7 @@
 //! `physical_window_size`/`physical_dim` to `anchor_window_size`/`anchor_dim` was
 //! a rename and a docs correction only: the arithmetic is unchanged.
 
-// RATIONALE: these pure modules are consumed only by the Windows tray assembly,
+// RATIONALE: these pure modules are consumed only by the tray assembly (Windows and macOS),
 // but stay cross-platform (not cfg-gated) so their unit tests run on every CI
 // OS; the dead-code allow applies only where no consumer exists.
 #![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]

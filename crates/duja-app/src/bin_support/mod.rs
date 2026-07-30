@@ -29,7 +29,7 @@
 //!   persistent-ramp crash marker, and macOS' `Core Graphics` one, which needs
 //!   no marker because a macOS ramp is not believed to outlive the process.
 //! - [`hotkey`] — pure accelerator-string parsing + conflict detection for the
-//!   global-hotkey table (the Windows tray converts + registers the result).
+//!   global-hotkey table (the tray converts + registers the result).
 //! - [`level_forward`] — the slider → engine forwarding seam behind a
 //!   [`level_forward::LevelSink`], where the final-value-of-a-drag contract
 //!   (never throttle on the UI side) is pinned.
@@ -49,8 +49,9 @@
 //! - [`updates`] — the opt-in update check: a pure decision function over an
 //!   injected transport, plus the rustls-backed HTTPS transport.
 //! - `toast` — a best-effort desktop notification for a newly-available update.
-//!   Windows only in substance (a `WinRT` toast); every other platform compiles a
-//!   documented no-op, because the tray menu item is the guaranteed surface.
+//!   Compiled where the tray is (its only caller), and Windows-only in substance:
+//!   a `WinRT` toast there, a documented no-op on macOS, because the tray menu
+//!   item is the guaranteed surface.
 //! - `tray` — the real tray + flyout assembly on the Slint main thread, on
 //!   Windows and macOS. Not intra-doc-linked here: it is still cfg-gated, so a
 //!   link would break the cross-platform (Linux) rustdoc build.
@@ -80,7 +81,12 @@ pub(crate) mod state_store;
 pub(crate) mod stress;
 pub(crate) mod updates;
 
+// `toast` has exactly one caller — `tray::update_flow` — so it is gated to
+// wherever the tray is. Declaring it unconditionally makes it dead code on Linux,
+// which the ubuntu clippy lane rejects with `-D warnings`; the module being
+// *internally* cross-platform (a WinRT toast on Windows, a documented no-op on
+// macOS) is a separate axis from where it is compiled at all.
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod toast;
-
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod tray;

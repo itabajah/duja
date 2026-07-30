@@ -5,6 +5,8 @@
 //! failure is logged at WARN and swallowed, and a platform with no implementation
 //! is not a failure at all — it simply has no bonus.
 //!
+//! Compiled only where the tray is, since `tray::update_flow` is its one caller.
+//!
 //! # Windows
 //!
 //! A `WinRT` `ToastNotification` through the `windows` crate already in the build,

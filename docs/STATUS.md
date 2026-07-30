@@ -321,10 +321,14 @@ gates rather than code — `ipc::TrayBridge` compiled verbatim once its
 `cfg(windows)` attributes were widened, exactly as `#90`'s openers did.
 
 What is genuinely macOS-shaped is small and specific:
-`setActivationPolicy(.accessory)` so Duja has no Dock tile, which must run
-**before** any window exists (after that, `AppKit` has already decided, and
-flipping later leaves a tile until relaunch — the opposite direction to `#94`'s
-loop-time rule); a 36px status icon for the menu bar's 18pt slot rather than
+`setActivationPolicy(.accessory)` so Duja has no Dock tile, which must run **from
+inside the running loop** — the intuition says "before any window exists", and that
+is exactly wrong here, because winit's `applicationDidFinishLaunching` forces
+`Regular` on an unbundled process and would overwrite an early call. It runs
+*before* `StartCause::Init`, so `#94`'s loop-time assembly is not merely an
+acceptable home for this but the only one that survives. (C6's signed bundle will
+let `LSUIElement` say the same thing declaratively, at which point winit stops
+overriding and this becomes belt-and-braces.) Then: a 36px status icon for the menu bar's 18pt slot rather than
 reusing Windows' 32px and letting `AppKit` resample by 1.125× on a glyph designed
 for legibility at tiny sizes; and `menu_on_left_click(false)` so a left click
 reaches the flyout instead of dropping the context menu. Windows keeps

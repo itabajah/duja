@@ -1,5 +1,5 @@
 //! The binary's IPC wiring: starting the OS transport over an [`IpcBridge`],
-//! the second-instance handshake, and the Windows tray bridge.
+//! the second-instance handshake, and the tray bridge.
 //!
 //! The transport-agnostic half — the [`IpcBridge`] trait, the
 //! [`handle_request`] request→response mapping and the [`HeadlessBridge`] —
@@ -59,8 +59,8 @@ pub(crate) fn start(bridge: Arc<dyn IpcBridge>) -> Option<PipeServer> {
 
 /// Best-effort: connect to the already-running instance and ask it to show its
 /// flyout. Returns whether the handshake succeeded.
-// RATIONALE: only the (Windows-only) tray second-instance path calls this; the
-// non-Windows build has no tray, so keep that lane dead-code clean.
+// RATIONALE: only the tray second-instance path calls this, and the tray does not
+// exist on Linux yet, so keep that lane dead-code clean.
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub(crate) fn show_running_instance() -> bool {
     match PipeClient::connect(SECOND_INSTANCE_TIMEOUT) {
