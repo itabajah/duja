@@ -6,13 +6,23 @@ body:
     attributes:
       value: |
         Thanks! Quirk reports directly improve Duja for everyone with the same monitor.
-        Please run `dujactl doctor --report` and paste its output below; it contains the
-        monitor identity and probed capabilities (no personal data).
+        Please run `dujactl doctor --report` and paste its output below. `--report` probes
+        each display, so the paste carries the monitor identity, its raw capability string,
+        the features and brightness range it reported, and its allowed input sources
+        (no personal data). It takes about a second per monitor.
   - type: input
     id: monitor
     attributes:
       label: Monitor make and model
       placeholder: "LG 27UK850, Dell U2720Q…"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      description: DDC behaviour varies across Windows builds and GPU drivers, so the build matters.
+      placeholder: "Windows 11 24H2 / macOS 15.2"
     validations:
       required: true
   - type: input

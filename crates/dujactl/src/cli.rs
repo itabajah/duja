@@ -35,7 +35,9 @@ COMMANDS:
     set <id|all> brightness <0-100>   set brightness percent (mapped onto the probed range)
     input <id>                        list a display's allowed input sources and the current one
     input <id> <name|code>            switch the display's active input (e.g. hdmi1, dp1, 0x11)
-    doctor                            environment / backend / quirk diagnostics + server reachability
+    doctor [--report]                 environment / backend / quirk diagnostics + server reachability
+                                      (--report probes each monitor too: capability string, features,
+                                       live range, allowed inputs — paste it into a quirk report)
     version                           print the workspace version
     --help                            print this help
 
@@ -74,7 +76,19 @@ pub enum Command {
         value: Option<String>,
     },
     /// Print environment / backend / quirk diagnostics.
-    Doctor,
+    Doctor {
+        /// Probe every display and add what the *monitor* reported (`--report`).
+        ///
+        /// `CONTRIBUTING.md` and the monitor-quirk issue template both ask users
+        /// to run `dujactl doctor --report` and paste the output, so the flag has
+        /// to exist — it was rejected as an unexpected argument until now. The
+        /// template also promises the paste "contains the monitor identity and
+        /// probed capabilities", so the flag has to *probe*: it adds the raw MCCS
+        /// capability string, the probed features, the live range and
+        /// hardware-range verdict, and the allowed input set. Plain `doctor` stays
+        /// probe-free and costs no DDC traffic; see [`crate::run::doctor`].
+        report: bool,
+    },
     /// Print the workspace version.
     Version,
     /// Print usage.
@@ -115,7 +129,7 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
 
     match cmd.as_str() {
         "list" => end(iter, Command::List),
-        "doctor" => end(iter, Command::Doctor),
+        "doctor" => parse_doctor(iter),
         "version" => end(iter, Command::Version),
         "--help" | "-h" | "help" => Ok(Command::Help),
         "get" => parse_get(iter),
@@ -132,6 +146,18 @@ fn end<'a>(
 ) -> Result<Command, UsageError> {
     match iter.next() {
         None => Ok(cmd),
+        Some(extra) => Err(usage(&format!("unexpected argument `{extra}`"))),
+    }
+}
+
+/// Parse `doctor [--report]`.
+///
+/// Only `--report` is accepted; anything else is still a usage error, so a typo
+/// does not silently produce the plain report.
+fn parse_doctor<'a>(mut iter: impl Iterator<Item = &'a String>) -> Result<Command, UsageError> {
+    match iter.next() {
+        None => Ok(Command::Doctor { report: false }),
+        Some(flag) if flag == "--report" => end(iter, Command::Doctor { report: true }),
         Some(extra) => Err(usage(&format!("unexpected argument `{extra}`"))),
     }
 }
@@ -223,9 +249,29 @@ mod tests {
     #[test]
     fn nullary_commands_parse() {
         assert_eq!(parse(&args(&["list"])), Ok(Command::List));
-        assert_eq!(parse(&args(&["doctor"])), Ok(Command::Doctor));
+        assert_eq!(
+            parse(&args(&["doctor"])),
+            Ok(Command::Doctor { report: false })
+        );
         assert_eq!(parse(&args(&["version"])), Ok(Command::Version));
         assert_eq!(parse(&args(&["--help"])), Ok(Command::Help));
+    }
+
+    /// `CONTRIBUTING.md` and `.github/ISSUE_TEMPLATE/monitor-quirk-report.yml`
+    /// both instruct users to run `dujactl doctor --report`; before this the
+    /// parser routed `doctor` through `end()`, which rejects any trailing
+    /// argument, so the single command the project asks bug reporters for exited
+    /// with a usage error. Proven red against that parser: it returned
+    /// `Err(UsageError)` for the first assertion below.
+    #[test]
+    fn doctor_accepts_the_report_flag_the_docs_promise() {
+        assert_eq!(
+            parse(&args(&["doctor", "--report"])),
+            Ok(Command::Doctor { report: true })
+        );
+        // A typo must not silently degrade to the plain report.
+        assert!(parse(&args(&["doctor", "--repot"])).is_err());
+        assert!(parse(&args(&["doctor", "--report", "extra"])).is_err());
     }
 
     #[test]
