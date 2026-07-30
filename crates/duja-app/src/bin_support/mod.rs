@@ -24,8 +24,10 @@
 //!   [`ipc::IpcBridge`] trait, [`ipc::handle_request`], and the headless bridge)
 //!   lives in the library so an integration test can drive the whole seam.
 //! - [`gamma`] — wires the opt-in gamma sub-floor channel: a pure engage/restore
-//!   coordinator (unit-tested with a fake sink) plus the Windows guard-backed
-//!   sink that drives the GPU ramp and owns the persistent-ramp crash marker.
+//!   coordinator (unit-tested with a fake sink) plus a per-platform sink that
+//!   drives the GPU ramp — Windows' guard-backed one, which owns the
+//!   persistent-ramp crash marker, and macOS' `Core Graphics` one, which needs
+//!   no marker because a macOS ramp is not believed to outlive the process.
 //! - [`hotkey`] — pure accelerator-string parsing + conflict detection for the
 //!   global-hotkey table (the Windows tray converts + registers the result).
 //! - [`level_forward`] — the slider → engine forwarding seam behind a

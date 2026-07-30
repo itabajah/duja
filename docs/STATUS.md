@@ -30,7 +30,7 @@ display control, automation, and integrations), see
 | **Internal-panel fallback fix** | **`v0.1.3` (Windows)** | ✅ shipped — the built-in panel no longer vanishes on a GPU/OEM-driven backlight |
 | **Dark rebrand + mirror/software-only** | **`v0.1.4` (Windows)** | ✅ shipped — the dark brand identity plus the two laptop-reported issues (#66, #67) |
 | **Sticky software-only fix** | **`v0.1.5` (Windows)** | ✅ shipped — a live monitor no longer sticks as "software-only"; tray Restart. Release verified: 6 assets, SHA256SUMS, minisign, SLSA provenance, `/releases/latest` → v0.1.5 |
-| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021) and the event-loop-first tray construction (#94). Remaining: the app assembly (un-gate `tray`/`toast`, the app-side macOS gamma sink, `os_dark_theme`, the per-platform gamma caption), packaging, **and the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
+| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021) and the event-loop-first tray construction (#94). Remaining: the app assembly (un-gate `tray`/`toast`, `os_dark_theme`, the per-platform gamma caption), packaging, **and the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
 | P7 Linux port | `m7-linux` / `v0.3.0` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
 
@@ -308,13 +308,24 @@ demands `FnOnce + Send` and the payload is emphatically `!Send`.
 
 What remains for P6 is more than un-gating two modules. `bin_support/mod.rs` gates
 only `tray` and `toast`, but `docs/debt.md` tracks three further pieces as
-macOS-assembly work: the **app-side gamma sink** (`gamma.rs` is cross-platform but
-its `GuardSink`/`GammaBackend` are individually `cfg(windows)`, so a
-`dim_mode = "gamma"` display on macOS gets no ramp at all); `os_dark_theme`; and
-the per-platform gate on the new gamma caption. Then packaging, then the gate —
-ADR-0013 keeps the macOS DDC path labelled experimental until there are ≥3
-independent community confirmations per architecture, which no amount of code
-closes.
+macOS-assembly work — now down to `os_dark_theme` and the per-platform gate on the
+new gamma caption. Then packaging, then the gate — ADR-0013 keeps the macOS DDC
+path labelled experimental until there are ≥3 independent community confirmations
+per architecture, which no amount of code closes.
+
+The **app-side gamma sink** has landed: `gamma.rs` now carries a macOS `MacSink`
+alongside Windows' `GuardSink`, so `dim_mode = "gamma"` has a driver on both
+platforms. It is not yet *reachable* — the tray, its only consumer, is still
+`cfg(windows)` — and two things about it are worth carrying into the gate rather
+than treating as done. `CGSetDisplayTransferByFormula` has the same
+reports-success-without-applying hazard Microsoft documents for
+`SetDeviceGammaRamp`, currently live on Apple Silicon with "Automatically adjust
+brightness" enabled (the default) and on recent hardware generally; and the
+Windows remedy for that class — verify by readback — provably does **not**
+transfer, because the macOS readback returns the values just written. Separately,
+the whole no-crash-marker design rests on the window server restoring transfer
+tables on exit, which is widely observed but undocumented by Apple. Both are in
+`docs/debt.md`.
 
 On the gamma sink specifically, `debt.md` still says it "needs a `ScreenStateGuard`
 twin and a crash-marker policy". That was written before the macOS *backend*

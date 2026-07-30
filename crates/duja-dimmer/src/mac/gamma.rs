@@ -2,13 +2,32 @@
 //!
 //! Like Windows, gamma is **not** on the default dimming path: an overlay
 //! reaches true black without touching the transfer tables, and gamma is
-//! meaningless under HDR. Unlike Windows, a macOS gamma table does **not**
-//! outlive the process: the window server tracks each connection's transfer
-//! tables and restores them automatically when that process exits. A crash
-//! therefore self-heals, so this module carries **none** of the Windows
-//! crash-marker / `ScreenStateGuard` machinery — [`restore_all`] is a single
+//! meaningless under HDR. Unlike Windows, a macOS gamma table is **believed not
+//! to outlive the process**: the window server is widely observed to restore each
+//! connection's transfer tables when that process exits, so a crash self-heals.
+//! This module therefore carries **none** of the Windows crash-marker /
+//! `ScreenStateGuard` machinery — [`restore_all`] is a single
 //! `CGDisplayRestoreColorSyncSettings` call for an explicit, in-process restore
 //! (e.g. `duja-app --restore`).
+//!
+//! **That belief is undocumented, and it is load-bearing.** Apple's
+//! `CGDirectDisplay.h` says nothing about restore-on-exit; the nearest official
+//! sentence is about display *configuration*, not transfer tables; Apple's own
+//! `MacGamma` sample saves and restores explicitly; and at least one shipping
+//! gamma tool moved to resetting on quit rather than counting on the OS. Nothing
+//! found contradicts the belief — but nothing confirms it, the hard-kill case is
+//! untested, and Duja has no Mac to settle it on. See `docs/debt.md`; the app-side
+//! consequence is that no crash-recovery path can fire on macOS.
+//!
+//! # A ramp this module accepts may still not reach the screen
+//!
+//! [`set_gamma`] returning `Ok(())` means Core Graphics accepted the call, not
+//! that the display changed. `CGSetDisplayTransferByFormula` is currently
+//! reported — with Apple DTS acknowledgement — to return `kCGErrorSuccess` while
+//! leaving the gamma curve untouched, notably while "Automatically adjust
+//! brightness" is enabled, which is the default on Apple Silicon laptops.
+//! Read-back does not detect it: `CGGetDisplayTransferByTable` returns the values
+//! just written. Callers must not treat success as proof of dimming.
 //!
 //! Gamma calls do not require the main thread (Quartz display services are not
 //! `NSWindow`), so they run inline on the caller's thread — off the main-queue

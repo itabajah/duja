@@ -25,15 +25,32 @@
 //!   versions expose the same constructor and methods, so the tray wires the
 //!   gamma channel without a `cfg`.
 //!
-//! # Why macOS has no crash marker
+//! # Why macOS has no crash marker — and how well that is actually established
 //!
 //! A Windows gamma ramp survives the process that set it, so a crash leaves the
 //! screen dimmed with nothing left to undo it — hence `ScreenStateGuard`, the
-//! marker file, and the recover-on-launch path. macOS is structurally different:
-//! the window server tracks each connection's transfer tables and restores them
-//! when that process exits, so a crash self-heals. The macOS sink therefore holds
-//! no guard, and `GammaBackend::new`'s marker path is accepted and ignored there —
-//! keeping one signature rather than pushing a `cfg` into the tray.
+//! marker file, and the recover-on-launch path. macOS is believed not to need
+//! that: the window server is widely observed to restore a process's transfer
+//! tables when the process exits, so a crash self-heals. The macOS sink therefore
+//! holds no guard, and `GammaBackend::new`'s marker path is accepted and ignored
+//! there — keeping one signature rather than pushing a `cfg` into the tray.
+//!
+//! **"Widely observed", not "documented".** Worth stating plainly, because this
+//! assumption is the sole reason a never-brick net is absent. Apple's
+//! `CGDirectDisplay.h` says nothing about restore-on-exit for
+//! `CGSetDisplayTransferByFormula`; the nearest official sentence — *"When your
+//! application terminates, the display arrangement returns to the current settings
+//! in Displays preferences"* — is about display **configuration**, not transfer
+//! tables. Apple's own `MacGamma` sample saves and restores explicitly, and Gamma
+//! Control's changelog records moving to reset on quit *"instead of counting on
+//! macOS to do it for us"*. Nothing here contradicts the belief; nothing confirms
+//! it either, and Duja has no Mac to settle it on.
+//!
+//! What that costs if the assumption is wrong on some configuration: because the
+//! marker is never written, `startup::recover_from_crash_marker` can never fire on
+//! macOS, so there is **no automatic recovery** — only `duja --restore`, run by a
+//! user on a screen they may not be able to read. Tracked in `docs/debt.md`; the
+//! hard-kill (SIGKILL / force-quit) case in particular is assumed, not verified.
 //!
 //! Before this module existed, `dim_mode = "gamma"` was a silent no-op and the
 //! crash-marker machinery was dead code (P4 gate Finding 2): the planner emitted
@@ -83,7 +100,8 @@ use duja_core::id::StableDisplayId;
 /// A per-display gamma engage/restore executor.
 ///
 /// Abstracts the OS gamma ramp so [`GammaCoordinator`]'s decisions are testable
-/// with a fake. The real implementation is Windows' `GuardSink`.
+/// with a fake. The real implementations are Windows' `GuardSink` and macOS'
+/// `MacSink`.
 pub(crate) trait GammaSink {
     /// Engage (or re-engage) gamma dimming for `id` at `factor` (`1.0` = identity,
     /// down to `GAMMA_FLOOR`), returning whether the OS **reported the write as
@@ -97,21 +115,43 @@ pub(crate) trait GammaSink {
     ///
     /// # This is *reported* acceptance, not observed liveness
     ///
-    /// `true` deliberately claims only what the OS said, because on Windows that is
-    /// all that is knowable from the write alone. Microsoft documents
-    /// `SetDeviceGammaRamp` as being able to *"fail silently (that is, it returns
-    /// TRUE, but it doesn't set your ramp)"* when a ramp violates its heuristics —
-    /// so on such hardware this returns `true` for a ramp that is not live, and
-    /// nothing dims with no log line at all. Closing that needs a
-    /// `GetDeviceGammaRamp` read-back comparison (ADR-0002's verify-by-readback
-    /// idiom, already mandated for DDC writes); see `docs/debt.md`.
+    /// `true` deliberately claims only what the OS said, because on **both**
+    /// platforms that is all that is knowable from the write alone. This was
+    /// originally written as a Windows property; it is not.
+    ///
+    /// - **Windows.** Microsoft documents `SetDeviceGammaRamp` as being able to
+    ///   *"fail silently (that is, it returns TRUE, but it doesn't set your
+    ///   ramp)"* when a ramp violates its heuristics.
+    /// - **macOS.** `CGSetDisplayTransferByFormula` has the same shape, and it is
+    ///   not hypothetical: Apple's own forum threads carry a DTS-acknowledged
+    ///   report that the call returns `kCGErrorSuccess` while *"the display's
+    ///   actual gamma curve remains unchanged despite the API reporting successful
+    ///   completion"*, with a reproduction as ordinary as leaving **"Automatically
+    ///   adjust brightness" on** (the default on Apple Silicon laptops). f.lux,
+    ///   Lunar, `BetterDisplay` and `MonitorControl` are all affected.
+    ///
+    /// The Windows cure — a `GetDeviceGammaRamp` read-back comparison, ADR-0002's
+    /// verify-by-readback idiom — **does not transfer**: on the reported macOS
+    /// hardware `CGGetDisplayTransferByTable` reads back exactly the values just
+    /// written while nothing changes on screen, so a readback would confirm a ramp
+    /// that is not live. See `docs/debt.md`.
     fn engage(&mut self, id: &StableDisplayId, factor: f32) -> bool;
-    /// Restore identity gamma for one display previously engaged.
+    /// Restore one display previously engaged, back to whatever this platform
+    /// treats as "not dimmed by Duja".
+    ///
+    /// Deliberately not "restore identity gamma": the two implementations differ
+    /// and it is user-visible. Windows writes the identity ramp; macOS writes
+    /// identity through `CGSetDisplayTransferByFormula`, which on a **calibrated**
+    /// display is *not* the same as its `ColorSync` profile — see `MacSink::restore`.
     fn restore(&mut self, id: &StableDisplayId);
-    /// Restore every engaged display and clear the crash marker (clean teardown),
-    /// returning whether every restore succeeded (`true` = clean). A `false`
-    /// return means at least one ramp could not be reset and the crash marker was
-    /// kept, so the caller must not force-remove it.
+    /// Restore every engaged display for a clean teardown, returning whether the
+    /// restore was clean (`true`).
+    ///
+    /// On Windows this also clears the crash marker, and a `false` return means at
+    /// least one ramp could not be reset and the marker was **kept**, so the caller
+    /// must not force-remove it. macOS has no marker and cannot report a failure —
+    /// its `false` is unreachable (see `MacSink::restore_all`), so a caller must
+    /// not read `true` there as evidence that anything was verified.
     fn restore_all(&mut self) -> bool;
 }
 
@@ -638,12 +678,22 @@ mod platform {
     /// `surface_token_for`.
     type DeviceResolver = Box<dyn FnMut(&StableDisplayId) -> Option<String>>;
 
-    /// The [`RefusalLog`] reason for "this id has no usable gamma display", kept
-    /// distinct from any OS error text so the two failure shapes each get their own
-    /// log line. Covers both halves of the correlation: no token at all (a
-    /// `DisplayServices` panel, which carries none), and a token that is not a
-    /// `CGDirectDisplayID`.
-    const NO_DEVICE_REASON: &str = "no CoreGraphics display for this display";
+    /// [`RefusalLog`] reason: this id carries no gamma token at all — a
+    /// `DisplayServices` panel, which has none by construction.
+    ///
+    /// Deliberately **separate** from [`BAD_TOKEN_REASON`]: `RefusalLog` latches per
+    /// (id, reason), so folding the two correlation failures into one string would
+    /// let an already-latched "no token" swallow a later "the token is garbage" on
+    /// the same id — which is exactly the hiding-a-second-fault behaviour the latch
+    /// documents itself as preventing.
+    const NO_TOKEN_REASON: &str = "no gamma token for this display";
+
+    /// [`RefusalLog`] reason: a token was present but is not a `CGDirectDisplayID`.
+    ///
+    /// Should be unreachable — `backend::discover_ddc` stamps
+    /// `cg_display_id.to_string()` — so seeing this in a log means the wrong value
+    /// reached the gamma channel, e.g. a surface token or a wrong-platform string.
+    const BAD_TOKEN_REASON: &str = "gamma token is not a CoreGraphics display id";
 
     /// The real macOS gamma sink: correlates ids to `CGDirectDisplayID`s and drives
     /// Core Graphics' transfer formula.
@@ -666,13 +716,24 @@ mod platform {
         /// Resolve `id` to a live `CGDirectDisplayID`, logging (once per reason) and
         /// returning `None` when it has no usable one.
         fn gamma_display_for(&mut self, id: &StableDisplayId) -> Option<u32> {
-            let cg_id = (self.resolve)(id)
-                .as_deref()
-                .and_then(display_id_from_token);
-            if cg_id.is_none() && self.refusals.note_refusal(id, NO_DEVICE_REASON) {
+            let Some(token) = (self.resolve)(id) else {
+                if self.refusals.note_refusal(id, NO_TOKEN_REASON) {
+                    warn!(
+                        id = %id.as_str(),
+                        "no gamma token for this display; skipping ramp \
+                         (logged once until the reason changes)"
+                    );
+                }
+                return None;
+            };
+            let cg_id = display_id_from_token(&token);
+            if cg_id.is_none() && self.refusals.note_refusal(id, BAD_TOKEN_REASON) {
+                // The token is in the line: this reason means the *wrong value*
+                // reached the gamma channel, and which value it was is the whole
+                // diagnostic.
                 warn!(
-                    id = %id.as_str(),
-                    "no CoreGraphics display for gamma display; skipping ramp \
+                    id = %id.as_str(), token,
+                    "gamma token is not a CoreGraphics display id; skipping ramp \
                      (logged once until the reason changes)"
                 );
             }
@@ -710,6 +771,25 @@ mod platform {
             true
         }
 
+        /// Write identity gamma to the one display leaving the sub-floor zone.
+        ///
+        /// # This is not the same end state as [`Self::restore_all`]
+        ///
+        /// `restore_all` goes through `CGDisplayRestoreColorSyncSettings`, which
+        /// returns every display to the **user's `ColorSync` profile**. This path
+        /// writes a linear identity transfer function instead, which on a
+        /// *calibrated* display is a different thing: the display comes back
+        /// un-dimmed but also un-calibrated, and stays that way until Duja quits or
+        /// anything triggers a global restore.
+        ///
+        /// Deliberate, and the alternative is worse rather than better. Core
+        /// Graphics has no per-display `ColorSync` restore, so honouring the profile
+        /// here would mean calling the **global** reset and then re-engaging every
+        /// other display Duja still has dimmed — which momentarily brightens
+        /// displays the user did not touch, the exact artifact
+        /// [`apply_dimming_batch`]'s ordering exists to avoid. Choosing that blind,
+        /// on hardware Duja does not have, would be trading a documented limit for
+        /// an unmeasured flicker. Recorded in `docs/debt.md` for whoever has a Mac.
         fn restore(&mut self, id: &StableDisplayId) {
             if let Some(cg_id) = self.engaged.remove(id)
                 && let Err(e) = duja_dimmer::restore_identity(&GammaDisplay::from_display_id(cg_id))
@@ -718,28 +798,44 @@ mod platform {
             }
         }
 
+        /// Reset every display to its `ColorSync` profile and forget the engaged set.
+        ///
+        /// **Always returns `true`**, and the signature cannot say so. macOS'
+        /// `RestoreReport::failed` is hardcoded empty (`CGDisplayRestoreColorSyncSettings`
+        /// returns `void` — there is nothing to report), so unlike Windows there is
+        /// no per-display outcome to reconcile and no failure to propagate. Clearing
+        /// `engaged` unconditionally is therefore correct here and would be a **bug**
+        /// on Windows, where a ramp that failed to reset must stay tracked so the
+        /// crash marker is kept.
+        ///
+        /// A caller must not read the `true` as evidence of anything: it means the
+        /// call was made. There is deliberately no `if !report.is_clean()` warning
+        /// here — that branch is unreachable, and dead code that looks like a guard
+        /// is worse than no guard.
+        ///
+        /// Note the blast radius, which is wider than the Windows twin's: this
+        /// resets **every** display, including ones Duja never engaged and whatever
+        /// another app (f.lux, a calibration loader) had set. Windows' `restore_now`
+        /// touches only what it recorded. Pre-existing — `tray/state.rs` already
+        /// calls the same global `duja_dimmer::restore_all()` on quit and on
+        /// "Restore screen" — but it is a real difference, not a simplification.
         fn restore_all(&mut self) -> bool {
-            // `CGDisplayRestoreColorSyncSettings` resets *every* display in one call,
-            // so unlike the Windows guard there is no per-display outcome to
-            // reconcile: the macOS `RestoreReport::failed` is documented as always
-            // empty. Clearing `engaged` unconditionally is therefore correct here and
-            // would NOT be on Windows, where a failed restore must stay tracked.
-            let report = duja_dimmer::restore_all();
+            // The report is inspected nowhere on purpose: its `failed` list is
+            // hardcoded empty upstream, so there is nothing to branch on.
+            let _report = duja_dimmer::restore_all();
             self.engaged.clear();
-            if !report.is_clean() {
-                warn!(failed = report.failed.len(), "some gamma restores failed");
-            }
-            report.is_clean()
+            true
         }
     }
 
     /// The tray-owned gamma channel: the pure coordinator plus the real sink.
     ///
     /// Unlike the Windows twin, dropping this does **not** restore anything — there
-    /// is no guard to run on `Drop`. It does not need one: the window server
-    /// restores this process's transfer tables when the process exits, whether that
-    /// exit is clean or a crash. A clean teardown still calls [`Self::restore_all`]
-    /// so the screen is right *before* the process goes away.
+    /// is no guard to run on `Drop`, on the belief that the window server restores
+    /// this process's transfer tables when it exits however that happens. See the
+    /// module docs for how well that is actually established; it is the assumption
+    /// the whole no-marker design rests on. A clean teardown still calls
+    /// [`Self::restore_all`] so the screen is right *before* the process goes away.
     pub(crate) struct GammaBackend {
         coord: GammaCoordinator,
         sink: MacSink,
@@ -747,12 +843,14 @@ mod platform {
 
     impl GammaBackend {
         /// Build a gamma channel using `resolve` to map a resolved display id to its
-        /// display-surface token.
+        /// **gamma** token (`BoundsMap::gamma_token_for`).
         ///
         /// `_marker` is the crash-marker path, accepted and **ignored**. It exists so
         /// this constructor is signature-identical to the Windows one and the tray
         /// can wire the gamma channel without a `cfg`; macOS has nothing to record
-        /// because a dirty exit leaves no ramp behind (see the module docs).
+        /// because a dirty exit is believed to leave no ramp behind (see the module
+        /// docs for the strength of that belief). The consequence of ignoring it is
+        /// that `startup::recover_from_crash_marker` can never fire on macOS.
         pub(crate) fn new(
             _marker: PathBuf,
             resolve: impl FnMut(&StableDisplayId) -> Option<String> + 'static,
@@ -781,11 +879,118 @@ mod platform {
             apply_dimming_batch(commands, &mut self.coord, &mut self.sink, overlays)
         }
 
-        /// Restore every engaged display, returning whether every restore succeeded
-        /// (`true` = clean).
+        /// Reset every display to its `ColorSync` profile and forget what was engaged.
+        ///
+        /// Always `true` — see [`MacSink::restore_all`].
         pub(crate) fn restore_all(&mut self) -> bool {
             self.coord.forget_all();
             self.sink.restore_all()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use duja_core::dimmer::DisplayBounds;
+
+        /// A `CGDirectDisplayID` that cannot be attached: `CGGetActiveDisplayList`
+        /// only ever reports real ids, so Core Graphics rejects a write to this one
+        /// with `kCGErrorIllegalArgument`. The macOS twin of the Windows tests'
+        /// bogus `\\.\DUJA_TEST` device name — it makes the *real* OS call fail
+        /// deterministically, on a runner with no displays at all.
+        const UNATTACHED_DISPLAY_ID: &str = "4294967295";
+
+        fn id(serial: &str) -> StableDisplayId {
+            StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap()
+        }
+
+        fn gamma_cmd(serial: &str, factor: f32) -> DimCommand {
+            DimCommand::new(
+                id(serial),
+                DisplayBounds::new(0, 0, 1920, 1080),
+                0.0,
+                Some(factor),
+            )
+        }
+
+        /// A display the resolver cannot map is refused, and nothing is recorded as
+        /// engaged — so the next batch retries rather than believing a ramp is live.
+        ///
+        /// Reds an `engage` that returns `true` without reaching Core Graphics.
+        #[test]
+        fn a_display_with_no_token_engages_nothing() {
+            let mut sink = MacSink {
+                resolve: Box::new(|_id| None),
+                engaged: BTreeMap::new(),
+                refusals: RefusalLog::default(),
+            };
+            assert!(
+                !sink.engage(&id("A"), 0.6),
+                "no token ⇒ the write cannot have happened"
+            );
+            assert!(
+                sink.engaged.is_empty(),
+                "nothing may be recorded as engaged"
+            );
+        }
+
+        /// A token that is not a `CGDirectDisplayID` is refused rather than coerced.
+        /// `0` is `kCGNullDirectDisplay`; the device name is the other platform's
+        /// token, which must never reach this sink.
+        #[test]
+        fn a_token_that_is_not_a_display_id_engages_nothing() {
+            for token in ["0", r"\\.\DISPLAY1", "1abc", ""] {
+                let mut sink = MacSink {
+                    resolve: Box::new(move |_id| Some(token.to_owned())),
+                    engaged: BTreeMap::new(),
+                    refusals: RefusalLog::default(),
+                };
+                assert!(
+                    !sink.engage(&id("A"), 0.6),
+                    "token {token:?} must be refused"
+                );
+                assert!(
+                    sink.engaged.is_empty(),
+                    "token {token:?} recorded an engage"
+                );
+            }
+        }
+
+        /// A well-formed token for a display that is not attached reaches Core
+        /// Graphics and is refused **by the OS**, which is the half the two tests
+        /// above cannot cover: they short-circuit before the FFI.
+        ///
+        /// Reds an `engage` that reports success without checking `set_gamma`'s
+        /// result — the failure mode that would leave the coordinator believing a
+        /// ramp is live and never planning an overlay instead.
+        #[test]
+        fn an_os_refusal_is_not_recorded_as_engaged() {
+            let mut sink = MacSink {
+                resolve: Box::new(|_id| Some(UNATTACHED_DISPLAY_ID.to_owned())),
+                engaged: BTreeMap::new(),
+                refusals: RefusalLog::default(),
+            };
+            assert!(
+                !sink.engage(&id("A"), 0.6),
+                "Core Graphics refuses an unattached display id"
+            );
+            assert!(
+                sink.engaged.is_empty(),
+                "a refused write must not be recorded as engaged"
+            );
+        }
+
+        /// The whole channel is inert for a display it cannot address: the batch
+        /// still succeeds (a refused ramp is never fatal) and the clean teardown
+        /// reports clean.
+        #[test]
+        fn a_batch_for_an_unaddressable_display_succeeds_and_engages_nothing() {
+            let mut backend = GammaBackend::new(PathBuf::from("ignored"), |_id| None);
+            backend
+                .apply_batch(&[gamma_cmd("A", 0.6)], None)
+                .expect("no overlay backend ⇒ no failure");
+            assert!(backend.sink.engaged.is_empty());
+            assert!(backend.restore_all());
         }
     }
 }
