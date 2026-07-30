@@ -88,10 +88,12 @@ pub struct DdcDisplay {
     /// set is detected and collapsed into one control.
     ///
     /// Concretely: `CGDisplayMirrorsDisplay(id)` when this display is a mirror
-    /// clone, else its own `CGDirectDisplayID`. See [`crate::mac_surface`] for
-    /// the rule and why the raw per-display id would **not** do (it is unique by
-    /// construction, so two mirrored Macs would produce two tokens at identical
-    /// bounds — the `#66` double-overlay defect).
+    /// clone, else its own `CGDirectDisplayID`. The rule — and why the raw
+    /// per-display id would **not** do (it is unique by construction, so two
+    /// mirrored Macs would produce two tokens at identical bounds, the `#66`
+    /// double-overlay defect) — is documented on the crate-private
+    /// `mac_surface` module. Not linked: this item is public and that module is
+    /// not, which `rustdoc -D warnings` rejects.
     ///
     /// Not stable across replug (that is what [`id`](Self::id) is for) — it is a
     /// live token for this enumeration.
