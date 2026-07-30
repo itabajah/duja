@@ -782,14 +782,29 @@ mod platform {
         /// un-dimmed but also un-calibrated, and stays that way until Duja quits or
         /// anything triggers a global restore.
         ///
-        /// Deliberate, and the alternative is worse rather than better. Core
-        /// Graphics has no per-display `ColorSync` restore, so honouring the profile
-        /// here would mean calling the **global** reset and then re-engaging every
-        /// other display Duja still has dimmed — which momentarily brightens
-        /// displays the user did not touch, the exact artifact
-        /// [`apply_dimming_batch`]'s ordering exists to avoid. Choosing that blind,
-        /// on hardware Duja does not have, would be trading a documented limit for
-        /// an unmeasured flicker. Recorded in `docs/debt.md` for whoever has a Mac.
+        /// There are **three** options, and all three are worth naming, because the
+        /// obvious second one is bad enough to make it look like there are only two:
+        ///
+        /// 1. What this does. Cheap, per-display, no flicker — loses calibration.
+        /// 2. Call the **global** `CGDisplayRestoreColorSyncSettings` and re-engage
+        ///    every other display Duja still has dimmed. Honours the profile, but
+        ///    momentarily brightens displays the user did not touch — the exact
+        ///    artifact [`apply_dimming_batch`]'s ordering exists to avoid.
+        /// 3. **Snapshot and restore**, which is what Apple's own `MacGamma` sample
+        ///    does: `CGGetDisplayTransferByTable` once, before Duja's first write,
+        ///    and `CGSetDisplayTransferByTable` to put it back. Per-display, no
+        ///    flicker, preserves calibration — better than 1 on the axis that
+        ///    matters, and both symbols are already in the bound `objc2` surface.
+        ///
+        /// So 3 is the right answer and this is not it. Deferred, not dismissed, and
+        /// the costs are real rather than rhetorical: two new `unsafe` blocks with
+        /// pointer out-params in `duja-dimmer`'s macOS backend (which today has
+        /// exactly one), a capacity query plus a 3×N `CGGammaValue` buffer per
+        /// engaged display, and a residual of its own — another app changing the
+        /// table mid-session gets Duja's older snapshot written back, which is still
+        /// strictly better than identity, which clobbers it unconditionally.
+        /// Writing that FFI blind, for a path unreachable on any Mac with an EDR
+        /// panel, is not a trade to make without hardware. See `docs/debt.md`.
         fn restore(&mut self, id: &StableDisplayId) {
             if let Some(cg_id) = self.engaged.remove(id)
                 && let Err(e) = duja_dimmer::restore_identity(&GammaDisplay::from_display_id(cg_id))
@@ -965,6 +980,23 @@ mod platform {
         /// ramp is live and never planning an overlay instead.
         #[test]
         fn an_os_refusal_is_not_recorded_as_engaged() {
+            // Precondition, asserted rather than assumed — the Windows twin does the
+            // same. Two ways this test could silently become vacuous: Core Graphics
+            // accepting the unattached id (and this PR's own headline finding is
+            // that it reports success it should not), or `display_id_from_token`
+            // tightening until `u32::MAX` is rejected, which would route the engage
+            // through the short-circuit path instead of the FFI and still pass.
+            assert_eq!(
+                display_id_from_token(UNATTACHED_DISPLAY_ID),
+                Some(u32::MAX),
+                "the probe id must survive the token parse, or this test never \
+                 reaches Core Graphics at all"
+            );
+            assert!(
+                duja_dimmer::set_gamma(&GammaDisplay::from_display_id(u32::MAX), 0.6).is_err(),
+                "precondition: an unattached display id must fail the ramp write"
+            );
+
             let mut sink = MacSink {
                 resolve: Box::new(|_id| Some(UNATTACHED_DISPLAY_ID.to_owned())),
                 engaged: BTreeMap::new(),
@@ -981,8 +1013,12 @@ mod platform {
         }
 
         /// The whole channel is inert for a display it cannot address: the batch
-        /// still succeeds (a refused ramp is never fatal) and the clean teardown
-        /// reports clean.
+        /// still succeeds (a refused ramp is never fatal) and engages nothing.
+        ///
+        /// Deliberately does **not** assert `restore_all()` is `true`: that is a
+        /// documented constant on this platform, so asserting it would pin the doc
+        /// rather than the behaviour. What `restore_all` must actually do is
+        /// covered below.
         #[test]
         fn a_batch_for_an_unaddressable_display_succeeds_and_engages_nothing() {
             let mut backend = GammaBackend::new(PathBuf::from("ignored"), |_id| None);
@@ -990,7 +1026,60 @@ mod platform {
                 .apply_batch(&[gamma_cmd("A", 0.6)], None)
                 .expect("no overlay backend ⇒ no failure");
             assert!(backend.sink.engaged.is_empty());
-            assert!(backend.restore_all());
+        }
+
+        /// Restoring one display drops **that** display from the engaged set and
+        /// leaves the others alone.
+        ///
+        /// The engaged map is seeded directly, because every path that populates it
+        /// honestly needs a real display to accept a ramp. That is the point: with
+        /// only the refusal tests above, `restore` could be an empty function body
+        /// and nothing would notice — the coordinator never asks it to restore
+        /// something it never recorded as engaged.
+        #[test]
+        fn restoring_one_display_forgets_only_that_display() {
+            let mut sink = MacSink {
+                resolve: Box::new(|_id| None),
+                engaged: BTreeMap::new(),
+                refusals: RefusalLog::default(),
+            };
+            // Two unattached ids: the Core Graphics write will fail and be logged,
+            // which is irrelevant here — the bookkeeping is what is under test.
+            sink.engaged.insert(id("A"), 4_294_967_295);
+            sink.engaged.insert(id("B"), 4_294_967_294);
+
+            sink.restore(&id("A"));
+
+            assert!(!sink.engaged.contains_key(&id("A")), "A must be forgotten");
+            assert!(
+                sink.engaged.contains_key(&id("B")),
+                "B is still engaged and must not be dropped by A's restore"
+            );
+        }
+
+        /// A full restore forgets **everything**, so nothing is left believing a
+        /// ramp of its own is live.
+        ///
+        /// Seeded for the same reason as above. Reds a `restore_all` that skips its
+        /// `engaged.clear()` — which would strand entries the coordinator has
+        /// already forgotten, so a later `restore` for one of them would write to a
+        /// display Duja no longer tracks.
+        #[test]
+        fn a_full_restore_forgets_every_engaged_display() {
+            let mut sink = MacSink {
+                resolve: Box::new(|_id| None),
+                engaged: BTreeMap::new(),
+                refusals: RefusalLog::default(),
+            };
+            sink.engaged.insert(id("A"), 4_294_967_295);
+            sink.engaged.insert(id("B"), 4_294_967_294);
+
+            sink.restore_all();
+
+            assert!(
+                sink.engaged.is_empty(),
+                "a full restore must leave nothing engaged"
+            );
         }
     }
 }
