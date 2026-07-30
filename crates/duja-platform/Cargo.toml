@@ -65,13 +65,51 @@ rustix = { workspace = true }
 # (LaunchAgent plist).
 directories = { workspace = true }
 
-# -- macOS event pump -------------------------------------------------------
+# -- macOS event pump + tray geometry ---------------------------------------
 [target.'cfg(target_os = "macos")'.dependencies]
 # CoreFoundation run-loop plumbing for the dedicated CFRunLoop thread. The
 # CoreGraphics `CGDisplayRegisterReconfigurationCallback` and IOKit
 # `IORegisterForSystemPower` externs are hand-declared in `mac/sys.rs` (no
 # maintained safe binding covers them), each `unsafe` block carrying a SAFETY.
 core-foundation-sys = { workspace = true }
+# Tray-anchor geometry (`geometry::platform`): the global mouse location and each
+# screen's frame / visibleFrame / backingScaleFactor. Same objc2 pins duja-dimmer
+# already uses, so no new crate versions enter Cargo.lock.
+objc2 = { workspace = true }
+# Features are named per Objective-C class, and a leaf class feature pulls in its
+# superclass features transitively.
+objc2-app-kit = { workspace = true, features = [
+    "std",
+    # Unlocks the CGFloat-typed accessors (backingScaleFactor) — they are gated on
+    # the core-foundation geometry types coming from this feature.
+    "objc2-core-foundation",
+    # NSScreen: screens(), frame, visibleFrame, backingScaleFactor.
+    "NSScreen",
+    # NSEvent: the class-level mouseLocation (Cocoa global points).
+    "NSEvent",
+] }
+# NSPoint / NSRect (aliases of CGPoint / CGRect) as the FFI copies them out.
+#
+# The last two features are redundant *today* — verified: strip either and this
+# crate still compiles for aarch64-apple-darwin, because objc2-app-kit's `NSScreen`
+# feature turns on `objc2-foundation/NSArray` and
+# `objc2-foundation/objc2-core-foundation` and cargo unifies them in. They are
+# declared anyway, and that is the deliberate choice, not a copy of another crate's
+# list (duja-dimmer's objc2-foundation entry omits `objc2-core-foundation`): this
+# crate names `NSPoint`/`NSRect` and calls `NSArray::count`/`objectAtIndex`
+# directly, so its own manifest should say so. Leaning on a sibling dependency's
+# feature selection means dropping `NSScreen` from the list above — or an upstream
+# narrowing its feature graph — turns into an unresolved-import error here with no
+# hint about which manifest line was actually load-bearing.
+objc2-foundation = { workspace = true, features = [
+    "std",
+    "NSGeometry",
+    # NSArray's count/objectAtIndex, used to walk NSScreen::screens.
+    "NSArray",
+    "objc2-core-foundation",
+] }
+# CGFloat, the return type of backingScaleFactor and the field type of NSRect.
+objc2-core-foundation = { workspace = true, features = ["std", "CFCGTypes"] }
 
 [dev-dependencies]
 duja-core = { workspace = true, features = ["test-support"] }

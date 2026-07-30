@@ -10,22 +10,41 @@
 //! edge and centres it vertically. All arithmetic is injected — the caller
 //! supplies the cursor, work area, and flyout size — so the placement is
 //! exhaustively unit-testable without any Win32 call.
+//!
+//! # Units: anchor units, not pixels
+//!
+//! Every coordinate and extent here is in **anchor units**: the unit
+//! `duja_platform::geometry` hands out, which is physical device pixels on
+//! Windows and points on macOS. This module never learns which; it only ever
+//! compares the cursor against the work area, clamps inside it, and returns an
+//! origin in the same space it was given — an operation that is unit-agnostic by
+//! construction, provided the caller does not mix units. That is what
+//! `logical_to_anchor` (the `scale`-shaped parameter below) is for: the `.slint`
+//! window size arrives in *logical* design units and has to be converted before
+//! it can be clamped against a work area.
+//!
+//! The wording used to say "physical pixels" throughout, which was true while
+//! Windows was the only backend and became a false statement the moment the macOS
+//! one landed (points are not pixels on a Retina display). Renaming
+//! `physical_window_size`/`physical_dim` to `anchor_window_size`/`anchor_dim` was
+//! a rename and a docs correction only: the arithmetic is unchanged.
 
 // RATIONALE: these pure modules are consumed only by the Windows tray assembly,
 // but stay cross-platform (not cfg-gated) so their unit tests run on every CI
 // OS; the dead-code allow applies only where no consumer exists.
 #![cfg_attr(not(windows), allow(dead_code))]
 
-/// A rectangle in virtual-desktop pixels (origin may be negative).
+/// A rectangle in the desktop's anchor space, y-down: [anchor units](self), with
+/// an origin that may be negative (a monitor left of or above the primary one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Rect {
     /// Left edge.
     pub(crate) x: i32,
     /// Top edge.
     pub(crate) y: i32,
-    /// Width (pixels).
+    /// Width (anchor units).
     pub(crate) w: u32,
-    /// Height (pixels).
+    /// Height (anchor units).
     pub(crate) h: u32,
 }
 
@@ -84,7 +103,7 @@ fn taskbar_edge(cursor: (i32, i32), work: Rect) -> Edge {
     edge
 }
 
-/// Compute the flyout's top-left corner (physical pixels).
+/// Compute the flyout's top-left corner ([anchor units](self)).
 ///
 /// `cursor` is the click point (typically the tray click / cursor position);
 /// `work_area` is the monitor work area under it; `flyout` is the flyout's
@@ -128,43 +147,53 @@ fn clamp(value: i32, lo: i32, hi: i32) -> i32 {
     if hi < lo { lo } else { value.clamp(lo, hi) }
 }
 
-/// Convert a *logical* `(width, height)` in `f32` design units to a **physical**
-/// pixel size at `scale`, rounding and guarding a degenerate scale/extent.
+/// Convert a *logical* `(width, height)` in `f32` design units to a size in
+/// [anchor units](self), rounding and guarding a degenerate factor/extent.
 ///
 /// The Slint window is laid out in logical pixels (`320px`) but the anchor math
-/// and `set_position` work in physical pixels (Win32 rects are physical on a
-/// Per-Monitor-V2 process). At a scale ≠ 1.0 the two differ, so the caller
-/// converts the window's logical design size to physical before clamping —
-/// otherwise the anchor keeps a *logical*-sized box on-screen while the real,
-/// larger physical window overflows the work-area edge (P0 live-QA bug 4). The
-/// height is content-driven (`f32`), so this takes `f32` inputs. A
-/// non-finite/degenerate scale falls back to the unscaled dimension.
-pub(crate) fn physical_window_size(logical_w: f32, logical_h: f32, scale: f32) -> (u32, u32) {
+/// works in anchor units, so the caller converts the window's logical design size
+/// before clamping — otherwise the anchor keeps a *logical*-sized box on-screen
+/// while the real, larger window overflows the work-area edge (P0 live-QA bug 4).
+///
+/// `logical_to_anchor` is the factor `duja_platform::TrayAnchor` derives for that
+/// conversion: the monitor's scale on Windows (anchor units are physical pixels,
+/// so a logical size must grow), and `1.0` on macOS (anchor units are points,
+/// which already *are* logical). The height is content-driven (`f32`), so this
+/// takes `f32` inputs. A non-finite/degenerate factor falls back to the unscaled
+/// dimension.
+pub(crate) fn anchor_window_size(
+    logical_w: f32,
+    logical_h: f32,
+    logical_to_anchor: f32,
+) -> (u32, u32) {
     (
-        physical_dim(logical_w, scale),
-        physical_dim(logical_h, scale),
+        anchor_dim(logical_w, logical_to_anchor),
+        anchor_dim(logical_h, logical_to_anchor),
     )
 }
 
-/// Scale one logical `f32` dimension to a physical pixel count (see
-/// [`physical_window_size`]), clamped to at least one pixel.
-fn physical_dim(logical: f32, scale: f32) -> u32 {
-    let scale = if scale.is_finite() && scale >= 0.1 {
-        scale
+/// Scale one logical `f32` dimension into [anchor units](self) (see
+/// [`anchor_window_size`]), clamped to at least one unit.
+fn anchor_dim(logical: f32, logical_to_anchor: f32) -> u32 {
+    let scale = if logical_to_anchor.is_finite() && logical_to_anchor >= 0.1 {
+        logical_to_anchor
     } else {
         1.0
     };
     let scaled = (logical.max(1.0) * scale).round();
     // RATIONALE (cast_possible_truncation, cast_sign_loss): `scaled` is finite,
-    // >= 1.0, and a rounded pixel count well within u32; the guards above rule out
+    // >= 1.0, and a rounded extent well within u32; the guards above rule out
     // negatives, NaN and infinities.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let out = scaled as u32;
     out.max(1)
 }
 
-/// The top-left corner (physical pixels) that centres a window of `size` within
-/// `work`, clamped so an oversized window pins to the work-area origin.
+/// The top-left corner ([anchor units](self)) that centres a window of `size`
+/// within `work`, clamped so an oversized window pins to the work-area origin.
+///
+/// `size` must already be in anchor units (see [`anchor_window_size`]) — mixing a
+/// logical size into an anchor-unit work area is the P0 live-QA bug 4 shape.
 ///
 /// Used to place the settings window deliberately on the active monitor rather
 /// than letting the OS drop it at a default cascade spot (P0 live-QA bug 4).
@@ -178,25 +207,32 @@ pub(crate) fn center_in(work: Rect, size: (u32, u32)) -> (i32, i32) {
     (x, y)
 }
 
-/// The largest logical flyout height that fits inside `work` (physical px) at
-/// `scale`, leaving `margin` physical px clear top and bottom, and never
+/// The largest *logical* flyout height that fits inside `work` ([anchor
+/// units](self)), leaving `margin` anchor units clear top and bottom, and never
 /// exceeding `absolute_cap` (logical px). The flyout scrolls its rows beyond
 /// this, so a small screen never overflows.
 ///
-/// A degenerate scale (non-finite or `< 0.1`) is treated as `1.0`, matching
-/// [`physical_dim`].
-pub(crate) fn flyout_height_cap(work: Rect, scale: f32, margin: i32, absolute_cap: f32) -> f32 {
-    let scale = if scale.is_finite() && scale >= 0.1 {
-        scale
+/// `logical_to_anchor` is the same factor [`anchor_window_size`] takes; this is
+/// its inverse direction (anchor units back to logical), which is why it divides.
+/// A degenerate factor (non-finite or `< 0.1`) is treated as `1.0`, matching
+/// [`anchor_dim`].
+pub(crate) fn flyout_height_cap(
+    work: Rect,
+    logical_to_anchor: f32,
+    margin: i32,
+    absolute_cap: f32,
+) -> f32 {
+    let scale = if logical_to_anchor.is_finite() && logical_to_anchor >= 0.1 {
+        logical_to_anchor
     } else {
         1.0
     };
-    let margin_px = u32::try_from(margin.max(0)).unwrap_or(0);
-    let usable_physical = work.h.saturating_sub(margin_px.saturating_mul(2));
-    // RATIONALE (cast_precision_loss): a work-area height in physical pixels is
-    // far below f32's 2^24 exact-integer limit, so this u32 -> f32 is exact.
+    let margin_units = u32::try_from(margin.max(0)).unwrap_or(0);
+    let usable_anchor = work.h.saturating_sub(margin_units.saturating_mul(2));
+    // RATIONALE (cast_precision_loss): a work-area height in anchor units is far
+    // below f32's 2^24 exact-integer limit, so this u32 -> f32 is exact.
     #[allow(clippy::cast_precision_loss)]
-    let usable_logical = usable_physical as f32 / scale;
+    let usable_logical = usable_anchor as f32 / scale;
     absolute_cap.min(usable_logical)
 }
 
@@ -263,7 +299,11 @@ mod tests {
     }
 
     #[test]
-    fn height_cap_accounts_for_dpi_scale() {
+    fn height_cap_divides_by_the_logical_to_anchor_factor() {
+        // A 2.0 factor is a 200 % Windows monitor (anchor units are physical
+        // pixels). A macOS Retina anchor is the *other* case — its factor is 1.0,
+        // because a `visibleFrame` height is already in logical points — which is
+        // what stops this cap halving the flyout on a Mac.
         let hi_dpi = Rect {
             x: 0,
             y: 0,
@@ -275,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn height_cap_treats_a_degenerate_scale_as_one() {
+    fn height_cap_treats_a_degenerate_factor_as_one() {
         let short = Rect {
             x: 0,
             y: 0,
@@ -374,25 +414,27 @@ mod tests {
         assert_eq!(taskbar_edge((1915, 1035), WORK), Edge::Bottom);
     }
 
-    // --- DPI scaling (P0 live-QA bug 4) ----------------------------------
+    // --- logical → anchor-unit scaling (P0 live-QA bug 4) ----------------
 
     #[test]
-    fn physical_window_size_scales_f32_logical_dims() {
-        // 320x250 logical at 125% → 400x313 (250 * 1.25 = 312.5 → 313).
-        assert_eq!(physical_window_size(320.0, 250.0, 1.25), (400, 313));
-        // Integer scale is identity.
-        assert_eq!(physical_window_size(440.0, 600.0, 1.0), (440, 600));
-        // A degenerate scale falls back to the unscaled (rounded) logical size.
-        assert_eq!(physical_window_size(320.0, 250.0, f32::NAN), (320, 250));
-        assert_eq!(physical_window_size(320.0, 250.0, 0.0), (320, 250));
-        // Extents clamp to at least one pixel.
-        assert_eq!(physical_window_size(0.0, 0.0, 1.25), (1, 1));
+    fn anchor_window_size_scales_f32_logical_dims() {
+        // 320x250 logical at a 1.25 factor → 400x313 (250 * 1.25 = 312.5 → 313).
+        assert_eq!(anchor_window_size(320.0, 250.0, 1.25), (400, 313));
+        // A unit factor — every macOS anchor, and a 96 DPI Windows one — is the
+        // identity.
+        assert_eq!(anchor_window_size(440.0, 600.0, 1.0), (440, 600));
+        // A degenerate factor falls back to the unscaled (rounded) logical size.
+        assert_eq!(anchor_window_size(320.0, 250.0, f32::NAN), (320, 250));
+        assert_eq!(anchor_window_size(320.0, 250.0, 0.0), (320, 250));
+        // Extents clamp to at least one unit.
+        assert_eq!(anchor_window_size(0.0, 0.0, 1.25), (1, 1));
     }
 
     #[test]
-    fn physical_window_stays_on_screen_at_125_percent() {
-        // The exact live-QA geometry: a 2560x1440 monitor at 125 % with a 60 px
-        // physical bottom taskbar; the tray click lands in the bottom-right.
+    fn anchor_sized_window_stays_on_screen_at_a_125_percent_factor() {
+        // The exact live-QA geometry: a 2560x1440 Windows monitor at 125 % with a
+        // 60 px bottom taskbar, so anchor units here are physical pixels; the tray
+        // click lands in the bottom-right.
         let work = Rect {
             x: 0,
             y: 0,
@@ -400,11 +442,11 @@ mod tests {
             h: 1380,
         };
         let logical = (320u32, 200u32);
-        let scale = 1.25;
-        let phys = physical_window_size(320.0, 200.0, scale);
-        assert_eq!(phys, (400, 250));
-        let phys_w = i32::try_from(phys.0).unwrap();
-        let phys_h = i32::try_from(phys.1).unwrap();
+        let logical_to_anchor = 1.25;
+        let sized = anchor_window_size(320.0, 200.0, logical_to_anchor);
+        assert_eq!(sized, (400, 250));
+        let anchor_w = i32::try_from(sized.0).unwrap();
+        let anchor_h = i32::try_from(sized.1).unwrap();
         let cursor = (2545, 1432);
 
         // Pre-fix: the anchor was computed from the *logical* size, so the clamp
@@ -412,19 +454,19 @@ mod tests {
         // window then overran the right edge.
         let bug = flyout_origin(cursor, work, logical, 15);
         assert!(
-            bug.0 + phys_w > work.right(),
+            bug.0 + anchor_w > work.right(),
             "reproduces the off-screen overflow: {} + {} > {}",
             bug.0,
-            phys_w,
+            anchor_w,
             work.right()
         );
 
-        // Fixed: anchoring with the physical size keeps the real window fully on
-        // screen and pinned against the taskbar edge.
-        let fixed = flyout_origin(cursor, work, phys, 15);
-        assert!(fixed.0 + phys_w <= work.right(), "right edge on-screen");
+        // Fixed: anchoring with the anchor-unit size keeps the real window fully
+        // on screen and pinned against the taskbar edge.
+        let fixed = flyout_origin(cursor, work, sized, 15);
+        assert!(fixed.0 + anchor_w <= work.right(), "right edge on-screen");
         assert!(
-            fixed.1 + phys_h <= work.bottom(),
+            fixed.1 + anchor_h <= work.bottom(),
             "bottom edge above the taskbar"
         );
         assert!(fixed.0 >= work.x, "left edge on-screen");
@@ -439,8 +481,8 @@ mod tests {
             w: 2560,
             h: 1380,
         };
-        // 420x560 logical settings window at 125 % → 525x700 physical.
-        let size = physical_window_size(420.0, 560.0, 1.25);
+        // 420x560 logical settings window at a 1.25 factor → 525x700 anchor units.
+        let size = anchor_window_size(420.0, 560.0, 1.25);
         assert_eq!(size, (525, 700));
         let (x, y) = center_in(work, size);
         // Centred: (2560-525)/2 = 1017, (1380-700)/2 = 340.
