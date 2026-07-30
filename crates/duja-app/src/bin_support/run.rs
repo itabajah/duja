@@ -283,9 +283,6 @@ const RESTORE_SUMMARY: &str = "reset gamma to the ColorSync profile on";
 /// only recovery macOS has, since nothing writes a marker for
 /// `startup::recover_from_crash_marker` to find.
 ///
-/// It becomes a true self-undo on macOS once the app assembly engages gamma
-/// there (P6 wave 2).
-///
 /// [`gamma::GammaBackend`]: super::gamma
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn restore() -> ExitCode {

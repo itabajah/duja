@@ -121,8 +121,14 @@ fn set_app_id() -> windows::core::Result<()> {
 /// Escape the five XML metacharacters so a version/URL can be embedded in the
 /// toast payload safely.
 ///
-/// Only the Windows toast builds XML, but this stays compiled under `test` on
-/// every target so its escaping table is pinned on all three CI lanes.
+/// Only the Windows toast builds XML, but this stays compiled under `test` so the
+/// escaping table is pinned wherever this module is.
+///
+/// That is **two** lanes, not three: gating `mod toast` where its one caller lives
+/// took Linux out of the promise an earlier version of this comment made. Low risk
+/// — the table is only *used* on Windows, which does run the test — but worth
+/// stating rather than leaving a stale claim of wider coverage. The `test` half of
+/// the `cfg` therefore only ever adds this function on macOS.
 #[cfg(any(test, windows))]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")

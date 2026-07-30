@@ -865,8 +865,15 @@ fn load_config(paths: &DujaPaths) -> Config {
 ///
 /// `NSApplicationActivationPolicy::Accessory` is the supported way to say "I am a
 /// status-item app". Without it Duja takes a Dock tile and a menu bar of its own,
-/// which for a tray utility is wrong on both counts, and launching steals focus
-/// from whatever the user was doing.
+/// which for a tray utility is wrong on both counts.
+///
+/// The Dock tile and the menu bar are genuinely prevented. **Focus is not, quite:**
+/// winit calls `activateIgnoringOtherApps(true)` eleven lines before it dispatches
+/// `StartCause::Init`, so the activation request is already with the window server
+/// by the time this downgrades the policy. The practical effect is likely nil — at
+/// that instant Duja has no visible window, and an accessory app with none holds
+/// nothing meaningful — but it is unverified, so this claims the two halves it
+/// actually delivers.
 ///
 /// # Why this is called from inside the running loop
 ///

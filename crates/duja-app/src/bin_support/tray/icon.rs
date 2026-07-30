@@ -29,6 +29,13 @@ const SIZE: u32 = 32;
 /// Deliberately a constant rather than a `backingScaleFactor` query: the menu bar
 /// lives on one screen at a time and the status item follows it, so there is no
 /// per-display answer to give, and a 1× Mac simply gets a cleanly halved 36 → 18.
+///
+/// The icon is **not** marked as a template image, so it keeps its accent colour
+/// rather than adopting the menu bar's foreground — the accent is the glyph's
+/// identity and is user-configurable. `duja-ui`'s `icon_rgb_reads_on_both_taskbars`
+/// already proves every accent clears 3:1 against light and dark chrome, so the
+/// idle icon is covered; the *highlight* state, while a right-click menu is open,
+/// is not modelled by anything and is recorded in `docs/debt.md`.
 #[cfg(target_os = "macos")]
 const SIZE: u32 = 36;
 
