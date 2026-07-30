@@ -81,11 +81,14 @@ become a false statement the moment macOS landed.
 
 ## Consequences
 
-- **Windows is bit-for-bit unchanged.** Its factors are `scale` and `1.0`, and
-  the anchor→physical conversion is written so that a `1.0` factor is provably
-  the identity (`i32` → `f64` is lossless, `×1.0` is exact, `round` of an integer
-  is that integer) rather than approximately so. A test pins that at the extremes
-  of the coordinate space.
+- **Windows is bit-for-bit unchanged.** Its `logical_to_anchor` is the monitor's
+  `scale` and its `anchor_to_physical` is `1.0`, and the anchor→physical
+  conversion is written so that a `1.0` factor is provably the identity (`i32` →
+  `f64` is lossless, `×1.0` is exact, `round` of an integer is that integer)
+  rather than approximately so. A test pins that at the extremes of the coordinate
+  space. (Stated per factor rather than as an ordered pair on purpose: an
+  "`x` and `y` respectively" phrasing of this table is exactly how the same
+  sentence got written backwards once already.)
 - **A new backend has exactly two questions to answer** — which unit its
   window-positioning API takes, and whether its y axis needs flipping — and the
   factor table answers everything downstream. This binds the P7 Linux backend,
@@ -101,13 +104,24 @@ become a false statement the moment macOS landed.
   foundation) or putting screen-server geometry into the pure `duja-core`
   brightness kernel. The two are instead tied together by a test that round-trips
   through the dimmer's own formula, with a comment in each saying they must agree.
+- **The contract fixes the *space*, not the OS's reporting conventions within
+  it.** Each backend still owns the quirks of the API it reads, and macOS has one
+  that bites immediately: `NSEvent::mouseLocation` reports a screen's y over
+  `(y0, y0 + h]` — closed at the top, so the topmost cursor row reads exactly the
+  screen's top edge — while a rectangle hit test is naturally half-open the other
+  way. Unbiased, that gives every menu-bar click to a screen mounted *above* the
+  primary. `mac_geometry` handles it once, at the boundary where cursor reports
+  enter (a half-point downward bias), rather than distorting the containment
+  predicate, which also has to serve the x axis where Quartz's convention is the
+  opposite. A future backend should expect its own version of this and resolve it
+  the same way: at the read, not in shared geometry.
 - **What this does not settle:** winit's `set_outer_position` divides the
   `PhysicalPosition` by the scale factor of the screen the window is *currently*
   on, not the one being targeted. On a mixed-DPI Mac a flyout moving between a
   Retina and a non-Retina screen can therefore land off by the scale ratio. The
   contract is correct per-anchor; the residual is a winit-side property that
-  needs real hardware to observe. It is recorded in `docs/debt.md` rather than
-  papered over.
+  needs real hardware to observe. It, and the half-point residual of the cursor
+  bias above, are recorded in `docs/debt.md` rather than papered over.
 
 ## Alternatives considered
 

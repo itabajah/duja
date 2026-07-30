@@ -74,10 +74,10 @@ directories = { workspace = true }
 core-foundation-sys = { workspace = true }
 # Tray-anchor geometry (`geometry::platform`): the global mouse location and each
 # screen's frame / visibleFrame / backingScaleFactor. Same objc2 pins duja-dimmer
-# already uses, so no new crate versions enter Cargo.lock. Features are enabled
-# per Objective-C class; a leaf class feature pulls in its superclass features
-# transitively.
+# already uses, so no new crate versions enter Cargo.lock.
 objc2 = { workspace = true }
+# Features are named per Objective-C class, and a leaf class feature pulls in its
+# superclass features transitively.
 objc2-app-kit = { workspace = true, features = [
     "std",
     # Unlocks the CGFloat-typed accessors (backingScaleFactor) — they are gated on
@@ -89,6 +89,18 @@ objc2-app-kit = { workspace = true, features = [
     "NSEvent",
 ] }
 # NSPoint / NSRect (aliases of CGPoint / CGRect) as the FFI copies them out.
+#
+# The last two features are redundant *today* — verified: strip either and this
+# crate still compiles for aarch64-apple-darwin, because objc2-app-kit's `NSScreen`
+# feature turns on `objc2-foundation/NSArray` and
+# `objc2-foundation/objc2-core-foundation` and cargo unifies them in. They are
+# declared anyway, and that is the deliberate choice, not a copy of another crate's
+# list (duja-dimmer's objc2-foundation entry omits `objc2-core-foundation`): this
+# crate names `NSPoint`/`NSRect` and calls `NSArray::count`/`objectAtIndex`
+# directly, so its own manifest should say so. Leaning on a sibling dependency's
+# feature selection means dropping `NSScreen` from the list above — or an upstream
+# narrowing its feature graph — turns into an unresolved-import error here with no
+# hint about which manifest line was actually load-bearing.
 objc2-foundation = { workspace = true, features = [
     "std",
     "NSGeometry",

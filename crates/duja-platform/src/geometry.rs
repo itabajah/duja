@@ -392,6 +392,15 @@ mod platform {
             });
             assert_eq!(converted.w, i32::MAX as u32);
             assert_eq!(converted.h, i32::MAX as u32);
+            // The macOS backend's `MAX_EXTENT` claims to match *this* ceiling, and
+            // this is the only lane that compiles both backends (`mac_geometry` is
+            // compiled under `cfg(test)` everywhere), so the claim is pinned here
+            // against the real Windows output rather than against a literal.
+            assert_eq!(
+                converted.w,
+                crate::mac_geometry::MAX_EXTENT,
+                "both backends must cap an absurd extent at the same value"
+            );
         }
 
         #[test]
@@ -664,10 +673,20 @@ mod tests {
     /// End-to-end smoke test of the real backend: it must not panic, and must
     /// hand placement values it can actually use.
     ///
-    /// Windows-only, and deliberately so — this calls the live Win32 query path.
-    /// On targets with no backend, [`cursor_anchor`] trips a `debug_assert`
-    /// announcing the placeholder, so calling it here would fail the test lane by
-    /// design rather than tell us anything.
+    /// Windows-only, and deliberately so, but not for the reason the earlier
+    /// version of this comment gave — the three lanes differ from each other, not
+    /// just from Windows:
+    ///
+    /// - on **Linux** the placeholder trips a `debug_assert`, so calling this would
+    ///   fail the lane by design rather than tell us anything;
+    /// - on **macOS** it would not fail loudly at all. The libtest harness runs
+    ///   test bodies on worker threads, where `MainThreadMarker::new()` is `None`,
+    ///   so this would silently exercise the fallback — and then the
+    ///   `AnchorUnit::PhysicalPixels` assertion below would fail against the
+    ///   fallback's `Points`, for a reason that has nothing to do with the backend
+    ///   being correct. Testing the live macOS path needs a `harness = false`
+    ///   binary on the real main thread (the shape `duja-dimmer`'s `macos_live`
+    ///   test uses) and a window server to talk to.
     #[cfg(windows)]
     #[test]
     fn the_real_backend_returns_a_usable_anchor() {

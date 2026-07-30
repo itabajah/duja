@@ -60,7 +60,12 @@ use crate::geometry::{AnchorUnit, TrayAnchor, WorkRect, sane_scale};
 /// `x + w` stays inside the `i32` space the contract is expressed in, so the
 /// placement kernel downstream (which converts extents back to `i32`) never sees
 /// a width it has to invent a substitute for.
-const MAX_EXTENT: u32 = i32::MAX.unsigned_abs();
+///
+/// That cross-backend claim is not left as prose: `geometry`'s Windows
+/// `an_extreme_rect_saturates_instead_of_overflowing` asserts this constant equals
+/// what `rect_from` actually produces for the extreme `RECT`. The Windows lane is
+/// the only one that compiles both backends, so that is where it can be checked.
+pub(crate) const MAX_EXTENT: u32 = i32::MAX.unsigned_abs();
 
 /// A point in Cocoa's global screen space: bottom-left origin, y-up, in points.
 ///
@@ -92,6 +97,14 @@ pub(crate) struct CocoaRect {
 impl CocoaRect {
     /// Whether `point` lies inside this rectangle, treating the right and top
     /// edges as exclusive (so adjacent screens do not both claim a shared edge).
+    ///
+    /// A plain half-open geometric predicate, `[x, x+w) × [y, y+h)`, matching
+    /// Quartz's own x convention. It deliberately does **not** know about
+    /// `NSEvent::mouseLocation`'s opposite y convention: that quirk belongs to
+    /// cursor reports, not to rectangle containment, so it is handled once at the
+    /// boundary where cursor reports enter — see [`CURSOR_HIT_TEST_BIAS`]. (Baking
+    /// it in here would mean an *asymmetric* predicate — closed-left/open-right in
+    /// x, open-bottom/closed-top in y — that is correct only for cursors.)
     ///
     /// Any `NaN` in either operand makes every comparison false, so a garbage
     /// coordinate is simply "not in this rectangle" rather than a panic or an
@@ -194,26 +207,84 @@ fn scale_from_cocoa(backing_scale: f64) -> f32 {
     sane_scale(scale)
 }
 
+/// How far *downward on screen* a reported cursor position is nudged before it is
+/// hit-tested against the screen frames — subtracted from the Cocoa y, because
+/// Cocoa's y grows upward.
+///
+/// **Why any bias at all.** `NSEvent::mouseLocation` and [`CocoaRect::contains`]
+/// use *opposite* half-open conventions on the y axis, and on a screen boundary
+/// that difference sends the click to the wrong screen:
+///
+/// - Quartz reports the cursor top-down over `0.0 .. frame.height`, and Cocoa
+///   converts with `y_cocoa = primary_h - y_quartz`. So on the menu-bar screen the
+///   reported y covers `(0.0, primary_h]` — it never reaches `0`, and the topmost
+///   cursor row reports **exactly** `primary_h`, the screen's own top edge.
+/// - `contains` is half-open the other way (`>= y`, `< y + h`), which is the right
+///   convention for x (Quartz x is `[0, width)`, un-flipped) and the wrong one for
+///   a y that arrives already closed at the top.
+///
+/// Unbiased, a status-item click — i.e. **every** anchor query a menu-bar app
+/// makes — reports `y == primary_h`, which the primary screen rejects and a screen
+/// mounted *above* it accepts, so the flyout opens on the other monitor. The
+/// mirror case is just as real: the topmost row of a screen mounted *below* the
+/// primary reports `y == 0`, which the primary wrongly claims.
+///
+/// **Why half a point.** The bias models "the pointer occupies the point *below*
+/// the edge it reports", turning the reported `(y0, y0 + h]` into the `[y0, y0 + h)`
+/// that `contains` (and the x axis) already use. Half a point is the midpoint of a
+/// 1-point row.
+///
+/// **Residual, stated rather than glossed.** Any `ε > 0` fixes both boundary
+/// cases, and a *smaller* `ε` is strictly safer at the far end: a cursor within
+/// `ε` of a screen's **bottom** edge biases out of that screen and into one
+/// mounted below it. At 1× and 2× the band is unreachable (the smallest reported
+/// `y_cocoa` is 1.0 and 0.5 respectively, and both stay `>= y0` after a 0.5 bias);
+/// at 3×, where the step is a third of a point, it is reachable. That trade is
+/// deliberate — it swaps a guaranteed wrong screen at the top edge, where every
+/// click lands, for a possible wrong screen within half a point of the bottom
+/// edge, where no anchor query happens. `ε` is the knob if a Mac ever shows
+/// otherwise.
+const CURSOR_HIT_TEST_BIAS: f64 = 0.5;
+
 /// Which screen in `screens` the cursor is on.
 ///
 /// Returns `None` only for an **empty** slice (the caller has no layout to work
 /// with and must fall back to its default anchor). Otherwise it is the index of
-/// the first screen whose `frame` contains the cursor, and — when the cursor is
-/// outside every frame — deterministically `Some(0)`, **the primary screen**.
+/// the first screen whose `frame` contains the cursor — biased by
+/// [`CURSOR_HIT_TEST_BIAS`], which is load-bearing, not cosmetic — and, when the
+/// cursor is outside every frame, deterministically `Some(0)`, **the primary
+/// screen**.
 ///
-/// That fallback is not hypothetical: `NSEvent::mouseLocation` can report a
+/// The gap fallback is not hypothetical: `NSEvent::mouseLocation` can report a
 /// position in the gap between two non-aligned screens, or just off the edge of
 /// one, and macOS does not offer a `MONITOR_DEFAULTTONEAREST` equivalent. Falling
 /// back to the primary rather than the nearest screen is the choice that costs
 /// nothing to reason about: the flyout lands on the screen with the menu bar,
 /// which is where the tray it hangs from lives.
+///
+/// **Mirrored sets resolve to the lowest index.** An extended-mirror set really
+/// does report two `NSScreen`s with *identical* frames, and `position` takes the
+/// first, so a Retina built-in mirrored to a 1× external contributes the built-in's
+/// `backingScaleFactor`. That is deterministic and defensible — the frames are
+/// identical, so the work area is the same either way, and only the scale differs —
+/// but it is a decision, so it is written down and pinned by a test rather than
+/// left to be discovered. (It is also the *safer* of the two: over-estimating the
+/// scale on a mirrored pair mis-places the flyout, whereas under-estimating it on a
+/// Retina screen would place it at a quarter of the intended offset.)
 fn screen_index_for_cursor(cursor: CocoaPoint, screens: &[CocoaScreen]) -> Option<usize> {
     if screens.is_empty() {
         return None;
     }
+    // Bias downward on screen (= subtract in Cocoa's y-up space) so a reported
+    // top-edge value lands inside the screen that reported it. A `NaN` cursor
+    // stays `NaN` here and matches nothing, falling through to the primary.
+    let probe = CocoaPoint {
+        x: cursor.x,
+        y: cursor.y - CURSOR_HIT_TEST_BIAS,
+    };
     let hit = screens
         .iter()
-        .position(|screen| screen.frame.contains(cursor));
+        .position(|screen| screen.frame.contains(probe));
     Some(hit.unwrap_or(0))
 }
 
@@ -246,8 +317,8 @@ pub(crate) fn anchor_from_screens(
 #[cfg(test)]
 mod tests {
     use super::{
-        CocoaPoint, CocoaRect, CocoaScreen, MAX_EXTENT, anchor_from_screens, coord_to_i32,
-        extent_to_u32, point_from_cocoa, scale_from_cocoa, screen_index_for_cursor,
+        CURSOR_HIT_TEST_BIAS, CocoaPoint, CocoaRect, CocoaScreen, MAX_EXTENT, anchor_from_screens,
+        coord_to_i32, extent_to_u32, point_from_cocoa, scale_from_cocoa, screen_index_for_cursor,
         work_rect_from_cocoa,
     };
     use crate::geometry::{AnchorUnit, WorkRect};
@@ -501,20 +572,136 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_edge_belongs_to_exactly_one_screen() {
-        // The primary's top edge (Cocoa y = 1080) is the bottom edge of the screen
-        // above. An inclusive upper bound would make the primary claim it too, and
-        // the flyout would flicker between screens along that line.
+    fn a_shared_edge_is_claimed_by_exactly_one_screen_and_it_is_the_reporting_one() {
+        // Two properties, and the second is the one an earlier version of this test
+        // failed to ask. (1) Exactly one screen may claim a shared edge, or the
+        // flyout flickers between monitors along that line — that is what the
+        // half-open `contains` rule buys. (2) It must be the screen the OS's own
+        // cursor report *meant*: `mouseLocation` reports the primary's topmost row
+        // as exactly its top edge (`1080`), so the primary has to win here. Weighing
+        // only (1) is how the wrong direction looked justified.
         let screens = [primary(), above_primary()];
+        let reported = CocoaPoint {
+            x: 100.0,
+            y: 1080.0,
+        };
+        let probe = CocoaPoint {
+            x: reported.x,
+            y: reported.y - CURSOR_HIT_TEST_BIAS,
+        };
+        let claims = screens
+            .iter()
+            .filter(|screen| screen.frame.contains(probe))
+            .count();
+        assert_eq!(claims, 1, "a shared edge must not be double-claimed");
         assert_eq!(
-            screen_index_for_cursor(
-                CocoaPoint {
-                    x: 100.0,
-                    y: 1080.0
-                },
-                &screens
-            ),
-            Some(1)
+            screen_index_for_cursor(reported, &screens),
+            Some(0),
+            "the primary reported this point, so the primary owns it"
+        );
+    }
+
+    #[test]
+    fn a_menu_bar_click_stays_on_the_primary_with_a_screen_mounted_above() {
+        // The regression this guards is not an edge case: a macOS status item lives
+        // in the menu bar, so `mouseLocation.y == primary_h` is *the* cursor
+        // position for every anchor query the app makes.
+        //
+        // Unbiased, the primary rejected its own top edge (`1080 < 1080` is false)
+        // and the screen above accepted it (`1080 >= 1080`), so the flyout was
+        // placed against the upper monitor's work area — `flyout_origin` then saw
+        // `d_bottom == 0`, inferred a bottom edge, and returned a negative y: the
+        // flyout opened entirely above the screen the user clicked.
+        let screens = [primary(), above_primary()];
+        let cursor = CocoaPoint {
+            x: 1900.0,
+            y: 1080.0,
+        };
+        assert_eq!(screen_index_for_cursor(cursor, &screens), Some(0));
+
+        let anchor = anchor_from_screens(cursor, &screens).expect("two screens convert");
+        assert_eq!(
+            anchor.work_area,
+            WorkRect {
+                x: 0,
+                y: 25,
+                w: 1920,
+                h: 1055,
+            },
+            "the primary's work area, not the upper screen's"
+        );
+        assert_eq!(anchor.cursor, (1900, 0), "the very top of anchor space");
+        assert!(
+            (anchor.scale - 1.0).abs() < f32::EPSILON,
+            "the primary's 1x backing scale, not the upper screen's 2x"
+        );
+    }
+
+    #[test]
+    fn a_top_row_click_on_a_screen_below_the_primary_stays_on_that_screen() {
+        // The mirror of the case above, and equally real: the topmost row of a
+        // screen mounted *below* the primary reports Cocoa `y == 0`
+        // (`y_cocoa = primary_h - y_quartz` with `y_quartz == primary_h`), which the
+        // primary wrongly claimed before the bias (`0 >= 0 && 0 < 1080`).
+        let screens = [primary(), below_primary()];
+        let cursor = CocoaPoint { x: 100.0, y: 0.0 };
+        assert_eq!(screen_index_for_cursor(cursor, &screens), Some(1));
+
+        let anchor = anchor_from_screens(cursor, &screens).expect("two screens convert");
+        assert_eq!(
+            anchor.work_area,
+            WorkRect {
+                x: 0,
+                y: 1080,
+                w: 1280,
+                h: 720,
+            },
+            "the lower screen's work area: 1080 - (-720 + 720) = 1080"
+        );
+        assert_eq!(anchor.cursor, (100, 1080), "1080 - 0");
+    }
+
+    #[test]
+    fn the_bottom_row_of_the_primary_still_belongs_to_the_primary() {
+        // The bias's cost, pinned so it cannot silently grow: a cursor on the
+        // primary's bottom row must stay on the primary even with a screen mounted
+        // directly below it. `mouseLocation` reports that row as `1.0` at 1x and
+        // `0.5` at 2x — both still `>= 0` after the 0.5 bias.
+        let screens = [primary(), below_primary()];
+        for y in [1.0, 0.5] {
+            assert_eq!(
+                screen_index_for_cursor(CocoaPoint { x: 100.0, y }, &screens),
+                Some(0),
+                "reported y {y} is the primary's bottom row"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mirrored_set_resolves_to_the_first_screen() {
+        // An extended-mirror set reports two `NSScreen`s with identical frames. The
+        // work area is the same either way, so the only thing the choice decides is
+        // which `backingScaleFactor` reaches `anchor_to_physical` — and it is the
+        // first screen's. Deterministic by construction (`position` takes the first
+        // match); pinned here because it is a decision, not an accident.
+        let retina_builtin = CocoaScreen {
+            backing_scale: 2.0,
+            ..primary()
+        };
+        let mirrored_external = CocoaScreen {
+            backing_scale: 1.0,
+            ..primary()
+        };
+        let screens = [retina_builtin, mirrored_external];
+        assert_eq!(
+            screen_index_for_cursor(CocoaPoint { x: 10.0, y: 10.0 }, &screens),
+            Some(0)
+        );
+        let anchor = anchor_from_screens(CocoaPoint { x: 10.0, y: 10.0 }, &screens)
+            .expect("two screens convert");
+        assert!(
+            (anchor.scale - 2.0).abs() < f32::EPSILON,
+            "the first screen's scale wins a mirrored set"
         );
     }
 
@@ -613,13 +800,24 @@ mod tests {
 
     #[test]
     fn the_flip_reference_is_the_first_screens_height_not_the_cursors() {
-        // The primary is 1080 tall and the screen above is 1440. Both the cursor
-        // and the work area must flip against 1080; using the *cursor's* screen
-        // height (1440) would shift everything on that screen by 360 pt.
+        // The primary is 1080 tall and the screen above is 1440, and the cursor is
+        // on the *taller* one — so the two candidate reference heights give
+        // different answers for both fields, which is what makes this discriminate.
+        //
+        // Correct (reference 1080):   cursor 1080 - 2000 = -920,
+        //                             work   1080 - (1080 + 1440) = -1440.
+        // Wrong   (reference 1440):   cursor 1440 - 2000 = -560,
+        //                             work   1440 - (1080 + 1440) = -1080.
         let screens = [primary(), above_primary()];
-        let anchor = anchor_from_screens(CocoaPoint { x: 0.0, y: 1080.0 }, &screens)
+        let anchor = anchor_from_screens(CocoaPoint { x: 0.0, y: 2000.0 }, &screens)
             .expect("a non-empty screen list converts");
-        assert_eq!(anchor.cursor.1, 0, "1080 - 1080 = 0, not 1440 - 1080 = 360");
-        assert_eq!(anchor.work_area.y, -1440, "1080 - (1080 + 1440)");
+        assert_eq!(
+            anchor.cursor.1, -920,
+            "1080 - 2000 = -920, not 1440 - 2000 = -560"
+        );
+        assert_eq!(
+            anchor.work_area.y, -1440,
+            "1080 - (1080 + 1440) = -1440, not 1440 - (1080 + 1440) = -1080"
+        );
     }
 }

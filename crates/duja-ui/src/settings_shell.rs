@@ -424,8 +424,13 @@ impl SettingsShell {
         self.ui.set_present_nonce(!self.ui.get_present_nonce());
     }
 
-    /// Move the settings window to physical pixel `(x, y)` (physical pixels pass
-    /// through `set_position` unscaled).
+    /// Move the settings window to physical pixel `(x, y)`.
+    ///
+    /// Physical pixels pass through unscaled **on Windows only**. On macOS winit's
+    /// `set_outer_position` divides them by the window's current scale factor to
+    /// get points, so a caller holding points must pre-multiply — see
+    /// [`FlyoutShell::set_position`](crate::FlyoutShell::set_position), which
+    /// documents the same hand-off in full, and ADR-0021.
     pub fn set_position(&self, x: i32, y: i32) {
         self.ui
             .window()
