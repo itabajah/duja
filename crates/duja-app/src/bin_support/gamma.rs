@@ -799,12 +799,21 @@ mod platform {
         /// So 3 is the right answer and this is not it. Deferred, not dismissed, and
         /// the costs are real rather than rhetorical: two new `unsafe` blocks with
         /// pointer out-params in `duja-dimmer`'s macOS backend (which today has
-        /// exactly one), a capacity query plus a 3×N `CGGammaValue` buffer per
-        /// engaged display, and a residual of its own — another app changing the
-        /// table mid-session gets Duja's older snapshot written back, which is still
-        /// strictly better than identity, which clobbers it unconditionally.
-        /// Writing that FFI blind, for a path unreachable on any Mac with an EDR
-        /// panel, is not a trade to make without hardware. See `docs/debt.md`.
+        /// exactly one), a `CGDisplayGammaTableCapacity` query plus a 3×N
+        /// `CGGammaValue` buffer per engaged display — and that query can answer
+        /// **0**, for a display exposing no gamma table, so option 3 needs option 1
+        /// as its own fallback rather than replacing it. It also carries a residual:
+        /// another app changing the table mid-session gets Duja's older snapshot
+        /// written back, still strictly better than identity, which clobbers it
+        /// unconditionally.
+        ///
+        /// And it narrows the divergence rather than removing it. `restore_all`
+        /// would still reload the *profile* while this path writes the *snapshot*,
+        /// and those differ whenever anything altered the table before Duja started;
+        /// a snapshot keyed by `CGDirectDisplayID` also inherits the id-reuse hazard
+        /// noted on `engaged`. Writing that FFI blind, for a path unreachable on any
+        /// Mac with an EDR panel, is not a trade to make without hardware. See
+        /// `docs/debt.md`.
         fn restore(&mut self, id: &StableDisplayId) {
             if let Some(cg_id) = self.engaged.remove(id)
                 && let Err(e) = duja_dimmer::restore_identity(&GammaDisplay::from_display_id(cg_id))
@@ -903,6 +912,37 @@ mod platform {
         }
     }
 
+    /// # What these tests do **not** cover — read before trusting the count
+    ///
+    /// Six tests, and they pin the **refusal** half. Three paths are unpinned, and
+    /// naming them is the point: a count that reads as coverage it does not have is
+    /// the false assurance this project rates worse than an admitted gap.
+    ///
+    /// - **The accept path.** Nothing here ever reaches a successful `set_gamma`,
+    ///   so `engaged.insert`, `note_success` and the `true` return are unpinned. An
+    ///   `engage` that writes the ramp and then returns `false` would pass — and its
+    ///   real shape is nasty: a live ramp the coordinator never records, rewritten
+    ///   every batch and never restored. This is at **parity with Windows**, whose
+    ///   four sink tests all use a bogus device that fails the write.
+    /// - **`restore`'s OS call.** `restoring_one_display_forgets_only_that_display`
+    ///   pins the bookkeeping; a `restore` that drops the entry and never resets the
+    ///   ramp still passes, and the user sees a display that stays dim after the
+    ///   slider leaves the sub-floor zone. Also at parity — no Windows test calls
+    ///   `GuardSink::restore` either.
+    /// - **`restore_all`'s OS call.** Same shape, and this one is *not* at parity:
+    ///   Windows pins it through a side effect, because the marker clear happens
+    ///   inside `ScreenStateGuard::restore_now`, so skipping the OS restore reds a
+    ///   test. macOS has no marker, so the call has no headless observable at all.
+    ///
+    /// A live smoke would not close the first: on a virtualized runner
+    /// `CGSetDisplayTransferByFormula` returning success is *exactly* the
+    /// success-without-effect case this module warns about, so the test would pin
+    /// "the FFI returned `Ok`" and nothing about a live ramp — strictly weaker than
+    /// `an_os_refusal_is_not_recorded_as_engaged`, whose discriminator is an
+    /// **error** and therefore positive evidence the call was evaluated. The only
+    /// construction that closes all three deterministically is injecting
+    /// `set_gamma`/`restore_identity` behind a seam, the same split this module
+    /// already uses one level up at [`GammaSink`] — a design change, not a test.
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -914,6 +954,13 @@ mod platform {
         /// bogus `\\.\DUJA_TEST` device name — it makes the *real* OS call fail
         /// deterministically, on a runner with no displays at all.
         const UNATTACHED_DISPLAY_ID: &str = "4294967295";
+
+        /// [`UNATTACHED_DISPLAY_ID`] as the `u32` the engaged map stores, so the
+        /// seeded tests below cannot drift from the token the others parse.
+        const UNATTACHED_ID: u32 = u32::MAX;
+        /// A second unattached id, for asserting one display's restore leaves its
+        /// siblings alone.
+        const OTHER_UNATTACHED_ID: u32 = u32::MAX - 1;
 
         fn id(serial: &str) -> StableDisplayId {
             StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap()
@@ -1038,6 +1085,8 @@ mod platform {
         /// something it never recorded as engaged.
         #[test]
         fn restoring_one_display_forgets_only_that_display() {
+            // The resolver is never consulted: `restore` reads the engaged map,
+            // not the resolver, which is itself part of the contract.
             let mut sink = MacSink {
                 resolve: Box::new(|_id| None),
                 engaged: BTreeMap::new(),
@@ -1045,8 +1094,8 @@ mod platform {
             };
             // Two unattached ids: the Core Graphics write will fail and be logged,
             // which is irrelevant here — the bookkeeping is what is under test.
-            sink.engaged.insert(id("A"), 4_294_967_295);
-            sink.engaged.insert(id("B"), 4_294_967_294);
+            sink.engaged.insert(id("A"), UNATTACHED_ID);
+            sink.engaged.insert(id("B"), OTHER_UNATTACHED_ID);
 
             sink.restore(&id("A"));
 
@@ -1071,8 +1120,8 @@ mod platform {
                 engaged: BTreeMap::new(),
                 refusals: RefusalLog::default(),
             };
-            sink.engaged.insert(id("A"), 4_294_967_295);
-            sink.engaged.insert(id("B"), 4_294_967_294);
+            sink.engaged.insert(id("A"), UNATTACHED_ID);
+            sink.engaged.insert(id("B"), OTHER_UNATTACHED_ID);
 
             sink.restore_all();
 
