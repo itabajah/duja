@@ -1098,22 +1098,34 @@ impl AppState {
         self.shell.update_from_vm(&self.vm.borrow());
     }
 
-    /// Compute and apply the full overlay batch for every known display, then
-    /// drive the gamma channel for any command carrying a gamma factor.
+    /// Compute and apply the full dimming batch — overlays **and** the gamma
+    /// channel — for every known display.
     ///
     /// Overlays and gamma are the two halves of one declarative batch: the
     /// overlay backend diffs the alpha channel, while [`gamma::GammaBackend`]
     /// engages/restores the GPU ramp for the (opt-in, SDR-only) gamma channel.
     /// HDR/unknown displays never carry a gamma factor here — `effective_mode`
-    /// forces them onto the overlay path — so they can never reach the ramp.
+    /// forces them onto the overlay path — so they can never reach the ramp. Nor
+    /// does a factor this platform's OS would refuse: [`dimming::plan_for_platform`]
+    /// plans an overlay below `duja_dimmer::min_gamma_factor()`, so the ramp is only
+    /// ever asked for what it can deliver.
+    ///
+    /// Because a display can therefore **switch mechanism** mid-drag, the ordering
+    /// of the two halves is load-bearing and is owned by
+    /// [`gamma::apply_dimming_batch`] (engage new ramps → overlay diff → restore
+    /// stale ramps), whose tests pin it on every lane. Doing the overlay first would
+    /// destroy it to completion before the ramp engaged and flash the screen bright.
+    ///
+    /// [`gamma::apply_dimming_batch`]: crate::bin_support::gamma::apply_dimming_batch
     fn apply_overlays(&mut self) {
         let commands = self.plan_commands();
-        if let Some(dimmer) = self.dimmer.as_mut()
-            && let Err(e) = dimmer.apply(&commands)
-        {
+        let overlays = self
+            .dimmer
+            .as_mut()
+            .map(|dimmer| dimmer as &mut dyn duja_core::dimmer::Dimmer);
+        if let Err(e) = self.gamma.apply_batch(&commands, overlays) {
             warn!(error = %e, "overlay apply failed");
         }
-        self.gamma.apply(&commands);
     }
 
     /// Build the declarative overlay command batch (pure; borrows `&self`).
@@ -1140,7 +1152,10 @@ impl AppState {
             })
             .collect();
         let guard = self.bounds.lock().ok();
-        let plan = dimming::plan(
+        // `plan_for_platform`, not `plan`: the *choice* of gamma minimum belongs
+        // in the cross-platform module where a test can observe it, not at this
+        // (untestable) call site. See its doc.
+        let plan = dimming::plan_for_platform(
             &inputs,
             |d| {
                 settings::continuum_for(
