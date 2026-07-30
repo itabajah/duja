@@ -43,6 +43,7 @@
 //!
 //! Every assertion here is therefore harness-independent, and a failure in this
 //! file is a finding, not a precondition to wave off.
+#![cfg(windows)]
 // RATIONALE: this live test does raw Win32 handle/bit arithmetic and unwraps
 // freely; the casts are inherent to the FFI and safe in-bounds here, so the
 // pedantic cast lints and the panic-family lints are relaxed for the test only.
