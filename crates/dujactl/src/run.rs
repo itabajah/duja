@@ -263,12 +263,24 @@ pub fn input(id: &str, value: Option<&str>) -> u8 {
 /// disagree — and a built-in panel the DDC backend also surfaces is counted as an
 /// internal panel rather than an external monitor (see
 /// [`backend::external_count`]).
-pub fn doctor() -> u8 {
+pub fn doctor(report: bool) -> u8 {
     let displays = backend::discover();
     let external = backend::external_count(&displays);
     let internal = backend::internal_count(&displays);
 
     println!("duja doctor");
+    if report {
+        // The two things a quirk report needs that the diagnostics below cannot
+        // carry: which build produced them, and which platform it ran on. Kept to
+        // `std::env::consts` so this stays dependency-free — a finer OS build
+        // number would mean new FFI for a header line.
+        println!(
+            "  dujactl:           {} ({} {})",
+            duja_core::version(),
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+    }
     if ipc::server_reachable() {
         println!("  ipc server:        reachable (running app will serve dujactl)");
     } else {
