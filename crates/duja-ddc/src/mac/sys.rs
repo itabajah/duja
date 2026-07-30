@@ -606,14 +606,16 @@ impl I2cBus for MacI2cBus {
 
 // --- top-level enumeration ------------------------------------------------
 
-/// One controllable external display: its CoreGraphics id, the id it mirrors,
-/// EDID, bounds, and an owned I2C bus.
+/// One controllable external display: its CoreGraphics identity (own id plus
+/// what it mirrors), EDID, bounds, and an owned I2C bus.
 pub(crate) struct MacDisplay {
-    pub cg_id: u32,
-    /// `CGDisplayMirrorsDisplay(cg_id)` — the master of this display's mirror
-    /// set, or `kCGNullDirectDisplay` (`0`) when it mirrors nothing. Raw here;
-    /// `crate::mac_surface::surface_id` turns the pair into the surface token.
-    pub mirrors: u32,
+    /// This display's own id together with `CGDisplayMirrorsDisplay` of it.
+    ///
+    /// Carried as the pair rather than two loose `u32`s so it is assembled
+    /// exactly once, here at the FFI site that reads both — `crate::mac_surface`
+    /// then interprets it without any downstream caller having to order two
+    /// same-typed arguments correctly.
+    pub mirror: crate::mac_surface::MirrorState,
     pub edid: Vec<u8>,
     pub bounds: DisplayBounds,
     pub bus: MacI2cBus,
@@ -666,8 +668,10 @@ pub(crate) fn enumerate_displays() -> Result<Vec<MacDisplay>, super::DdcError> {
             continue;
         };
         out.push(MacDisplay {
-            cg_id: id,
-            mirrors: mirrored_master(id),
+            mirror: crate::mac_surface::MirrorState {
+                display_id: id,
+                mirrors: mirrored_master(id),
+            },
             edid,
             bounds,
             bus,

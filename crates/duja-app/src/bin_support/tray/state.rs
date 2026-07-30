@@ -936,7 +936,7 @@ impl AppState {
                     id: s.id.clone(),
                     kind: s.kind,
                     software_only: s.software_only,
-                    device: guard.as_ref().and_then(|b| b.device_for(&s.id)),
+                    device: guard.as_ref().and_then(|b| b.surface_token_for(&s.id)),
                     name: s.name.clone(),
                 })
                 .collect()

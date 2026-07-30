@@ -9,9 +9,11 @@
 //! [`DdcCiTransport`].
 //!
 //! This mirrors the Windows `win` module surface. The one shape difference:
-//! there is no GDI device on macOS, so [`DdcDisplay`] exposes the
-//! `CGDirectDisplayID` instead. All `unsafe` FFI is confined to the [`sys`]
-//! submodule.
+//! there is no GDI device on macOS, and the single Windows device name does two
+//! jobs — addressing a display and naming its framebuffer — that macOS splits, so
+//! [`DdcDisplay`] exposes **two** CoreGraphics ids where Windows has one string
+//! (see `cg_display_id` and `surface_id`). All `unsafe` FFI is confined to the
+//! [`sys`] submodule.
 //!
 //! # Experimental — hardware-unverified
 //! Duja has no macOS hardware and CI's mac runners are virtualized (no external
@@ -55,8 +57,8 @@ pub enum DdcError {
 }
 
 /// One enumerated external monitor: its stable identity, friendly name, raw
-/// EDID, point-space bounds, `CGDirectDisplayID`, and the owned I2C bus needed
-/// to control it.
+/// EDID, point-space bounds, the CoreGraphics id that addresses it, the surface
+/// token that names its framebuffer, and the owned I2C bus needed to control it.
 ///
 /// Turn it into a controller with [`into_controller`](Self::into_controller);
 /// dropping it without doing so releases the underlying I2C service handle.
@@ -80,23 +82,35 @@ pub struct DdcDisplay {
     /// physical-pixel bounds is a property of the platform, not a pending fixup.
     /// See ADR-0013.
     pub bounds: DisplayBounds,
-    /// The **display-surface token**: which framebuffer this display draws from.
-    /// The macOS analogue of the Windows backend's `gdi_device`, and it carries
-    /// the same two guarantees `duja-app`'s `backend::DisplayGeom` contract
-    /// demands — it is addressable by the gamma channel, *and* every panel
-    /// sharing one framebuffer reports the same value, which is how a mirrored
-    /// set is detected and collapsed into one control.
+    /// This display's own CoreGraphics id — the value that **addresses** it.
     ///
-    /// Concretely: `CGDisplayMirrorsDisplay(id)` when this display is a mirror
-    /// clone, else its own `CGDirectDisplayID`. The rule — and why the raw
-    /// per-display id would **not** do (it is unique by construction, so two
-    /// mirrored Macs would produce two tokens at identical bounds, the `#66`
-    /// double-overlay defect) — is documented on the crate-private
-    /// `mac_surface` module. Not linked: this item is public and that module is
-    /// not, which `rustdoc -D warnings` rejects.
+    /// The macOS analogue of the Windows backend's `gdi_device` for the
+    /// addressing half of that field's job: the gamma channel resolves a display
+    /// to this and hands it to `CGSetDisplayTransferByFormula`. It is *not* the
+    /// value to group mirrored panels by — that is
+    /// [`surface_id`](Self::surface_id), and the two differ exactly when this
+    /// display is a mirror clone.
     ///
     /// Not stable across replug (that is what [`id`](Self::id) is for) — it is a
     /// live token for this enumeration.
+    pub cg_display_id: u32,
+    /// The **display-surface token**: which framebuffer this display draws from,
+    /// and the value mirrored panels are grouped by.
+    ///
+    /// `CGDisplayMirrorsDisplay(id)` when this display is a mirror clone, else
+    /// its own `CGDirectDisplayID`, so every panel sharing one framebuffer
+    /// reports the same value. Grouping on the raw per-display id instead is the
+    /// `#66` double-overlay defect: it is unique by construction, so two mirrored
+    /// Macs would produce two tokens at identical bounds and two overlays on one
+    /// surface.
+    ///
+    /// **A key, not an address.** A clone's value is another display's id, and
+    /// that display need not be one this backend returned — the built-in panel is
+    /// filtered out (`CGDisplayIsBuiltin`) yet is the master whenever a `MacBook`
+    /// mirrors its own screen to a projector. Comparing it is correct; passing it
+    /// to a per-display call is not. The full rule is on the crate-private
+    /// `mac_surface` module (not linked: this item is public and that module is
+    /// not, which `rustdoc -D warnings` rejects).
     pub surface_id: u32,
     bus: MacI2cBus,
     sort_key: u32,
@@ -142,9 +156,13 @@ pub fn enumerate() -> Result<Vec<DdcDisplay>, DdcError> {
             name,
             edid: raw.edid,
             bounds: raw.bounds,
-            surface_id: crate::mac_surface::surface_id(raw.cg_id, raw.mirrors),
+            cg_display_id: raw.mirror.display_id,
+            // `raw.mirror` was assembled once, at the FFI site that reads both
+            // values, so there is no positional pair to get the wrong way round
+            // here. See `mac_surface::MirrorState`.
+            surface_id: crate::mac_surface::surface_id(raw.mirror),
             bus: raw.bus,
-            sort_key: raw.cg_id,
+            sort_key: raw.mirror.display_id,
         });
     }
     displays.sort_by_key(|d| d.sort_key);

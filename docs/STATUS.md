@@ -30,7 +30,7 @@ display control, automation, and integrations), see
 | **Internal-panel fallback fix** | **`v0.1.3` (Windows)** | ✅ shipped — the built-in panel no longer vanishes on a GPU/OEM-driven backlight |
 | **Dark rebrand + mirror/software-only** | **`v0.1.4` (Windows)** | ✅ shipped — the dark brand identity plus the two laptop-reported issues (#66, #67) |
 | **Sticky software-only fix** | **`v0.1.5` (Windows)** | ✅ shipped — a live monitor no longer sticks as "software-only"; tray Restart. Release verified: 6 assets, SHA256SUMS, minisign, SLSA provenance, `/releases/latest` → v0.1.5 |
-| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021) and the event-loop-first tray construction (#94). Remaining: the app assembly (un-gate `tray`/`toast`, the app-side macOS gamma sink, the `clone_group` surface token, `os_dark_theme`, the per-platform gamma caption), packaging, **and the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
+| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021) and the event-loop-first tray construction (#94). Remaining: the app assembly (un-gate `tray`/`toast`, the app-side macOS gamma sink, `os_dark_theme`, the per-platform gamma caption), packaging, **and the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
 | P7 Linux port | `m7-linux` / `v0.3.0` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
 
@@ -311,18 +311,24 @@ only `tray` and `toast`, but `docs/debt.md` tracks four further pieces as
 macOS-assembly work: the **app-side gamma sink** (`gamma.rs` is cross-platform but
 its `GuardSink`/`GammaBackend` are individually `cfg(windows)`, so a
 `dim_mode = "gamma"` display on macOS gets no ramp at all, and the cure needs a
-`ScreenStateGuard` twin plus a crash-marker policy for
-`CGSetDisplayTransferByFormula` — a design decision, not a port); the
-`clone_group` **surface token**; `os_dark_theme`; and the per-platform gate on the
-new gamma caption. Then packaging, then the gate — ADR-0013 keeps the macOS DDC
+crash-marker policy for `CGSetDisplayTransferByFormula` — a design decision, not a
+port); `os_dark_theme`; and the per-platform gate on the new gamma caption. Then packaging, then the gate — ADR-0013 keeps the macOS DDC
 path labelled experimental until there are ≥3 independent community confirmations
 per architecture, which no amount of code closes.
 
-`#90` left a **standing rule** the assembly must honour, in the `DisplayGeom`
-docs: `BoundsMap::device_for` must not be fed into `clone_group` on macOS until
-the surface token maps through `CGDisplayMirrorsDisplay`, because a
-`CGDirectDisplayID` is unique per display and would silently make mirror-merge
-inert, re-introducing `#66`'s double overlay.
+`#90`'s **standing rule** — `BoundsMap::device_for` must not be fed into
+`clone_group` on macOS until the surface token maps through
+`CGDisplayMirrorsDisplay` — is **discharged**, and the fix arrived larger than the
+rule anticipated. Stamping the mirror-set master does give `clone_group` the
+shared-framebuffer identity it needs, but it cannot also be the value gamma
+addresses: a clone's token is *another display's* id, and on the commonest Mac
+mirror layout — a MacBook mirroring its built-in screen to a projector — that
+master is the built-in panel, which `enumerate` filters out with
+`CGDisplayIsBuiltin`. Driving `CGSetDisplayTransferByFormula` through it would dim
+the laptop screen instead of the monitor whose slider moved. So the one opaque
+token is now **two** named fields on `DisplayGeom` (`gamma_token`,
+`surface_token`) behind two `BoundsMap` accessors; Windows puts the same GDI
+device name in both, because there one device *is* the clone set.
 
 **Two defects found by reading a real install.** Neither was in new code, and
 neither was reachable from any test:
