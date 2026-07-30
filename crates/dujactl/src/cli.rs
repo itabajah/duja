@@ -36,7 +36,8 @@ COMMANDS:
     input <id>                        list a display's allowed input sources and the current one
     input <id> <name|code>            switch the display's active input (e.g. hdmi1, dp1, 0x11)
     doctor [--report]                 environment / backend / quirk diagnostics + server reachability
-                                      (--report adds the version + platform header a bug report needs)
+                                      (--report probes each monitor too: capability string, features,
+                                       live range, allowed inputs — paste it into a quirk report)
     version                           print the workspace version
     --help                            print this help
 
@@ -76,14 +77,16 @@ pub enum Command {
     },
     /// Print environment / backend / quirk diagnostics.
     Doctor {
-        /// Prefix the diagnostics with the version + platform header a bug
-        /// report needs (`--report`).
+        /// Probe every display and add what the *monitor* reported (`--report`).
         ///
         /// `CONTRIBUTING.md` and the monitor-quirk issue template both ask users
         /// to run `dujactl doctor --report` and paste the output, so the flag has
         /// to exist — it was rejected as an unexpected argument until now. The
-        /// output is deliberately *not* fenced: the template's textarea uses
-        /// `render: text`, which wraps the paste in a code block already.
+        /// template also promises the paste "contains the monitor identity and
+        /// probed capabilities", so the flag has to *probe*: it adds the raw MCCS
+        /// capability string, the probed features, the live range and
+        /// hardware-range verdict, and the allowed input set. Plain `doctor` stays
+        /// probe-free and costs no DDC traffic; see [`crate::run::doctor`].
         report: bool,
     },
     /// Print the workspace version.
