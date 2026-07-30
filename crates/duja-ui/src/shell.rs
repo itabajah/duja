@@ -299,9 +299,27 @@ impl FlyoutShell {
 
     /// Move the flyout to physical pixel `(x, y)` without changing visibility.
     ///
-    /// Physical coordinates: `set_position` takes physical screen pixels and
-    /// passes the `Physical` variant straight through (no scale applied), so
-    /// Win32 physical anchors land unscaled on a Per-Monitor-V2 process.
+    /// `(x, y)` are **physical screen pixels**, always. What that costs the caller
+    /// is platform-dependent, and "passes straight through unscaled" is only true
+    /// on one of them:
+    ///
+    /// - **Windows**: physical pixels *are* the OS's own window-positioning unit
+    ///   on a Per-Monitor-V2 process, so a Win32-derived anchor lands unscaled.
+    /// - **macOS**: they are not. winit's `set_outer_position` converts the
+    ///   `Physical` variant to points by **dividing** by the window's current
+    ///   scale factor, so a caller holding points (which is what every macOS
+    ///   screen API reports) has to pre-multiply by the monitor's backing scale
+    ///   for that round trip to land where it meant.
+    ///
+    /// Callers should not open-code either rule: `duja_platform`'s
+    /// `TrayAnchor::anchor_to_physical` is the factor for exactly this hand-off
+    /// (`1.0` on Windows, the backing scale on macOS), and `duja-app`'s
+    /// `tray::geometry::to_physical_position` applies it. See ADR-0021.
+    ///
+    /// One residual is *not* covered by that factor and is tracked in
+    /// `docs/debt.md`: winit divides by the scale factor of the screen the window
+    /// is **currently** on, not the one being targeted, so a mixed-DPI Mac can
+    /// still land a cross-screen move off by the ratio of the two.
     pub fn set_position(&self, x: i32, y: i32) {
         self.ui
             .window()

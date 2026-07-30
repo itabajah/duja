@@ -195,30 +195,41 @@ impl AppState {
 
     /// Show the flyout anchored near the tray/cursor, in one shot.
     ///
-    /// The window is sized *and* anchored in physical pixels **while still hidden**
-    /// — using the target monitor's OS-queried scale (Per-Monitor-V2; Win32 rects
-    /// are physical) — then shown exactly once, with no resize or move afterwards.
-    /// A post-show resize (the former buffer re-assert) made the software renderer
-    /// occasionally present a partial/transparent first frame that only repaired on
-    /// a later click (item 1); presenting a correctly-sized, correctly-placed window
-    /// in one shot removes that race. The anchor still uses the true physical size
-    /// so the window lands flush against the tray edge at any scale (P0 live-QA bug
-    /// 4); Slint sizes the buffer natively for the monitor it is shown on (PR #29).
+    /// The window is sized *and* anchored **while still hidden** — in the anchor
+    /// units of the target monitor, using the two conversion factors
+    /// `duja_platform::TrayAnchor` derives (see `tray::geometry`) — then shown
+    /// exactly once, with no resize or move afterwards. A post-show resize (the
+    /// former buffer re-assert) made the software renderer occasionally present a
+    /// partial/transparent first frame that only repaired on a later click (item
+    /// 1); presenting a correctly-sized, correctly-placed window in one shot
+    /// removes that race. The anchor still clamps against the window's true size
+    /// so it lands flush against the tray edge at any scale (P0 live-QA bug 4);
+    /// Slint sizes the buffer natively for the monitor it is shown on (PR #29).
     pub(super) fn show_flyout(&mut self) {
         use crate::bin_support::positioning::{
-            flyout_height_cap, flyout_origin, physical_window_size,
+            anchor_window_size, flyout_height_cap, flyout_origin,
         };
-        let (cursor, work, scale) = geometry::cursor_work_area_and_scale();
+        let anchor = geometry::cursor_anchor();
         // Drive the window height from the row count (a no-frame window is not
         // auto-grown to its content preferred size), but never exceed the work
         // area: on a small screen the flyout caps here and its rows scroll
         // instead of overflowing off-screen. Logical px — Slint scales it.
-        let cap = flyout_height_cap(work, scale, FLYOUT_MARGIN, FLYOUT_MAX_LOGICAL_HEIGHT);
+        let cap = flyout_height_cap(
+            anchor.work,
+            anchor.logical_to_anchor,
+            FLYOUT_MARGIN,
+            FLYOUT_MAX_LOGICAL_HEIGHT,
+        );
         let logical_height = clamp_flyout_height(self.flyout_logical_height(), cap);
         self.shell.set_content_height(logical_height);
 
-        let physical = physical_window_size(FLYOUT_LOGICAL_WIDTH, logical_height, scale);
-        let (x, y) = flyout_origin(cursor, work, physical, FLYOUT_MARGIN);
+        let sized = anchor_window_size(
+            FLYOUT_LOGICAL_WIDTH,
+            logical_height,
+            anchor.logical_to_anchor,
+        );
+        let origin = flyout_origin(anchor.cursor, anchor.work, sized, FLYOUT_MARGIN);
+        let (x, y) = geometry::to_physical_position(origin, anchor.anchor_to_physical);
         self.shell
             .present_at(FLYOUT_LOGICAL_WIDTH, logical_height, x, y);
         self.flyout_visible = true;
@@ -270,8 +281,13 @@ impl AppState {
     /// to full height and overflow a small/high-DPI work area.
     fn capped_flyout_height(&self) -> f32 {
         use crate::bin_support::positioning::flyout_height_cap;
-        let (_cursor, work, scale) = geometry::cursor_work_area_and_scale();
-        let cap = flyout_height_cap(work, scale, FLYOUT_MARGIN, FLYOUT_MAX_LOGICAL_HEIGHT);
+        let anchor = geometry::cursor_anchor();
+        let cap = flyout_height_cap(
+            anchor.work,
+            anchor.logical_to_anchor,
+            FLYOUT_MARGIN,
+            FLYOUT_MAX_LOGICAL_HEIGHT,
+        );
         clamp_flyout_height(self.flyout_logical_height(), cap)
     }
 
@@ -489,7 +505,7 @@ impl AppState {
     /// Rebuild the settings view-model from live state and show the window, in one
     /// shot (same partial-first-paint fix as the flyout — item 1).
     fn open_settings(&mut self) {
-        use crate::bin_support::positioning::{center_in, physical_window_size};
+        use crate::bin_support::positioning::{anchor_window_size, center_in};
         self.rebuild_settings();
         self.settings_shell
             .update_from_vm(&self.settings_vm.borrow());
@@ -498,13 +514,18 @@ impl AppState {
         self.settings_shell
             .set_content_height(SETTINGS_LOGICAL_HEIGHT);
 
-        // Size + centre the window on the active monitor in physical pixels while
-        // still hidden (using the monitor's OS-queried scale), then show once — no
-        // post-show resize/move. Centring on the active monitor also avoids the OS
-        // default cascade position (P0 live-QA bug 4).
-        let (_cursor, work, scale) = geometry::cursor_work_area_and_scale();
-        let physical = physical_window_size(SETTINGS_LOGICAL_WIDTH, SETTINGS_LOGICAL_HEIGHT, scale);
-        let (x, y) = center_in(work, physical);
+        // Size + centre the window on the active monitor in that monitor's anchor
+        // units while still hidden, then show once — no post-show resize/move.
+        // Centring on the active monitor also avoids the OS default cascade
+        // position (P0 live-QA bug 4).
+        let anchor = geometry::cursor_anchor();
+        let sized = anchor_window_size(
+            SETTINGS_LOGICAL_WIDTH,
+            SETTINGS_LOGICAL_HEIGHT,
+            anchor.logical_to_anchor,
+        );
+        let centred = center_in(anchor.work, sized);
+        let (x, y) = geometry::to_physical_position(centred, anchor.anchor_to_physical);
         self.settings_shell
             .present_at(SETTINGS_LOGICAL_WIDTH, SETTINGS_LOGICAL_HEIGHT, x, y);
         // Bring settings to the foreground (normal level, not topmost).
