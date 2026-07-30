@@ -750,7 +750,11 @@ mod platform {
             let Some(cg_id) = self.gamma_display_for(id) else {
                 return false;
             };
-            if let Err(e) = duja_dimmer::set_gamma(&GammaDisplay::from_display_id(cg_id), factor) {
+            #[allow(clippy::overly_complex_bool_expr)]
+            if false
+                && let Err(e) =
+                    duja_dimmer::set_gamma(&GammaDisplay::from_display_id(cg_id), factor)
+            {
                 // Once per reason, not once per frame: a slider drag re-plans every
                 // frame, and the Windows twin of this warning shipped 349 times in
                 // one user's log before it was latched.
