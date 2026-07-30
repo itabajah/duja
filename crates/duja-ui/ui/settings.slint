@@ -412,6 +412,21 @@ export component SettingsWindow inherits Window {
                                     font-size: 11px;
                                     wrap: word-wrap;
                                 }
+                                // Windows refuses a gamma ramp below 50% (its own
+                                // anti-lockout rule), so Duja substitutes the
+                                // overlay for the darker half of the range. The
+                                // level is identical; the coverage is not. The
+                                // figure is hardcoded because duja-ui depends on
+                                // neither duja-dimmer nor duja-platform — see
+                                // `duja_dimmer::MIN_ACCEPTED_GAMMA` for the real
+                                // constant, and docs/debt.md for the (currently
+                                // inert) per-platform gating this still wants.
+                                if monitor.gamma-available: Text {
+                                    text: @tr("Gamma dims to at most 50% on Windows; below that Duja uses the overlay, which cannot cover full-screen games or the mouse pointer");
+                                    color: Palette.text-faint;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
                                 if monitor.has-inputs: FieldRow {
                                     label: @tr("Input source");
                                     Dropdown {
