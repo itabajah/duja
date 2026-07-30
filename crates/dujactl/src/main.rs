@@ -45,7 +45,7 @@ fn dispatch(args: &[String]) -> u8 {
         // Input switching stays on the direct backend: a paced 0x60 probe/write
         // needs the hardware path, and the IPC surface deliberately omits it.
         Ok(Command::Input { id, value }) => run::input(&id, value.as_deref()),
-        Ok(Command::Doctor) => run::doctor(),
+        Ok(Command::Doctor { report }) => run::doctor(report),
         Ok(Command::Version) => run::version(),
         Err(err) => {
             eprintln!("{err}");

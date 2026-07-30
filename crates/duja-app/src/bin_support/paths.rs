@@ -3,10 +3,20 @@
 //!
 //! Paths come from [`directories::ProjectDirs`] for
 //! `("io.github", "itabajah", "duja")` — the platform-correct per-user
-//! locations (on Windows, `%APPDATA%\itabajah\duja` for config and
-//! `%LOCALAPPDATA%\itabajah\duja\data` for state/logs). The config file is the
-//! user-facing settings; state, marker and logs are volatile machine data and
-//! live under the data dir so a config backup never drags them along.
+//! locations. The config file is the user-facing settings; state, marker and logs
+//! are volatile machine data and live under the data dir so a config backup never
+//! drags them along.
+//!
+//! Resolved, per platform (`config_dir()` / `data_dir()`, i.e. the **roaming**
+//! Windows root, not the local one — worth stating because
+//! `.github/ISSUE_TEMPLATE/bug.yml` quotes the log path to bug reporters, and this
+//! comment previously claimed `%LOCALAPPDATA%`, where nothing is ever written):
+//!
+//! | | config | state / marker / logs |
+//! |---|---|---|
+//! | Windows | `%APPDATA%\itabajah\duja\config` | `%APPDATA%\itabajah\duja\data` |
+//! | macOS | `~/Library/Application Support/io.github.itabajah.duja` | same |
+//! | Linux | `$XDG_CONFIG_HOME/duja` | `$XDG_DATA_HOME/duja` |
 
 use std::path::PathBuf;
 
@@ -103,6 +113,36 @@ mod tests {
         if let Some(p) = DujaPaths::resolve() {
             let s = p.config.to_string_lossy().to_lowercase();
             assert!(s.contains("duja"), "config path = {s}");
+        }
+    }
+
+    /// `.github/ISSUE_TEMPLATE/bug.yml` tells bug reporters to open a literal log
+    /// path, so which Windows root this resolves to is now a documented promise
+    /// rather than an implementation detail. `ProjectDirs::data_dir()` is
+    /// `{FOLDERID_RoamingAppData}\…\data` — the **roaming** root; the local one is
+    /// `data_local_dir()`, which Duja does not use. This module's own doc comment
+    /// said `%LOCALAPPDATA%` until `#95`, where a live check found the logs under
+    /// `%APPDATA%` instead, so the claim is pinned here.
+    #[cfg(windows)]
+    #[test]
+    fn windows_logs_live_under_the_roaming_appdata_root() {
+        let Some(p) = DujaPaths::resolve() else {
+            return;
+        };
+        let Ok(roaming) = std::env::var("APPDATA") else {
+            return;
+        };
+        assert!(
+            p.log_dir.starts_with(&roaming),
+            "log_dir {:?} must be under %APPDATA% ({roaming}) — bug.yml quotes it",
+            p.log_dir
+        );
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            assert!(
+                !p.log_dir.starts_with(&local),
+                "log_dir {:?} is not under %LOCALAPPDATA%",
+                p.log_dir
+            );
         }
     }
 

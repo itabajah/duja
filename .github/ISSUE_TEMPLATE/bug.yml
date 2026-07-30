@@ -6,7 +6,7 @@ body:
     id: version
     attributes:
       label: Duja version
-      placeholder: "output of `dujactl version` or the About dialog"
+      placeholder: "output of `dujactl version`, or the `dujactl:` line of `dujactl doctor`"
     validations:
       required: true
   - type: input
@@ -32,5 +32,9 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: Attach relevant lines from the log folder (tray menu → Open log folder), or a crash log if one exists.
+      description: |
+        Attach relevant lines from `duja.log`, or a crash log if one exists. The log folder is:
+        - Windows: paste `%APPDATA%\itabajah\duja\data\logs` into Explorer's address bar
+        - macOS: `~/Library/Application Support/io.github.itabajah.duja/logs`
+        - Linux: `~/.local/share/duja/logs` (or `$XDG_DATA_HOME/duja/logs`)
       render: text
