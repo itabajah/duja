@@ -31,12 +31,12 @@
 //! [`CtlDisplay`] prints. Hoisting them would couple the CLI to the tray app's
 //! surface to save a dozen lines. Keep them in step by hand.
 //!
-//! Since then the copied surface is not only the *shape* but the **policy**: the
-//! merge truth table on [`merge_displays`] and [`open`]'s panel-first order are
-//! mirrored, rule for rule, from that module — because a CLI that disagrees with
-//! the tray about which row is the real built-in panel, or about which transport
-//! drives it, is a bug in its own right. Nothing enforces the mirror: there is no
-//! shared crate and no test comparing the two. **Change one, change the other.**
+//! What is copied is not only the *shape* but the **policy**: the merge truth
+//! table on [`merge_displays`] and [`open`]'s panel-first order are mirrored, rule
+//! for rule, from that module — because a CLI that disagrees with the tray about
+//! which row is the real built-in panel, or about which transport drives it, is a
+//! bug in its own right. Nothing enforces the mirror: there is no shared crate and
+//! no test comparing the two. **Change one, change the other.**
 //!
 //! Both DDC platforms — Windows and macOS — are wired: `duja-ddc` and
 //! `duja-panel` expose the same `enumerate`/open surface on each, so one
@@ -62,9 +62,14 @@ pub struct CtlDisplay {
 ///
 /// Never errors: a failing backend simply contributes nothing.
 ///
-/// This is only the two hardware enumerations plus
-/// [`merge_and_resolve_slots`] — every decision lives in that pure pipeline, so
-/// the policy is unit-tested rather than reachable only through hardware.
+/// This is only the two hardware enumerations plus [`merge_and_resolve_slots`],
+/// so every decision *downstream of the two enumerations* lives in that pure
+/// pipeline and is unit-tested rather than reachable only through hardware. Two
+/// things stay outside it and are checked by the type system alone: which
+/// `is_internal` value each platform reports (`ddc_is_internal` — plain backticks,
+/// not a link: it exists only on the two DDC targets, and an intra-doc link would
+/// break the Linux rustdoc lane) and the `Ok`/`Err` shells of the enumerations
+/// themselves. See `docs/debt.md`.
 ///
 /// Identical-twin monitors that share one EDID id are disambiguated with
 /// `-slot<n>` suffixes — the same convention the daemon's
@@ -175,14 +180,20 @@ pub fn internal_count(displays: &[CtlDisplay]) -> usize {
 /// because it is the same rule on both — only the *input* differs, and only as far
 /// as the backends' fields force:
 ///
-/// - **Windows** passes `d.is_internal`. `duja_ddc::enumerate` has flagged a
+/// - **Windows** reports `d.is_internal`. `duja_ddc::enumerate` has flagged a
 ///   laptop's embedded panel since `v0.1.3`, and that flag is the whole
 ///   difference between "external monitor" and "the built-in screen surfaced as a
 ///   fallback carrier".
-/// - **macOS** passes `false`, because there is nothing else it could pass: that
-///   backend filters built-ins out at enumeration with `CGDisplayIsBuiltin` and
-///   its `DdcDisplay` carries no such field, so every entry it yields *is* an
+/// - **macOS** reports `false`, because there is nothing else it could report:
+///   that backend filters built-ins out at enumeration with `CGDisplayIsBuiltin`
+///   and its `DdcDisplay` carries no such field, so every entry it yields *is* an
 ///   external monitor.
+///
+/// That one-bit difference is the *whole* platform divergence, and
+/// `ddc_is_internal` is the only `cfg`-split it costs: [`discover_ddc`] itself
+/// stays a single body, as `#90` established. (Plain backticks there, not a link:
+/// that helper exists only on the two DDC targets, so an intra-doc link from this
+/// un-`cfg`'d doc comment would break the Linux rustdoc lane.)
 ///
 /// `name` is the backend's optional monitor name; `"-"` stands in when it has
 /// none, since the `list` table always prints a cell.
@@ -203,30 +214,35 @@ fn map_ddc_display(id: StableDisplayId, is_internal: bool, name: Option<String>)
     }
 }
 
-/// Enumerate the DDC backend's displays. Windows arm: the `is_internal` flag
-/// decides the kind (see [`map_ddc_display`]). Each `DdcDisplay` is dropped at the
-/// end of the closure, releasing its physical-monitor handle promptly.
+/// Whether this DDC display is a laptop's embedded panel. Windows arm: the
+/// backend's own `is_internal` flag, which is an OS-reported connector fact (CCD
+/// `outputTechnology`), not a heuristic.
 #[cfg(windows)]
-fn discover_ddc() -> Vec<CtlDisplay> {
-    match duja_ddc::enumerate() {
-        Ok(displays) => displays
-            .into_iter()
-            .map(|d| map_ddc_display(d.id.clone(), d.is_internal, d.name.clone()))
-            .collect(),
-        Err(_) => Vec::new(),
-    }
+fn ddc_is_internal(d: &duja_ddc::DdcDisplay) -> bool {
+    d.is_internal
 }
 
-/// Enumerate the DDC backend's displays. macOS arm: identical but for the
-/// hard-coded `is_internal: false`, which is the only divergence the backends'
-/// field difference forces (see [`map_ddc_display`]). Each `DdcDisplay` is dropped
-/// at the end of the closure, releasing its I2C service handle promptly.
+/// Whether this DDC display is a laptop's embedded panel. macOS arm: always
+/// `false` — that backend filters built-ins out at enumeration
+/// (`CGDisplayIsBuiltin`) and its `DdcDisplay` carries no such field, so every
+/// entry it yields is an external monitor.
 #[cfg(target_os = "macos")]
+fn ddc_is_internal(_d: &duja_ddc::DdcDisplay) -> bool {
+    false
+}
+
+/// Enumerate the DDC backend's displays. One body for both DDC platforms — the
+/// only divergence the backends' field difference forces is confined to
+/// [`ddc_is_internal`], and the classification itself to [`map_ddc_display`]. Each
+/// `DdcDisplay` is dropped at the end of the closure, releasing its OS handle
+/// promptly: a physical-monitor `HANDLE` on Windows, an I2C service handle on
+/// macOS.
+#[cfg(any(windows, target_os = "macos"))]
 fn discover_ddc() -> Vec<CtlDisplay> {
     match duja_ddc::enumerate() {
         Ok(displays) => displays
             .into_iter()
-            .map(|d| map_ddc_display(d.id.clone(), false, d.name.clone()))
+            .map(|d| map_ddc_display(d.id.clone(), ddc_is_internal(&d), d.name.clone()))
             .collect(),
         Err(_) => Vec::new(),
     }
@@ -378,6 +394,14 @@ mod tests {
     /// `-slot0` / `-slot1`; `-slot1` then resolved to nothing in either backend's
     /// list, so the id `list` printed could not be set or read. Merged first, the
     /// panel keeps its bare, resolvable id.
+    ///
+    /// Note which field discriminates the survivor here. Both candidate rows are
+    /// [`DisplayKind::InternalPanel`] — that is the entire point of the fixture —
+    /// so `kind` cannot say *which* one was kept and the **name** has to. Asserting
+    /// only the kind would let a merge that kept the DDC entry and dropped the
+    /// native panel row pass unnoticed, which is the wrong survivor: the whole
+    /// reason to dedup is that the native backend, not DDC-on-eDP, drives this
+    /// panel.
     #[test]
     fn serial_bearing_panel_from_both_backends_keeps_one_bare_addressable_id() {
         let shared = StableDisplayId::from_parts("GSM", 0x5B09, Some("PANEL1")).unwrap();
@@ -394,10 +418,16 @@ mod tests {
             out.iter().all(|d| !d.id.as_str().contains("-slot")),
             "a deduplicated panel is not an identical twin, so it must not be slotted"
         );
+        let survivor = out.first();
         assert_eq!(
-            out.first().map(|d| d.kind),
-            Some(DisplayKind::InternalPanel),
+            survivor.map(|d| d.name.as_str()),
+            Some("Built-in"),
             "the survivor is the native panel entry, not the DDC one"
+        );
+        assert_eq!(
+            survivor.map(|d| d.kind),
+            Some(DisplayKind::InternalPanel),
+            "and it is classified as the built-in panel"
         );
     }
 
