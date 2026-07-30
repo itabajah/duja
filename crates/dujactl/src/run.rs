@@ -260,10 +260,9 @@ pub fn input(id: &str, value: Option<&str>) -> u8 {
 /// `doctor [--report]`: environment / backend / quirk diagnostics. Always exit 0.
 ///
 /// The two counts are derived from the same merged, deduplicated display set the
-/// per-display listing below walks, so the summary and the detail can never
-/// disagree — and a built-in panel the DDC backend also surfaces is counted as an
-/// internal panel rather than an external monitor (see
-/// [`backend::external_count`]).
+/// per-display listing walks, so the summary and the detail can never disagree —
+/// and a built-in panel the DDC backend also surfaces is counted as an internal
+/// panel rather than an external monitor (see [`backend::external_count`]).
 ///
 /// # Two audiences, split by `--report`
 ///
