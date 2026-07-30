@@ -108,8 +108,9 @@ The public key and full instructions live in [SECURITY.md](SECURITY.md).
 | Hotkeys, input switch, `dujactl` | ✅ | ⏳ | ⏳ |
 
 ¹ Apple-Silicon DDC uses private APIs (same approach as MonitorControl / Lunar); the macOS app
-shell is still in progress. ² Requires the `i2c-dev` module and a udev rule (`dujactl doctor`
-checks). ³ GNOME Wayland exposes no third-party overlay/gamma path; hardware control still works.
+shell is still in progress. ² Will require the `i2c-dev` module and a udev rule; the Linux DDC
+backend is not written yet, so nothing checks for them today. ³ GNOME Wayland exposes no
+third-party overlay/gamma path; hardware control still works.
 
 ## Build from source
 

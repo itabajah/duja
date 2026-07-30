@@ -28,4 +28,8 @@ with the phases; keep entries as observable behaviors, not implementation.
 ## Linux
 - [ ] X11 (KDE/GNOME) and KDE Wayland: tray menu, overlay, backlight.
 - [ ] GNOME Wayland: software dimming correctly reports unavailable; hardware paths work.
-- [ ] Missing i2c permissions: `dujactl doctor` names the fix; app degrades gracefully.
+- [ ] Missing i2c permissions: the app degrades gracefully (hardware control unavailable, no
+      crash, software dimming still works). `dujactl doctor` reports the displays it can see
+      and nothing about permissions — there is no permission/module/platform diagnostic in
+      `dujactl` at all, so this item is *not* a check that it "names the fix". Land that
+      diagnostic with the P7 Linux backend (see [debt.md](debt.md)) and tighten this line then.
