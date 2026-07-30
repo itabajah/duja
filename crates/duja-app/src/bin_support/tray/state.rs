@@ -925,7 +925,7 @@ impl AppState {
         // Snapshot each display's device under the bounds lock — the enumerator
         // populated the bounds map BEFORE this DisplaysChanged fired (engine
         // `refresh` runs the enumerator, which writes the map, then reconciles and
-        // notifies), so `device_for` is fresh here. A transiently-`None` device
+        // notifies), so `surface_token_for` is fresh here. A transiently-`None` token
         // degrades gracefully: that panel becomes its own singleton (two rows for one
         // frame) and converges on the next pass, never stranding an overlay.
         let members: Vec<clone_group::GroupMember> = {

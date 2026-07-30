@@ -307,14 +307,23 @@ construction **inside** the running event loop, which both `tray-icon` and
 demands `FnOnce + Send` and the payload is emphatically `!Send`.
 
 What remains for P6 is more than un-gating two modules. `bin_support/mod.rs` gates
-only `tray` and `toast`, but `docs/debt.md` tracks four further pieces as
+only `tray` and `toast`, but `docs/debt.md` tracks three further pieces as
 macOS-assembly work: the **app-side gamma sink** (`gamma.rs` is cross-platform but
 its `GuardSink`/`GammaBackend` are individually `cfg(windows)`, so a
-`dim_mode = "gamma"` display on macOS gets no ramp at all, and the cure needs a
-crash-marker policy for `CGSetDisplayTransferByFormula` — a design decision, not a
-port); `os_dark_theme`; and the per-platform gate on the new gamma caption. Then packaging, then the gate — ADR-0013 keeps the macOS DDC
-path labelled experimental until there are ≥3 independent community confirmations
-per architecture, which no amount of code closes.
+`dim_mode = "gamma"` display on macOS gets no ramp at all); `os_dark_theme`; and
+the per-platform gate on the new gamma caption. Then packaging, then the gate —
+ADR-0013 keeps the macOS DDC path labelled experimental until there are ≥3
+independent community confirmations per architecture, which no amount of code
+closes.
+
+On the gamma sink specifically, `debt.md` still says it "needs a `ScreenStateGuard`
+twin and a crash-marker policy". That was written before the macOS *backend*
+landed, and `duja-dimmer/src/mac/gamma.rs` now opens by explaining why macOS needs
+**neither**: the window server restores each process's transfer tables when it
+exits, so a crash self-heals and there is no dirty-exit state to record. What the
+sink actually needs is the correlation half — resolving a display id to a
+`CGDirectDisplayID` and driving `set_gamma`/`restore_identity` — which is a port,
+not a design decision. The row is left for the PR that lands the sink to drain.
 
 `#90`'s **standing rule** — `BoundsMap::device_for` must not be fed into
 `clone_group` on macOS until the surface token maps through
