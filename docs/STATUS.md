@@ -1,7 +1,9 @@
 # Duja — Project Status
 
-_Last updated: 2026-07-26 (v0.1.5 shipped, then the structural wave: the tray.rs
-split and the throttle pin / E2E smoke, clearing the P6 prerequisite)._
+_Last updated: 2026-07-30 (P6 wave 2: the macOS backends are wired into the app
+and CLI, the tray anchor contract is settled in ADR-0021, and tray construction
+now happens inside the running event loop. Plus two defects found by reading a
+real install's log and config)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -28,7 +30,7 @@ display control, automation, and integrations), see
 | **Internal-panel fallback fix** | **`v0.1.3` (Windows)** | ✅ shipped — the built-in panel no longer vanishes on a GPU/OEM-driven backlight |
 | **Dark rebrand + mirror/software-only** | **`v0.1.4` (Windows)** | ✅ shipped — the dark brand identity plus the two laptop-reported issues (#66, #67) |
 | **Sticky software-only fix** | **`v0.1.5` (Windows)** | ✅ shipped — a live monitor no longer sticks as "software-only"; tray Restart. Release verified: 6 assets, SHA256SUMS, minisign, SLSA provenance, `/releases/latest` → v0.1.5 |
-| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; the `tray.rs` split prerequisite is cleared; wave 2 (app assembly + packaging) + gate remain |
+| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021) and the event-loop-first tray construction (#94). Remaining: the app assembly (un-gate `tray`/`toast`, the app-side macOS gamma sink, the `clone_group` surface token, `os_dark_theme`, the per-platform gamma caption), packaging, **and the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
 | P7 Linux port | `m7-linux` / `v0.3.0` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
 
@@ -45,7 +47,7 @@ end from day one. Distribution is a tag-triggered
 portable zip, each with `SHA256SUMS`, a minisign signature, and a build-provenance
 attestation.
 
-Health: **858 tests (Windows lane) plus 10 doctests, green on 3 OSes** — the
+Health: **951 tests (Windows lane) plus 10 doctests, green on 3 OSes** — the
 per-OS count differs because the `#![cfg(windows)]` and `#![cfg(unix)]`
 integration suites compile out on the other lanes; clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
@@ -283,6 +285,125 @@ into a test-infra PR.
    warning is still true, or adding a comment asserting protection that does not
    exist, converts a tracked gap into a lie in the exact file a maintainer reads
    before re-introducing the bug. Under-promise in comments; never over-promise.
+
+### P6 wave 2 — the macOS foundation, and two defects in a live install (2026-07-30)
+
+Seven PRs, 871 → 951 tests. Three carry the macOS port; two fix things a real
+user was hitting; two are hygiene. Every one went through an adversarial review
+that found something real, and in four cases the review's finding was worth more
+than the PR it reviewed.
+
+**The macOS foundation.** `#90` wires the wave-1 backends into `duja-app` *and*
+`dujactl`, so `duja --once` and every `dujactl` verb reach real macOS hardware
+instead of stubs. `#91` gives `duja-platform` a macOS `cursor_anchor` and settles
+the unit question `#87` deliberately left open, in **[ADR-0021](adr/0021-tray-anchor-coordinate-contract.md)**:
+the anchor space stays "the platform's own window-positioning unit" (physical
+pixels on Windows, points on macOS) and an `AnchorUnit` plus two derived factors
+(`logical_to_anchor`, `anchor_to_physical`, product always `scale`) put the
+conversion where a test can see it. `#94` moves tray, hotkey, `AppState` and IPC
+construction **inside** the running event loop, which both `tray-icon` and
+`global-hotkey` require on macOS; the mechanism is a zero-duration
+`slint::Timer::single_shot`, chosen over `invoke_from_event_loop` because that
+demands `FnOnce + Send` and the payload is emphatically `!Send`.
+
+What remains for P6 is more than un-gating two modules. `bin_support/mod.rs` gates
+only `tray` and `toast`, but `docs/debt.md` tracks four further pieces as
+macOS-assembly work: the **app-side gamma sink** (`gamma.rs` is cross-platform but
+its `GuardSink`/`GammaBackend` are individually `cfg(windows)`, so a
+`dim_mode = "gamma"` display on macOS gets no ramp at all, and the cure needs a
+`ScreenStateGuard` twin plus a crash-marker policy for
+`CGSetDisplayTransferByFormula` — a design decision, not a port); the
+`clone_group` **surface token**; `os_dark_theme`; and the per-platform gate on the
+new gamma caption. Then packaging, then the gate — ADR-0013 keeps the macOS DDC
+path labelled experimental until there are ≥3 independent community confirmations
+per architecture, which no amount of code closes.
+
+`#90` left a **standing rule** the assembly must honour, in the `DisplayGeom`
+docs: `BoundsMap::device_for` must not be fed into `clone_group` on macOS until
+the surface token maps through `CGDisplayMirrorsDisplay`, because a
+`CGDirectDisplayID` is unique per display and would silently make mirror-merge
+inert, re-introducing `#66`'s double overlay.
+
+**Two defects found by reading a real install.** Neither was in new code, and
+neither was reachable from any test:
+
+- **Windows caps gamma dimming at 50 %** (`#96`). The reporting user's log held
+  **349** `SetDeviceGammaRamp failed` warnings over 15 days with
+  `dim_mode = "gamma"`, each reading *"failed: The operation completed
+  successfully"* — `windows-rs` builds that error from `GetLastError`, and the API
+  returns `FALSE` without setting one. A sweep on their display **bracketed** the
+  boundary (every step down to 0.50 accepted, every step from 0.45 refused), and
+  Microsoft's documented rule pins the value the measurement alone cannot: *"any
+  entry in the ramp must be within 32768 of the identity value"*. The integer ramp
+  at `f = 0.50` deviates by exactly **32767**, one unit inside the limit under
+  either a `<` or a `<=` reading — which is why 0.5 is the smallest `f32` that
+  satisfies every reading, and why **`GAMMA_FLOOR = 0.3` is unreachable on
+  Windows**. Worse, the app recorded the display as engaged anyway, so the planner
+  never substituted an overlay and the slider did nothing below the transition.
+  Now the planner asks `duja_dimmer::min_gamma_factor()` and plans an overlay
+  below it, and `#96` also removed a **bright flash** the fix would otherwise have
+  introduced: crossing the boundary mid-drag used to destroy the overlay to
+  completion before engaging the ramp, so the batch is now ordered engage → overlay
+  diff → restore. Log volume went from 349 warnings to one per transition. The
+  level the overlay delivers is identical; its coverage is not (an overlay cannot
+  cover exclusive-fullscreen, the secure desktop, or later-created topmost
+  windows), and the settings window says so. **The user chose to keep the mode with
+  the cap disclosed** rather than retire it. Two routes to "nothing dims" remain
+  open and are tracked: a refusal for any reason *other* than a sub-minimum factor
+  still leaves no overlay, and Microsoft documents a violating ramp as failing
+  *silently by returning `TRUE`* — verify-by-readback (ADR-0002's idiom for lying
+  hardware) is the real cure.
+- **`dujactl doctor --report` did not exist** (`#95`). `CONTRIBUTING.md` and the
+  monitor-quirk issue template both instruct users to run it; `doctor` was routed
+  through `end()`, which rejects trailing arguments, so the one command asked of
+  bug reporters exited with a usage error. Fixing it exposed that the template
+  also promised "probed capabilities" the command never gathered, so `--report`
+  now probes: raw MCCS capability string, feature set, live range,
+  `hardware_range`, allowed inputs, and the probe **error** when there is one
+  (previously "enumerates but DDC is dead" looked identical to a healthy monitor).
+
+**A documentation sweep found four more claims no code backed**, all fixed in
+`#95`: `bug.yml` pointed at a "tray menu → Open log folder" item and an "About
+dialog", neither of which exists (and the GUI cannot display its own version at
+all — `grep -i version` across every `.slint` finds nothing); `README.md` and
+`docs/qa-checklist.md` claimed `dujactl doctor` checks Linux i2c permissions,
+making that qa item a release gate that could never pass; and `paths.rs`'s own
+module doc gave the wrong log directory (`%LOCALAPPDATA%` where the real path is
+roaming `%APPDATA%`), which is now pinned by a test because `bug.yml` quotes it to
+strangers.
+
+**Hygiene.** `#92` brings `dujactl`'s discovery in line with the app's, fixing a
+Windows defect where a WMI-drivable built-in panel was listed twice and, if
+serial-bearing, collided into `-slot0`/`-slot1` so `set` on one of them failed
+outright while the other wrote VCP `0x10` over eDP. `#93` replaces the live
+overlay test's `FindWindowExW` cursor walk — whose `hwndChildAfter` is Z-order
+relative, so a concurrent overlay elsewhere could make it revisit a window *or*
+truncate when the cursor window died — with an `EnumWindows` snapshot, plus a
+serialization gate so `cargo test` (the workflow `CONTRIBUTING.md` lists first)
+passes as well as nextest.
+
+**`#94` was verified on real hardware**, since no test covers the assembled tray.
+The load-bearing check is a `dujactl list` **served over IPC** — `--verbose` says
+so, and only the app's table carries the `mode` column, whereas a plain `list`
+falls back to the direct backend and would exit 0 with no app running at all.
+Because `ipc::start` is the *last* statement of `assemble_with_loop_running`, an
+IPC-served answer implies `build_tray`, `init_hotkeys` and the `AppState` literal
+all ran before it. Window enumeration then showed `tray_icon_app`,
+`global_hotkey_app`, `DujaPlatformEvents`, a hidden `Duja Settings` and a visible
+`Duja Brightness` anchored bottom-right, and the continuum round-tripped correctly
+(user 88 → hardware 80 exactly, user 95 → hardware 92 by rounding, at
+`min_perceived_pct = 40`). No new warnings or errors in the log (`#94` adds one
+`info` line by design), `private = 5.2 MB`, `cpu = 0.27 s`.
+
+**One thing the smoke also exposed, the hard way.** Running the new
+`dujactl doctor --report` repeatedly *while the tray app was running* left the
+display marked `software_only` in the app, even though hardware writes kept
+working throughout. `--report` opens its own controller and probes over DDC by
+design, so two processes were driving one monitor's I2C; a timeout on the app's
+side is enough to trip the no-hardware detector that `#59` and `#78` hardened. The
+CLI's own runs were clean, which is why the PR that added probing did not catch it
+— it checked the wrong side. Tracked in [debt.md](debt.md); the fix direction is
+for `--report` to prefer IPC, or to say plainly that it is about to contend.
 
 ## What is done
 
