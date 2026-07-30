@@ -3,9 +3,9 @@
 //!
 //! Both values are platform-specific and this map is deliberately blind to which
 //! platform it holds: the bounds are physical pixels on Windows and points on
-//! macOS, and the token is a GDI device name on Windows and a decimal
-//! `CGDirectDisplayID` on macOS. The accessors below are named after the Windows
-//! value they were written for; the contract lives on
+//! macOS, and the token is a GDI device name on Windows and a decimal macOS
+//! surface id. The accessors below are named after the Windows value they were
+//! written for; the contract lives on
 //! [`DisplayGeom`](crate::bin_support::backend::DisplayGeom) and **must** be read
 //! before using either on a new platform.
 //!
@@ -18,10 +18,10 @@
 //!   framebuffer yields the **same** string, because that equality is how a
 //!   mirrored set is detected and collapsed into one control (`#66`).
 //!
-//! `MONITORINFOEX::szDevice` has both. A macOS `CGDirectDisplayID` has only the
-//! first (it is unique per display), so `device_for` must not reach
-//! `group_clones` on macOS until the token carries surface identity — see
-//! `DisplayGeom`'s element-3 section for the fix and the standing rule.
+//! `MONITORINFOEX::szDevice` has both, and so does the macOS token — which is why
+//! it is the mirror-set master's `CGDirectDisplayID` rather than the display's own
+//! (`duja_ddc`'s `mac_surface`). Both consumers are therefore safe on both
+//! platforms; a *third* platform's token must satisfy both before it is stamped.
 //!
 //! `duja-core`'s `DiscoveredDisplay` is frozen and carries no bounds, so the app
 //! keeps them here, refreshed on every enumeration. Entries are stored in the
@@ -68,12 +68,12 @@ impl BoundsMap {
     }
 
     /// The display-surface token for a resolved display id — the GDI device name
-    /// (e.g. `\\.\DISPLAY1`) on Windows, a decimal `CGDirectDisplayID` on macOS —
-    /// or `None` if unknown / panel.
+    /// (e.g. `\\.\DISPLAY1`) on Windows, a decimal surface id on macOS — or
+    /// `None` if unknown / panel.
     ///
     /// Feeds the gamma sink **and** the mirror grouping, which need different
-    /// guarantees from it; the macOS value satisfies only the gamma one. Read the
-    /// module docs (and `DisplayGeom`'s element 3) before adding a caller.
+    /// guarantees from it; both platforms' values satisfy both. Read the module
+    /// docs (and `DisplayGeom`'s element 3) before adding a caller.
     pub(crate) fn device_for(&self, resolved: &StableDisplayId) -> Option<String> {
         let idx = self.index_of(resolved)?;
         self.entries

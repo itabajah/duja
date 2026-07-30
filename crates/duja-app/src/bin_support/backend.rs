@@ -110,30 +110,34 @@ pub(crate) fn discover() -> Vec<DiscoveredDisplay> {
 ///   "any member software-only ⇒ pin the hardware members to MAX" rule. See
 ///   `clone_group`, `#66` and ADR-0018.
 ///
-/// **macOS satisfies (a) only, and that is not yet fixed.** The token there is the
-/// `CGDirectDisplayID` in decimal — exactly what
-/// `duja_dimmer::GammaDisplay::from_display_id` needs, recovered with a `u32`
-/// `parse` — but a `CGDirectDisplayID` is unique **per display by construction**,
-/// so two mirrored Macs produce two *different* tokens at identical bounds.
-/// `group_clones` would then build two singletons instead of one mirror: two
-/// overlay windows stacked on the same pixels and the software-only pin rule
-/// skipped, which is exactly the `#66` defect the mirror merge cured.
+/// **macOS satisfies both.** The token there is `duja_ddc`'s
+/// `DdcDisplay::surface_id` in decimal, which is *not* the display's own id: it is
+/// `CGDisplayMirrorsDisplay(id)` when this display is a mirror clone, else `id`
+/// itself (see `duja_ddc`'s `mac_surface`). So every clone of one framebuffer
+/// renders the same string — (b) — while the value stays a real
+/// `CGDirectDisplayID` that `duja_dimmer::GammaDisplay::from_display_id` accepts
+/// after a `u32` `parse` — (a). For a mirror set it is specifically the *master's*
+/// id, the drawable member, so addressing it is the meaningful choice as well as
+/// the legal one.
 ///
-/// **Standing rule, for whoever assembles the macOS tray:
-/// `BoundsMap::device_for` must NOT be fed into `clone_group` on macOS until this
-/// token satisfies (b).** The fix is to stamp the *surface*, not the display:
-/// `CGDisplayMirrorsDisplay(id)` when it is non-zero (the mirror-set master), else
-/// `id` itself — or any equivalent surface id — so every clone of one framebuffer
-/// renders the same string. It is deliberately not done in this PR: it is
-/// hardware-blind (Duja has no Mac on which to confirm the mirror-set semantics)
-/// and it belongs with the assembly that actually wires `clone_group`. Until then,
-/// a macOS gamma sink may consume the token; mirror grouping may not.
+/// The earlier standing rule — "`BoundsMap::device_for` must not be fed into
+/// `clone_group` on macOS" — is **discharged**, and `duja_ddc` no longer exposes a
+/// raw per-display id for this path to reach by mistake.
 ///
-/// Either way it must never be shown to a user or parsed as a device path: it is a
-/// token, not a name. And there is no macOS gamma sink yet (`gamma.rs`'s
-/// `GuardSink` is `cfg(windows)`), so today macOS carries the token with **no**
-/// consumer at all; it is stamped now so the sink that lands with the tray
-/// assembly has it waiting.
+/// # What is still hardware-blind here
+///
+/// Duja has no Mac, and the CI runners are virtualized with no external display,
+/// so no test or run has ever observed a real macOS mirror set. What is *proven*
+/// is the rule itself (`mac_surface`'s tests, which run on every CI OS); what is
+/// **assumed** is that `CGGetActiveDisplayList` reports every member of a mirror
+/// set rather than only the master. That assumption is deliberately not
+/// load-bearing: if only the master is ever enumerated, each token equals its own
+/// display id, `group_clones` builds the same singletons it builds today, and
+/// behaviour is unchanged. The assumption can only *add* a merge, never remove
+/// one — it degrades safely (see `docs/debt.md`).
+///
+/// Either way the token must never be shown to a user or parsed as a device path:
+/// it is a token, not a name.
 pub(crate) type DisplayGeom = (String, Option<DisplayBounds>, Option<String>);
 
 /// Enumerate displays **and** their bounds + display-surface tokens in one pass.
@@ -265,13 +269,12 @@ fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
     //    macOS internal panel can only come from `duja-panel`/`DisplayServices`; if
     //    that framework cannot control it, Duja cannot either, and no DDC entry
     //    will stand in for it.
-    // 2. The display-surface token is the `CGDirectDisplayID` in decimal (Windows
+    // 2. The display-surface token is `DdcDisplay::surface_id` in decimal (Windows
     //    uses the GDI device name), and `bounds` are points here, not physical
-    //    pixels. Both are specified on `DisplayGeom` — read its element-3 section
-    //    before consuming the token: a `CGDirectDisplayID` is unique per display, so
-    //    it does NOT carry the shared-framebuffer identity `clone_group` needs, and
-    //    feeding it there would re-introduce #66 (two overlays on one mirrored
-    //    surface). The gamma channel can use it as-is.
+    //    pixels. Both are specified on `DisplayGeom`. Note the token is NOT the
+    //    display's own `CGDirectDisplayID` — that is unique per display and would
+    //    re-introduce #66 (two overlays on one mirrored surface); `duja-ddc` stamps
+    //    the mirror-set master instead, and no longer exposes the raw id here.
 
     match duja_ddc::enumerate() {
         Ok(displays) => displays
@@ -283,7 +286,7 @@ fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
                     name: d.name.clone(),
                     capabilities: hardware_brightness_caps(),
                 };
-                (display, d.bounds, d.cg_display_id.to_string())
+                (display, d.bounds, d.surface_id.to_string())
             })
             .collect(),
         Err(_) => Vec::new(),

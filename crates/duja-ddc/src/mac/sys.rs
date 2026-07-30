@@ -177,6 +177,14 @@ fn display_bounds(id: u32) -> DisplayBounds {
     rect_to_bounds(CGDisplay::new(id).bounds())
 }
 
+/// The master of `id`'s mirror set, or `kCGNullDirectDisplay` (`0`) when this
+/// display is not mirroring another — which is also what the *master* of a set
+/// reports about itself. Fed to `crate::mac_surface::surface_id`, which owns the
+/// interpretation.
+fn mirrored_master(id: u32) -> u32 {
+    CGDisplay::new(id).mirrors_display()
+}
+
 /// Convert a `CGRect` (float origin + size, points) to [`DisplayBounds`]. The
 /// `as` casts are saturating: NaN maps to 0, and a negative extent clamps to 0.
 fn rect_to_bounds(rect: CGRect) -> DisplayBounds {
@@ -598,10 +606,14 @@ impl I2cBus for MacI2cBus {
 
 // --- top-level enumeration ------------------------------------------------
 
-/// One controllable external display: its CoreGraphics id, EDID, bounds, and an
-/// owned I2C bus.
+/// One controllable external display: its CoreGraphics id, the id it mirrors,
+/// EDID, bounds, and an owned I2C bus.
 pub(crate) struct MacDisplay {
     pub cg_id: u32,
+    /// `CGDisplayMirrorsDisplay(cg_id)` — the master of this display's mirror
+    /// set, or `kCGNullDirectDisplay` (`0`) when it mirrors nothing. Raw here;
+    /// `crate::mac_surface::surface_id` turns the pair into the surface token.
+    pub mirrors: u32,
     pub edid: Vec<u8>,
     pub bounds: DisplayBounds,
     pub bus: MacI2cBus,
@@ -655,6 +667,7 @@ pub(crate) fn enumerate_displays() -> Result<Vec<MacDisplay>, super::DdcError> {
         };
         out.push(MacDisplay {
             cg_id: id,
+            mirrors: mirrored_master(id),
             edid,
             bounds,
             bus,

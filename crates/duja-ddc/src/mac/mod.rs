@@ -80,11 +80,22 @@ pub struct DdcDisplay {
     /// physical-pixel bounds is a property of the platform, not a pending fixup.
     /// See ADR-0013.
     pub bounds: DisplayBounds,
-    /// The CoreGraphics display id. This is the macOS analogue of the Windows
-    /// backend's `gdi_device`: the token a later app-side gamma/overlay path
-    /// correlates a resolved id to. Not stable across replug (that is what
-    /// [`id`](Self::id) is for) — it is a live handle for this enumeration.
-    pub cg_display_id: u32,
+    /// The **display-surface token**: which framebuffer this display draws from.
+    /// The macOS analogue of the Windows backend's `gdi_device`, and it carries
+    /// the same two guarantees `duja-app`'s `backend::DisplayGeom` contract
+    /// demands — it is addressable by the gamma channel, *and* every panel
+    /// sharing one framebuffer reports the same value, which is how a mirrored
+    /// set is detected and collapsed into one control.
+    ///
+    /// Concretely: `CGDisplayMirrorsDisplay(id)` when this display is a mirror
+    /// clone, else its own `CGDirectDisplayID`. See [`crate::mac_surface`] for
+    /// the rule and why the raw per-display id would **not** do (it is unique by
+    /// construction, so two mirrored Macs would produce two tokens at identical
+    /// bounds — the `#66` double-overlay defect).
+    ///
+    /// Not stable across replug (that is what [`id`](Self::id) is for) — it is a
+    /// live token for this enumeration.
+    pub surface_id: u32,
     bus: MacI2cBus,
     sort_key: u32,
 }
@@ -129,7 +140,7 @@ pub fn enumerate() -> Result<Vec<DdcDisplay>, DdcError> {
             name,
             edid: raw.edid,
             bounds: raw.bounds,
-            cg_display_id: raw.cg_id,
+            surface_id: crate::mac_surface::surface_id(raw.cg_id, raw.mirrors),
             bus: raw.bus,
             sort_key: raw.cg_id,
         });
