@@ -99,6 +99,46 @@ pub type PlatformDimmer = MacDimmer;
 #[cfg(not(any(windows, target_os = "macos")))]
 pub type PlatformDimmer = StubDimmer;
 
+/// The lowest gamma factor **this platform's OS** will actually accept.
+///
+/// A *platform* limit, distinct from [`GAMMA_FLOOR`] — Duja's own cross-platform
+/// safety floor on how dark a ramp it is willing to ask for. A caller that wants a
+/// factor below this will get a refusal rather than a darker screen, so it must
+/// ask **before** attempting the write and realise that part of the range some
+/// other way (ADR-0003's overlay is the answer, and `duja-app`'s `dimming::plan`
+/// does exactly that).
+///
+/// On Windows this is `MIN_ACCEPTED_GAMMA` (`0.5`): `SetDeviceGammaRamp` validates
+/// every ramp so an application cannot blank the screen, and refuses one whose
+/// entries stray more than 32768 (of 65535) from the identity. See that constant
+/// for the derivation and the hardware measurement behind it. `GAMMA_FLOOR` is
+/// therefore **unreachable** on Windows.
+#[cfg(windows)]
+#[must_use]
+pub fn min_gamma_factor() -> f32 {
+    win::MIN_ACCEPTED_GAMMA
+}
+
+/// The lowest gamma factor **this platform's OS** will actually accept.
+///
+/// A *platform* limit, distinct from [`GAMMA_FLOOR`] — Duja's own cross-platform
+/// safety floor on how dark a ramp it is willing to ask for. Off Windows there is
+/// no additional OS restriction to report, so this is `GAMMA_FLOOR` itself and no
+/// caller ever needs to substitute an overlay for a refused ramp:
+///
+/// - **macOS**: `CGSetDisplayTransferByFormula` takes an arbitrary
+///   `(min, max, gamma)` triple — it will happily accept `max = 0` and black the
+///   display out — so it imposes no anti-lockout clamp of its own. (The reason
+///   that is safe on macOS and not on Windows is crash behaviour, not validation:
+///   the window server restores a process's transfer tables when it exits, so a
+///   crashed ramp self-heals.)
+/// - **Other targets**: there is no gamma backend at all, so the value is inert.
+#[cfg(not(windows))]
+#[must_use]
+pub fn min_gamma_factor() -> f32 {
+    GAMMA_FLOOR
+}
+
 /// The crate version, as compiled in.
 #[must_use]
 pub fn version() -> &'static str {
@@ -112,5 +152,25 @@ mod tests {
     #[test]
     fn links_against_core() {
         assert_eq!(version(), duja_core::version());
+    }
+
+    #[test]
+    fn min_gamma_factor_is_never_below_the_safety_floor() {
+        // A platform whose OS accepted *less* than `GAMMA_FLOOR` would still not
+        // get it: `clamp_gamma` bounds every factor at the floor first, so the
+        // effective minimum can only ever be at or above it.
+        assert!(min_gamma_factor() >= GAMMA_FLOOR);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cannot_reach_the_cross_platform_gamma_floor() {
+        // The whole reason the app needs an overlay fallback: on Windows the OS
+        // refuses the bottom of the gamma range outright, so `GAMMA_FLOOR` is not
+        // a level the ramp can deliver.
+        assert!(
+            min_gamma_factor() > GAMMA_FLOOR,
+            "Windows caps the ramp above GAMMA_FLOOR; the planner must substitute an overlay"
+        );
     }
 }

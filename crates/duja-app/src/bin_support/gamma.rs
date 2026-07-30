@@ -40,8 +40,13 @@ use duja_core::id::StableDisplayId;
 /// with a fake. The real implementation is Windows' `GuardSink`.
 pub(crate) trait GammaSink {
     /// Engage (or re-engage) gamma dimming for `id` at `factor` (`1.0` = identity,
-    /// down to `GAMMA_FLOOR`).
-    fn engage(&mut self, id: &StableDisplayId, factor: f32);
+    /// down to `GAMMA_FLOOR`), returning whether the ramp is now **live**.
+    ///
+    /// `false` means the ramp was not written — the OS refused it, or the display
+    /// could not be correlated to a gamma device. The coordinator must not then
+    /// record the factor as engaged: it never took effect, so there is nothing to
+    /// restore later and a retry on the next batch is the only route back.
+    fn engage(&mut self, id: &StableDisplayId, factor: f32) -> bool;
     /// Restore identity gamma for one display previously engaged.
     fn restore(&mut self, id: &StableDisplayId);
     /// Restore every engaged display and clear the crash marker (clean teardown),
@@ -67,12 +72,45 @@ fn retain_failed_engagements(
     engaged.retain(|_id, device| failed_devices.contains(device));
 }
 
+/// Once-per-display logging state for a refused gamma engage.
+///
+/// A slider drag re-plans on every frame, so a display whose ramp the OS refuses
+/// emits one warning per apply: the reported log holds **349** identical lines,
+/// up to a dozen inside a single 450 ms drag. This tracks which displays are
+/// currently refusing so a line is emitted on each *transition* — once when the
+/// ramp starts being refused, once if it later succeeds — rather than per frame.
+///
+/// Pure (a set of ids), so the suppression rule is unit-tested on every target
+/// without a failing ramp.
+#[derive(Debug, Default)]
+pub(crate) struct RefusalLog {
+    /// Displays whose most recent engage attempt was refused.
+    refusing: BTreeSet<StableDisplayId>,
+}
+
+impl RefusalLog {
+    /// Record a refused engage for `id`; `true` when this is a *new* refusal and
+    /// therefore worth logging.
+    pub(crate) fn note_refusal(&mut self, id: &StableDisplayId) -> bool {
+        self.refusing.insert(id.clone())
+    }
+
+    /// Record a successful engage for `id`; `true` only when it *was* refusing, so
+    /// a recovery is reported once and a display that never failed stays silent.
+    pub(crate) fn note_success(&mut self, id: &StableDisplayId) -> bool {
+        self.refusing.remove(id)
+    }
+}
+
 /// The pure decision core: tracks which displays currently have gamma engaged
 /// (and at what factor) and reconciles that against each apply batch.
 #[derive(Debug, Default)]
 pub(crate) struct GammaCoordinator {
-    /// Resolved id → currently-engaged factor, as raw bits for exact (lint-free,
-    /// `NaN`-free — the factor is always a clamped `clamp_gamma` output) compare.
+    /// Resolved id → the factor the sink confirmed is **live**, as raw bits for
+    /// exact (lint-free, `NaN`-free — the factor is always a clamped `clamp_gamma`
+    /// output) compare. A refused engage is deliberately absent: recording it would
+    /// make the coordinator claim a ramp the OS rejected, suppress the retry that
+    /// could recover it, and later issue a restore for a ramp that was never set.
     engaged: BTreeMap<StableDisplayId, u32>,
 }
 
@@ -82,16 +120,21 @@ impl GammaCoordinator {
     /// Engages every command carrying a gamma factor (only when newly present or
     /// the factor changed, so an unchanged ramp is never rewritten), and restores
     /// every previously-engaged display that no longer carries one. Commands with
-    /// `gamma: None` (the default overlay path, and every HDR/unknown display —
-    /// `effective_mode` forces them to overlay) never engage the ramp.
+    /// `gamma: None` (the default overlay path, every HDR/unknown display, and
+    /// every factor this platform's OS would refuse — `effective_mode` and
+    /// `dimming::plan` force both onto the overlay) never engage the ramp.
+    ///
+    /// A refused engage is **not** recorded, so the next batch tries again (that is
+    /// the only way a display recovers) and no restore is later issued for a ramp
+    /// that was never written. It stays in the "asking for gamma" set either way,
+    /// so a refusal never tears down a ramp that *is* live at an older factor.
     pub(crate) fn apply(&mut self, commands: &[DimCommand], sink: &mut impl GammaSink) {
         let mut present: BTreeSet<StableDisplayId> = BTreeSet::new();
         for cmd in commands {
             let Some(factor) = cmd.gamma else { continue };
             present.insert(cmd.id.clone());
             let bits = factor.to_bits();
-            if self.engaged.get(&cmd.id) != Some(&bits) {
-                sink.engage(&cmd.id, factor);
+            if self.engaged.get(&cmd.id) != Some(&bits) && sink.engage(&cmd.id, factor) {
                 self.engaged.insert(cmd.id.clone(), bits);
             }
         }
@@ -126,9 +169,9 @@ mod platform {
     use duja_core::dimmer::{DimCommand, GAMMA_FLOOR};
     use duja_core::id::StableDisplayId;
     use duja_dimmer::{GammaDisplay, ScreenStateGuard};
-    use tracing::warn;
+    use tracing::{info, warn};
 
-    use super::{GammaCoordinator, GammaSink, retain_failed_engagements};
+    use super::{GammaCoordinator, GammaSink, RefusalLog, retain_failed_engagements};
 
     /// Resolve a resolved display id to its GDI device name (e.g. `\\.\DISPLAY1`).
     type DeviceResolver = Box<dyn FnMut(&StableDisplayId) -> Option<String>>;
@@ -140,27 +183,49 @@ mod platform {
         resolve: DeviceResolver,
         /// Resolved id → the GDI device name engaged for it, so a later restore
         /// targets the exact device the engage used (device names can change
-        /// across a hot-plug).
+        /// across a hot-plug). Only ids whose ramp write **succeeded** are here:
+        /// the guard likewise does not record an untouched display, so the two
+        /// stay in step.
         engaged: BTreeMap<StableDisplayId, String>,
+        /// Per-display once-only logging for a refused ramp (see [`RefusalLog`]).
+        refusals: RefusalLog,
     }
 
     impl GammaSink for GuardSink {
-        fn engage(&mut self, id: &StableDisplayId, factor: f32) {
+        fn engage(&mut self, id: &StableDisplayId, factor: f32) -> bool {
             debug_assert!(
                 (GAMMA_FLOOR..=1.0).contains(&factor),
                 "gamma factor {factor} out of range; HDR/unknown must force overlay"
             );
             let Some(device) = (self.resolve)(id) else {
-                warn!(id = %id.as_str(), "no GDI device for gamma display; skipping ramp");
-                return;
+                if self.refusals.note_refusal(id) {
+                    warn!(
+                        id = %id.as_str(),
+                        "no GDI device for gamma display; skipping ramp (logged once)"
+                    );
+                }
+                return false;
             };
             if let Err(e) = self
                 .guard
                 .engage_gamma(GammaDisplay::from_device_name(&device), factor)
             {
-                warn!(id = %id.as_str(), device, error = %e, "gamma engage failed");
+                // Once per display, not once per frame: a slider drag re-plans every
+                // frame, and this warning shipped 349 times in one user's log.
+                if self.refusals.note_refusal(id) {
+                    warn!(
+                        id = %id.as_str(), device, factor, error = %e,
+                        "gamma engage refused; falling back to no ramp for this display \
+                         (logged once until it succeeds)"
+                    );
+                }
+                return false;
+            }
+            if self.refusals.note_success(id) {
+                info!(id = %id.as_str(), device, "gamma engage recovered");
             }
             self.engaged.insert(id.clone(), device);
+            true
         }
 
         fn restore(&mut self, id: &StableDisplayId) {
@@ -215,6 +280,7 @@ mod platform {
                     guard: ScreenStateGuard::new(Some(marker)),
                     resolve: Box::new(resolve),
                     engaged: BTreeMap::new(),
+                    refusals: RefusalLog::default(),
                 },
             }
         }
@@ -295,6 +361,68 @@ mod platform {
                 "an uncorrelated gamma command must not mark dirty"
             );
         }
+
+        /// A GDI device name that does not exist, so `CreateDCW` — and therefore
+        /// the ramp write — always fails. Lets the refusal path be exercised
+        /// headlessly, with no display and no gamma change on the real screen.
+        const BOGUS_DEVICE: &str = r"\\.\DUJA_BOGUS_GAMMA_DEVICE";
+
+        fn bogus_sink(marker: std::path::PathBuf) -> GuardSink {
+            GuardSink {
+                guard: ScreenStateGuard::new(Some(marker)),
+                resolve: Box::new(|_id| Some(BOGUS_DEVICE.to_owned())),
+                engaged: BTreeMap::new(),
+                refusals: RefusalLog::default(),
+            }
+        }
+
+        #[test]
+        fn a_refused_ramp_reports_failure_and_is_not_recorded_as_engaged() {
+            // Bug 1 at the site it shipped from: `GuardSink::engage` logged the
+            // failure and then inserted the display into `engaged` anyway, and it
+            // returned nothing, so the coordinator believed the ramp was live. It
+            // must now report the refusal and record nothing.
+            assert!(
+                duja_dimmer::set_gamma(&GammaDisplay::from_device_name(BOGUS_DEVICE), 0.6).is_err(),
+                "precondition: a bogus GDI device must fail the ramp write"
+            );
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut sink = bogus_sink(dir.path().join("gamma.dirty"));
+
+            assert!(
+                !sink.engage(&id("A"), 0.6),
+                "a refused ramp must report that it is not live"
+            );
+            assert!(
+                sink.engaged.is_empty(),
+                "a refused ramp must not be tracked as engaged"
+            );
+        }
+
+        #[test]
+        fn a_refused_ramp_is_retried_but_latched_so_it_warns_once() {
+            // Bug 3, at the site that emitted the 349 lines. The coordinator retries
+            // a refused display on every batch (that is the only way it recovers),
+            // so the suppression has to live in the sink. Twelve attempts — the size
+            // of one 450 ms drag burst in the report — all report the refusal...
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut sink = bogus_sink(dir.path().join("gamma.dirty"));
+            for attempt in 0..12 {
+                assert!(
+                    !sink.engage(&id("A"), 0.6),
+                    "attempt {attempt} must still report the refusal"
+                );
+            }
+            // ...but the log-worthy transition was consumed by the FIRST one, so no
+            // later attempt is new. Pre-fix, every one of the twelve warned.
+            assert!(
+                !sink.refusals.note_refusal(&id("A")),
+                "the refusal must already be latched after the first attempt"
+            );
+            // The latch is also what makes a later recovery reportable exactly once.
+            assert!(sink.refusals.note_success(&id("A")));
+            assert!(!sink.refusals.note_success(&id("A")));
+        }
     }
 }
 
@@ -312,15 +440,20 @@ mod tests {
     }
 
     /// A fake sink that records every engage/restore call for assertions.
+    ///
+    /// `refuse` makes every engage report "the ramp is not live", which is what a
+    /// real OS refusal looks like from the coordinator's side.
     #[derive(Default)]
     struct FakeSink {
         engaged: Vec<(StableDisplayId, f32)>,
         restored: Vec<StableDisplayId>,
+        refuse: bool,
     }
 
     impl GammaSink for FakeSink {
-        fn engage(&mut self, id: &StableDisplayId, factor: f32) {
+        fn engage(&mut self, id: &StableDisplayId, factor: f32) -> bool {
             self.engaged.push((id.clone(), factor));
+            !self.refuse
         }
         fn restore(&mut self, id: &StableDisplayId) {
             self.restored.push(id.clone());
@@ -421,6 +554,104 @@ mod tests {
         // this with a whole-guard restore instead).
         coord.apply(&[], &mut sink);
         assert!(sink.restored.is_empty());
+    }
+
+    // --- A refused engage must not be recorded as engaged -------------------
+
+    #[test]
+    fn a_refused_engage_is_not_recorded_and_is_retried() {
+        // Bug 1's coordinator half: the old code called `sink.engage` and then
+        // inserted the factor unconditionally, so a display whose ramp the OS
+        // rejected was believed engaged — which also suppressed every retry, since
+        // the recorded factor matched the next batch's. RED both ways: pre-fix the
+        // second apply issues no engage at all.
+        let mut coord = GammaCoordinator::default();
+        let mut sink = FakeSink {
+            refuse: true,
+            ..FakeSink::default()
+        };
+        coord.apply(&[cmd("A", Some(0.6))], &mut sink);
+        coord.apply(&[cmd("A", Some(0.6))], &mut sink);
+        assert_eq!(
+            sink.engaged.len(),
+            2,
+            "a refused ramp must be retried on the next batch, not assumed live"
+        );
+    }
+
+    #[test]
+    fn a_refused_engage_is_never_restored() {
+        // Nothing was written, so nothing may be un-written: a restore for a ramp
+        // that never took effect is a spurious OS call and, on the guard side, a
+        // `touched` entry that never existed. Pre-fix the display was in `engaged`,
+        // so dropping it issued a restore.
+        let mut coord = GammaCoordinator::default();
+        let mut sink = FakeSink {
+            refuse: true,
+            ..FakeSink::default()
+        };
+        coord.apply(&[cmd("A", Some(0.6))], &mut sink);
+        coord.apply(&[], &mut sink);
+        assert!(
+            sink.restored.is_empty(),
+            "a ramp that was refused must not be restored"
+        );
+    }
+
+    #[test]
+    fn a_refusal_does_not_tear_down_a_ramp_that_is_already_live() {
+        // The display keeps asking for gamma, so it stays in the "present" set even
+        // while a *new* factor is being refused: the older, live ramp must not be
+        // restored out from under it (that would flash the screen bright).
+        let mut coord = GammaCoordinator::default();
+        let mut sink = FakeSink::default();
+        coord.apply(&[cmd("A", Some(0.6))], &mut sink); // accepted, now live
+        sink.refuse = true;
+        coord.apply(&[cmd("A", Some(0.55))], &mut sink); // refused
+        assert!(
+            sink.restored.is_empty(),
+            "a refused change must leave the live ramp alone"
+        );
+        // ...and when the display finally leaves the gamma path, the ramp that IS
+        // live (0.6) is the one restored.
+        sink.refuse = false;
+        coord.apply(&[cmd("A", None)], &mut sink);
+        assert_eq!(sink.restored, vec![id("A")]);
+    }
+
+    // --- Once-per-display refusal logging -----------------------------------
+
+    #[test]
+    fn refusal_log_reports_only_the_transitions() {
+        // Bug 3: 349 identical warnings, a dozen inside one 450 ms drag. Only the
+        // edges are worth a line.
+        let mut log = RefusalLog::default();
+        assert!(log.note_refusal(&id("A")), "the first refusal is news");
+        for _ in 0..11 {
+            assert!(!log.note_refusal(&id("A")), "a repeat refusal is not");
+        }
+        assert!(log.note_success(&id("A")), "the recovery is news");
+        assert!(
+            !log.note_success(&id("A")),
+            "a display that was not refusing stays silent"
+        );
+        // And it latches again after recovering, so a second episode is reported.
+        assert!(log.note_refusal(&id("A")));
+    }
+
+    #[test]
+    fn refusal_log_tracks_displays_independently() {
+        let mut log = RefusalLog::default();
+        assert!(log.note_refusal(&id("A")));
+        assert!(
+            log.note_refusal(&id("B")),
+            "B's first refusal is news even though A is already refusing"
+        );
+        assert!(log.note_success(&id("A")));
+        assert!(
+            !log.note_refusal(&id("B")),
+            "A recovering must not un-latch B"
+        );
     }
 
     #[test]

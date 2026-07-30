@@ -384,3 +384,70 @@ fn alpha_updates_meet_frame_budget() {
     eprintln!("worst alpha-update latency: {worst:?}");
     dimmer.shutdown();
 }
+
+/// Diagnostic (hardware-gated): which gamma factors does this display's driver
+/// actually accept?
+///
+/// Exists because a real user's log carried **349** `SetDeviceGammaRamp failed`
+/// warnings whose text was self-contradictory ("The operation completed
+/// successfully"), while `duja --restore` — the identity ramp — succeeded on the
+/// same display. That rules out a blanket refusal and points at Windows' own
+/// ramp validation, which rejects a ramp deviating too far from linear so an app
+/// cannot blank the screen. This sweep finds the real cut-off rather than
+/// guessing it, and prints it, so the fix can be based on a measurement.
+///
+/// **Visually safe.** A *rejected* call changes nothing by definition, and every
+/// accepted step is undone by an identity write immediately afterwards, so the
+/// worst case is a brief flicker. `GAMMA_FLOOR` is the lowest factor Duja can
+/// ever ask for, so the sweep stops there.
+///
+/// # What it found (2026-07-30, MSI MP273QP, `\\.\DISPLAY1`)
+///
+/// ```text
+/// factor 1.00 .. 0.50 : ACCEPTED
+/// factor 0.45 .. 0.30 : REJECTED
+/// lowest accepted factor: 0.50
+/// ```
+///
+/// Which is the whole basis of `MIN_ACCEPTED_GAMMA` in `src/win/gamma.rs`: the
+/// 0.05-step sweep brackets the cut-off, and the `65535 * (1 - f) <= 32768`
+/// derivation recorded on that constant makes it exact. The two agree. That
+/// constant's own unit tests pin the arithmetic on every lane, so a re-run here is
+/// not needed to keep the fix honest — this test exists to *establish* the fact
+/// and to re-measure it on a different GPU if one ever disagrees.
+#[test]
+#[ignore = "gamma diagnostic: run in the hardware suite (DUJA_HW_TESTS=1)"]
+fn report_which_gamma_factors_the_driver_accepts() {
+    let _serial = gate();
+    if !hw_enabled() {
+        eprintln!("skipping gamma sweep: set DUJA_HW_TESTS=1 to run");
+        return;
+    }
+    let displays = duja_dimmer::enumerate_gamma_displays();
+    assert!(!displays.is_empty(), "no gamma-capable display enumerated");
+
+    for display in &displays {
+        eprintln!("display {}", display.name());
+        let mut lowest_accepted = f32::NAN;
+        // 1.00 down to GAMMA_FLOOR in 0.05 steps, worst case one flicker each.
+        for step in 0..=14 {
+            // RATIONALE (cast_precision_loss): `step` is 0..=14, exact in f32.
+            #[allow(clippy::cast_precision_loss)]
+            let factor = 1.0 - (step as f32) * 0.05;
+            if factor < duja_core::dimmer::GAMMA_FLOOR {
+                break;
+            }
+            let outcome = duja_dimmer::set_gamma(display, factor);
+            // Undo immediately: an accepted dim must not outlive its measurement.
+            let _ = duja_dimmer::restore_identity(display);
+            match outcome {
+                Ok(()) => {
+                    eprintln!("  factor {factor:.2}: ACCEPTED");
+                    lowest_accepted = factor;
+                }
+                Err(e) => eprintln!("  factor {factor:.2}: REJECTED -> {e}"),
+            }
+        }
+        eprintln!("  lowest accepted factor: {lowest_accepted:.2}");
+    }
+}

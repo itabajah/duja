@@ -1105,7 +1105,10 @@ impl AppState {
     /// overlay backend diffs the alpha channel, while [`gamma::GammaBackend`]
     /// engages/restores the GPU ramp for the (opt-in, SDR-only) gamma channel.
     /// HDR/unknown displays never carry a gamma factor here — `effective_mode`
-    /// forces them onto the overlay path — so they can never reach the ramp.
+    /// forces them onto the overlay path — so they can never reach the ramp. Nor
+    /// does a factor this platform's OS would refuse: [`dimming::plan`] is given
+    /// `duja_dimmer::min_gamma_factor()` and plans an overlay below it, so the
+    /// ramp is only ever asked for what it can deliver.
     fn apply_overlays(&mut self) {
         let commands = self.plan_commands();
         if let Some(dimmer) = self.dimmer.as_mut()
@@ -1151,6 +1154,7 @@ impl AppState {
                 )
             },
             |id| guard.as_ref().and_then(|b| b.bounds_for(id)),
+            duja_dimmer::min_gamma_factor(),
         );
         plan.commands
     }
