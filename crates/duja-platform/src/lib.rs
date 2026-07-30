@@ -55,7 +55,7 @@ pub mod ipc;
 mod single_instance;
 
 pub use autostart::{Autostart, AutostartError};
-pub use desktop::{animations_enabled, open_url, os_dark_theme};
+pub use desktop::{OpenUrlFailure, animations_enabled, open_url, os_dark_theme};
 pub use geometry::{AnchorUnit, TrayAnchor, WorkRect, cursor_anchor};
 pub use installer_guard::InstallerGuard;
 pub use ipc::{IpcTransportError, PipeClient, PipeServer};

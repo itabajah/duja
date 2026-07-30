@@ -25,13 +25,18 @@
 //!
 //! # Purity
 //!
-//! Every platform arm is a thin call plus a *pure* decoder that turns the OS's raw
-//! answer into Duja's vocabulary — including `open_url`'s, whose success rule is
-//! Windows' legacy "greater than 32" convention rather than a boolean. The decoders
-//! are compiled (and tested) on every OS, so the interpretation of
-//! `AppsUseLightTheme == 0`, of an **absent** `AppsUseLightTheme`, and of a missing
-//! `AppleInterfaceStyle` are pinned on all three CI lanes, not only on the lane that
-//! can run the query.
+//! Wherever the OS's raw answer needs *interpreting*, that step is a **pure
+//! decoder** rather than an inline expression, so it is compiled and tested on
+//! every CI lane and not only on the one that can run the query. That covers the
+//! three real decisions: `AppsUseLightTheme == 0` meaning dark, an **absent**
+//! `AppsUseLightTheme` meaning light, a missing `AppleInterfaceStyle` meaning
+//! light, plus `ShellExecuteW`'s legacy "greater than 32" success rule.
+//!
+//! Not every arm has one, and that is the point of the rule rather than an
+//! exception to it: macOS answers all three questions with a value that needs no
+//! interpretation (a `bool` from `openURL`, a `bool` to negate for reduced motion),
+//! and the placeholder arms return constants. A decoder exists where there is a
+//! decision to get wrong.
 
 /// A URL that could not be opened, carrying whatever the platform reported.
 ///
@@ -202,7 +207,8 @@ mod platform {
     use super::{AppsUseLightTheme, OpenUrlFailure};
 
     /// The subkey the Settings app writes the theme preference into.
-    const PERSONALIZE: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    pub(super) const PERSONALIZE: PCWSTR =
+        w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
 
     /// A `REG_DWORD` is four bytes; `RegGetValueW` is told so and writes the
     /// actual size back. A compile-time assert rather than a runtime conversion,
@@ -240,29 +246,46 @@ mod platform {
     /// Read `HKCU\…\Themes\Personalize\AppsUseLightTheme`, the value the Settings
     /// app writes when the user picks an app theme.
     pub(super) fn os_dark_theme() -> Option<bool> {
-        super::dark_from_apps_use_light_theme(read_personalize_dword(w!("AppsUseLightTheme")))
+        // SAFETY: both arguments are `w!` string literals, so each is a valid
+        // NUL-terminated wide string with `'static` storage.
+        let read = unsafe { read_dword(PERSONALIZE, w!("AppsUseLightTheme")) };
+        super::dark_from_apps_use_light_theme(read)
     }
 
-    /// Read one `REG_DWORD` from the Personalize subkey, distinguishing **absent**
-    /// from **unreadable** — the whole point, since the two mean opposite things
-    /// (see [`super::dark_from_apps_use_light_theme`]).
+    /// Read one `REG_DWORD` under `HKCU`, distinguishing **absent** from
+    /// **unreadable** — the whole point, since the two mean opposite things (see
+    /// [`super::dark_from_apps_use_light_theme`]).
     ///
     /// `RRF_RT_REG_DWORD` restricts the type *before* any copy, so a `REG_SZ` under
     /// this name comes back `ERROR_UNSUPPORTED_TYPE` with the buffer untouched
     /// rather than as garbage, and `ERROR_MORE_DATA` is unreachable for a value
     /// that must be exactly four bytes.
-    pub(super) fn read_personalize_dword(name: PCWSTR) -> AppsUseLightTheme {
+    ///
+    /// # Safety
+    /// `subkey` and `name` must each be a valid, NUL-terminated wide string that
+    /// stays live for the duration of the call.
+    ///
+    /// `unsafe` rather than safe-with-a-comment: the precondition is a property of
+    /// the raw pointers, which the signature cannot enforce, so a safe signature
+    /// would let a caller reach UB without writing `unsafe` anywhere.
+    pub(super) unsafe fn read_dword(subkey: PCWSTR, name: PCWSTR) -> AppsUseLightTheme {
         let mut value: u32 = 0;
         let mut size = DWORD_BYTES;
-        // SAFETY: the subkey path is a static NUL-terminated literal and `name` is
-        // one by the caller's contract. `pdwtype` is null (we do not need the type
-        // back); `pvdata`/`pcbdata` point at a live, aligned `u32`/`u32` pair whose
-        // sizes match what RRF_RT_REG_DWORD requires. `value` is read only after an
-        // `ERROR_SUCCESS` return.
+        // SAFETY: `subkey`/`name` are valid NUL-terminated wide strings, live for
+        // the call, by this function's own contract. `pdwtype` is null (we do not
+        // need the type back); `pvdata`/`pcbdata` point at a live, aligned
+        // `u32`/`u32` pair whose sizes match what RRF_RT_REG_DWORD requires.
+        // `value` is read only after an `ERROR_SUCCESS` return.
+        //
+        // `pvdata` must be `Some`: passing `None` there is *documented* to return
+        // `ERROR_SUCCESS` and report only the size, so the buffer would keep its
+        // seed and every read would "succeed" with a fabricated value. Pinned by
+        // `tests::live::a_written_dword_round_trips_through_the_production_read`,
+        // which is the only shape that can observe it.
         let rc = unsafe {
             RegGetValueW(
                 HKEY_CURRENT_USER,
-                PERSONALIZE,
+                subkey,
                 name,
                 RRF_RT_REG_DWORD,
                 None,
@@ -272,8 +295,11 @@ mod platform {
         };
         match rc {
             ERROR_SUCCESS => AppsUseLightTheme::Value(value),
-            // The value, or the whole subkey, has never been written. On a stock
-            // profile that is the normal state, not an error.
+            // Not written. On a stock profile that is the normal state, not an
+            // error. `ERROR_FILE_NOT_FOUND` is the code Microsoft documents, and
+            // measurement says it covers a missing *subkey* too, at any depth —
+            // `ERROR_PATH_NOT_FOUND` is listed for breadth, not because any probed
+            // shape produces it.
             ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => AppsUseLightTheme::Absent,
             _ => AppsUseLightTheme::Unreadable,
         }
@@ -472,29 +498,197 @@ mod tests {
     }
 
     /// Live tests against the real OS — the decoders above pin the *decisions*,
-    /// these pin that the platform calls under them actually work.
+    /// these pin that the platform call under them actually works.
     ///
-    /// The crate has precedent for this (`autostart/win.rs`'s scratch-key round
-    /// trip, `geometry.rs`'s real-backend anchor), and it earns its keep here: the
-    /// registry read is a hand-built flags/buffer/size triple, and getting the
-    /// restriction flag or a pointer wrong would make every read fail — which the
-    /// pure decoder would faithfully translate into "unknown ⇒ dark" with nothing
-    /// to see.
+    /// The crate has precedent for this shape (`autostart/win.rs`'s scratch-key
+    /// round trip, `geometry.rs`'s real-backend anchor), and it earns its keep
+    /// here because the registry read is a hand-built flags/buffer/size triple.
+    ///
+    /// # Why an error-path test is not enough
+    ///
+    /// The tempting shortcut — "read a value that cannot exist and check we say
+    /// `Absent`" — proves less than it looks, and the reasoning that makes it look
+    /// sufficient is **false**. Getting the data pointer wrong does *not* make the
+    /// read fail: [`RegGetValueW`] is documented to return `ERROR_SUCCESS` and
+    /// merely report the required size when `pvData` is `NULL`. So a read with a
+    /// null buffer *succeeds*, leaves the buffer at whatever it was seeded with,
+    /// and hands back a fabricated value — every user getting one fixed theme
+    /// forever, with no error anywhere for a decoder or an error-path test to see.
+    ///
+    /// Only a **round trip** can observe that the OS wrote our bytes, so that is
+    /// what [`a_written_dword_round_trips_through_the_production_read`] does,
+    /// under a throwaway per-process key and never against the real theme value.
+    ///
+    /// [`RegGetValueW`]: https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-reggetvaluew
+    /// [`a_written_dword_round_trips_through_the_production_read`]: live::a_written_dword_round_trips_through_the_production_read
     #[cfg(windows)]
     mod live {
+        use windows::Win32::Foundation::ERROR_SUCCESS;
+        use windows::Win32::System::Registry::{
+            HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE,
+            REG_SAM_FLAGS, RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegSetValueExW,
+        };
+        use windows::core::{PCWSTR, w};
+
+        use super::super::platform::read_dword;
         use super::super::{AppsUseLightTheme, os_dark_theme};
+
+        /// A value neither `0` nor `1`, so it cannot be confused with a real theme
+        /// setting and so a stale/zeroed buffer cannot pass by coincidence.
+        const SENTINEL: u32 = 0x00BA_DA55;
+
+        /// NUL-terminate a Rust string for the Win32 wide-string APIs.
+        fn wide(s: &str) -> Vec<u16> {
+            s.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+
+        /// The OS's bytes actually land in our buffer.
+        ///
+        /// Writes `SENTINEL` under a per-process scratch key, reads it back through
+        /// the **production** `read_dword`, and asserts the value round-trips. This
+        /// is the only construction that can catch a mis-wired `pvData` — see the
+        /// module docs for why a null buffer *succeeds* rather than failing.
+        #[test]
+        fn a_written_dword_round_trips_through_the_production_read() {
+            let scratch = ScratchKey::new("desktop");
+
+            // Absent before anything is written — the same error path the other
+            // test covers, asserted here against a key we know the state of.
+            // SAFETY: the scratch path outlives the call (owned by `scratch`); the
+            // value name is a `w!` literal.
+            let before = unsafe { read_dword(scratch.path(), w!("Probe")) };
+            assert_eq!(before, AppsUseLightTheme::Absent, "nothing written yet");
+
+            scratch.write_dword(SENTINEL);
+
+            // SAFETY: as above.
+            let after = unsafe { read_dword(scratch.path(), w!("Probe")) };
+            assert_eq!(
+                after,
+                AppsUseLightTheme::Value(SENTINEL),
+                "the value we wrote must come back byte-for-byte; a `Value` with                  any other payload means the OS never wrote our buffer"
+            );
+        }
+
+        /// A throwaway `HKCU\Software\DujaTest\<tag>-<pid>` key that deletes
+        /// itself on drop.
+        ///
+        /// A guard rather than a cleanup call at the end of the test, because this
+        /// test's whole job is to **fail** when the read is mis-wired: a trailing
+        /// `delete_scratch_key(...)` is skipped by the unwind, so every red run
+        /// would leave a key behind in the developer's registry. (Observed exactly
+        /// that while verifying the sabotage.) `Drop` runs on the unwind too.
+        struct ScratchKey {
+            /// The subkey path, NUL-terminated. Owned here so the pointer handed to
+            /// Win32 stays valid for this guard's whole life.
+            wide: Vec<u16>,
+        }
+
+        impl ScratchKey {
+            /// Create the key. Process-unique, so parallel runs never collide, and
+            /// never anywhere near the real Personalize key.
+            fn new(tag: &str) -> Self {
+                let key = ScratchKey {
+                    wide: wide(&format!(r"Software\DujaTest\{tag}-{}", std::process::id())),
+                };
+                let mut handle = HKEY::default();
+                // SAFETY: `key.wide` is a NUL-terminated wide string owned by `key`
+                // and live for the call; `phkresult` points at a live `HKEY`,
+                // written only on success. Every other out-param is `None`.
+                let rc = unsafe {
+                    RegCreateKeyExW(
+                        HKEY_CURRENT_USER,
+                        key.path(),
+                        None,
+                        PCWSTR::null(),
+                        REG_OPTION_NON_VOLATILE,
+                        REG_SAM_FLAGS(KEY_READ.0 | KEY_WRITE.0),
+                        None,
+                        &raw mut handle,
+                        None,
+                    )
+                };
+                assert_eq!(rc, ERROR_SUCCESS, "could not create the scratch key");
+                // SAFETY: `handle` came from the successful create above and is
+                // closed exactly once; the key itself persists until `Drop`.
+                unsafe {
+                    let _ = RegCloseKey(handle);
+                }
+                key
+            }
+
+            /// This key's path, for the production reader.
+            fn path(&self) -> PCWSTR {
+                PCWSTR(self.wide.as_ptr())
+            }
+
+            /// Set `Probe` to `value` as a `REG_DWORD`.
+            fn write_dword(&self, value: u32) {
+                let mut handle = HKEY::default();
+                // SAFETY: as in `new` — the path outlives the call and `phkresult`
+                // points at a live `HKEY` written only on success.
+                let rc = unsafe {
+                    RegCreateKeyExW(
+                        HKEY_CURRENT_USER,
+                        self.path(),
+                        None,
+                        PCWSTR::null(),
+                        REG_OPTION_NON_VOLATILE,
+                        REG_SAM_FLAGS(KEY_READ.0 | KEY_WRITE.0),
+                        None,
+                        &raw mut handle,
+                        None,
+                    )
+                };
+                assert_eq!(rc, ERROR_SUCCESS, "could not open the scratch key");
+                let bytes = value.to_ne_bytes();
+                // SAFETY: `handle` is an open key from the successful create above;
+                // the name is a `w!` literal; `bytes` is a live 4-byte buffer
+                // matching the declared `REG_DWORD` type and length.
+                let rc =
+                    unsafe { RegSetValueExW(handle, w!("Probe"), None, REG_DWORD, Some(&bytes)) };
+                // SAFETY: `handle` came from `RegCreateKeyExW`, closed exactly once.
+                unsafe {
+                    let _ = RegCloseKey(handle);
+                }
+                assert_eq!(rc, ERROR_SUCCESS, "could not write the scratch value");
+            }
+        }
+
+        impl Drop for ScratchKey {
+            fn drop(&mut self) {
+                // SAFETY: the path is a NUL-terminated wide string owned by `self`
+                // and live for the call; this deletes only the process-unique key
+                // this guard created.
+                unsafe {
+                    let _ = RegDeleteKeyW(HKEY_CURRENT_USER, self.path());
+                }
+                // `RegCreateKeyExW` also created the shared `Software\DujaTest`
+                // parent, so removing only our own key still leaves an empty key in
+                // the user's registry. Sweep it best-effort: `RegDeleteKeyW` refuses
+                // a key that still has subkeys, so this is a no-op while any other
+                // scratch key (this module's or `autostart`'s) is live, and the last
+                // guard out cleans up.
+                let parent = wide(r"Software\DujaTest");
+                // SAFETY: `parent` is a NUL-terminated wide string live for the
+                // call; the delete is refused rather than recursive if non-empty.
+                unsafe {
+                    let _ = RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR(parent.as_ptr()));
+                }
+            }
+        }
 
         /// A value that cannot exist must read as **`Absent`**, not `Unreadable`.
         ///
-        /// This exercises the whole `RegGetValueW` call — flags, buffer pointer,
-        /// size in/out — plus the return-code mapping, and needs no writes: the
-        /// subkey is real, the value name is not. If the triple were malformed,
-        /// the call would fail with some *other* code and land in `Unreadable`,
-        /// which is the failure this asserts against.
+        /// The return-code half of the contract, against the *real* Personalize
+        /// subkey: the key is real, the value name is not. Distinguishing these two
+        /// codes is what makes a stock profile resolve to light rather than dark.
         #[test]
         fn a_value_that_does_not_exist_reads_as_absent() {
-            use windows::core::w;
-            let read = super::super::platform::read_personalize_dword(w!("DujaNoSuchValue"));
+            use super::super::platform::PERSONALIZE;
+            // SAFETY: both arguments are `w!`/`const` string literals with 'static
+            // storage.
+            let read = unsafe { read_dword(PERSONALIZE, w!("DujaNoSuchValue")) };
             assert_eq!(
                 read,
                 AppsUseLightTheme::Absent,

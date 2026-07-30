@@ -705,6 +705,13 @@ impl AppState {
     /// and cheap when it is `System`. Called before every show so the flyout and
     /// the settings window — which re-resolves on every open — cannot end up
     /// displaying opposite palettes.
+    ///
+    /// **Not covered by any test**, and deliberately said out loud: deleting the
+    /// call from `show_flyout` leaves the whole suite green and clippy silent.
+    /// That is the same structural gap as the throttle and loop-assembly rows in
+    /// `docs/debt.md` — `AppState` owns a concrete `tray_icon::TrayIcon` and two
+    /// live Slint shells, so it cannot be built off the Slint main thread — not an
+    /// oversight to be fixed by adding one.
     fn refresh_system_theme(&mut self) {
         let theme = settings::ui_theme(self.config.general.theme, os_dark_theme());
         self.vm.borrow_mut().set_theme(theme);
