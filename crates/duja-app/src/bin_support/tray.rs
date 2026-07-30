@@ -30,9 +30,10 @@
 //! legal moment to create a status item), and a Slint timer can only fire from
 //! `i_slint_core::platform::update_timers_and_animations`, which the winit
 //! backend calls from its `new_events` hook — i.e. from inside the loop, at
-//! `StartCause::Init` on the first pass. The ordering is **not** `cfg`-split:
-//! Windows, the shipped platform, exercises exactly the sequence macOS depends
-//! on.
+//! `StartCause::Init` on the first pass. That mechanism is pinned against the
+//! real Slint/winit stack by `tests/loop_time_assembly.rs`, not merely asserted
+//! here. The ordering is **not** `cfg`-split: Windows, the shipped platform,
+//! exercises exactly the sequence macOS depends on.
 //!
 //! # Continuum ownership
 //!
@@ -247,6 +248,17 @@ enum Action {
 /// start return directly, while a loop-time failure (the tray icon) is recorded
 /// by the queued assembly, quits the loop, and is re-raised here — see
 /// [`LoopAssembly`].
+///
+/// The tray-failure **message and exit code are unchanged** by the restructure,
+/// but its *route* is not, and the difference is not free: `build_tray` used to
+/// run before `run::start_platform`, `Engine::spawn` and `PlatformDimmer::spawn`,
+/// so a tray failure returned having started nothing. It now happens after all
+/// three, so a launch that cannot create a tray has already run a full hardware
+/// enumeration (DDC I2C reads across every monitor) and spawned the pump and the
+/// overlay-dimmer thread, and unwinds through the engine's bounded (~2 s)
+/// worker-join. Unavoidable while the closure owns the engine sender, and a
+/// failed launch is not a hot path — but it is a real change in what a failed
+/// launch costs.
 pub(crate) fn run(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
     let _ = verbose; // logging is initialised by the caller.
     let paths = DujaPaths::resolve_or_fallback();
@@ -333,9 +345,9 @@ pub(crate) fn run(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
     });
 
     // 7. Queue the loop-time assembly (tray icon, hotkeys, `AppState`, event
-    //    sources, IPC) as the first work the event loop does. See the module doc
-    //    for why the tray cannot be built here, and `LoopAssembly` for how a
-    //    failure inside the closure still exits non-zero.
+    //    sources, IPC) as the first work the event loop does — see
+    //    `queue_loop_time_assembly` for why the tray cannot be built here, and
+    //    `LoopAssembly` for how a failure inside the closure still exits non-zero.
     let resources = LoopStartResources {
         paths,
         config,
@@ -353,55 +365,8 @@ pub(crate) fn run(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
         notifications,
     };
     let assembly: Rc<LoopAssembly<PipeServer>> = Rc::new(LoopAssembly::new());
-    // DECISION (event-loop-first, verified in the pinned sources): a
-    // zero-duration single-shot Slint timer is the queueing mechanism, not
-    // `slint::invoke_from_event_loop` and not a custom winit application
-    // handler.
-    //
-    // - It can only fire from `i_slint_core::platform::update_timers_and_animations`,
-    //   and `i-slint-backend-winit` calls that from exactly two places:
-    //   `ApplicationHandler::new_events` (`event_loop.rs`) and the Apple
-    //   display-link callback (`frame_throttle/apple_display_link.rs`, which only
-    //   exists once a window is rendering). Both are inside the running loop, so
-    //   by construction the closure fires at `StartCause::Init` on the loop's
-    //   first pass — exactly the point `tray-icon` documents as the earliest legal
-    //   moment to create a macOS status item. (`i_slint_core::platform::set_platform`
-    //   also calls it, but that already ran when the flyout window was created,
-    //   before this timer exists.)
-    // - `Timer::single_shot` takes `FnOnce() + 'static`; `invoke_from_event_loop`
-    //   additionally requires `Send`, which `FlyoutShell`, `SettingsShell`,
-    //   `Rc<RefCell<…Vm>>` and `GammaBackend` (it owns a bare `Box<dyn FnMut>`)
-    //   are not. Using it would mean smuggling those main-thread-only values
-    //   across a `Send` bound via a second thread-local or an `unsafe impl Send`.
-    // - Winit *does* deliver queued user events strictly after
-    //   `StartCause::Init` on both platforms (on macOS they are drained only in
-    //   the `BeforeWaiting` observer, gated on `is_running`, which
-    //   `applicationDidFinishLaunching:` sets immediately before dispatching
-    //   Init + Resumed), so `invoke_from_event_loop` would also be late enough.
-    //   The timer is preferred because it does not depend on that answer: it
-    //   hangs off the backend's own `new_events` hook rather than on user-event
-    //   delivery order.
-    // - It schedules nothing further: a `SingleShot` timer is removed from the
-    //   timer list once its callback returns (`TimerList::maybe_activate_timers`),
-    //   so `duration_until_next_timer_update` is `None` again and the loop is back
-    //   to `ControlFlow::Wait` with zero periodic wakeups (ADR-0001).
-    slint::Timer::single_shot(Duration::ZERO, {
-        let assembly = Rc::clone(&assembly);
-        move || match assemble_with_loop_running(resources) {
-            Ok(server) => assembly.store_server(server),
-            Err(error) => {
-                // There is no app without a tray. Record the cause, stop the
-                // loop, and let `run` re-raise it below so the process still
-                // exits non-zero with this message rather than lingering as a
-                // running-but-invisible app.
-                error!(error = %format!("{error:#}"), "fatal: tray assembly failed");
-                assembly.record_failure(error);
-                let _ = slint::quit_event_loop();
-            }
-        }
-    });
+    queue_loop_time_assembly(resources, &assembly);
 
-    info!("duja tray running");
     let loop_result = slint::run_event_loop_until_quit();
     // A loop that fails to *start* is logged and still exits 0 — pre-existing
     // behaviour, deliberately not changed here. Note what it now also implies: the
@@ -435,6 +400,92 @@ pub(crate) fn run(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
         return Err(error);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Queue [`assemble_with_loop_running`] to run as the first work the (not yet
+/// running) event loop does, reporting its outcome through `assembly`.
+///
+/// # The mechanism, and why this one
+///
+/// A zero-duration single-shot Slint timer — deliberately **not**
+/// [`slint::invoke_from_event_loop`] and **not**
+/// `i_slint_backend_winit::Backend::builder().with_custom_application_handler`.
+/// Verified in the pinned dependency sources:
+///
+/// - **It can only fire from inside the running loop.** A Slint timer is drained
+///   only by `i_slint_core::platform::update_timers_and_animations`, and
+///   `i-slint-backend-winit` calls that from exactly two places:
+///   `ApplicationHandler::new_events` (`event_loop.rs`) and the Apple display-link
+///   callback (`frame_throttle/apple_display_link.rs`, which only exists once a
+///   window is rendering). Both are inside the loop, so the closure fires at
+///   `StartCause::Init` on the loop's first pass — exactly the point `tray-icon`
+///   documents as the earliest legal moment to create a macOS status item.
+///   (`i_slint_core::platform::set_platform` also calls it, but that already ran
+///   when the flyout window was created, before this timer exists.)
+/// - **It does not need `Send`.** `Timer::single_shot` takes `FnOnce() + 'static`;
+///   `invoke_from_event_loop` additionally requires `Send`, which `FlyoutShell`,
+///   `SettingsShell`, `Rc<RefCell<…Vm>>` and [`gamma::GammaBackend`] (it owns a
+///   bare `Box<dyn FnMut>`) are not. Using it would mean pushing those
+///   main-thread-only values across a `Send` bound via a second thread-local or an
+///   `unsafe impl Send`.
+/// - **The user-event ordering question does not arise.** Winit *does* deliver
+///   queued user events strictly after `StartCause::Init` on both platforms (on
+///   macOS they are drained only in the `BeforeWaiting` observer, gated on
+///   `is_running`, which `applicationDidFinishLaunching:` sets immediately before
+///   dispatching Init + Resumed), so `invoke_from_event_loop` would also have been
+///   late enough. The timer is preferred because it does not *depend* on that
+///   answer: it hangs off the backend's own `new_events` hook rather than on
+///   user-event delivery order.
+/// - **A custom application handler costs too much.** Its
+///   `new_events(_, StartCause::Init)` hook is the documented "loop is running
+///   now" callback, but taking over backend construction means calling
+///   `slint::platform::set_platform` by hand and re-asserting the software
+///   renderer, which ADR-0009 makes load-bearing for both the RAM and
+///   binary-size budgets.
+/// - **It schedules nothing further.** A `SingleShot` timer is removed from the
+///   timer list once its callback returns (`TimerList::maybe_activate_timers`), so
+///   `duration_until_next_timer_update` is `None` again and the loop is back to
+///   `ControlFlow::Wait` with zero periodic wakeups (ADR-0001).
+///
+/// The first and last points rest on two *pinned dependency versions*, and
+/// dependabot merges `cargo-minor-patch` bumps here unattended, so they are not
+/// left as prose: `tests/loop_time_assembly.rs` asserts them against the real
+/// Slint/winit stack. If a Slint bump relocates the timer drain, that test fails
+/// on Windows instead of the tray quietly moving back outside the loop and the
+/// consequence surfacing on macOS, where it is fatal.
+fn queue_loop_time_assembly(
+    resources: LoopStartResources,
+    assembly: &Rc<LoopAssembly<PipeServer>>,
+) {
+    let assembly = Rc::clone(assembly);
+    slint::Timer::single_shot(Duration::ZERO, move || {
+        match assemble_with_loop_running(resources) {
+            Ok(server) => {
+                assembly.store_server(server);
+                // Logged here, not before the loop: everything this message claims
+                // is running (tray, hotkeys, state, IPC) exists only now.
+                info!("duja tray running");
+            }
+            Err(error) => {
+                // There is no app without a tray. Record the cause, stop the loop,
+                // and let `run` re-raise it after teardown so the process still
+                // exits non-zero with this message rather than lingering as a
+                // running-but-invisible app.
+                error!(error = %format!("{error:#}"), "fatal: tray assembly failed");
+                assembly.record_failure(error);
+                // This call is the only thing that ends the process on this path, so
+                // a failure to send the quit gets a line of its own: the result
+                // would be an invisible process with both shells already dropped and
+                // no way for the user to exit it — worse than the failure it is
+                // reporting. Unreachable (the loop is running by construction here,
+                // so `quit_event_loop`'s generation stamp matches), but not silently
+                // discarded.
+                if let Err(e) = slint::quit_event_loop() {
+                    error!(error = %e, "could not stop the event loop after a fatal tray failure");
+                }
+            }
+        }
+    });
 }
 
 /// The resources [`run()`] acquires **before** the event loop starts, moved
@@ -840,20 +891,24 @@ fn unix_now() -> i64 {
 /// [`run()`] itself is unreachable from a test: it acquires a single-instance
 /// lock, opens two real Slint windows, spawns the engine and pump, and then
 /// blocks in the event loop. So the [`LoopAssembly`] tests below pin the
-/// hand-back *cell* — a recorded failure survives, the root cause wins, the IPC
-/// handle is taken exactly once — and nothing more. In particular these are
-/// **not** covered:
+/// hand-back **cell** and nothing more — the *storage* contract, not what
+/// [`run()`] does with it. Specifically **not** covered:
 ///
-/// - that `run()` actually calls [`LoopAssembly::take_failure`] and returns the
-///   error (delete those three lines and every test still passes);
-/// - that the queued closure really runs with the event loop already going, as
-///   opposed to being re-inlined into the pre-loop phase — the point of the whole
-///   restructure, and untestable here for the reason recorded in debt.md;
-/// - the teardown *order* around [`LoopAssembly::take_server`].
+/// - that [`run()`] actually calls [`LoopAssembly::take_failure`] and returns the
+///   error (delete those three lines and every test here still passes), nor that
+///   it calls [`LoopAssembly::take_server`] at the right point in the teardown
+///   order. The cell can only promise that what went in comes back out;
+/// - that duja's own [`assemble_with_loop_running`] is the thing being queued.
+///   The **mechanism** — that a zero-duration [`slint::Timer::single_shot`]
+///   queued before the loop fires once, from inside it, leaving no timer behind —
+///   *is* pinned, against the real Slint/winit stack, in
+///   `tests/loop_time_assembly.rs`. What is still open is the wiring between the
+///   two: re-inlining `build_tray`/`init_hotkeys` into the pre-loop phase keeps
+///   the whole suite green. That gap is the debt.md row.
 ///
-/// All three are Windows-invisible by construction (Windows tolerates the old
-/// ordering), which is exactly why this restructure landed on its own, verified
-/// by the interactive smoke test rather than by a green suite.
+/// Both gaps are Windows-invisible by construction (Windows tolerates the old
+/// ordering), which is why this restructure landed on its own and why the
+/// interactive smoke test is part of its evidence rather than an optional extra.
 #[cfg(test)]
 mod tests {
     #[test]
@@ -882,44 +937,32 @@ mod tests {
         assert_eq!(out, Some(vec![1, 2, 3]));
     }
 
-    /// A clean assembly reports no failure, so `run` exits 0.
+    /// A recorded failure comes back out with its message intact.
     ///
-    /// The floor of the contract: if this ever returned `Some`, every successful
-    /// launch would exit non-zero.
+    /// Named for what it asserts, not for the consequence: whether `run` then
+    /// *exits non-zero* is a property of `run`, which no test here reaches. What
+    /// this does catch is a `record_failure` that drops its argument or a
+    /// `take_failure` that always answers `None` — either of which would compile,
+    /// keep the whole suite green, and turn "the tray could not be created" from
+    /// the old inline `?` into a silent success with no tray and no window.
     #[test]
-    fn an_assembly_that_did_not_fail_has_no_failure_to_re_raise() {
-        let assembly = super::LoopAssembly::<u32>::new();
-        assert!(assembly.take_failure().is_none());
-    }
-
-    /// A loop-time failure must survive the trip back to `run`.
-    ///
-    /// This is the pin on the regression the event-loop-first restructure could
-    /// have introduced. Before it, `build_tray` ran inline in `run` and a failure
-    /// was a plain `?` — the process exited non-zero with that message. Inside a
-    /// queued closure there is no `?`, so the error has to be *recorded* and
-    /// re-raised after the loop; a `record_failure` that dropped its argument (or
-    /// a `take_failure` that always answered `None`) would compile, keep the whole
-    /// suite green, and turn "the tray could not be created" into a silent
-    /// exit-0 with no tray and no window — strictly worse than the crash it
-    /// replaced.
-    #[test]
-    fn a_recorded_failure_is_handed_back_so_the_process_still_exits_non_zero() {
+    fn a_recorded_failure_comes_back_out_with_its_message_intact() {
         let assembly = super::LoopAssembly::<u32>::new();
         assembly.record_failure(anyhow::anyhow!("failed to create the tray icon: nope"));
 
-        let raised = assembly
-            .take_failure()
-            .expect("the failure must be re-raised");
+        let raised = assembly.take_failure().expect("the failure must come back");
         assert_eq!(
             format!("{raised}"),
             "failed to create the tray icon: nope",
-            "the message `main` prints must be the one the assembly recorded"
+            "the message `main` would print must be the one the assembly recorded"
         );
     }
 
     /// The first failure wins, so the reported cause is the one that stopped the
     /// assembly rather than whatever failed last on the way out.
+    ///
+    /// The one test here that pins a real decision — the `if slot.is_none()` guard
+    /// in [`super::LoopAssembly::record_failure`]. Plain last-write-wins reds it.
     #[test]
     fn the_first_failure_wins_so_the_root_cause_is_what_gets_reported() {
         let assembly = super::LoopAssembly::<u32>::new();
@@ -930,15 +973,17 @@ mod tests {
         assert_eq!(format!("{raised}"), "root cause");
     }
 
-    /// The IPC server handle must reach teardown, and exactly once.
+    /// The server slot hands its handle back once, then reads empty.
     ///
-    /// `run` shuts the server down first, before the engine, so losing the handle
-    /// here would leak the pipe server thread past the process's own shutdown
-    /// sequence; handing it out twice would double-shut-down. `store_server(None)`
-    /// is a legitimate outcome (no transport ⇒ no control API), so it must not be
-    /// confused with "not yet assembled".
+    /// Again named for the assertion rather than the consequence: that `run`
+    /// *shuts the server down* in the right teardown position is not covered here.
+    /// The storage contract is: a stored handle comes back (a `store_server` that
+    /// dropped it would leave the pipe-server thread running past the process's own
+    /// shutdown sequence), a second take does not hand the same handle out twice,
+    /// and `store_server(None)` — a legitimate outcome when the transport is
+    /// unavailable — is indistinguishable from empty by design.
     #[test]
-    fn the_ipc_server_reaches_teardown_exactly_once() {
+    fn the_server_slot_hands_its_handle_back_once_and_then_reads_empty() {
         let assembly = super::LoopAssembly::new();
         assert!(assembly.take_server().is_none(), "nothing stored yet");
 
