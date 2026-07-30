@@ -18,15 +18,18 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 // RATIONALE: unlike the pure `duja-app` library (which keeps `#![forbid(unsafe_code)]`),
 // the *binary* wires the Windows shell, which needs a little documented FFI.
-// Exactly three call sites remain, named so this comment cannot quietly go stale
+// Exactly ONE call site remains, named so this comment cannot quietly go stale
 // the way it did when the geometry moved out:
-//   - `bin_support::tray`    — `ShellExecuteW`, opening the releases page
 //   - `bin_support::toast`   — `SetCurrentProcessExplicitAppUserModelID`
-//   - `bin_support::motion`  — `SystemParametersInfoW`, the reduced-motion query
-// The cursor/work-area geometry that used to live here now sits in
-// `duja_platform::geometry`, where the project confines FFI. Every `unsafe` block
-// carries a `// SAFETY:` note and the workspace `unsafe_op_in_unsafe_fn` /
-// `undocumented_unsafe_blocks` denials still apply.
+// The three that used to sit alongside it are gone, in two waves and for the same
+// reason: `#87` hoisted the cursor/work-area geometry into
+// `duja_platform::geometry`, and the macOS assembly hoisted `ShellExecuteW`
+// (opening the releases page) and `SystemParametersInfoW` (the reduced-motion
+// query) into `duja_platform::desktop` — both earned a normalized API the moment
+// they acquired a second platform's implementation. The toast stays because it has
+// no macOS twin: `UNUserNotificationCenter` needs a signed app bundle Duja does not
+// have yet. Every `unsafe` block carries a `// SAFETY:` note and the workspace
+// `unsafe_op_in_unsafe_fn` / `undocumented_unsafe_blocks` denials still apply.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::process::ExitCode;

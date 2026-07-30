@@ -2,13 +2,18 @@
 //!
 //! The only animation Duja drives from Rust is the slider thumb gliding to a new
 //! position when brightness changes **externally** (the monitor's own buttons —
-//! see the reflection path). It honours the Windows "Show animations in Windows"
-//! accessibility setting, and never animates a hidden window. The DDC-never-
-//! animates rule is unaffected: only the rendered thumb glides; the engine
-//! already has the final value.
+//! see the reflection path). It honours the OS accessibility setting on both
+//! platforms ("Animation effects" on Windows, "Reduce motion" on macOS), and
+//! never animates a hidden window. The DDC-never-animates rule is unaffected:
+//! only the rendered thumb glides; the engine already has the final value.
+//!
+//! The *query* lives in `duja_platform::desktop`, with the rest of the confined
+//! platform FFI. What stays here is the **policy** — how a glide duration follows
+//! from the answer plus whether the window is even on screen — which is pure and
+//! is tested on every CI OS.
 
-// RATIONALE: consumed only by the Windows tray assembly; the pure policy stays
-// cross-platform so its tests run on every CI OS.
+// RATIONALE: consumed only by the tray assembly, which is not built on every
+// target; the pure policy stays cross-platform so its tests run on every CI OS.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 /// The thumb's glide duration (ms) when motion is enabled and the window is
@@ -30,59 +35,13 @@ pub(crate) fn glide_for(visible: bool, os_animations: bool) -> i32 {
     }
 }
 
-/// Whether the OS wants client-area animations (Settings → Accessibility →
-/// Visual effects → "Animation effects"). Defaults to `true` (motion) if the
-/// query fails, matching Windows' own default.
-#[cfg(windows)]
-pub(crate) fn os_animations_enabled() -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
-    };
-
-    // A Win32 `BOOL` is a 4-byte int; default to animations-on if the call fails.
-    let mut enabled: i32 = 1;
-    // SAFETY: `SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION)` writes a `BOOL`
-    // (4-byte int) into `pvparam`; we pass a pointer to a live, correctly-sized,
-    // aligned `i32` and read it only after the call returns. `uiparam`/`fwinini`
-    // are 0, as documented for a read (no broadcast, no profile write).
-    let ok = unsafe {
-        SystemParametersInfoW(
-            SPI_GETCLIENTAREAANIMATION,
-            0,
-            Some(std::ptr::addr_of_mut!(enabled).cast()),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        )
-    };
-    // On success the OS overwrote `enabled` with the real setting; on failure it
-    // left our motion-on seed untouched. Decide on that value alone so a failed
-    // query yields the documented motion-on default (the old `ok.is_ok() && …`
-    // returned motion-OFF on failure — the opposite of the doc).
-    animations_enabled_from(ok.is_ok().then_some(enabled))
-}
-
-/// Pure motion decision for [`os_animations_enabled`]: `queried` is the
-/// OS-written `BOOL` from a successful query, or `None` when the query failed
-/// (⇒ the motion-on default). Motion is on unless the OS explicitly reported
-/// client-area animations disabled.
-fn animations_enabled_from(queried: Option<i32>) -> bool {
-    queried.is_none_or(|enabled| enabled != 0)
-}
-
-/// Non-Windows: no OS query yet, so take the documented motion-on default.
+/// Whether the OS wants UI animations, from `duja_platform::desktop`.
 ///
-/// **This is a stub, and on macOS it will become an accessibility regression the
-/// moment the flyout ships there.** macOS answers this question directly, via
-/// `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion`; returning a flat
-/// `true` overrides a user who has explicitly asked the system for less motion.
-/// It is left unimplemented here only because reaching `NSWorkspace` means
-/// adding the `AppKit` dependency to `duja-app`, which is part of the macOS app
-/// assembly rather than something to smuggle in ahead of it — the flyout does
-/// not yet run on macOS, so nothing consumes this today.
-///
-/// Tracked in `docs/debt.md`; wire it up with the rest of the assembly.
-#[cfg(not(windows))]
+/// Defaults to `true` (motion) when the platform cannot answer, matching both
+/// Windows' and macOS' own defaults. The decision that turns a failed query into
+/// that default is pinned in `duja-platform`, next to the query it guards.
 pub(crate) fn os_animations_enabled() -> bool {
-    true
+    duja_platform::animations_enabled()
 }
 
 #[cfg(test)]
@@ -97,17 +56,5 @@ mod tests {
         // Reduced motion: honour the accessibility opt-out.
         assert_eq!(glide_for(true, false), 0);
         assert_eq!(glide_for(false, false), 0);
-    }
-
-    #[test]
-    fn motion_defaults_on_when_the_os_query_fails() {
-        use super::animations_enabled_from;
-        // Query failed (None) ⇒ motion ON: the documented Windows default. The
-        // old code ANDed the failed success flag in and returned motion-OFF here.
-        assert!(animations_enabled_from(None));
-        // OS reported animations enabled ⇒ on.
-        assert!(animations_enabled_from(Some(1)));
-        // OS reported animations disabled ⇒ off (honour the accessibility opt-out).
-        assert!(!animations_enabled_from(Some(0)));
     }
 }
