@@ -384,6 +384,42 @@ mod tests {
         }
     }
 
+    /// A 2560x1440 screen placed directly to the **right** of the primary: the
+    /// commonest multi-monitor layout, and the one that exercises the x edge.
+    fn right_of_primary() -> CocoaScreen {
+        CocoaScreen {
+            frame: CocoaRect {
+                x: 1920.0,
+                y: 0.0,
+                w: 2560.0,
+                h: 1440.0,
+            },
+            visible_frame: CocoaRect {
+                x: 1920.0,
+                y: 0.0,
+                w: 2560.0,
+                h: 1440.0,
+            },
+            backing_scale: 1.0,
+        }
+    }
+
+    /// How many of `screens` claim `reported` once the hit-test bias is applied.
+    ///
+    /// More than one is a defect on its own: `position` would silently take the
+    /// lowest index, so the flyout would jump between monitors along the shared
+    /// line depending on enumeration order.
+    fn claim_count(reported: CocoaPoint, screens: &[CocoaScreen]) -> usize {
+        let probe = CocoaPoint {
+            x: reported.x,
+            y: reported.y - CURSOR_HIT_TEST_BIAS,
+        };
+        screens
+            .iter()
+            .filter(|screen| screen.frame.contains(probe))
+            .count()
+    }
+
     // --- the y flip -------------------------------------------------------
 
     #[test]
@@ -572,32 +608,73 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_edge_is_claimed_by_exactly_one_screen_and_it_is_the_reporting_one() {
-        // Two properties, and the second is the one an earlier version of this test
-        // failed to ask. (1) Exactly one screen may claim a shared edge, or the
-        // flyout flickers between monitors along that line — that is what the
-        // half-open `contains` rule buys. (2) It must be the screen the OS's own
-        // cursor report *meant*: `mouseLocation` reports the primary's topmost row
-        // as exactly its top edge (`1080`), so the primary has to win here. Weighing
-        // only (1) is how the wrong direction looked justified.
+    fn a_shared_horizontal_edge_goes_to_the_screen_that_reported_it() {
+        // The property an earlier version of this test failed to ask: not just that
+        // one screen claims a shared line, but that it is the screen the OS's own
+        // cursor report *meant*. `mouseLocation` reports the primary's topmost row
+        // as exactly its top edge (`1080`), so the primary has to win. Weighing only
+        // double-claiming is how the wrong direction looked justified.
         let screens = [primary(), above_primary()];
         let reported = CocoaPoint {
             x: 100.0,
             y: 1080.0,
         };
-        let probe = CocoaPoint {
-            x: reported.x,
-            y: reported.y - CURSOR_HIT_TEST_BIAS,
-        };
-        let claims = screens
-            .iter()
-            .filter(|screen| screen.frame.contains(probe))
-            .count();
-        assert_eq!(claims, 1, "a shared edge must not be double-claimed");
+        assert_eq!(claim_count(reported, &screens), 1);
         assert_eq!(
             screen_index_for_cursor(reported, &screens),
             Some(0),
             "the primary reported this point, so the primary owns it"
+        );
+    }
+
+    #[test]
+    fn a_probe_landing_exactly_on_a_shared_edge_is_not_double_claimed() {
+        // This is where the half-open `contains` rule earns its keep, and it needs a
+        // *reported* value half a point above the boundary so that the biased probe
+        // lands exactly on it — a reachable position on a Retina display, whose
+        // cursor steps in half points.
+        //
+        // Reported 1080.5 → probe 1080.0, which is `above_primary`'s bottom edge.
+        // Exclusive (correct): the primary rejects it (`1080 < 1080` is false) and
+        // only the upper screen claims it. Inclusive: **both** claim it and
+        // `position` silently takes the primary — the lower index, not the right
+        // screen. Without this case, making the upper bounds inclusive changes no
+        // test outcome at all, because every other probe here sits strictly inside a
+        // frame.
+        let stacked = [primary(), above_primary()];
+        let reported = CocoaPoint {
+            x: 100.0,
+            y: 1080.5,
+        };
+        assert_eq!(
+            claim_count(reported, &stacked),
+            1,
+            "an inclusive top edge would let both screens claim this probe"
+        );
+        assert_eq!(
+            screen_index_for_cursor(reported, &stacked),
+            Some(1),
+            "half a point above the boundary is the upper screen"
+        );
+
+        // The same thing on the x axis, which takes no bias at all: side-by-side is
+        // the commonest layout, and Quartz reports x over `[x0, x0 + w)` — already
+        // the convention `contains` uses, so the shared column needs no correction,
+        // only exclusivity.
+        let side_by_side = [primary(), right_of_primary()];
+        let on_the_seam = CocoaPoint {
+            x: 1920.0,
+            y: 500.0,
+        };
+        assert_eq!(
+            claim_count(on_the_seam, &side_by_side),
+            1,
+            "an inclusive right edge would let both screens claim this probe"
+        );
+        assert_eq!(
+            screen_index_for_cursor(on_the_seam, &side_by_side),
+            Some(1),
+            "the seam column belongs to the screen it starts"
         );
     }
 
