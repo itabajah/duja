@@ -14,10 +14,26 @@
 //!   engage (and at what factor) and which to restore. It never touches the OS —
 //!   it drives a [`GammaSink`], so its logic is exhaustively unit-tested against
 //!   a fake sink on every target.
-//! - `GuardSink` (Windows only) is the real sink: it correlates a resolved
-//!   display id to its GDI device name and drives `ScreenStateGuard`'s
-//!   `engage_gamma` / `restore_display`, which write and clear the crash marker.
-//! - `GammaBackend` (Windows only) bundles the two and is what the tray owns.
+//! - the real sink is per-platform, and both correlate a resolved display id to
+//!   its display-surface token before driving the OS: Windows' `GuardSink` turns
+//!   the token into a GDI device name and drives `ScreenStateGuard`'s
+//!   `engage_gamma` / `restore_display`, which write and clear the crash marker;
+//!   macOS' `MacSink` parses the token as a `CGDirectDisplayID` and calls
+//!   `duja_dimmer`'s `set_gamma` / `restore_identity` directly, with **no** guard
+//!   and no marker (see the crash-safety note below).
+//! - `GammaBackend` bundles the two and is what the tray owns. Both platforms'
+//!   versions expose the same constructor and methods, so the tray wires the
+//!   gamma channel without a `cfg`.
+//!
+//! # Why macOS has no crash marker
+//!
+//! A Windows gamma ramp survives the process that set it, so a crash leaves the
+//! screen dimmed with nothing left to undo it — hence `ScreenStateGuard`, the
+//! marker file, and the recover-on-launch path. macOS is structurally different:
+//! the window server tracks each connection's transfer tables and restores them
+//! when that process exits, so a crash self-heals. The macOS sink therefore holds
+//! no guard, and `GammaBackend::new`'s marker path is accepted and ignored there —
+//! keeping one signature rather than pushing a `cfg` into the tray.
 //!
 //! Before this module existed, `dim_mode = "gamma"` was a silent no-op and the
 //! crash-marker machinery was dead code (P4 gate Finding 2): the planner emitted
@@ -46,11 +62,18 @@
 //! this layer — but a screen that is momentarily too dark is the right failure
 //! direction for a dimmer.
 
-// RATIONALE: the pure coordinator/trait are consumed only by the Windows
-// `GammaBackend` (the tray is `cfg(windows)`), but they stay cross-platform so
-// their unit tests run on every CI OS; the dead-code allow applies only where no
-// consumer exists.
-#![cfg_attr(not(windows), allow(dead_code))]
+// RATIONALE: the pure coordinator/trait stay cross-platform so their unit tests
+// run on every CI OS, and the whole channel — the macOS `GammaBackend` included —
+// has exactly one consumer: the tray, which is still `cfg(windows)`. So on macOS
+// the sink built in this file is written but not yet called, which is also why the
+// re-export needs `unused_imports` and not just `dead_code`.
+//
+// Drop BOTH allows for macOS in the PR that un-gates the tray, when the consumer
+// actually appears — the tightened form is
+// `not(any(windows, target_os = "macos"))`. Leaving them on past that point would
+// hide a genuinely unwired sink, which is the failure this file already had once
+// (the P4 gate found `dim_mode = "gamma"` was a silent no-op).
+#![cfg_attr(not(windows), allow(dead_code, unused_imports))]
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -106,6 +129,38 @@ fn retain_failed_engagements(
     failed_devices: &BTreeSet<String>,
 ) {
     engaged.retain(|_id, device| failed_devices.contains(device));
+}
+
+/// Recover a `CGDirectDisplayID` from a macOS **gamma** token.
+///
+/// The token is `backend::DisplayGeom`'s `gamma_token`: on macOS this display's
+/// own `CGDirectDisplayID` rendered in decimal. Emphatically **not** the
+/// `surface_token` next to it, which names the mirror-set master and may belong to
+/// a display Duja never enumerated — `BoundsMap` keeps the two behind separately
+/// named accessors precisely so this sink cannot take the wrong one.
+///
+/// This is the whole of the macOS sink's correlation step, isolated so the
+/// rejection rule is pinned on every CI lane rather than only where a Mac can run
+/// it.
+///
+/// Returns `None` for anything that is not a plain decimal `u32`, and the caller
+/// treats that exactly as "this display has no gamma device": it refuses the
+/// engage rather than dimming something else. Three ways that matters:
+///
+/// - the *other* platform's token is a GDI device name (`\.\DISPLAY1`), so a
+///   wrong-platform token must fail closed rather than parse to a plausible number;
+/// - a lenient parse of a leading-digits string (`"1abc"` → `1`) would silently
+///   address display 1;
+/// - `0` is `kCGNullDirectDisplay`, never a valid display, so it is rejected too.
+///   That one is not hypothetical hygiene: it is what a swapped or unset id looks
+///   like, and Core Graphics would otherwise be handed the null display.
+#[cfg(any(test, target_os = "macos"))]
+fn display_id_from_token(token: &str) -> Option<u32> {
+    match token.parse::<u32>() {
+        // `kCGNullDirectDisplay`: a real display never has id 0.
+        Ok(0) | Err(_) => None,
+        Ok(id) => Some(id),
+    }
 }
 
 /// Once-per-reason logging state for a refused gamma engage.
@@ -560,6 +615,181 @@ mod platform {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) use platform::GammaBackend;
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use duja_core::dimmer::{DimCommand, Dimmer, DimmerError, GAMMA_FLOOR};
+    use duja_core::id::StableDisplayId;
+    use duja_dimmer::GammaDisplay;
+    use tracing::{debug, warn};
+
+    use super::{
+        GammaCoordinator, GammaSink, RefusalLog, apply_dimming_batch, display_id_from_token,
+    };
+
+    /// Resolve a resolved display id to its **gamma** token — on macOS this
+    /// display's own `CGDirectDisplayID` in decimal (see `backend::DisplayGeom`).
+    /// The tray wires this from `BoundsMap::gamma_token_for`, never
+    /// `surface_token_for`.
+    type DeviceResolver = Box<dyn FnMut(&StableDisplayId) -> Option<String>>;
+
+    /// The [`RefusalLog`] reason for "this id has no usable gamma display", kept
+    /// distinct from any OS error text so the two failure shapes each get their own
+    /// log line. Covers both halves of the correlation: no token at all (a
+    /// `DisplayServices` panel, which carries none), and a token that is not a
+    /// `CGDirectDisplayID`.
+    const NO_DEVICE_REASON: &str = "no CoreGraphics display for this display";
+
+    /// The real macOS gamma sink: correlates ids to `CGDirectDisplayID`s and drives
+    /// Core Graphics' transfer formula.
+    ///
+    /// The Windows twin wraps every write in a `ScreenStateGuard` because a Windows
+    /// ramp outlives the process. Here there is no guard and no marker: the window
+    /// server restores this process's transfer tables when it exits, so the only
+    /// state worth tracking is what *this* run engaged, for the in-process restore.
+    struct MacSink {
+        resolve: DeviceResolver,
+        /// Resolved id → the `CGDirectDisplayID` engaged for it, so a later restore
+        /// targets the exact display the engage used (ids are re-issued across a
+        /// hot-plug). Only ids whose write **succeeded** are here.
+        engaged: BTreeMap<StableDisplayId, u32>,
+        /// Per-display once-only logging for a refused ramp (see [`RefusalLog`]).
+        refusals: RefusalLog,
+    }
+
+    impl MacSink {
+        /// Resolve `id` to a live `CGDirectDisplayID`, logging (once per reason) and
+        /// returning `None` when it has no usable one.
+        fn gamma_display_for(&mut self, id: &StableDisplayId) -> Option<u32> {
+            let cg_id = (self.resolve)(id)
+                .as_deref()
+                .and_then(display_id_from_token);
+            if cg_id.is_none() && self.refusals.note_refusal(id, NO_DEVICE_REASON) {
+                warn!(
+                    id = %id.as_str(),
+                    "no CoreGraphics display for gamma display; skipping ramp \
+                     (logged once until the reason changes)"
+                );
+            }
+            cg_id
+        }
+    }
+
+    impl GammaSink for MacSink {
+        fn engage(&mut self, id: &StableDisplayId, factor: f32) -> bool {
+            debug_assert!(
+                (GAMMA_FLOOR..=1.0).contains(&factor),
+                "gamma factor {factor} out of range; HDR/unknown must force overlay"
+            );
+            let Some(cg_id) = self.gamma_display_for(id) else {
+                return false;
+            };
+            if let Err(e) = duja_dimmer::set_gamma(&GammaDisplay::from_display_id(cg_id), factor) {
+                // Once per reason, not once per frame: a slider drag re-plans every
+                // frame, and the Windows twin of this warning shipped 349 times in
+                // one user's log before it was latched.
+                let reason = e.to_string();
+                if self.refusals.note_refusal(id, &reason) {
+                    warn!(
+                        id = %id.as_str(), cg_id, factor, error = %reason,
+                        "gamma engage refused; no ramp for this display \
+                         (logged once until the reason changes)"
+                    );
+                }
+                return false;
+            }
+            if self.refusals.note_success(id) {
+                debug!(id = %id.as_str(), cg_id, "gamma engage accepted again");
+            }
+            self.engaged.insert(id.clone(), cg_id);
+            true
+        }
+
+        fn restore(&mut self, id: &StableDisplayId) {
+            if let Some(cg_id) = self.engaged.remove(id)
+                && let Err(e) = duja_dimmer::restore_identity(&GammaDisplay::from_display_id(cg_id))
+            {
+                warn!(id = %id.as_str(), cg_id, error = %e, "gamma restore failed");
+            }
+        }
+
+        fn restore_all(&mut self) -> bool {
+            // `CGDisplayRestoreColorSyncSettings` resets *every* display in one call,
+            // so unlike the Windows guard there is no per-display outcome to
+            // reconcile: the macOS `RestoreReport::failed` is documented as always
+            // empty. Clearing `engaged` unconditionally is therefore correct here and
+            // would NOT be on Windows, where a failed restore must stay tracked.
+            let report = duja_dimmer::restore_all();
+            self.engaged.clear();
+            if !report.is_clean() {
+                warn!(failed = report.failed.len(), "some gamma restores failed");
+            }
+            report.is_clean()
+        }
+    }
+
+    /// The tray-owned gamma channel: the pure coordinator plus the real sink.
+    ///
+    /// Unlike the Windows twin, dropping this does **not** restore anything — there
+    /// is no guard to run on `Drop`. It does not need one: the window server
+    /// restores this process's transfer tables when the process exits, whether that
+    /// exit is clean or a crash. A clean teardown still calls [`Self::restore_all`]
+    /// so the screen is right *before* the process goes away.
+    pub(crate) struct GammaBackend {
+        coord: GammaCoordinator,
+        sink: MacSink,
+    }
+
+    impl GammaBackend {
+        /// Build a gamma channel using `resolve` to map a resolved display id to its
+        /// display-surface token.
+        ///
+        /// `_marker` is the crash-marker path, accepted and **ignored**. It exists so
+        /// this constructor is signature-identical to the Windows one and the tray
+        /// can wire the gamma channel without a `cfg`; macOS has nothing to record
+        /// because a dirty exit leaves no ramp behind (see the module docs).
+        pub(crate) fn new(
+            _marker: PathBuf,
+            resolve: impl FnMut(&StableDisplayId) -> Option<String> + 'static,
+        ) -> Self {
+            GammaBackend {
+                coord: GammaCoordinator::default(),
+                sink: MacSink {
+                    resolve: Box::new(resolve),
+                    engaged: BTreeMap::new(),
+                    refusals: RefusalLog::default(),
+                },
+            }
+        }
+
+        /// Drive one apply batch across the gamma channel **and** `overlays`, in the
+        /// order that never brightens the screen mid-transition.
+        ///
+        /// Delegates to the cross-platform [`apply_dimming_batch`], which owns the
+        /// sequencing (and its tests) — so the ordering is pinned on every CI lane
+        /// rather than only where a real sink can be built.
+        pub(crate) fn apply_batch(
+            &mut self,
+            commands: &[DimCommand],
+            overlays: Option<&mut dyn Dimmer>,
+        ) -> Result<(), DimmerError> {
+            apply_dimming_batch(commands, &mut self.coord, &mut self.sink, overlays)
+        }
+
+        /// Restore every engaged display, returning whether every restore succeeded
+        /// (`true` = clean).
+        pub(crate) fn restore_all(&mut self) -> bool {
+            self.coord.forget_all();
+            self.sink.restore_all()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,6 +802,39 @@ mod tests {
 
     fn cmd(serial: &str, gamma: Option<f32>) -> DimCommand {
         DimCommand::new(id(serial), DisplayBounds::new(0, 0, 1920, 1080), 0.0, gamma)
+    }
+
+    /// A decimal token recovers its `CGDirectDisplayID` across the valid range.
+    #[test]
+    fn a_decimal_token_recovers_its_coregraphics_display_id() {
+        use super::display_id_from_token as decode;
+        assert_eq!(decode("1"), Some(1));
+        assert_eq!(decode("724059720"), Some(724_059_720));
+        assert_eq!(decode(&u32::MAX.to_string()), Some(u32::MAX));
+    }
+
+    /// Anything that is not a plain decimal `u32` must fail **closed**, so the sink
+    /// refuses the engage instead of driving some other display's gamma.
+    ///
+    /// The Windows device name is the case that matters: it is the other platform's
+    /// token for the same field, so a lenient parse is how a wrong-platform value
+    /// would quietly become a real display id.
+    #[test]
+    fn a_token_that_is_not_a_display_id_is_rejected_rather_than_coerced() {
+        use super::display_id_from_token as decode;
+        assert_eq!(decode(r"\\.\DISPLAY1"), None, "a Windows GDI device name");
+        // Leading digits must NOT win: `"1abc"` parsing to 1 would address display 1.
+        assert_eq!(decode("1abc"), None);
+        assert_eq!(decode(""), None);
+        assert_eq!(decode(" 7"), None);
+        assert_eq!(decode("-1"), None);
+        // Wider than a CGDirectDisplayID: truncating would address a real display.
+        assert_eq!(decode("4294967296"), None);
+        // `kCGNullDirectDisplay`. Parses fine as a `u32`, so only an explicit
+        // rejection keeps it out — and it is exactly what an unset or swapped id
+        // looks like, which is the reason to fail closed rather than hand Core
+        // Graphics the null display.
+        assert_eq!(decode("0"), None);
     }
 
     /// An ordered log of what one batch did, shared by the fake sink and the fake
