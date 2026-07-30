@@ -10,6 +10,29 @@
 //! Gamma and HDR live paths need a real display and are **not** exercised here
 //! (see the `#[ignore]`d, `DUJA_HW_TESTS`-gated tests); their logic is covered
 //! by the pure unit tests in the crate.
+//!
+//! # These tests require one process per test
+//!
+//! Every assertion below means "how many overlays does *my* dimmer own", but the
+//! only attribution available from outside the backend is the owning **process**
+//! ([`my_overlays`]) — not the owning dimmer. That is exact under
+//! `cargo nextest run`, which gives each test its own process, and it is what CI
+//! runs.
+//!
+//! Under a plain `cargo test -p duja-dimmer` all of these share one process and
+//! run concurrently, so a sibling test's overlays are counted as this test's.
+//! That is not hypothetical: measured on this tree, five of the seven fail, with
+//! counts like `left: 4, right: 1`, and `alpha_change_round_trips` reads the
+//! *wrong window's* alpha (`left: 128, right: 64` — a sibling's 0.5 overlay
+//! instead of its own 0.25). Attribution cannot be recovered by diffing against a
+//! pre-spawn baseline either: a sibling's window can appear after the snapshot.
+//!
+//! Making them harness-independent would mean the backend exposing the Win32
+//! thread that owns its overlays, so a test could filter by it. That is a
+//! production API addition for test attribution alone, and CI does not need it —
+//! recorded in `docs/debt.md` rather than done here. Until then: run these with
+//! nextest, and read a failure under `cargo test` as this precondition, not as a
+//! regression.
 #![cfg(windows)]
 // RATIONALE: this live test does raw Win32 handle/bit arithmetic and unwraps
 // freely; the casts are inherent to the FFI and safe in-bounds here, so the
@@ -62,11 +85,25 @@ fn offscreen(serial: &str, alpha: f32) -> DimCommand {
     )
 }
 
-/// The overlay windows this *process* currently owns (filtered by PID so a
-/// parallel test process's overlays are never miscounted).
+/// The overlay windows this *process* currently owns, **each reported once**
+/// (filtered by PID so another process's overlays are never miscounted).
+///
+/// The dedup is load-bearing, not tidiness. `FindWindowExW`'s `after` argument is
+/// **Z-order-relative, not an index**: with a null parent the search resumes at
+/// the window after `after` *in the current Z-order*. The walk matches the class
+/// across every process — a real `duja.exe` dimming this desktop is part of it,
+/// and only the PID check below drops it — and these are all topmost layered
+/// windows, so the Z-order can shift between iterations and hand back a window
+/// already seen. Without the dedup one overlay can therefore be counted twice,
+/// which is the shape of the `left: 2, right: 1` failure recorded against
+/// `drop_shuts_down_and_removes_overlays` in `docs/debt.md`.
+///
+/// Stated precisely: that is the mechanism the code makes possible, and removing
+/// it is what this dedup does. The single historical observation was never
+/// reproduced, so this is not a confirmed post-mortem of that run.
 fn my_overlays() -> Vec<HWND> {
     let me = std::process::id();
-    let mut out = Vec::new();
+    let mut out: Vec<HWND> = Vec::new();
     let mut after: Option<HWND> = None;
     loop {
         // SAFETY: FindWindowExW walks top-level windows of the class; `after`
@@ -79,7 +116,7 @@ fn my_overlays() -> Vec<HWND> {
         let mut pid = 0u32;
         // SAFETY: `hwnd` is a live window handle from the enumeration.
         unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut pid)) };
-        if pid == me {
+        if pid == me && !out.contains(&hwnd) {
             out.push(hwnd);
         }
         after = Some(hwnd);
