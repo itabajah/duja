@@ -41,7 +41,10 @@ windows = { version = "0.62", default-features = false, features = [
     "Win32_System_Threading",
     "Win32_Security",
     # Autostart: HKCU ...\CurrentVersion\Run value read/write/delete (P5).
+    # Also the `desktop` module's AppsUseLightTheme dark-mode read.
     "Win32_System_Registry",
+    # `desktop::open_url`: ShellExecuteW's "open" verb (the default browser).
+    "Win32_UI_Shell",
     # IPC named-pipe transport (P5): pipe create/connect/peek, file read/write,
     # the explicit DACL (SDDL → security descriptor), and the client PID/session
     # check.
@@ -87,26 +90,45 @@ objc2-app-kit = { workspace = true, features = [
     "NSScreen",
     # NSEvent: the class-level mouseLocation (Cocoa global points).
     "NSEvent",
+    # `desktop`: NSWorkspace's openURL (default browser) and, through the
+    # NSAccessibility category it also unlocks, accessibilityDisplayShouldReduceMotion.
+    "NSWorkspace",
+    "NSAccessibility",
 ] }
 # NSPoint / NSRect (aliases of CGPoint / CGRect) as the FFI copies them out.
 #
-# The last two features are redundant *today* — verified: strip either and this
-# crate still compiles for aarch64-apple-darwin, because objc2-app-kit's `NSScreen`
-# feature turns on `objc2-foundation/NSArray` and
-# `objc2-foundation/objc2-core-foundation` and cargo unifies them in. They are
-# declared anyway, and that is the deliberate choice, not a copy of another crate's
-# list (duja-dimmer's objc2-foundation entry omits `objc2-core-foundation`): this
-# crate names `NSPoint`/`NSRect` and calls `NSArray::count`/`objectAtIndex`
-# directly, so its own manifest should say so. Leaning on a sibling dependency's
-# feature selection means dropping `NSScreen` from the list above — or an upstream
-# narrowing its feature graph — turns into an unresolved-import error here with no
-# hint about which manifest line was actually load-bearing.
+# Of the entries below, only `NSUserDefaults` is load-bearing. `NSGeometry`,
+# `NSArray`, `objc2-core-foundation`, `NSString` and `NSURL` are all redundant
+# *today* — measured one at a time, by deleting the line from THIS block and
+# re-running `cargo check -p duja-platform --target aarch64-apple-darwin
+# --all-features`, which still compiles in each case: objc2-app-kit's `NSScreen`
+# and `NSWorkspace` features turn them on transitively and cargo unifies them in.
+# (The `objc2-core-foundation` entry in the objc2-app-kit block above is a
+# different feature and IS load-bearing, as are `NSWorkspace` and
+# `NSAccessibility`.)
+#
+# They are declared anyway, and that is the deliberate choice, not a copy of
+# another crate's list (duja-dimmer's objc2-foundation entry omits
+# `objc2-core-foundation`): this crate names `NSPoint`/`NSRect`/`NSString`/`NSURL`
+# and calls `NSArray::count`/`objectAtIndex` directly, so its own manifest should
+# say so. Leaning on a sibling dependency's feature selection means dropping
+# `NSScreen` from the list above — or an upstream narrowing its feature graph —
+# turns into an unresolved-import error here with no hint about which manifest line
+# was actually load-bearing.
+#
+# Named individually rather than as "the last two", which is how the previous
+# version of this comment silently became false the moment the list grew.
 objc2-foundation = { workspace = true, features = [
     "std",
     "NSGeometry",
     # NSArray's count/objectAtIndex, used to walk NSScreen::screens.
     "NSArray",
     "objc2-core-foundation",
+    # `desktop`: NSString (both queries), NSURL (open_url), and NSUserDefaults
+    # (the AppleInterfaceStyle dark-mode read).
+    "NSString",
+    "NSURL",
+    "NSUserDefaults",
 ] }
 # CGFloat, the return type of backingScaleFactor and the field type of NSRect.
 objc2-core-foundation = { workspace = true, features = ["std", "CFCGTypes"] }

@@ -402,6 +402,8 @@ mod tests {
         // A unique per-process subkey so parallel test runs never collide, and
         // so we never touch the real Run key.
         let subkey = format!(r"Software\DujaTest\autostart-{}", std::process::id());
+        // Held for the whole test so a failing assertion still cleans up.
+        let _cleanup = ScratchCleanup(subkey.clone());
         let mut store = RunKey::new(&subkey);
 
         // Absent → read is None.
@@ -420,18 +422,37 @@ mod tests {
         assert_eq!(store.read(VALUE_NAME).expect("read-after-delete"), None);
         store.delete(VALUE_NAME).expect("delete-again");
 
-        // Clean up the scratch key we created.
-        delete_scratch_key(&subkey);
+        // The scratch key is removed by `_cleanup`'s `Drop`.
     }
 
-    /// Remove the throwaway `HKCU\<subkey>` created by the live test.
-    fn delete_scratch_key(subkey: &str) {
-        use windows::Win32::System::Registry::RegDeleteKeyW;
-        let wide = wide(subkey);
-        // SAFETY: `wide` is a NUL-terminated wide string outliving the call; we
-        // delete only the process-unique scratch key we created above.
-        unsafe {
-            let _ = RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR(wide.as_ptr()));
+    /// Removes the throwaway `HKCU\<subkey>` — and the shared `Software\DujaTest`
+    /// parent — when it goes out of scope.
+    ///
+    /// A guard rather than a call at the end of the test, because a failing
+    /// assertion unwinds straight past a trailing call and leaves the key behind in
+    /// the developer's registry. That was observed for real while sabotage-testing
+    /// the sibling `desktop` module's scratch key, which is where this shape comes
+    /// from; sweeping the shared parent here too is what lets the two suites
+    /// actually leave the registry clean rather than each blaming the other.
+    struct ScratchCleanup(String);
+
+    impl Drop for ScratchCleanup {
+        fn drop(&mut self) {
+            use windows::Win32::System::Registry::RegDeleteKeyW;
+            let leaf = wide(&self.0);
+            // SAFETY: `leaf` is a NUL-terminated wide string outliving the call; we
+            // delete only the process-unique scratch key the test created.
+            unsafe {
+                let _ = RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR(leaf.as_ptr()));
+            }
+            // `RegCreateKeyExW` also created the shared parent. Best-effort:
+            // `RegDeleteKeyW` refuses a key that still has subkeys, so this can
+            // never remove one a sibling test is still using.
+            let parent = wide(r"Software\DujaTest");
+            // SAFETY: as above; refused rather than recursive when non-empty.
+            unsafe {
+                let _ = RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR(parent.as_ptr()));
+            }
         }
     }
 }

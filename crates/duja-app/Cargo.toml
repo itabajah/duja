@@ -42,11 +42,12 @@ global-hotkey.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
-    # Opening the releases page in the default browser (ShellExecuteW).
+    # SetCurrentProcessExplicitAppUserModelID, the toast's app identity. This used
+    # to be the *secondary* reason for this feature, behind ShellExecuteW for
+    # opening the releases page; that call moved to `duja_platform::desktop` with
+    # the macOS assembly, so the toast is now the only reason left.
     "Win32_UI_Shell",
     # WinRT toast notification for a newly-available update (no extra crate).
-    # SetCurrentProcessExplicitAppUserModelID (for the toast's app identity) is
-    # already covered by Win32_UI_Shell above.
     "UI_Notifications",
     "Data_Xml_Dom",
     "Foundation",
