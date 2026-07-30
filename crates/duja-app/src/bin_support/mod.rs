@@ -7,10 +7,12 @@
 //! - [`backend`] — real hardware enumeration (`duja-ddc` + `duja-panel`) mapped
 //!   to [`duja_core::manager::DiscoveredDisplay`], plus a re-enumerate-and-open
 //!   controller factory and per-display bounds discovery.
-//! - [`bounds`] — the app-side resolved-id → bounds + display-surface-token map
-//!   (twin-slot aware). Both values are platform-specific: bounds are physical
-//!   pixels on Windows and points on macOS, and the token is a GDI device name vs
-//!   a `CGDirectDisplayID` (see [`backend::DisplayGeom`] for the contract).
+//! - [`bounds`] — the app-side resolved-id → display-geometry map (twin-slot
+//!   aware): bounds plus the two platform tokens. Every value is
+//!   platform-specific — bounds are physical pixels on Windows and points on
+//!   macOS, and the tokens are one GDI device name repeated on Windows versus two
+//!   distinct `CGDirectDisplayID`s on macOS, one addressing the display and one
+//!   naming its framebuffer (see [`backend::DisplayGeom`] for the contract).
 //! - [`clone_group`] — groups mirrored (Duplicate-mode) panels sharing one GDI
 //!   surface into a single control (one merged row, one overlay per surface).
 //! - [`counting`] — a [`counting::CountingController`] decorator that tallies

@@ -26,8 +26,10 @@
 //! This mapping is a knowing copy of `duja-app`'s `bin_support::backend`, not a
 //! shared crate. `dujactl` is a ~0.8 MB companion binary that deliberately does
 //! **not** depend on `duja-app`, and the two mappings are not the same function:
-//! the app produces `DiscoveredDisplay` + geometry (bounds and a gamma-target
-//! token) for the engine and the dimmer, while this one produces the three fields
+//! the app produces `DiscoveredDisplay` + geometry (bounds, plus two platform
+//! tokens — one that addresses a display for gamma and one that names its
+//! framebuffer for the mirror merge) for the engine and the dimmer, while this one
+//! produces the three fields
 //! [`CtlDisplay`] prints. Hoisting them would couple the CLI to the tray app's
 //! surface to save a dozen lines. Keep them in step by hand.
 //!

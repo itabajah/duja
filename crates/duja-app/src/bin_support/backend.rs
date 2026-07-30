@@ -77,12 +77,12 @@ pub(crate) fn discover() -> Vec<DiscoveredDisplay> {
     discover_all().0
 }
 
-/// One display's app-side geometry: its bare id, its display bounds, and its
-/// display-surface token. Carried by DDC displays — external monitors and a
-/// (Windows-only) DDC-fallback internal panel alike — but not by the panel
-/// backend's panels, whose geometry is `None`.
+/// One display's app-side geometry: its bare id, its display bounds, and the two
+/// platform tokens the dimming channels need. Carried by DDC displays — external
+/// monitors and a (Windows-only) DDC-fallback internal panel alike — but not by
+/// the panel backend's panels, whose geometry is all `None`.
 ///
-/// # Element 2 — bounds, whose **unit differs by platform**
+/// # Bounds, whose **unit differs by platform**
 ///
 /// On **Windows** these are virtual-desktop **physical pixels**
 /// (`MONITORINFO::rcMonitor`). On **macOS** they are **points**, not pixels:
@@ -94,73 +94,97 @@ pub(crate) fn discover() -> Vec<DiscoveredDisplay> {
 /// because each side stays in its own unit, so nothing here may assume pixels or
 /// mix a bound with a physical-pixel quantity without scaling first.
 ///
-/// # Element 3 — an **opaque, platform-specific display-surface token**
+/// # Two tokens, because they answer two different questions
 ///
-/// A `String` so this type stays uniform, but it carries **two** invariants,
-/// because it has **two** consumers. The Windows value — the GDI device name
-/// (`MONITORINFOEX::szDevice`, e.g. `\\.\DISPLAY1`) — satisfies both:
+/// This used to be one opaque `String` with **two** invariants, because it had two
+/// consumers:
 ///
-/// - **(a) Addressable by the platform gamma channel.** `gamma.rs`'s `GuardSink`
-///   resolves a display id to this token and hands it to
-///   `duja_dimmer::GammaDisplay::from_device_name`.
+/// - **(a) Addressable by the platform gamma channel.** The gamma sink resolves a
+///   display id to a token and hands it to `duja_dimmer`'s `GammaDisplay`.
 /// - **(b) Identical for every panel sharing one framebuffer.** `clone_group`'s
-///   `group_clones` buckets members on this exact string (case-folded), so token
+///   `group_clones` buckets members on the exact string (case-folded), so token
 ///   equality *is* the mirror-detection mechanism: it is what collapses a
 ///   Duplicate-mode set into one control with one overlay, and what routes the
 ///   "any member software-only ⇒ pin the hardware members to MAX" rule. See
 ///   `clone_group`, `#66` and ADR-0018.
 ///
-/// **macOS satisfies (a) only, and that is not yet fixed.** The token there is the
-/// `CGDirectDisplayID` in decimal — exactly what
-/// `duja_dimmer::GammaDisplay::from_display_id` needs, recovered with a `u32`
-/// `parse` — but a `CGDirectDisplayID` is unique **per display by construction**,
-/// so two mirrored Macs produce two *different* tokens at identical bounds.
-/// `group_clones` would then build two singletons instead of one mirror: two
-/// overlay windows stacked on the same pixels and the software-only pin rule
-/// skipped, which is exactly the `#66` defect the mirror merge cured.
+/// **Windows can hold both in one value; macOS cannot.** A GDI device name *is*
+/// the clone set — `MONITORINFOEX::szDevice` is shared by every mirrored panel and
+/// one ramp on it covers them all — so both fields carry that same string there.
+/// CoreGraphics gives every display its own id and its own transfer table, and the
+/// two questions come apart: the surface token of a clone is the *master's* id,
+/// and that master need not even be a display Duja enumerated (the built-in panel
+/// is filtered out by `CGDisplayIsBuiltin`, and is the master whenever a `MacBook`
+/// mirrors its screen to a projector). Addressing gamma through it would dim the
+/// laptop screen instead of the monitor whose slider moved.
 ///
-/// **Standing rule, for whoever assembles the macOS tray:
-/// `BoundsMap::device_for` must NOT be fed into `clone_group` on macOS until this
-/// token satisfies (b).** The fix is to stamp the *surface*, not the display:
-/// `CGDisplayMirrorsDisplay(id)` when it is non-zero (the mirror-set master), else
-/// `id` itself — or any equivalent surface id — so every clone of one framebuffer
-/// renders the same string. It is deliberately not done in this PR: it is
-/// hardware-blind (Duja has no Mac on which to confirm the mirror-set semantics)
-/// and it belongs with the assembly that actually wires `clone_group`. Until then,
-/// a macOS gamma sink may consume the token; mirror grouping may not.
+/// So the two are separate fields with separate names, and `BoundsMap` exposes
+/// them through separately named accessors. Neither may be shown to a user or
+/// parsed as a device path: both are tokens, not names.
 ///
-/// Either way it must never be shown to a user or parsed as a device path: it is a
-/// token, not a name. And there is no macOS gamma sink yet (`gamma.rs`'s
-/// `GuardSink` is `cfg(windows)`), so today macOS carries the token with **no**
-/// consumer at all; it is stamped now so the sink that lands with the tray
-/// assembly has it waiting.
-pub(crate) type DisplayGeom = (String, Option<DisplayBounds>, Option<String>);
+/// # What is still hardware-blind
+///
+/// Duja has no Mac, and the CI runners are virtualized with no external display,
+/// so no test or run has ever observed a real macOS mirror set. What is *proven*
+/// is the surface rule (`duja_ddc`'s `mac_surface` tests, which run on every CI
+/// OS); what is **assumed** is that `CGGetActiveDisplayList` reports every member
+/// of a mirror set rather than only the master. That assumption is deliberately
+/// not load-bearing: if only the master is enumerated, each surface token equals
+/// its own display id, `group_clones` builds the same singletons it builds today,
+/// and behaviour is unchanged. It can only *add* a merge, never remove one — and
+/// it cannot mis-address anything, because addressing no longer goes through it.
+/// See `docs/debt.md`.
+#[derive(Debug, Clone)]
+pub(crate) struct DisplayGeom {
+    /// The display's **bare** EDID id (pre twin-slot resolution), which is what
+    /// `BoundsMap` routes a resolved id back to.
+    pub(crate) id: String,
+    /// Display bounds in this platform's unit (see above), or `None` for a panel
+    /// backend entry.
+    pub(crate) bounds: Option<DisplayBounds>,
+    /// The token that **addresses** this display for gamma: the GDI device name on
+    /// Windows, this display's own `CGDirectDisplayID` in decimal on macOS.
+    /// `None` for a panel backend entry, which has no gamma device.
+    pub(crate) gamma_token: Option<String>,
+    /// The token that names this display's **framebuffer**, which mirrored panels
+    /// are grouped by: the GDI device name on Windows (identical to
+    /// [`Self::gamma_token`] there), the mirror-set master's `CGDirectDisplayID` in
+    /// decimal on macOS. `None` for a panel backend entry, which cannot be
+    /// correlated to a surface and so stays its own singleton.
+    pub(crate) surface_token: Option<String>,
+}
 
-/// Enumerate displays **and** their bounds + display-surface tokens in one pass.
+/// Enumerate displays **and** their geometry in one pass.
 ///
 /// Returns the [`DiscoveredDisplay`] list the engine consumes, plus a parallel
 /// [`DisplayGeom`] list in the *same* deterministic order (DDC first, then
 /// panels). The geometry list feeds an app-side
 /// [`BoundsMap`](crate::bin_support::bounds::BoundsMap); the panel backend's
-/// panels contribute `None` bounds and `None` token, whereas a DDC display —
-/// including a Windows DDC-fallback internal panel — keeps its DDC geometry. See
-/// [`DisplayGeom`] for the per-platform unit and token. Never errors.
+/// panels contribute no bounds and no tokens, whereas a DDC display — including a
+/// Windows DDC-fallback internal panel — keeps its DDC geometry. See
+/// [`DisplayGeom`] for the per-platform units and the two tokens. Never errors.
 pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<DisplayGeom>) {
     let ddc: Vec<(DiscoveredDisplay, DisplayGeom)> = discover_ddc()
         .into_iter()
-        .map(|(display, display_bounds, surface_token)| {
-            let geom = (
-                display.id.as_str().to_owned(),
-                Some(display_bounds),
-                Some(surface_token),
-            );
-            (display, geom)
+        .map(|found| {
+            let geom = DisplayGeom {
+                id: found.display.id.as_str().to_owned(),
+                bounds: Some(found.bounds),
+                gamma_token: Some(found.gamma_token),
+                surface_token: Some(found.surface_token),
+            };
+            (found.display, geom)
         })
         .collect();
     let panel: Vec<(DiscoveredDisplay, DisplayGeom)> = discover_panel()
         .into_iter()
         .map(|display| {
-            let geom = (display.id.as_str().to_owned(), None, None);
+            let geom = DisplayGeom {
+                id: display.id.as_str().to_owned(),
+                bounds: None,
+                gamma_token: None,
+                surface_token: None,
+            };
             (display, geom)
         })
         .collect();
@@ -223,8 +247,21 @@ fn merge_displays(
     out
 }
 
+/// One display found by the DDC backend: its metadata plus the geometry
+/// [`discover_all`] folds into a [`DisplayGeom`].
+///
+/// Named fields rather than a tuple because two of them are same-typed platform
+/// tokens whose meanings are not interchangeable — see [`DisplayGeom`]. On Windows
+/// they are deliberately the same string.
+struct FoundDdc {
+    display: DiscoveredDisplay,
+    bounds: DisplayBounds,
+    gamma_token: String,
+    surface_token: String,
+}
+
 #[cfg(windows)]
-fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
+fn discover_ddc() -> Vec<FoundDdc> {
     // Each `DdcDisplay` is dropped at the end of the map closure, releasing its
     // physical-monitor handle promptly — we keep only the metadata, bounds, and
     // GDI device name. A display the DDC backend flags `is_internal` is a laptop
@@ -245,7 +282,15 @@ fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
                     name: d.name.clone(),
                     capabilities: hardware_brightness_caps(),
                 };
-                (display, d.bounds, d.gdi_device)
+                FoundDdc {
+                    display,
+                    bounds: d.bounds,
+                    // One GDI device name does both jobs on Windows: it addresses
+                    // the display AND names the framebuffer every mirrored panel
+                    // shares. See `DisplayGeom` for why macOS cannot do the same.
+                    gamma_token: d.gdi_device.clone(),
+                    surface_token: d.gdi_device,
+                }
             })
             .collect(),
         Err(_) => Vec::new(),
@@ -253,7 +298,7 @@ fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
 }
 
 #[cfg(target_os = "macos")]
-fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
+fn discover_ddc() -> Vec<FoundDdc> {
     // Same shape as the Windows arm — metadata, bounds and the display-surface
     // token, with each `DdcDisplay` dropped at the end of the closure so its I2C
     // service handle is released promptly — with two platform differences:
@@ -265,13 +310,13 @@ fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
     //    macOS internal panel can only come from `duja-panel`/`DisplayServices`; if
     //    that framework cannot control it, Duja cannot either, and no DDC entry
     //    will stand in for it.
-    // 2. The display-surface token is the `CGDirectDisplayID` in decimal (Windows
-    //    uses the GDI device name), and `bounds` are points here, not physical
-    //    pixels. Both are specified on `DisplayGeom` — read its element-3 section
-    //    before consuming the token: a `CGDirectDisplayID` is unique per display, so
-    //    it does NOT carry the shared-framebuffer identity `clone_group` needs, and
-    //    feeding it there would re-introduce #66 (two overlays on one mirrored
-    //    surface). The gamma channel can use it as-is.
+    // 2. The two tokens are DIFFERENT values here, where Windows repeats one
+    //    string. `cg_display_id` addresses this display; `surface_id` names its
+    //    framebuffer (the mirror-set master when it is a clone). Grouping on the
+    //    former would re-introduce #66 (two overlays on one mirrored surface);
+    //    addressing gamma through the latter would dim a different display, and
+    //    possibly one Duja does not even list. `DisplayGeom` has the full contract.
+    //    `bounds` are points here, not physical pixels — also on `DisplayGeom`.
 
     match duja_ddc::enumerate() {
         Ok(displays) => displays
@@ -283,7 +328,12 @@ fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
                     name: d.name.clone(),
                     capabilities: hardware_brightness_caps(),
                 };
-                (display, d.bounds, d.cg_display_id.to_string())
+                FoundDdc {
+                    display,
+                    bounds: d.bounds,
+                    gamma_token: d.cg_display_id.to_string(),
+                    surface_token: d.surface_id.to_string(),
+                }
             })
             .collect(),
         Err(_) => Vec::new(),
@@ -293,7 +343,7 @@ fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
 /// No DDC backend on this target: `duja-ddc` exposes `enumerate` only on Windows
 /// and macOS, so there is nothing to enumerate (Linux lands in P7).
 #[cfg(not(any(windows, target_os = "macos")))]
-fn discover_ddc() -> Vec<(DiscoveredDisplay, DisplayBounds, String)> {
+fn discover_ddc() -> Vec<FoundDdc> {
     Vec::new()
 }
 
@@ -420,12 +470,7 @@ mod tests {
             name: Some(name.to_owned()),
             capabilities: hardware_brightness_caps(),
         };
-        let geom = (
-            id.as_str().to_owned(),
-            Some(DisplayBounds::new(0, 0, 100, 100)),
-            Some(r"\\.\display1".to_owned()),
-        );
-        (display, geom)
+        (display, ddc_geom(id))
     }
 
     /// A DDC-backed entry for an INTERNAL panel surfaced by the fallback — kind
@@ -439,12 +484,7 @@ mod tests {
             name: Some(name.to_owned()),
             capabilities: hardware_brightness_caps(),
         };
-        let geom = (
-            id.as_str().to_owned(),
-            Some(DisplayBounds::new(0, 0, 100, 100)),
-            Some(r"\\.\display1".to_owned()),
-        );
-        (display, geom)
+        (display, ddc_geom(id))
     }
 
     /// A WMI panel entry (internal) for `id`, with no geometry (matches how the
@@ -456,7 +496,26 @@ mod tests {
             name: Some(name.to_owned()),
             capabilities: hardware_brightness_caps(),
         };
-        (display, (id.as_str().to_owned(), None, None))
+        (
+            display,
+            DisplayGeom {
+                id: id.as_str().to_owned(),
+                bounds: None,
+                gamma_token: None,
+                surface_token: None,
+            },
+        )
+    }
+
+    /// DDC-style geometry: bounds plus both tokens. Windows-shaped, i.e. one
+    /// device name in both slots, which is what `discover_ddc` stamps there.
+    fn ddc_geom(id: &StableDisplayId) -> DisplayGeom {
+        DisplayGeom {
+            id: id.as_str().to_owned(),
+            bounds: Some(DisplayBounds::new(0, 0, 100, 100)),
+            gamma_token: Some(r"\\.\display1".to_owned()),
+            surface_token: Some(r"\\.\display1".to_owned()),
+        }
     }
 
     #[test]
