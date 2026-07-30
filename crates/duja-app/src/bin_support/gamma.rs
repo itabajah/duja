@@ -80,17 +80,17 @@
 //! direction for a dimmer.
 
 // RATIONALE: the pure coordinator/trait stay cross-platform so their unit tests
-// run on every CI OS, and the whole channel — the macOS `GammaBackend` included —
-// has exactly one consumer: the tray, which is still `cfg(windows)`. So on macOS
-// the sink built in this file is written but not yet called, which is also why the
-// re-export needs `unused_imports` and not just `dead_code`.
+// run on every CI OS, but the channel itself has exactly one consumer — the tray —
+// which now exists on Windows AND macOS. So the allow is narrowed to the platforms
+// where nothing calls this at all (Linux, until P7), and the `unused_imports` half
+// the previous PR needed while the macOS sink sat unwired is gone with it.
 //
-// Drop BOTH allows for macOS in the PR that un-gates the tray, when the consumer
-// actually appears — the tightened form is
-// `not(any(windows, target_os = "macos"))`. Leaving them on past that point would
-// hide a genuinely unwired sink, which is the failure this file already had once
-// (the P4 gate found `dim_mode = "gamma"` was a silent no-op).
-#![cfg_attr(not(windows), allow(dead_code, unused_imports))]
+// Narrowing this was the point rather than a tidy-up: leaving it broad would hide a
+// genuinely unwired sink, which is the failure this file already had once — the P4
+// gate found `dim_mode = "gamma"` was a silent no-op because the planner emitted
+// commands nothing executed. It earned its keep immediately, surfacing
+// `retain_failed_engagements` as dead on macOS.
+#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -164,6 +164,14 @@ pub(crate) trait GammaSink {
 /// Pure (no OS), so the name→id retention rule is unit-tested on every target
 /// without a real GDI guard. Correct under the "device names can change across a
 /// hot-plug" caveat: it matches on the exact device name the engage recorded.
+///
+/// **Windows-only in production.** macOS has nothing to reconcile —
+/// `CGDisplayRestoreColorSyncSettings` resets everything in one call and reports
+/// no per-display outcome — so `MacSink::restore_all` clears its map outright.
+/// Compiled under `test` everywhere so the retention rule stays pinned on all three
+/// CI lanes; narrowing this module's dead-code allow to exclude macOS is what
+/// surfaced that it was otherwise dead there.
+#[cfg(any(test, windows))]
 fn retain_failed_engagements(
     engaged: &mut BTreeMap<StableDisplayId, String>,
     failed_devices: &BTreeSet<String>,

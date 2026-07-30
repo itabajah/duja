@@ -27,7 +27,7 @@
 //!   coordinator (unit-tested with a fake sink) plus a per-platform sink that
 //!   drives the GPU ramp — Windows' guard-backed one, which owns the
 //!   persistent-ramp crash marker, and macOS' `Core Graphics` one, which needs
-//!   no marker because a macOS ramp is believed not to outlive the process.
+//!   no marker because a macOS ramp is not believed to outlive the process.
 //! - [`hotkey`] — pure accelerator-string parsing + conflict detection for the
 //!   global-hotkey table (the Windows tray converts + registers the result).
 //! - [`level_forward`] — the slider → engine forwarding seam behind a
@@ -48,9 +48,12 @@
 //! - [`stress`] — the `--stress` exit-criteria harness and its report.
 //! - [`updates`] — the opt-in update check: a pure decision function over an
 //!   injected transport, plus the rustls-backed HTTPS transport.
-//! - `tray` — (Windows only) the real tray + flyout assembly on the Slint main
-//!   thread. Not intra-doc-linked here: it is `cfg(windows)`, so a link would
-//!   break the cross-platform (Linux) rustdoc build.
+//! - `toast` — a best-effort desktop notification for a newly-available update.
+//!   Windows only in substance (a `WinRT` toast); every other platform compiles a
+//!   documented no-op, because the tray menu item is the guaranteed surface.
+//! - `tray` — the real tray + flyout assembly on the Slint main thread, on
+//!   Windows and macOS. Not intra-doc-linked here: it is still cfg-gated, so a
+//!   link would break the cross-platform (Linux) rustdoc build.
 
 pub(crate) mod backend;
 pub(crate) mod bounds;
@@ -77,7 +80,7 @@ pub(crate) mod state_store;
 pub(crate) mod stress;
 pub(crate) mod updates;
 
-#[cfg(windows)]
 pub(crate) mod toast;
-#[cfg(windows)]
+
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod tray;

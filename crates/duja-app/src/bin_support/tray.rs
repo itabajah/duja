@@ -292,6 +292,10 @@ pub(crate) fn run(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
     //     `InstallerGuard`. Named binding = held across `run()`; no-op off Windows.
     let _installer_guard = duja_platform::InstallerGuard::acquire();
 
+    // 1c. Become a menu-bar-only app on macOS. No-op elsewhere, and it must happen
+    //     before any window exists — see `become_accessory_app`.
+    become_accessory_app();
+
     // 2. Crash-marker recovery: a dirty gamma exit is undone before we start.
     startup::recover_from_crash_marker(&paths.crash_marker, || {
         let report = duja_dimmer::restore_all();
@@ -854,6 +858,51 @@ fn load_config(paths: &DujaPaths) -> Config {
         }
     }
 }
+
+/// Make this a menu-bar-only application on macOS: no Dock icon, no app menu,
+/// no window in the ⌘-Tab switcher. A no-op on every other platform.
+///
+/// `NSApplicationActivationPolicy::Accessory` is the supported way to say "I am a
+/// status-item app". Without it Duja would take a Dock tile and a menu bar of its
+/// own, which for a tray utility is wrong on both counts, and the settings window
+/// would activate the app rather than just appearing.
+///
+/// # Why here, and not in the loop-time assembly
+///
+/// This must run **before** the first window exists. `#94` moved tray/hotkey/IPC
+/// construction inside the running event loop because `tray-icon` and
+/// `global-hotkey` require it, but the activation policy is the opposite case: by
+/// the time Slint has created a window, `AppKit` has already decided whether this
+/// process owns a Dock tile, and flipping the policy afterwards leaves a tile
+/// behind that only disappears on relaunch. So it goes at the top of `run`,
+/// alongside the other pre-loop acquisitions.
+///
+/// `NSApplication::sharedApplication` **creates** the shared instance if none
+/// exists, which is exactly what is wanted here — winit adopts whatever `NSApp`
+/// already is — and is why `desktop::os_dark_theme` deliberately does *not* touch
+/// it (that one runs on a path where creating the app object early would be a side
+/// effect, not the point).
+#[cfg(target_os = "macos")]
+fn become_accessory_app() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+
+    // `run` is called from `main` on the process's main thread, so this marker is
+    // always available; if that ever stops being true, silently skipping is the
+    // right degrade — a Dock icon is a cosmetic wart, not a broken app.
+    let Some(mtm) = MainThreadMarker::new() else {
+        warn!("not on the main thread; leaving the activation policy alone");
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    if !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory) {
+        warn!("could not set the accessory activation policy; Duja may show a Dock icon");
+    }
+}
+
+/// No activation policy to set on this platform.
+#[cfg(not(target_os = "macos"))]
+const fn become_accessory_app() {}
 
 /// The OS dark/light preference, for the `System` theme setting.
 ///

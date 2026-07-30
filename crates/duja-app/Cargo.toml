@@ -35,7 +35,10 @@ tracing-subscriber.workspace = true
 # is shared across the process.
 slint.workspace = true
 
-# Tray + cursor/work-area geometry + global hotkeys live only on Windows.
+# The tray icon and global hotkeys are the two crates the tray assembly needs on
+# every platform it runs on. Same pinned versions on both, from the P1
+# `spike/eventloop` recipe — they cohabit with Slint on one main thread, which is
+# the property the whole tray design rests on.
 [target.'cfg(windows)'.dependencies]
 tray-icon.workspace = true
 global-hotkey.workspace = true
@@ -52,6 +55,24 @@ windows = { workspace = true, features = [
     "Data_Xml_Dom",
     "Foundation",
     "Foundation_Collections",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon.workspace = true
+global-hotkey.workspace = true
+# The status item needs two things `tray-icon` does not expose: the activation
+# policy (`.accessory`, so Duja has no Dock icon and no menu bar of its own) and
+# the menu-bar thickness the icon must be rendered for. Both are `NSApplication` /
+# `NSStatusBar` reads on the main thread. Same objc2 pins the other crates use, so
+# nothing new enters Cargo.lock.
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = [
+    "std",
+    # NSApplication: sharedApplication + setActivationPolicy.
+    "NSApplication",
+    # NSStatusBar: the system-wide bar's thickness, for the icon size.
+    "NSStatusBar",
+    "NSResponder",
 ] }
 
 [build-dependencies]

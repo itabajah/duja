@@ -21,7 +21,7 @@
 // that converts + registers accelerators is Windows-only, so on other targets
 // the public surface is unused. This mirrors the sibling `settings`/`dimming`
 // modules' dead-code allow.
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

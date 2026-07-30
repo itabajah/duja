@@ -208,12 +208,13 @@ pub(super) fn build_tray(accent: AccentChoice) -> anyhow::Result<TrayHandles> {
         };
     });
 
-    let tray = TrayIconBuilder::new()
+    let builder = TrayIconBuilder::new()
         // Clone shares the same `Rc` inner, so prepends on our kept handle show
         // up in the menu the tray owns.
         .with_menu(Box::new(menu.clone()))
         .with_tooltip("Duja")
-        .with_icon(icon::tray_icon(duja_ui::accent::icon_rgb(accent))?)
+        .with_icon(icon::tray_icon(duja_ui::accent::icon_rgb(accent))?);
+    let tray = with_left_click_policy(builder)
         .build()
         .map_err(|e| anyhow::anyhow!("failed to create the tray icon: {e}"))?;
     Ok(TrayHandles {
@@ -221,6 +222,31 @@ pub(super) fn build_tray(accent: AccentChoice) -> anyhow::Result<TrayHandles> {
         menu,
         update_item,
     })
+}
+
+/// On macOS, stop a left click from opening the context menu, so it can toggle
+/// the flyout instead.
+///
+/// `tray-icon` defaults `menu_on_left_click` to **true**, which on macOS means a
+/// left click drops the menu and the `TrayIconEvent::Click` the flyout toggle
+/// depends on never usefully arrives — the user would get the Open/Settings/Quit
+/// menu where every other Duja platform gives them the brightness sliders. The
+/// menu stays reachable by right click, which is the macOS convention for a status
+/// item that has a primary action.
+#[cfg(target_os = "macos")]
+fn with_left_click_policy(builder: tray_icon::TrayIconBuilder) -> tray_icon::TrayIconBuilder {
+    builder.with_menu_on_left_click(false)
+}
+
+/// Windows keeps `tray-icon`'s default.
+///
+/// Not because the default is obviously right, but because the shipped Windows
+/// behaviour — left click toggles the flyout, right click opens the menu — has
+/// been verified on real hardware with this setting untouched, and this PR is not
+/// the place to change what a Windows user's left click does.
+#[cfg(not(target_os = "macos"))]
+const fn with_left_click_policy(builder: tray_icon::TrayIconBuilder) -> tray_icon::TrayIconBuilder {
+    builder
 }
 
 /// Build the global-hotkey registrar and apply the initial plan from `config`

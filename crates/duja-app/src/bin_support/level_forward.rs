@@ -47,7 +47,7 @@
 // (`tray::state::AppState`), but they stay cross-platform so the final-value
 // regression test runs on every CI OS lane; the dead-code allow applies only
 // where no consumer exists. Mirrors `gamma.rs`.
-#![cfg_attr(not(windows), allow(dead_code))]
+#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
 use crossbeam_channel::Sender;
 

@@ -1,46 +1,86 @@
-//! A best-effort Windows toast announcing a newly-available update.
+//! A best-effort desktop notification announcing a newly-available update.
 //!
-//! This uses the `WinRT` `ToastNotification` API through the `windows` crate
-//! already in the build — no extra dependency. Every call is best-effort: a
-//! failure is logged at WARN and swallowed (exactly like `tray::open_url`),
-//! because a missing toast must never affect the app. The tray "Update
-//! available" item and tooltip are the guaranteed surfaces; the toast is a
-//! bonus.
+//! Best-effort in the strongest sense: the tray "Update available" menu item and
+//! the tooltip are the **guaranteed** surfaces, and this is a bonus on top. Every
+//! failure is logged at WARN and swallowed, and a platform with no implementation
+//! is not a failure at all — it simply has no bonus.
 //!
-//! # App identity
+//! # Windows
 //!
-//! An unpackaged process must set an explicit `AppUserModelID` for a toast to
-//! resolve an identity. We set [`AUMID`] on the process; the installer sets the
-//! *same* id on the Start-Menu shortcut, which is what makes the toast render
-//! reliably for an installed copy. A portable (unzipped) copy has no shortcut,
-//! so its toast may show a generic identity or be suppressed — acceptable, and
-//! documented, since the tray surfaces cover it.
+//! A `WinRT` `ToastNotification` through the `windows` crate already in the build,
+//! so no extra dependency. An unpackaged process must set an explicit
+//! `AppUserModelID` for a toast to resolve an identity: `AUMID` is set on the
+//! process, and the installer stamps the *same* id on the Start-Menu shortcut,
+//! which is what makes the toast render reliably for an installed copy. A portable
+//! (unzipped) copy has no shortcut, so its toast may show a generic identity or be
+//! suppressed — acceptable, and documented, since the tray surfaces cover it.
 //!
 //! The toast's `launch` opens the releases page via protocol activation, so a
 //! click behaves like the tray item; Duja still only ever opens the page.
+//!
+//! # macOS — deliberately nothing, for now
+//!
+//! There is no macOS arm, and it is not an oversight to fill in later without
+//! thought. `UNUserNotificationCenter` — the only supported route since
+//! `NSUserNotification` was removed — requires **a signed application bundle**,
+//! which Duja does not have until the packaging work lands, *and* a runtime
+//! authorization prompt, which is a product decision: asking a brightness utility
+//! for notification permission on first launch, to deliver one message a user may
+//! never see, is a worse trade than the tray item they already have.
+//!
+//! So on macOS the update surfaces through the tray menu item and tooltip only.
+//! That is a complete path, not a degraded one — see `update_flow`, where the menu
+//! item and tooltip are set *before* this is called and independently of it.
 
-use tracing::warn;
+#[cfg(windows)]
 use windows::Data::Xml::Dom::XmlDocument;
+#[cfg(windows)]
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+#[cfg(windows)]
 use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+#[cfg(windows)]
 use windows::core::{HSTRING, PCWSTR};
 
+#[cfg(windows)]
 use crate::bin_support::updates::RELEASES_PAGE_URL;
 
 /// The application's stable `AppUserModelID`. Must match the `AppUserModelID` the
 /// installer stamps on the Start-Menu shortcut (`packaging/windows/duja.iss`).
+#[cfg(windows)]
 const AUMID: &str = "io.github.itabajah.duja";
 
-/// Show a toast announcing that `version` is available. Best-effort — logs and
-/// returns on any failure.
+/// Announce that `version` is available, where the platform supports it.
+///
+/// Best-effort and infallible by construction: a platform failure is logged, and
+/// a platform with no notification path does nothing at all. Callers must not
+/// treat this as the update's delivery mechanism — the tray item is.
 pub(crate) fn notify_update_available(version: &str) {
-    if let Err(e) = show(version) {
-        warn!(error = %e, "failed to show the update toast");
+    platform::notify(version);
+}
+
+#[cfg(windows)]
+mod platform {
+    use tracing::warn;
+
+    /// Show the toast, logging any `WinRT` failure.
+    pub(super) fn notify(version: &str) {
+        if let Err(e) = super::show(version) {
+            warn!(error = %e, "failed to show the update toast");
+        }
     }
+}
+
+#[cfg(not(windows))]
+mod platform {
+    /// No notification path on this platform (see the module docs). Silent by
+    /// design: there is nothing that failed, so there is nothing to warn about,
+    /// and the tray item has already surfaced the update by the time this runs.
+    pub(super) const fn notify(_version: &str) {}
 }
 
 /// Build and show the toast, propagating any `WinRT` error to the caller for
 /// logging.
+#[cfg(windows)]
 fn show(version: &str) -> windows::core::Result<()> {
     set_app_id()?;
 
@@ -68,6 +108,7 @@ fn show(version: &str) -> windows::core::Result<()> {
 }
 
 /// Set the process `AppUserModelID` so the toast has an app identity.
+#[cfg(windows)]
 fn set_app_id() -> windows::core::Result<()> {
     let wide: Vec<u16> = AUMID.encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY: `wide` is a NUL-terminated UTF-16 string that outlives the call;
@@ -77,6 +118,10 @@ fn set_app_id() -> windows::core::Result<()> {
 
 /// Escape the five XML metacharacters so a version/URL can be embedded in the
 /// toast payload safely.
+///
+/// Only the Windows toast builds XML, but this stays compiled under `test` on
+/// every target so its escaping table is pinned on all three CI lanes.
+#[cfg(any(test, windows))]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

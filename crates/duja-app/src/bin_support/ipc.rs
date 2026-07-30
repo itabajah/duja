@@ -28,11 +28,11 @@ use duja_platform::ipc::PipeClient;
 
 pub(crate) use duja_app::ipc::{HeadlessBridge, IpcBridge, handle_request};
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use crossbeam_channel::Sender;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use duja_app::EngineCommand;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use duja_core::model::DisplaySnapshot;
 
 /// How long a second instance waits to reach the running server before giving
@@ -61,7 +61,7 @@ pub(crate) fn start(bridge: Arc<dyn IpcBridge>) -> Option<PipeServer> {
 /// flyout. Returns whether the handshake succeeded.
 // RATIONALE: only the (Windows-only) tray second-instance path calls this; the
 // non-Windows build has no tray, so keep that lane dead-code clean.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub(crate) fn show_running_instance() -> bool {
     match PipeClient::connect(SECOND_INSTANCE_TIMEOUT) {
         Ok(mut client) => match client.request(&Request::ShowFlyout) {
@@ -81,7 +81,7 @@ pub(crate) fn show_running_instance() -> bool {
 /// The tray bridge: `set`/`show_flyout` hop onto the Slint main thread so the
 /// persisted level and the overlay/gamma batch stay consistent with the flyout;
 /// `snapshot` reads the engine directly.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) struct TrayBridge {
     /// A **fully functional** headless bridge, embedded only for its
     /// [`snapshot`](IpcBridge::snapshot) (a plain engine read, identical in both
@@ -105,7 +105,7 @@ pub(crate) struct TrayBridge {
     bridge: HeadlessBridge,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 impl TrayBridge {
     pub(crate) fn new(engine_tx: Sender<EngineCommand>) -> Self {
         TrayBridge {
@@ -114,7 +114,7 @@ impl TrayBridge {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 impl IpcBridge for TrayBridge {
     fn snapshot(&self) -> Vec<DisplaySnapshot> {
         // Same engine read as the headless bridge; only `set` differs.
