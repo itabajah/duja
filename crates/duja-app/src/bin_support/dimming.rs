@@ -114,6 +114,30 @@ pub(crate) fn plan(
     DimPlan { commands, hardware }
 }
 
+/// [`plan`] with **this platform's** gamma minimum supplied.
+///
+/// This is what the tray calls, and the seam exists so the *choice* of minimum is
+/// pinned by a test instead of living at an `AppState` call site no test can reach:
+/// [`plan`]'s own tests drive the parameter directly with a literal, and
+/// `plan_for_platform_uses_the_dimmer_crates_gamma_minimum` pins that this wrapper
+/// passes `duja_dimmer::min_gamma_factor()` rather than, say, `GAMMA_FLOOR` — the
+/// substitution that would silently restore the whole defect.
+///
+/// It works only because `duja-dimmer` is an **unconditional** dependency of
+/// `duja-app`, so this cross-platform module can reach the platform verdict itself.
+pub(crate) fn plan_for_platform(
+    displays: &[DisplayInput],
+    cfg_for: impl Fn(&DisplayInput) -> ContinuumConfig,
+    bounds_for: impl Fn(&StableDisplayId) -> Option<DisplayBounds>,
+) -> DimPlan {
+    plan(
+        displays,
+        cfg_for,
+        bounds_for,
+        duja_dimmer::min_gamma_factor(),
+    )
+}
+
 /// Map `user_pct` under `cfg`, substituting an overlay for a gamma factor the
 /// platform cannot accept.
 ///
@@ -419,6 +443,40 @@ mod tests {
                 cmd.gamma,
                 cmd.overlay_alpha
             );
+        }
+    }
+
+    #[test]
+    fn plan_for_platform_uses_the_dimmer_crates_gamma_minimum() {
+        // The wiring, pinned where it can be: the whole fix depends on the minimum
+        // being the *platform's* rather than `GAMMA_FLOOR`, and this is the only
+        // layer that can observe which one was used. Substituting `GAMMA_FLOOR` in
+        // `plan_for_platform` reds the Windows arm below.
+        let mon = monitor(50, ConfigDimMode::Gamma);
+        let displays = [input("A", DisplayKind::ExternalDdc, 0)];
+        let plan = plan_for_platform(
+            &displays,
+            |_| continuum_for(DisplayKind::ExternalDdc, false, &mon, true),
+            |_| Some(bounds()),
+        );
+        let cmd = plan.commands.first().expect("one command");
+
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                cmd.gamma, None,
+                "on Windows slider 0 asks for a factor the OS refuses, so the plan \
+                 must carry an overlay — `plan_for_platform` did not use MIN_ACCEPTED_GAMMA"
+            );
+            assert!(cmd.has_overlay());
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(
+                cmd.gamma.is_some(),
+                "off Windows the OS imposes no limit, so the ramp must survive"
+            );
+            assert!(!cmd.has_overlay());
         }
     }
 
