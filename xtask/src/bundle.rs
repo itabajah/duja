@@ -89,8 +89,8 @@ pub(crate) const BUNDLE_ID: &str = "io.github.itabajah.duja";
 ///
 /// The claim is enforced on the artifact, not on paper: the release workflow
 /// builds both slices with `MACOSX_DEPLOYMENT_TARGET` set to this value, and
-/// `dist`'s `verify_slices` reads the `minos` back out of the fused binary and
-/// refuses to sign a bundle whose slices disagree with it.
+/// `dist`'s `Verified::checked` reads the `minos` back out of the fused binary
+/// and refuses to sign a bundle whose slices disagree with it.
 pub(crate) const MIN_MACOS: &str = "11.0";
 
 /// The four-byte legacy type/creator record in `Contents/PkgInfo`.
@@ -429,7 +429,7 @@ mod tests {
     /// `LSMinimumSystemVersion` is a claim about the *binary*, and only the build
     /// honours it. The release workflow sets `MACOSX_DEPLOYMENT_TARGET` for both
     /// slices; if that value is changed or dropped, the plist would go on
-    /// advertising a floor nothing compiled against. (`dist::verify_slices`
+    /// advertising a floor nothing compiled against. (`dist`'s `Verified::checked`
     /// enforces the same thing on the artifact — this catches the drift before a
     /// release ever runs.)
     #[test]

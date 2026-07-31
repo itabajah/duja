@@ -18,8 +18,28 @@
 //! against synthetic binaries.
 //!
 //! Deliberately partial: this reads the fat header, each slice's CPU type, and
-//! the one load command that carries the deployment target. It is not a Mach-O
+//! the load command that carries the macOS deployment target. It is not a Mach-O
 //! library and should not grow into one.
+//!
+//! # What constrains the constants below — and what does not
+//!
+//! The unit tests build their own synthetic binaries, and those builders import
+//! the **same** constants the parser compares against. So a wrong
+//! `LC_BUILD_VERSION`, `MH_MAGIC_64`, `CPU_TYPE_*` or field offset would leave
+//! the suite green while making [`slices`] reject every real universal binary —
+//! and since this runs inside `dist`'s packaging step, that direction **blocks
+//! releases**. The tests constrain the *logic*: that the walk steps over
+//! unrelated load commands, that a differing floor is visible, that truncation
+//! is an error rather than a panic.
+//!
+//! Two things constrain the constants themselves. Every value here was read off
+//! Apple's `cctools` (`fat.h`, `mach-o/loader.h`, `libstuff/ofile.c`) and dyld,
+//! and is cited at its definition. And the release workflow's
+//! `workflow_dispatch` dry run feeds this parser a **real `lipo` output** — a
+//! false reject fails the packaging step loudly, which is how a wrong constant
+//! would surface. Checking in a captured real fat header as a byte fixture would
+//! close the gap properly; it needs a Mac to produce one, and is recorded in
+//! `docs/debt.md`.
 //!
 //! # Layout, for the constants below
 //!
@@ -40,7 +60,10 @@ const MH_MAGIC_64: u32 = 0xfeed_facf;
 
 /// Bytes in a `fat_arch` record (5 × `u32`).
 const FAT_ARCH_SIZE: usize = 20;
-/// Bytes in a `fat_arch_64` record (2 × `u32`, 3 × `u64`, 1 × `u32` padding).
+/// Bytes in a `fat_arch_64` record: `cputype`/`cpusubtype` (2 × `u32`),
+/// `offset`/`size` (2 × `u64`), `align`/`reserved` (2 × `u32`). `reserved` is a
+/// real field, not padding, and `lipo` does not initialise it — so nothing here
+/// may assume it is zero.
 const FAT_ARCH_64_SIZE: usize = 32;
 /// Bytes in a `mach_header_64`.
 const MACH_HEADER_64_SIZE: usize = 32;
@@ -48,6 +71,11 @@ const MACH_HEADER_64_SIZE: usize = 32;
 /// `LC_BUILD_VERSION` — carries `platform`, `minos`, `sdk`. What every current
 /// toolchain emits.
 const LC_BUILD_VERSION: u32 = 0x32;
+/// `PLATFORM_MACOS`. A binary may carry more than one `LC_BUILD_VERSION` (a
+/// zippered one has macOS *and* Mac Catalyst), so the platform is checked rather
+/// than assumed — otherwise the first command wins and the answer is whichever
+/// platform the linker happened to emit first.
+const PLATFORM_MACOS: u32 = 1;
 /// `LC_VERSION_MIN_MACOSX` — the predecessor, `version` then `sdk`. Read too, so
 /// a slice built by an older toolchain reports a version rather than "absent".
 const LC_VERSION_MIN_MACOSX: u32 = 0x24;
@@ -140,10 +168,20 @@ fn thin_slice(bytes: &[u8], start: usize) -> Result<Slice, String> {
         if size < 8 {
             return Err(format!("load command at {cursor} has size {size}"));
         }
-        // `minos` is the 4th word of LC_BUILD_VERSION and the 3rd of the older
-        // LC_VERSION_MIN_MACOSX; both encode it the same way.
+        // `minos` is the 4th word of LC_BUILD_VERSION (after `cmd`, `cmdsize`,
+        // `platform`) and the 3rd of the older LC_VERSION_MIN_MACOSX (after
+        // `cmd`, `cmdsize`); both encode it the same way. Note the offsets are
+        // *not* interchangeable — reading one word further gets `sdk`, which
+        // would compare the build machine's SDK against the advertised floor.
         let packed_at = match cmd {
-            LC_BUILD_VERSION => Some(add(cursor, 12)?),
+            // Only the macOS entry: a zippered binary also carries a Mac
+            // Catalyst one, and taking whichever came first would report a
+            // different platform's floor.
+            LC_BUILD_VERSION
+                if read_u32(bytes, add(cursor, 8)?, Endian::Little)? == PLATFORM_MACOS =>
+            {
+                Some(add(cursor, 12)?)
+            }
             LC_VERSION_MIN_MACOSX => Some(add(cursor, 8)?),
             _ => None,
         };
@@ -225,6 +263,7 @@ fn read_u64(bytes: &[u8], offset: usize, endian: Endian) -> Result<u64, String> 
 pub(crate) mod fixtures {
     use super::{
         CPU_TYPE_ARM64, CPU_TYPE_X86_64, FAT_ARCH_SIZE, FAT_MAGIC, LC_BUILD_VERSION, MH_MAGIC_64,
+        PLATFORM_MACOS,
     };
 
     /// Pack `X.Y.Z` the way the linker does.
@@ -259,9 +298,18 @@ pub(crate) mod fixtures {
         fat(&thin_parts)
     }
 
+    /// An SDK version distinct from every `minos` a fixture uses.
+    ///
+    /// Load-bearing: when `sdk` and `minos` hold the same bytes, reading one
+    /// word past `minos` returns the right answer by accident and the offset is
+    /// pinned by nothing. That mistake would compare the build machine's SDK
+    /// against the advertised floor and refuse to package **every** release.
+    const FIXTURE_SDK: (u32, u32, u32) = (26, 3, 0);
+
     /// A thin 64-bit Mach-O with one `LC_BUILD_VERSION` (plus a filler load
     /// command in front of it, so the walk has to actually step over one).
     pub(crate) fn thin(cpu_type: u32, cmd: u32, version: u32) -> Vec<u8> {
+        let sdk = packed(FIXTURE_SDK.0, FIXTURE_SDK.1, FIXTURE_SDK.2);
         let mut out = Vec::new();
         out.extend_from_slice(&MH_MAGIC_64.to_le_bytes()); // magic
         out.extend_from_slice(&cpu_type.to_le_bytes()); // cputype
@@ -280,14 +328,39 @@ pub(crate) mod fixtures {
         out.extend_from_slice(&cmd.to_le_bytes());
         if cmd == LC_BUILD_VERSION {
             out.extend_from_slice(&24u32.to_le_bytes()); // cmdsize
-            out.extend_from_slice(&1u32.to_le_bytes()); // platform = macOS
+            out.extend_from_slice(&PLATFORM_MACOS.to_le_bytes()); // platform
             out.extend_from_slice(&version.to_le_bytes()); // minos
-            out.extend_from_slice(&version.to_le_bytes()); // sdk
+            out.extend_from_slice(&sdk.to_le_bytes()); // sdk
             out.extend_from_slice(&0u32.to_le_bytes()); // ntools
         } else {
             out.extend_from_slice(&16u32.to_le_bytes()); // cmdsize
             out.extend_from_slice(&version.to_le_bytes()); // version
-            out.extend_from_slice(&version.to_le_bytes()); // sdk
+            out.extend_from_slice(&sdk.to_le_bytes()); // sdk
+        }
+        out
+    }
+
+    /// A thin binary whose only `LC_BUILD_VERSION` is for another platform,
+    /// with a macOS one after it — the zippered shape, where taking the first
+    /// version command reports the wrong platform's floor.
+    pub(crate) fn zippered(cpu_type: u32, other_platform: u32, other: u32, macos: u32) -> Vec<u8> {
+        let sdk = packed(FIXTURE_SDK.0, FIXTURE_SDK.1, FIXTURE_SDK.2);
+        let mut out = Vec::new();
+        out.extend_from_slice(&MH_MAGIC_64.to_le_bytes());
+        out.extend_from_slice(&cpu_type.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // cpusubtype
+        out.extend_from_slice(&2u32.to_le_bytes()); // filetype
+        out.extend_from_slice(&2u32.to_le_bytes()); // ncmds
+        out.extend_from_slice(&48u32.to_le_bytes()); // sizeofcmds
+        out.extend_from_slice(&0u32.to_le_bytes()); // flags
+        out.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        for (platform, version) in [(other_platform, other), (PLATFORM_MACOS, macos)] {
+            out.extend_from_slice(&LC_BUILD_VERSION.to_le_bytes());
+            out.extend_from_slice(&24u32.to_le_bytes());
+            out.extend_from_slice(&platform.to_le_bytes());
+            out.extend_from_slice(&version.to_le_bytes());
+            out.extend_from_slice(&sdk.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
         }
         out
     }
@@ -332,11 +405,14 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use super::fixtures::{fat, packed, thin};
+    use super::fixtures::{self, fat, packed, thin};
     use super::*;
 
-    /// The shape `lipo` actually produces for Duja: two slices, both built at
-    /// the advertised floor. This is the case the packaging check depends on.
+    /// Two slices, both built at the advertised floor — the case the packaging
+    /// check must accept. (Slice order here is arm64-first for readability;
+    /// `lipo` sorts by CPU type, so a real one lists `x86_64` first. The parser
+    /// reports whatever order the fat table gives, which is why the assertions
+    /// below are positional rather than a set.)
     #[test]
     fn a_universal_binary_reports_both_architectures_and_their_floors() {
         let bytes = fat(&[
@@ -402,6 +478,42 @@ mod tests {
                 .and_then(|s| s.min_os.clone()),
             Some("10.13".to_owned())
         );
+    }
+
+    /// A zippered binary carries a second `LC_BUILD_VERSION` for Mac Catalyst,
+    /// and Apple's linker may emit it first. Taking whichever version command
+    /// came first would report *that* platform's floor — a different number,
+    /// silently, with nothing to distinguish it from the right one.
+    #[test]
+    fn a_second_platforms_build_version_is_not_mistaken_for_the_macos_one() {
+        // PLATFORM_MACCATALYST is 6; its floor is unrelated to the macOS one.
+        let bytes = fixtures::zippered(CPU_TYPE_ARM64, 6, packed(14, 0, 0), packed(11, 0, 0));
+        assert_eq!(
+            slices(&bytes)
+                .expect("parse")
+                .first()
+                .and_then(|s| s.min_os.clone()),
+            Some("11.0".to_owned())
+        );
+    }
+
+    /// `sdk` sits one word past `minos` in `LC_BUILD_VERSION` and one past
+    /// `version` in its predecessor. Reading it instead would compare the *build
+    /// machine's* SDK against the advertised floor and refuse every release, so
+    /// the fixtures give it a value no test expects.
+    #[test]
+    fn the_sdk_version_is_never_read_as_the_minimum() {
+        for cmd in [LC_BUILD_VERSION, LC_VERSION_MIN_MACOSX] {
+            let bytes = fixtures::thin(CPU_TYPE_ARM64, cmd, packed(11, 0, 0));
+            assert_eq!(
+                slices(&bytes)
+                    .expect("parse")
+                    .first()
+                    .and_then(|s| s.min_os.clone()),
+                Some("11.0".to_owned()),
+                "cmd {cmd:#x} read the wrong word"
+            );
+        }
     }
 
     #[test]

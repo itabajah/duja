@@ -17,9 +17,10 @@
 //!   [`run_command`], tested without touching the registry.
 //! - macOS uses a `launchd` `LaunchAgent` plist (see the `mac` module); its plist
 //!   generation and parsing are pure and host-tested (see the `plist` module),
-//!   as is the rule refusing to register a copy running from a mounted volume
-//!   (see the `mac_location` module — Duja ships as a disk image, and a login
-//!   item pointing inside one dies the moment it is ejected).
+//!   as is the rule refusing to register a copy running from somewhere that can
+//!   go away (see the `mac_location` module — Duja ships as a disk image, and a
+//!   login item pointing at a mounted volume, or at the App Translocation mirror
+//!   a quarantined copy runs from, dies on eject or on quit).
 //! - Any remaining target gets a stub whose every operation reports
 //!   [`AutostartError::Unsupported`].
 //!

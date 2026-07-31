@@ -236,12 +236,14 @@ fn windows(root: &Path, dist: &Path, version: &Version) -> Result<(), String> {
 
 /// Fuse, assemble, sign, and image the macOS artifact.
 ///
-/// The order is not arrangeable: `lipo` rewrites the Mach-O, the bundle seal
-/// covers the `Info.plist` and every file under `Contents`, and the disk image
-/// is a snapshot of the signed tree — so **signing is the last mutation**, after
-/// the universal binaries exist and after the bundle is complete. Nested code
-/// (`dujactl`) is signed before the bundle that encloses it, because sealing the
-/// bundle records the signatures it finds inside.
+/// The order is not arrangeable: `lipo` rewrites the Mach-O and the bundle seal
+/// covers the `Info.plist` and every file under `Contents`, so **signing is the
+/// last mutation of the bundle** — after the universal binaries exist and after
+/// the bundle is complete. Nested code (`dujactl`) is signed before the bundle
+/// that encloses it, because sealing the bundle records the signatures it finds
+/// inside. The steps that follow deliberately touch only the *staging directory*
+/// around the sealed `.app`: the `/Applications` symlink is its sibling, and
+/// `hdiutil` only reads.
 fn macos(root: &Path, dist: &Path, version: &Version, identity: &str) -> Result<(), String> {
     // 1. Resolve every input *before* creating anything, so the common failure —
     //    "you have not built both slices yet" — leaves no half-staged tree.
@@ -333,12 +335,18 @@ mod verified {
     /// `Info.plist`.
     ///
     /// The field is private to this module and [`Verified::checked`] is the only
-    /// constructor, so [`super::seal`] — which takes nothing else — cannot be
-    /// reached without the check having run. That is deliberate rather than
-    /// decorative: `dist::macos` cannot execute on the lanes this code is
-    /// written on, so "a test proves the call site is still there" is not
-    /// available. A type makes it *uncompilable* to remove, which is the
-    /// stronger guarantee and the only one on offer here.
+    /// constructor, so [`super::seal`] — which takes nothing else — **cannot be
+    /// reached without the check having run**; forging one from `dist` is
+    /// `error[E0451]`. That is deliberate rather than decorative: `dist::macos`
+    /// cannot execute on the lanes this code is written on, so "a test proves
+    /// the call site is still there" is not available.
+    ///
+    /// Precisely what it does and does not guarantee: deleting the
+    /// `Verified::checked` call *and* the `seal` call together still compiles,
+    /// and would produce an unverified, unsigned image. What stops that is not
+    /// this type but `dead_code` under CI's `clippy -D warnings`. The type
+    /// closes the case that matters — a signed artifact that was never
+    /// checked — not every case.
     pub(super) struct Verified<'a> {
         /// The bundle this token vouches for.
         app: &'a bundle::Bundle,
@@ -488,12 +496,16 @@ fn link_applications(stage: &Path) -> Result<(), String> {
 /// Wrap `stage` in a compressed read-only disk image.
 ///
 /// Nothing ever writes to a read-only compressed image, so the filesystem inside
-/// it is an implementation detail; `HFS+` is chosen for breadth, not for
-/// anything APFS lacks. It is what `hdiutil create -srcfolder` produces by
-/// default and what every mount helper and archiver handles. (The reason usually
-/// given for it — that APFS images are unreadable before macOS 10.13 — does
-/// *not* apply here: Duja's own floor is already higher than that.) `UDZO` is
-/// the zlib-compressed read-only format every macOS reads.
+/// it is an implementation detail; `HFS+` is asked for **explicitly**, for
+/// breadth rather than for anything APFS lacks. Without `-fs`, `-srcfolder`
+/// inherits the source volume's filesystem (`man hdiutil`: the APFS default
+/// "does not apply to images created with `-srcfolder`"), which would make the
+/// output depend on whatever the build machine happens to use — an APFS image
+/// from one runner and an HFS+ image from another, for the same release. Naming
+/// it removes that. (The reason usually given for HFS+ — that APFS images are
+/// unreadable before macOS 10.13 — does *not* apply here: Duja's own floor is
+/// already higher than that.) `UDZO` is the zlib-compressed read-only format
+/// every macOS reads.
 fn image(stage: &Path, dmg: &Path, version: &Version) -> Result<(), String> {
     let mut cmd = Command::new("hdiutil");
     cmd.arg("create")

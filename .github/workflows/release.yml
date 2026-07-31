@@ -144,7 +144,7 @@ jobs:
       # Fuse → bundle → codesign → DMG, all in the dependency-free xtask so the
       # same command produces the same artifact on a maintainer's Mac — provided
       # the two builds above ran with the same MACOSX_DEPLOYMENT_TARGET, which
-      # `xtask`'s `verify_slices` refuses to package without.
+      # `xtask`'s `Verified::checked` refuses to package without.
       - name: Package Duja.app and the disk image
         env:
           MACOS_SIGN: ${{ vars.MACOS_SIGN }}
@@ -157,11 +157,15 @@ jobs:
             cargo run --release -p xtask -- dist --version "$VERSION"
           fi
 
-      # Checked on the bytes that actually ship, with Apple's own tools. The
-      # arch/`minos` half duplicates what `xtask`'s `verify_slices` already
-      # refused to sign without — deliberately, because that check reads the
-      # Mach-O header with code written here, and a second implementation is the
-      # only thing that catches *that* code being wrong.
+      # Checked with Apple's own tools on the bytes this job produces. Note the
+      # gated Developer ID path signs and staples the image *after* this step,
+      # so on that path the shipped `.dmg` is not the one verified here — the
+      # bundle inside it is unchanged, and `stapler` only adds a ticket. The
+      # arch/`minos` half duplicates what `xtask`'s `Verified::checked` already
+      # refused to sign without. Deliberate, but note what it can and cannot do:
+      # a second implementation catches a false *accept*. A false **reject** —
+      # the direction a wrong Mach-O constant would fail in — kills the Package
+      # step above, so this step never runs to disagree with it.
       #
       # `otool` output goes to a file rather than through a pipe: `awk … exit`
       # closes the read end while `otool` may still be writing, and under
@@ -199,7 +203,9 @@ jobs:
           test -x "$mount/Duja.app/Contents/MacOS/duja"
           test -L "$mount/Applications"
           codesign --verify --strict "$mount/Duja.app"
-          hdiutil detach "$mount"
+          # A transient busy unmount must not fail a release that passed every
+          # other check; the retry is what the EXIT trap would have done anyway.
+          hdiutil detach "$mount" || hdiutil detach "$mount" -force
           trap - EXIT
 
       # Also INERT until MACOS_SIGN is set. Note this step is NOT PUBLISH-gated:
@@ -209,9 +215,11 @@ jobs:
       # fails the whole release rather than half of it — re-running the workflow
       # on the same tag recovers, because the Release is updated rather than
       # re-created (docs/release-checklist.md says so where it will be read).
-      # `--timeout` bounds a stuck submission to something shorter than the
-      # 6-hour job limit, so a hung queue fails loudly instead of burning a
-      # runner.
+      # `--timeout` bounds a stuck submission to something well short of the
+      # 6-hour job limit. `notarytool` does not document its exit code on
+      # timeout, so what actually fails the job may be the `stapler staple`
+      # below rather than the submit itself — either way it stops, which is the
+      # property that matters.
       - name: Notarize and staple the disk image
         if: vars.MACOS_SIGN == 'true'
         env:

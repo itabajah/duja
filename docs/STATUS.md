@@ -49,7 +49,7 @@ end from day one. Distribution is a tag-triggered
 portable zip, and — from `v0.2.0` — a macOS universal disk image, all under one
 `SHA256SUMS`, each with a minisign signature and a build-provenance attestation.
 
-Health: **1,026 tests locally (Windows, including doctests), green on 3 OSes** — the
+Health: **1,019 tests on the Windows CI lane plus 10 doctests (1,029 in a local `cargo test`), green on 3 OSes** — the
 per-OS count differs because the `#![cfg(windows)]` and `#![cfg(unix)]`
 integration suites compile out on the other lanes; clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
@@ -603,9 +603,10 @@ rewrites the Mach-O and the bundle seal covers the `Info.plist` and everything u
 (`dujactl`) is signed before the bundle that encloses it, because sealing the bundle
 records the signatures it finds inside. The default identity is ad-hoc (`-`): enough
 for macOS to *execute* the binary — Apple Silicon refuses an unsigned one outright —
-but not notarized, so a downloaded copy still needs right-click → Open. That is the
-exact macOS twin of the SmartScreen prompt on the unsigned Windows installer, and
-`SECURITY.md` now says both. `--sign <identity>` takes a real Developer ID and the
+but not notarized, so Gatekeeper blocks the first open of a downloaded copy and the
+user must allow it in System Settings → Privacy & Security → **Open Anyway**. That
+is the exact macOS twin of the SmartScreen prompt on the unsigned Windows installer,
+and `SECURITY.md` now says both. `--sign <identity>` takes a real Developer ID and the
 hardened runtime is applied on **both** paths, so turning signing on is a repo
 variable, not a code change — the same posture as the inert Azure Trusted Signing
 block.
@@ -613,9 +614,11 @@ block.
 **`LSUIElement` closes a loop from `#102`.** `become_accessory_app` sets the
 activation policy imperatively because winit stops overriding it only for a bundled
 app; the bundle now declares the same thing, so for an installed copy the call is
-belt-and-braces. It stays, because a portable binary has no `Info.plist` to read —
-and because `launchd` starts the login-item copy by exec'ing `Contents/MacOS/duja`
-directly.
+belt-and-braces. It stays for the reason that is actually checkable: a `cargo run`
+or portable copy has no `Info.plist` at all. Not for the reason it is tempting to
+give — a `launchd`-exec'd copy *inside* the bundle is still bundled, because
+`NSBundle` resolves upward from the executable path, which is the same question
+winit's `is_bundled` branch asks.
 
 **One tightening that was not packaging.** `--version` used to be interpolated raw
 into a single-quoted PowerShell literal; it now reaches the same place through a
@@ -644,7 +647,7 @@ omitted `MACOSX_DEPLOYMENT_TARGET` entirely, so following it produced an `x86_64
 slice at rustc's default inside a bundle advertising 11.0: exactly the drift the
 test exists to prevent, invisible to it. The fix moves the invariant onto the
 artifact. `xtask` now reads the Mach-O header itself — a new `macho` module, ~180
-lines of bounds-checked integer reads — and `verify_slices` refuses to sign a
+lines of bounds-checked integer reads — and `Verified::checked` refuses to sign a
 bundle whose slices are not all present and all built for the advertised floor.
 Parsing it in Rust rather than shelling to `otool` is the point: the check then
 runs **identically on a maintainer's Mac and in CI**, and is unit-testable on every
@@ -683,8 +686,8 @@ the step now actually mounts it, checks `Duja.app` and the `Applications` symlin
 are there, and detaches. And the one user-facing instruction the PR added, "first
 launch needs right-click → Open", stopped being true in macOS 15: Sequoia removed
 that Gatekeeper override, and the user must go to System Settings → Privacy &
-Security → Open Anyway. It was wrong in five places, on every macOS this release
-targets.
+Security → Open Anyway. It was wrong everywhere it appeared, on every macOS this
+release targets.
 
 Two tests were deleted for being tautologies (`assert_eq!(BINARIES, [MAIN, HELPER])`
 where `BINARIES` is *defined* as that), and the coupling they pretended to check is
@@ -692,6 +695,42 @@ now real: the executable names are read out of each crate's `[[bin]]` section, t
 architecture list out of the workflow's `cargo build --target` lines, and both
 cross-file readers now assert that **every** occurrence agrees rather than the
 first.
+
+#### And what the second review changed
+
+Round 2 blocked it again, and the best finding was that the mounted-volume guard
+**does not fire in the scenario it was written for**. A downloaded `.dmg` is
+quarantined, and macOS will not run a quarantined app in place: **App
+Translocation** mounts a throwaway read-only mirror and runs it from
+`/private/var/folders/…/AppTranslocation/…`. So `current_exe()` never starts with
+`/Volumes/`, the guard passes, the plist is written — and that mount is destroyed
+when the app *quits*, which is sooner than ejecting. The fix catches the marker as
+a path component too, and the test for it is the one that would have failed. This
+is the second time in this PR that a guard was written against the case that was
+easy to imagine rather than the case that actually happens.
+
+Second: the Mach-O fixtures wrote `sdk == minos`, so **reading `sdk` instead of
+`minos` left all 31 tests green** — and that specific mistake would compare the
+build machine's SDK against the advertised floor and refuse to package *every*
+release. The fixtures now use a distinct SDK, and the two offsets are pinned by a
+test that names why. While there, the parser stopped taking the first
+`LC_BUILD_VERSION` it finds: a zippered binary carries a Mac Catalyst one too, so
+it now selects `PLATFORM_MACOS`.
+
+What could not be fixed is recorded rather than glossed: the fixtures import the
+same constants the parser compares against, so **no test constrains the constants
+themselves** — a wrong one would block every release while the suite stayed green.
+Every value was read off Apple's `cctools` and dyld and is cited at its definition,
+and the dry run feeds the parser a real `lipo` output; the debt row names the fix
+(capture a real fat header as a byte fixture) and why it needs a Mac.
+
+Three more corrections of confident prose: `hdiutil create -srcfolder` does **not**
+default to APFS — it inherits the source volume's filesystem, which is the actual
+reason to name `HFS+` explicitly; the `Verified` token makes a *signed-but-unchecked*
+artifact uncompilable, not every omission (deleting the check and the seal together
+still compiles, and `dead_code` under CI's clippy is what catches that); and the
+"re-run recovers the tag" note gave the wrong reason, since with `needs:` the
+publishing job never ran and there is no Release to update.
 
 
 ## What is done

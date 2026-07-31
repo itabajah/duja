@@ -155,7 +155,9 @@ this changes no step ordering and no packaging code.
 >
 > The same unpredictability applies on a tag push, where `needs: macos` means a
 > notary outage fails the *whole* release. **That is recoverable and does not
-> burn the tag**: re-run the workflow from the Actions tab on the same tag. The
-> gate, the builds and the packaging all repeat, and `softprops/action-gh-release`
-> updates the existing Release rather than creating a second one. Do not delete
-> and re-push the tag.
+> burn the tag**: re-run the workflow from the Actions tab on the same tag.
+> Because the publishing job `needs:` the macOS one, a failure there means it
+> never ran — so nothing was published, and the re-run simply creates the Release
+> for the first time. (Were something to fail *after* publishing, a re-run would
+> still be right: `softprops/action-gh-release` updates an existing release in
+> place rather than creating a second one.) Do not delete and re-push the tag.

@@ -38,9 +38,18 @@ tests run on every CI lane, Windows and Linux included.
 
 The default is an ad-hoc signature (`codesign -s -`): enough for macOS to
 execute the binary — Apple Silicon refuses an unsigned one outright — but not
-enough for Gatekeeper to open a downloaded copy: the user has to allow it in
-System Settings → Privacy & Security → Open Anyway. Duja has no Apple Developer
-account, exactly as it has no Windows Authenticode certificate.
+enough for Gatekeeper to open a downloaded copy. The user allows it in System
+Settings → Privacy & Security → **Open Anyway** (the button appears for about an
+hour after the blocked launch and asks for the login password). The `.dmg` is
+unsigned too, so on macOS 15+ the image itself may need one pass before the app
+needs a second. Duja has no Apple Developer account, exactly as it has no Windows
+Authenticode certificate.
+
+One more consequence worth knowing: a downloaded `.dmg` is quarantined, so running
+`Duja.app` **from the mounted image** triggers App Translocation — macOS runs a
+throwaway read-only copy, and Duja refuses to register launch-at-login from there
+because the login item would die the moment the app quits. Drag the app to
+`/Applications` first; that also clears the quarantine flag.
 
 `cargo xtask dist --sign "<identity>"` signs with a real Developer ID instead;
 [`release.yml`](../../.github/workflows/release.yml) passes it automatically once
@@ -54,8 +63,12 @@ unlike the Windows portable zip, where both binaries sit side by side at the
 archive root. Invoke it by full path, or symlink it somewhere on `PATH`:
 
 ```sh
-ln -s /Applications/Duja.app/Contents/MacOS/dujactl /usr/local/bin/dujactl
+sudo mkdir -p /usr/local/bin
+sudo ln -s /Applications/Duja.app/Contents/MacOS/dujactl /usr/local/bin/dujactl
 ```
+
+(`/usr/local` is root-owned and `/usr/local/bin` does not exist on a stock macOS
+install, so both lines need `sudo`.)
 
 Doing that automatically would mean writing outside the bundle from an installer
 Duja does not have (the DMG is a drag-to-install, which by design touches only
