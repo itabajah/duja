@@ -789,8 +789,10 @@ What no test can reach is that macOS *reports* any of this: the two new
 CoreGraphics calls have never run, like every other macOS path here. One hazard
 they surface *is* handled at the source — `CGDisplayBounds` answers `CGRectNull`
 for a display it considers invalid, and this backend reads the *online* list, which
-can hold a built-in that is not the active drawable, so `panel_geometry` refuses a
-degenerate rect outright rather than planning a zero-size overlay at `i32::MAX`.
+can hold a built-in that is not the active drawable, so `panel_geometry` refuses any
+rect that is not finite or encloses no area rather than planning an overlay from it.
+Both arms earn their place: `CGRectInfinite`'s extents convert to `u32::MAX` and
+would sail past an emptiness check alone.
 The rest is in the debt row, including the one the review found: because the anchor
 of a group is its lowest id string and an Apple panel's `APP-…` sorts ahead of
 nearly every monitor id, a mirrored set's single overlay is now usually **placed**
