@@ -45,11 +45,19 @@ unsigned too, so on macOS 15+ the image itself may need one pass before the app
 needs a second. Duja has no Apple Developer account, exactly as it has no Windows
 Authenticode certificate.
 
-One more consequence worth knowing: a downloaded `.dmg` is quarantined, so running
-`Duja.app` **from the mounted image** triggers App Translocation — macOS runs a
-throwaway read-only copy, and Duja refuses to register launch-at-login from there
-because the login item would die the moment the app quits. Drag the app to
-`/Applications` first; that also clears the quarantine flag.
+One more consequence worth knowing: a downloaded `.dmg` is quarantined and
+unsigned, so running `Duja.app` **from the mounted image** triggers App
+Translocation — macOS runs a throwaway read-only copy, and Duja refuses to
+register launch-at-login from there because the login item would die the moment
+the app quits. Drag the app to `/Applications` first.
+
+Dragging it stops the translocation but does **not** clear quarantine: Finder
+records the move by setting `QTN_FLAG_DO_NOT_TRANSLOCATE` inside the existing
+quarantine attribute (`copyfile(3)`), which is why the Open Anyway pass above is
+still needed. To remove it outright, `xattr -dr com.apple.quarantine
+/Applications/Duja.app` — but only after you have verified the download's
+checksum and signature, since that is precisely the check you would be
+skipping.
 
 `cargo xtask dist --sign "<identity>"` signs with a real Developer ID instead;
 [`release.yml`](../../.github/workflows/release.yml) passes it automatically once

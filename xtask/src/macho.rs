@@ -340,9 +340,9 @@ pub(crate) mod fixtures {
         out
     }
 
-    /// A thin binary whose only `LC_BUILD_VERSION` is for another platform,
-    /// with a macOS one after it — the zippered shape, where taking the first
-    /// version command reports the wrong platform's floor.
+    /// A thin binary carrying two `LC_BUILD_VERSION`s, another platform's
+    /// first and the macOS one after it — the zippered shape, where taking the
+    /// first version command reports the wrong platform's floor.
     pub(crate) fn zippered(cpu_type: u32, other_platform: u32, other: u32, macos: u32) -> Vec<u8> {
         let sdk = packed(FIXTURE_SDK.0, FIXTURE_SDK.1, FIXTURE_SDK.2);
         let mut out = Vec::new();

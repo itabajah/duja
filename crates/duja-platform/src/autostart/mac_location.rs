@@ -22,20 +22,32 @@
 //! The obvious one is `/Volumes/…`, where macOS mounts removable media and disk
 //! images. **It is not the one the sequence above actually produces.**
 //!
-//! A `.dmg` downloaded by a browser carries the quarantine flag, and Launch
-//! Services will not run a quarantined app in place: **App Translocation**
-//! (macOS 10.12 onwards) mounts a throwaway read-only mirror and runs the app
-//! from `/private/var/folders/…/AppTranslocation/<uuid>/d/Duja.app/…` instead.
-//! `current_exe()` is `_NSGetExecutablePath` on Apple targets, so that is the
-//! path Duja sees and the path the plist would record. That mount is torn down
-//! when the app **quits** — sooner than ejecting — so the translocated case is
-//! strictly worse than the `/Volumes/` one that hides it.
+//! A `.dmg` downloaded by a browser carries the quarantine attribute, and
+//! **App Translocation** (macOS 10.12 onwards) then runs the app from a
+//! throwaway read-only mirror at
+//! `/private/var/folders/…/AppTranslocation/<uuid>/d/Duja.app/…` rather than in
+//! place. `current_exe()` is `_NSGetExecutablePath` on Apple targets, so that is
+//! the path Duja sees and the path the plist would record. That mirror is torn
+//! down when the app **quits** — sooner than ejecting — so the translocated case
+//! is strictly worse than the `/Volumes/` one that hides it.
 //!
-//! Translocation is decided by the quarantine flag, not by the signature, so an
-//! ad-hoc signature does not avoid it; signing the disk image would, which is on
-//! the inert `MACOS_SIGN` path. Dragging the app to `/Applications` in Finder
-//! clears the flag — which is exactly the remedy this module tells the user
-//! about, and the reason one sentence covers both locations.
+//! It is not "quarantined ⇒ translocated": quarantined apps run in place all the
+//! time. Three things have to hold together — the quarantine attribute, being
+//! opened through Launch Services, and Finder never having moved the app — and
+//! Apple scoped it further at WWDC 2016 (session 706) to apps *"on **unsigned**
+//! disk images"*. Duja's image is unsigned (signing it is on the inert
+//! `MACOS_SIGN` path, and would prevent this outright) and a copy run straight
+//! off the mounted image has never been moved, so all three hold for exactly the
+//! sequence above. Note the signature of the *app* is irrelevant: an ad-hoc
+//! signature does not avoid translocation.
+//!
+//! Dragging the app to `/Applications` in Finder is what stops it — but not by
+//! clearing quarantine, which is the tempting and wrong summary. Finder records
+//! the user's move by setting `QTN_FLAG_DO_NOT_TRANSLOCATE` **inside** the
+//! existing quarantine information (`copyfile(3)`, `COPYFILE_RUN_IN_PLACE`); the
+//! attribute itself survives, which is why Gatekeeper still asks about the app
+//! afterwards. Either way the copy then runs from where the user put it, which
+//! is all this module needs.
 //!
 //! # Why paths, and what it costs
 //!
@@ -44,11 +56,13 @@
 //! the wrong trade for a check whose whole point is being right before anything
 //! is written.
 //!
-//! The cost is one false positive: a user who keeps applications on a second
-//! internal APFS volume (also mounted under `/Volumes/`) is told to move Duja to
-//! `/Applications` when their login item would in fact have survived. That is a
-//! refusal with correct advice, not a broken feature — and it is the direction
-//! to be wrong in, since the alternative is a silently dead login item.
+//! The cost is two false positives, both narrow: a user who keeps applications
+//! on a second internal APFS volume (also mounted under `/Volumes/`), and a user
+//! whose path happens to contain a directory named `AppTranslocation`. Both are
+//! told to move Duja to `/Applications` when their login item would in fact have
+//! survived. That is a refusal with correct advice, not a broken feature — and
+//! it is the direction to be wrong in, since the alternative is a silently dead
+//! login item.
 //!
 //! Compiled on macOS and, under `cfg(test)`, on every host — same arrangement as
 //! [`plist`](super::plist), so the rule is unit-tested on the Windows and Linux
@@ -88,8 +102,9 @@ pub(crate) fn is_on_an_ephemeral_mount(exe: &Path) -> bool {
 ///
 /// Names the remedy rather than the rule: "drag it to Applications" is the
 /// action whether the copy is on a disk image, an external drive, or a
-/// translocated mirror — and in the last case dragging it in Finder is also what
-/// clears the quarantine flag that caused the translocation in the first place.
+/// translocated mirror — and in the last case dragging it *in Finder* is also
+/// what stops the translocation, because Finder marks the moved copy
+/// `QTN_FLAG_DO_NOT_TRANSLOCATE`.
 pub(crate) fn ephemeral_mount_message(exe: &Path) -> String {
     format!(
         "Duja is running from a temporary location ({}) — a disk image, an \

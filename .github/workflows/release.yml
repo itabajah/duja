@@ -213,8 +213,9 @@ jobs:
       # build cannot predict, and a dry run that skipped it would not be a dry
       # run of the thing most likely to break. The cost is that a notary outage
       # fails the whole release rather than half of it — re-running the workflow
-      # on the same tag recovers, because the Release is updated rather than
-      # re-created (docs/release-checklist.md says so where it will be read).
+      # on the same tag recovers, because the publishing job `needs:` this one
+      # and so never ran: nothing was published, and the re-run creates the
+      # Release for the first time. Full note in docs/release-checklist.md.
       # `--timeout` bounds a stuck submission to something well short of the
       # 6-hour job limit. `notarytool` does not document its exit code on
       # timeout, so what actually fails the job may be the `stapler staple`

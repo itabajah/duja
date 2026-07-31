@@ -498,8 +498,10 @@ fn link_applications(stage: &Path) -> Result<(), String> {
 /// Nothing ever writes to a read-only compressed image, so the filesystem inside
 /// it is an implementation detail; `HFS+` is asked for **explicitly**, for
 /// breadth rather than for anything APFS lacks. Without `-fs`, `-srcfolder`
-/// inherits the source volume's filesystem (`man hdiutil`: the APFS default
-/// "does not apply to images created with `-srcfolder`"), which would make the
+/// inherits the source volume's filesystem (`man hdiutil` COMPATIBILITY, macOS
+/// 11.0: the new APFS default "does not apply to images created with
+/// `-srcfolder`" — the `-fs` paragraph's flat "The default file system is APFS"
+/// is the one that misleads here), which would make the
 /// output depend on whatever the build machine happens to use — an APFS image
 /// from one runner and an HFS+ image from another, for the same release. Naming
 /// it removes that. (The reason usually given for HFS+ — that APFS images are
@@ -672,8 +674,8 @@ mod tests {
     /// add`, and its two `cargo build --target` lines — and only the last of
     /// those decides what is actually compiled. Dropping one `cargo build` line
     /// is the realistic drift, and it yields a single-arch "universal" binary.
-    /// `verify_slices` catches that at package time, but only once somebody runs
-    /// a release; reading the workflow catches it on every lane.
+    /// `Verified::checked` catches that at package time, but only once somebody
+    /// runs a release; reading the workflow catches it on every lane.
     #[test]
     fn the_workflow_builds_every_architecture_this_fuses() {
         let workflow = crate::read_repo_file(&[".github", "workflows", "release.yml"]);
