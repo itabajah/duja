@@ -43,11 +43,68 @@ fn intel_set_vcp_brightness_matches_monitorcontrol() {
 
 #[test]
 fn apple_silicon_get_vcp_matches_arm64ddc_framing() {
-    // Arm64DDC.swift: [0x80|(len+1), len, body…, checksum]; body=[0x01,0x10]
-    // (len 2), so byte0=0x83, byte1=0x02; seed 0x6E^0x51 = 0x3F.
+    // The Intel frame minus its leading 0x51 source byte, which
+    // `IOAVServiceWriteI2C` carries out of band as `dataAddress`. m1ddc's
+    // `prepareDDCRead` writes these bytes as literals:
+    //     data[0] = 0x82; data[1] = 0x01; /* data[2] = vcp */
+    //     data[3] = 0x6e ^ data[0] ^ data[1] ^ data[2] ^ data[3];
     let packet = DdcWire::AppleSilicon.encode_get_vcp(0x10);
-    assert_eq!(packet, vec![0x83, 0x02, 0x01, 0x10, 0xAF]);
+    assert_eq!(packet, vec![0x82, 0x01, 0x10, 0xFD]);
+    // A Get seeds with the display write address ALONE — it does not fold in
+    // the 0x51 source address the way the Intel frame's checksum does.
+    assert!(trailing_checksum_ok(&packet, 0x6E));
+}
+
+#[test]
+fn apple_silicon_set_vcp_matches_arm64ddc_framing() {
+    // m1ddc's `prepareDDCWrite`, again as literals:
+    //     data[0] = 0x84; data[1] = 0x03; /* data[2] = vcp */
+    //     data[3] = value >> 8; data[4] = value & 255;
+    //     data[5] = 0x6E ^ packet->inputAddr ^ data[0] ^ … ^ data[4];
+    let packet = DdcWire::AppleSilicon.encode_set_vcp(0x10, 0x0032);
+    assert_eq!(packet, vec![0x84, 0x03, 0x10, 0x00, 0x32, 0x9A]);
+    // A Set DOES fold in the source address. The asymmetry with the Get above
+    // is not explained by either reference; it is reproduced because both of
+    // them do it and both are field-proven against real displays.
     assert!(trailing_checksum_ok(&packet, 0x6E ^ 0x51));
+}
+
+#[test]
+fn apple_silicon_frames_the_same_message_as_intel_without_the_source_byte() {
+    // The two arms differ in exactly one structural way: Intel puts the 0x51
+    // host source address on the wire, Apple Silicon passes it as the I2C call's
+    // `dataAddress`. Everything after it — length byte, op-code, arguments — is
+    // the same VESA message. Pinning the relationship (rather than only the two
+    // byte vectors) is what would have caught the extra length byte this test
+    // file used to enshrine: a transposed or invented header byte breaks it even
+    // if someone "fixes" both corpora to agree with each other.
+    for body in [
+        DdcWire::AppleSilicon.encode_get_vcp(0x10),
+        DdcWire::AppleSilicon.encode_set_vcp(0x10, 0x0032),
+    ]
+    .into_iter()
+    .zip([
+        DdcWire::Intel.encode_get_vcp(0x10),
+        DdcWire::Intel.encode_set_vcp(0x10, 0x0032),
+    ]) {
+        let (apple, intel) = body;
+        assert_eq!(
+            intel.first(),
+            Some(&0x51),
+            "the Intel frame leads with the host source address"
+        );
+        // Drop each frame's trailing checksum (the seeds differ by design), then
+        // drop the Intel frame's leading source byte. What remains must match.
+        let apple_message = apple.split_last().map(|(_, rest)| rest);
+        let intel_message = intel
+            .split_last()
+            .and_then(|(_, rest)| rest.split_first())
+            .map(|(_, rest)| rest);
+        assert_eq!(
+            apple_message, intel_message,
+            "the two arms carry an identical message body"
+        );
+    }
 }
 
 #[test]
@@ -60,13 +117,28 @@ fn apple_silicon_and_intel_framings_differ() {
 }
 
 #[test]
-fn apple_silicon_single_byte_body_seeds_with_write_address() {
-    // A hypothetical one-byte body exercises the `send.count == 1` seed branch
-    // (Arm64DDC.swift): seed is 0x6E, not 0x6E ^ 0x51.
-    let packet = DdcWire::AppleSilicon.frame_request(&[0xAA]);
-    // byte0 = 0x80 | 2 = 0x82, byte1 = 1, body 0xAA, checksum seeded 0x6E.
-    assert_eq!(packet.get(..3), Some(&[0x82u8, 0x01, 0xAA][..]));
-    assert!(trailing_checksum_ok(&packet, 0x6E));
+fn only_a_get_seeds_its_checksum_without_the_source_address() {
+    // The seed branch keyed on the message SHAPE, tested through the three
+    // requests that actually reach it rather than through a fabricated body.
+    //
+    // Arm64DDC.swift branches on `send.count == 1`, where `send` excludes the
+    // op-code — so the branch fires for a Get-VCP and nothing else. The previous
+    // version of this test invented a one-byte body to reach that branch, which
+    // was the visible symptom of the framing bug: no request this codec can
+    // build has a one-byte body, so the branch was unreachable and the seed it
+    // guards was never applied to the Get that needed it.
+    assert!(trailing_checksum_ok(
+        &DdcWire::AppleSilicon.encode_get_vcp(0x10),
+        0x6E
+    ));
+    assert!(trailing_checksum_ok(
+        &DdcWire::AppleSilicon.encode_set_vcp(0x10, 0x0032),
+        0x6E ^ 0x51
+    ));
+    assert!(trailing_checksum_ok(
+        &DdcWire::AppleSilicon.encode_caps_request(0x0000),
+        0x6E ^ 0x51
+    ));
 }
 
 // --- get-VCP reply round trips -------------------------------------------
@@ -305,7 +377,7 @@ fn transport_reads_vcp_through_the_bus() {
     // The framed request the transport wrote is the Apple Silicon get packet.
     assert_eq!(
         transport.bus().writes.first().map(Vec::as_slice),
-        Some(&[0x83u8, 0x02, 0x01, 0x10, 0xAF][..])
+        Some(&[0x82u8, 0x01, 0x10, 0xFD][..])
     );
 }
 
