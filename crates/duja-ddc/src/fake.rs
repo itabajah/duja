@@ -312,12 +312,65 @@ impl FakeI2cBus {
     }
 
     /// Extract the DDC/CI request body (op-code and args) from a framed packet.
-    /// The body always starts at index 2 and its length lives in the low 7 bits
-    /// of index 1 — true for both the Intel and Apple Silicon framings.
-    fn request_body(data: &[u8]) -> Option<&[u8]> {
-        let len = usize::from(data.get(1).copied()? & 0x7F);
-        let end = len.saturating_add(2);
-        data.get(2..end)
+    ///
+    /// The two framings put the length byte in different places: Intel leads
+    /// with the `0x51` host source address and so carries it at index 1, while
+    /// Apple Silicon passes that address out of band as the I2C call's
+    /// `dataAddress` and so leads with the length byte itself.
+    ///
+    /// This used to read index 1 unconditionally, on the stated grounds that it
+    /// was "true for both framings". It was not — it was true of the *malformed*
+    /// Apple Silicon frame this fake was written against, whose spurious second
+    /// byte happened to equal the body length, so the fake decoded the bug into
+    /// the right answer and every round trip closed. A fake that shares the
+    /// production framing assumption cannot test that assumption; keying off
+    /// [`DdcWire`] is what makes the two independent.
+    /// Validate a request's trailing XOR checksum the way a real display would,
+    /// re-deriving the seed from the framing and the op-code.
+    ///
+    /// Without this the seed was untested end to end: inverting it reddened only
+    /// the two exact-byte unit tests, and every `mac_transport_*` round trip
+    /// closed regardless, because `read()` just hands back a scripted reply.
+    ///
+    /// **What this does and does not buy.** It checks a value the codec
+    /// *computes* rather than re-deriving where the codec *puts* things, so it is
+    /// independent of the layout — which is the assumption that was wrong. It is
+    /// not independent of the seed rule, which it necessarily restates: a change
+    /// made to both sides at once would still pass, the same limit every fake
+    /// has. What it catches is the realistic regression — one side edited alone.
+    ///
+    /// The constants are spelled literally rather than imported, like the
+    /// op-codes above. That is deliberate: sharing production's constants is how
+    /// the layout assumption got shared in the first place.
+    fn request_checksum_ok(wire: DdcWire, data: &[u8]) -> bool {
+        let Some((&stamped, covered)) = data.split_last() else {
+            return false;
+        };
+        // Intel folds the on-wire 0x51 in as an ordinary covered byte. Apple
+        // Silicon does not carry it, and folds it into the seed for everything
+        // except a Get — see `DdcWire::AppleSilicon`.
+        let seed = match wire {
+            DdcWire::Intel => 0x6E,
+            DdcWire::AppleSilicon => {
+                if Self::request_body(wire, data).and_then(<[u8]>::first) == Some(&OP_GET_VCP) {
+                    0x6E
+                } else {
+                    0x6E ^ 0x51
+                }
+            }
+        };
+        covered.iter().fold(seed, |acc, &b| acc ^ b) == stamped
+    }
+
+    fn request_body(wire: DdcWire, data: &[u8]) -> Option<&[u8]> {
+        let length_index: usize = match wire {
+            DdcWire::Intel => 1,
+            DdcWire::AppleSilicon => 0,
+        };
+        let body_start = length_index.saturating_add(1);
+        let len = usize::from(data.get(length_index).copied()? & 0x7F);
+        let end = body_start.saturating_add(len);
+        data.get(body_start..end)
     }
 
     /// Build the capabilities-reply fragment for `offset` from the caps string.
@@ -339,7 +392,12 @@ impl I2cBus for FakeI2cBus {
         if !self.connected {
             return Err(TransportError::Disconnected);
         }
-        let Some(body) = Self::request_body(data) else {
+        if !Self::request_checksum_ok(self.wire, data) {
+            // A real display NAKs a bad checksum, which the transport sees as no
+            // reply at all.
+            return Err(TransportError::Timeout);
+        }
+        let Some(body) = Self::request_body(self.wire, data) else {
             return Err(TransportError::Timeout);
         };
         match body.first().copied() {

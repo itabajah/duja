@@ -34,10 +34,19 @@ Findings:
   anyway, then re-deriving `Disconnected`/`Timeout`/`Backend` from opaque errors.
 - **The wire is tiny and standard.** DDC/CI is three request shapes (get/set VCP,
   capabilities) plus reply parsing and an XOR checksum. The only real subtlety is
-  that Apple Silicon's `IOAVServiceWriteI2C` path wants a slightly different frame
-  than the Intel/standard MCCS frame (an extra length byte, checksum seed
-  `0x6E ^ 0x51`) — a per-arm branch of a few lines, encoded from
-  `Arm64DDC.swift`.
+  that Apple Silicon's `IOAVServiceWriteI2C` takes the `0x51` host source address
+  as a separate `dataAddress` argument, so its packet is the standard MCCS frame
+  **minus that leading byte** — and the checksum seed differs per request shape
+  (`0x6E` for a Get, `0x6E ^ 0x51` otherwise). A per-arm branch of a few lines.
+
+  > **This paragraph said "an extra length byte" until the P6 gate.** That was
+  > wrong, and the code written from it emitted malformed requests that no Apple
+  > Silicon display could answer — see the `duja-ddc` `ddcci` module docs for the
+  > misreading of `Arm64DDC.swift` that produced it. Cross-check any change here
+  > against **fastfetch** (`src/detection/brightness/brightness_apple.c`), which
+  > implements both arms in one file and is the clearest available reference;
+  > MonitorControl and m1ddc share an author, so they are not independent of each
+  > other, and `ddc-macos` genuinely disagrees on the Get checksum.
 - **Own-backend cost is small and reuses everything.** By expressing the OS layer
   as an [`I2cBus`](../../crates/duja-ddc/src/ddcci.rs) (write bytes / read bytes)
   and building a generic `DdcCiTransport<B: I2cBus>` on it, the entire codec is

@@ -49,13 +49,13 @@ end from day one. Distribution is a tag-triggered
 portable zip, and — from `v0.2.0` — a macOS universal disk image, all under one
 `SHA256SUMS`, each with a minisign signature and a build-provenance attestation.
 
-Health: **1,036 tests on the Windows CI lane plus 10 doctests (1,046 in a local `cargo test --workspace --all-features`), green on 3 OSes** — the
+Health: **1,038 tests on the Windows CI lane plus 10 doctests (1,048 in a local `cargo test --workspace --all-features`), green on 3 OSes** — the
 per-OS count differs because the `#![cfg(windows)]` and `#![cfg(unix)]`
 integration suites compile out on the other lanes; clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
-on stable, adversarial gate reviews at **P2, P3, P4, P5** plus a full post-v0.1.0
-**deep review** (14 module reviewers, every non-low finding adversarially
-verified) with every confirmed finding fixed test-first.
+on stable, adversarial gate reviews at **P2, P3, P4, P5, P6** plus a full
+post-v0.1.0 **deep review** (14 module reviewers, every non-low finding
+adversarially verified) with every confirmed finding fixed test-first.
 
 ### v0.1.1 — deep-review fix wave (2026-07-17)
 
@@ -731,6 +731,47 @@ artifact uncompilable, not every omission (deleting the check and the seal toget
 still compiles, and `dead_code` under CI's clippy is what catches that); and the
 "re-run recovers the tag" note gave the wrong reason, since with `needs:` the
 publishing job never ran and there is no Release to update.
+
+### `#106` — every Apple Silicon DDC request was malformed (2026-07-31)
+
+Found by the **P6 phase-gate review**, and the reason `#105` was not in fact the
+last P6 code item. On an M-series Mac no external monitor could be read or driven
+over DDC: `frame_request`'s Apple Silicon arm emitted a spurious byte and an
+off-by-one length prefix, and used the wrong checksum seed for a Get.
+
+    Get VCP 0x10   was  83 02 01 10 AF      now  82 01 10 FD
+    Set VCP 0x10   was  85 04 03 10 hi lo   now  84 03 10 hi lo
+
+`0x02` is *VCP Feature Reply*, a display→host op-code, so the frames were
+semantically garbage rather than corrupt — the old checksum was self-consistent,
+which is part of why nothing rejected them loudly.
+
+One root cause. The arm was transliterated from MonitorControl's
+`packet = [0x80 | (send.count + 1), UInt8(send.count)] + send`, whose `send`
+**excludes** the DDC op-code — so that second element *is* the op-code, and only
+looks like a second length field because a Get sends 1 byte (op `0x01`) and a Set
+sends 3 (op `0x03`). Duja read it as a length and prepended its own op-code as
+well. The same misreading shifted the seed branch, which the reference keys on
+`send.count == 1`, i.e. duja's Get.
+
+Cross-checked against four implementations before a byte changed. They do not all
+agree, and the write-up says so: **fastfetch** is the most useful (it emits both
+arms from one file), MonitorControl and m1ddc agree with it but **share an
+author** so they are one source rather than two, and `ddc-macos` genuinely
+dissents on the Get checksum. Duja follows the three field-dominant ones.
+
+Why nothing caught it: `FakeI2cBus` read the length at index 1 and the body at
+`2..`, documented as true for both framings. That was true only of the *malformed*
+frame, whose spurious second byte happened to equal the body length — so the fake
+decoded the bug into the right answer and every round trip closed. It now keys off
+`DdcWire`, and validates the request checksum as a real display would, which the
+gate's review of this PR showed was the remaining half: before that, inverting the
+seed reddened only the two exact-byte unit tests and **zero** transport tests.
+Both properties were verified by restoring the defect under the corrected fake.
+
+Note this is a reading of the wire, not an observation — Duja has still never run
+against Apple Silicon hardware, so the whole `duja-ddc` `mac/` row in
+[debt.md](debt.md) stands unchanged.
 
 ### `#105` — the built-in panel gets a position, so it can be dimmed (2026-07-31)
 
