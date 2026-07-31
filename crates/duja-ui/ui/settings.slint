@@ -439,16 +439,19 @@ export component SettingsWindow inherits Window {
                                 }
                                 // On macOS `CGSetDisplayTransferByFormula` can
                                 // return success and leave the display's curve
-                                // untouched — reported on current hardware, with a
-                                // trigger as ordinary as leaving "Automatically
-                                // adjust brightness" on. Unlike the Windows cap
+                                // untouched. Two reported modes, deliberately not
+                                // ranked here: Apple DTS reproduced a total
+                                // no-visual-change on M5 Pro/Max/Neo with no
+                                // precondition at all, and separately the ramp is
+                                // reported not to apply while "Automatically adjust
+                                // brightness" is on. Unlike the Windows cap
                                 // there is no rule to comply with and readback
                                 // cannot detect it, so the only thing Duja can do
                                 // is say so before the user picks the mode. Same
                                 // decision as the cap above: keep gamma, disclose
                                 // the limit. See `duja_dimmer::gamma_is_advisory`.
                                 if monitor.gamma-available && monitor.gamma-advisory: Text {
-                                    text: @tr("Gamma may not take effect on this system: macOS can accept a ramp and not apply it, most often while \"Automatically adjust brightness\" is on. If the screen does not dim, use the overlay instead");
+                                    text: @tr("Gamma may not take effect on this system: macOS can accept a ramp and not apply it — on some recent Macs regardless of settings, and on others while \"Automatically adjust brightness\" is on. If the screen does not dim, use the overlay instead");
                                     color: Palette.text-faint;
                                     font-size: 11px;
                                     wrap: word-wrap;

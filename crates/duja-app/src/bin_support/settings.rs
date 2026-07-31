@@ -29,7 +29,31 @@
 use duja_core::config::{Config, DimMode as ConfigDimMode, MonitorConfig, Theme as ConfigTheme};
 use duja_core::continuum::ContinuumConfig;
 use duja_core::model::{DimMode, DisplayKind};
-use duja_ui::Theme as UiTheme;
+use duja_ui::{GammaLimits, Theme as UiTheme};
+
+use crate::bin_support::dimming;
+
+/// What **this platform's** OS does to a gamma ramp, as the settings view-model
+/// wants it: how far the channel reaches, and whether a write can be accepted
+/// without being applied.
+///
+/// Lives here, in a cross-platform module whose tests run on every CI lane, for
+/// the reason [`dimming::plan_for_platform`] does: the *choice* of source has to
+/// be pinned by a test rather than sitting at an `AppState` call site no test can
+/// reach. It was in `tray/state.rs` for one commit, and a review showed what that
+/// costs — hardcoding `advisory: false` there deletes the macOS hazard disclosure
+/// entirely while the whole suite and every CI lane stay green, because the tray
+/// module is `cfg(any(windows, target_os = "macos"))` and no test reaches it.
+///
+/// Building the struct in one place also keeps the three `set_displays` call sites
+/// from disagreeing — the failure being one refresh path that discloses a limit and
+/// another that does not.
+pub(crate) fn platform_gamma_limits() -> GammaLimits {
+    GammaLimits {
+        cap_pct: dimming::gamma_cap_pct_for_platform(),
+        advisory: duja_dimmer::gamma_is_advisory(),
+    }
+}
 
 /// Resolve the [`ContinuumConfig`] for one display from its per-monitor settings.
 ///
@@ -143,6 +167,58 @@ pub(crate) fn ui_theme(pref: ConfigTheme, os_dark: Option<bool>) -> UiTheme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_gamma_limits_reports_this_os_rather_than_a_literal() {
+        // Both captions in the settings window are only correct because these two
+        // values come from `duja-dimmer` per target. Substituting either constant
+        // here silently deletes a disclosure the user is meant to see — and while
+        // this call lived in `tray/state.rs` *nothing in the tree noticed*, because
+        // that module is `cfg(any(windows, target_os = "macos"))`, so even
+        // `clippy (ubuntu-latest)` could not reach it.
+        //
+        // Which lane catches which substitution is asymmetric, and worth stating
+        // rather than leaving to be discovered:
+        //
+        // - `cap_pct: None` reds **here on Windows** (the arm below expects
+        //   `Some(50)`) and is invisible elsewhere, since `None` is the right
+        //   answer off Windows.
+        // - `advisory: false` reds **only on the macOS lane**. On Windows `false`
+        //   is the correct value, so no Windows-side assertion can call it a bug —
+        //   the same shape as `gamma_cap_pct_for_platform`'s own test, and the
+        //   reason this one asserts all three targets instead of just the host.
+        //
+        // Asserted as the whole struct rather than field by field, so a future
+        // third limit cannot be added and left unpinned.
+        let limits = platform_gamma_limits();
+
+        #[cfg(windows)]
+        assert_eq!(
+            limits,
+            GammaLimits {
+                cap_pct: Some(50),
+                advisory: false,
+            },
+            "Windows caps the ramp at MIN_ACCEPTED_GAMMA and honours what it accepts"
+        );
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            limits,
+            GammaLimits {
+                cap_pct: None,
+                advisory: true,
+            },
+            "macOS takes the whole range and can still not apply it"
+        );
+
+        #[cfg(not(any(windows, target_os = "macos")))]
+        assert_eq!(
+            limits,
+            GammaLimits::UNLIMITED,
+            "no gamma backend ⇒ no limit to disclose"
+        );
+    }
 
     fn monitor(floor: u8, mode: ConfigDimMode) -> MonitorConfig {
         MonitorConfig {

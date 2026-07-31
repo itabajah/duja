@@ -25,8 +25,7 @@ use duja_core::model::{DimMode, DisplayKind, DisplaySnapshot};
 use duja_dimmer::PlatformDimmer;
 use duja_platform::Autostart;
 use duja_ui::{
-    FlyoutShell, FlyoutVm, GammaLimits, SettingsCommand, SettingsShell, SettingsVm, ThemeChoice,
-    UiCommand,
+    FlyoutShell, FlyoutVm, SettingsCommand, SettingsShell, SettingsVm, ThemeChoice, UiCommand,
 };
 
 use crate::bin_support::bounds::BoundsMap;
@@ -49,21 +48,6 @@ use super::{
     FLYOUT_MIN_LOGICAL_HEIGHT, SETTINGS_LOGICAL_HEIGHT, SETTINGS_LOGICAL_WIDTH, geometry, icon,
     open_url, os_dark_theme, spawn_relaunch, unix_now,
 };
-
-/// What this platform's OS does to a gamma ramp, for the settings captions.
-///
-/// A free function rather than an [`AppState`] field: both halves are process
-/// constants (`duja-dimmer` resolves them per target at compile time), so storing
-/// them would only be a snapshot of something that cannot change. It exists at all
-/// so the three `set_displays` call sites cannot disagree about how the struct is
-/// built — the failure mode being one refresh path that discloses the cap and
-/// another that does not.
-fn platform_gamma_limits() -> GammaLimits {
-    GammaLimits {
-        cap_pct: dimming::gamma_cap_pct_for_platform(),
-        advisory: duja_dimmer::gamma_is_advisory(),
-    }
-}
 
 /// The main-thread application state driven by every event source.
 pub(super) struct AppState {
@@ -467,7 +451,7 @@ impl AppState {
             &self.snapshots,
             &self.config,
             self.gamma_allowed,
-            platform_gamma_limits(),
+            settings::platform_gamma_limits(),
         );
         self.settings_shell
             .update_from_vm(&self.settings_vm.borrow());
@@ -590,7 +574,7 @@ impl AppState {
                 &self.snapshots,
                 &self.config,
                 self.gamma_allowed,
-                platform_gamma_limits(),
+                settings::platform_gamma_limits(),
             );
             vm.set_hotkeys(hotkeys);
         }
@@ -1047,7 +1031,7 @@ impl AppState {
             &self.snapshots,
             &self.config,
             self.gamma_allowed,
-            platform_gamma_limits(),
+            settings::platform_gamma_limits(),
         );
         self.settings_shell
             .update_from_vm(&self.settings_vm.borrow());

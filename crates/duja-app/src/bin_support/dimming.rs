@@ -164,7 +164,8 @@ pub(crate) fn plan_for_platform(
 /// `0..transition` onto the whole factor range, so `gamma == user_pct / transition`
 /// on a display with a working backlight and `gamma == user_pct / 100` without one.
 /// With the shipped defaults (`hw_floor_pct = 0`, `min_perceived_pct = 25`)
-/// `transition` is 25, so a factor of `0.5` is reached at slider 12, not slider 50.
+/// `transition` is 25, so a factor of `0.5` falls at slider 12.5 — the substitution
+/// takes over at slider 12 and below, not at slider 50.
 /// The factor is a fraction of the *floor-level* picture, and the caption's "%"
 /// means the gamma channel's own reach rather than a mark on the slider. Whether
 /// the copy should say so is a separate question — `docs/debt.md` carries it.

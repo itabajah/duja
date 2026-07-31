@@ -167,12 +167,16 @@ pub fn min_gamma_factor() -> f32 {
 /// unknown, not a mode the platform has.
 ///
 /// On **macOS** this is `true`, and the difference is mechanism rather than
-/// likelihood. `CGSetDisplayTransferByFormula` is reported (DTS-acknowledged) to
-/// return `kCGErrorSuccess` while leaving the display's curve unchanged, on
-/// *valid* triples, when "Automatically adjust brightness" is on — the default on
-/// Apple Silicon laptops. There is no rule to comply with, and readback cannot
-/// detect it either: `CGGetDisplayTransferByTable` returns the values just written
-/// while the screen is unchanged. See `docs/debt.md`.
+/// likelihood. `CGSetDisplayTransferByFormula` is reported to return
+/// `kCGErrorSuccess` while leaving the display's curve unchanged, on *valid*
+/// triples, in two distinct situations that are deliberately not ranked against
+/// each other: Apple DTS reproduced a **total** no-visual-change on M5 Pro/Max/Neo
+/// under macOS 26.3.1 with **no precondition at all** (both the Table and Formula
+/// entry points, on built-in and external displays), and separately the ramp is
+/// reported not to apply while "Automatically adjust brightness" is on. There is no
+/// rule to comply with, and readback cannot detect it either: DTS confirmed
+/// `CGGetDisplayTransferByTable` returns the values just written while the screen is
+/// unchanged. See `docs/debt.md`.
 #[cfg(windows)]
 #[must_use]
 pub fn gamma_is_advisory() -> bool {
@@ -184,12 +188,13 @@ pub fn gamma_is_advisory() -> bool {
 /// contract; the short version is that this asks whether the hazard can be
 /// engineered away, not whether it exists.
 ///
-/// - **macOS**: `true`. `CGSetDisplayTransferByFormula` is reported
-///   (DTS-acknowledged) to return `kCGErrorSuccess` while leaving the curve
-///   unchanged, on *valid* triples, when "Automatically adjust brightness" is on —
-///   the default on Apple Silicon laptops. No rule exists to comply with, and
-///   `CGGetDisplayTransferByTable` returns the written values while the screen is
-///   unchanged, so verification by readback does not detect it either.
+/// - **macOS**: `true`. `CGSetDisplayTransferByFormula` is reported to return
+///   `kCGErrorSuccess` while leaving the curve unchanged, on *valid* triples —
+///   DTS-reproduced on M5 Pro/Max/Neo with no precondition, and separately
+///   reported while "Automatically adjust brightness" is on. No rule exists to
+///   comply with, and `CGGetDisplayTransferByTable` returns the written values
+///   while the screen is unchanged, so verification by readback does not detect it
+///   either.
 /// - **Other targets**: `false` — there is no gamma backend at all, so nothing can
 ///   silently fail.
 #[cfg(not(windows))]

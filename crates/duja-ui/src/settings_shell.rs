@@ -949,6 +949,17 @@ mod binding_tests {
         advisory: true,
     };
 
+    /// An OS that is both capped and advisory. No real target is, which is exactly
+    /// why it belongs here: it is the only fixture that can catch one guard being
+    /// derived from the *other* flag. `CAPPED_ONLY` and `ADVISORY_ONLY` alone
+    /// cannot — under those two, `gamma-advisory` and `gamma-cap-pct == 0` are
+    /// indistinguishable, so `&& gamma-cap-pct == 0` passes as a stand-in for
+    /// `&& gamma-advisory` and both captions still land where they should.
+    const BOTH_LIMITS: GammaLimits = GammaLimits {
+        cap_pct: Some(NOT_THE_WINDOWS_CAP),
+        advisory: true,
+    };
+
     /// The rendered dim-mode captions in `shell`'s element tree whose text starts
     /// with `prefix`.
     ///
@@ -1119,6 +1130,16 @@ mod binding_tests {
             render(CAPPED_ONLY, false).is_empty(),
             "gamma unavailable ⇒ no caption about how far gamma reaches"
         );
+
+        // An OS that is both capped and advisory still shows the cap. Without this
+        // case, `gamma-cap-pct > 0 && !gamma-advisory` passes as a stand-in for the
+        // real guard — a plausible "simplification", since no shipping target is
+        // both — and the cap caption would vanish the moment one became both.
+        assert_eq!(
+            render(BOTH_LIMITS, true).len(),
+            1,
+            "the cap is disclosed on its own terms, not conditioned on reliability"
+        );
     }
 
     // The macOS hazard caption: `CGSetDisplayTransferByFormula` can return success
@@ -1128,8 +1149,11 @@ mod binding_tests {
     // leaked onto Windows would be a hazard warning for a path this project's own
     // `MIN_ACCEPTED_GAMMA` tests prove compliant.
     //
-    // The two captions are deliberately driven against *each other's* fixture:
-    // deriving either guard from the other flag, or from `gamma-cap-pct`, reds here.
+    // The two captions are driven against *each other's* fixture, and against an OS
+    // that has both limits at once — the case no shipping target is, and the only
+    // one that separates the flags. Under `CAPPED_ONLY`/`ADVISORY_ONLY` alone,
+    // `gamma-advisory` and `gamma-cap-pct == 0` agree on every input, so a guard
+    // written in terms of the wrong one passes; `BOTH_LIMITS` is where they part.
     #[test]
     fn the_advisory_caption_renders_only_where_gamma_can_silently_do_nothing() {
         i_slint_backend_testing::init_no_event_loop();
@@ -1175,6 +1199,16 @@ mod binding_tests {
 
         // And an OS with neither limit says nothing at all.
         assert_eq!(render(GammaLimits::UNLIMITED, true), (0, 0));
+
+        // Both limits at once: two independent facts, two captions. This is the
+        // case that separates `gamma-advisory` from `gamma-cap-pct == 0` — under
+        // the two fixtures above they agree on every input, so a guard written
+        // `&& gamma-cap-pct == 0` instead of `&& gamma-advisory` passes both.
+        assert_eq!(
+            render(BOTH_LIMITS, true),
+            (1, 1),
+            "a capped *and* advisory OS discloses both limits"
+        );
     }
 
     // The settings window must follow the resolved theme. Before the fix,
