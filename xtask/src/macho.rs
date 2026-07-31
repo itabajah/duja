@@ -173,16 +173,26 @@ fn thin_slice(bytes: &[u8], start: usize) -> Result<Slice, String> {
         // `cmd`, `cmdsize`); both encode it the same way. Note the offsets are
         // *not* interchangeable — reading one word further gets `sdk`, which
         // would compare the build machine's SDK against the advertised floor.
+        //
+        // The `size` guards keep every read inside the command that claims it.
+        // `read_u32` bounds-checks against the *file*, not the command, so
+        // without them a command whose `cmdsize` lies would read its
+        // neighbour's bytes — and that is not academic: `PLATFORM_MACOS` is 1,
+        // which is also `LC_SEGMENT`, so a truncated build-version command
+        // followed by a segment would pass the platform check and report the
+        // segment's `cmdsize` as a version. Silently wrong is the one outcome
+        // this parser must not have.
         let packed_at = match cmd {
             // Only the macOS entry: a zippered binary also carries a Mac
             // Catalyst one, and taking whichever came first would report a
             // different platform's floor.
             LC_BUILD_VERSION
-                if read_u32(bytes, add(cursor, 8)?, Endian::Little)? == PLATFORM_MACOS =>
+                if size >= 16
+                    && read_u32(bytes, add(cursor, 8)?, Endian::Little)? == PLATFORM_MACOS =>
             {
                 Some(add(cursor, 12)?)
             }
-            LC_VERSION_MIN_MACOSX => Some(add(cursor, 8)?),
+            LC_VERSION_MIN_MACOSX if size >= 12 => Some(add(cursor, 8)?),
             _ => None,
         };
         if let Some(at) = packed_at {
@@ -514,6 +524,41 @@ mod tests {
                 "cmd {cmd:#x} read the wrong word"
             );
         }
+    }
+
+    /// A load command whose `cmdsize` is too small to hold the field being
+    /// read must be skipped, not read past. `PLATFORM_MACOS` is 1 and
+    /// `LC_SEGMENT` is also 1, so the neighbouring command's header would
+    /// otherwise satisfy the platform check and its `cmdsize` would be reported
+    /// as a version.
+    #[test]
+    fn a_load_command_that_lies_about_its_size_is_not_read_past() {
+        let mut out = Vec::new();
+        out.extend_from_slice(&MH_MAGIC_64.to_le_bytes());
+        out.extend_from_slice(&CPU_TYPE_ARM64.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // cpusubtype
+        out.extend_from_slice(&2u32.to_le_bytes()); // filetype
+        out.extend_from_slice(&2u32.to_le_bytes()); // ncmds
+        out.extend_from_slice(&24u32.to_le_bytes()); // sizeofcmds
+        out.extend_from_slice(&0u32.to_le_bytes()); // flags
+        out.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        // A build-version command claiming to be 8 bytes long...
+        out.extend_from_slice(&LC_BUILD_VERSION.to_le_bytes());
+        out.extend_from_slice(&8u32.to_le_bytes());
+        // ...immediately followed by LC_SEGMENT (1), which is also the value of
+        // PLATFORM_MACOS, with a cmdsize that would read as version 0.16.
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&[0u8; 8]);
+
+        assert_eq!(
+            slices(&out)
+                .expect("parse")
+                .first()
+                .and_then(|s| s.min_os.clone()),
+            None,
+            "a short command must not be read past into its neighbour"
+        );
     }
 
     #[test]

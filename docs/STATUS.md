@@ -49,7 +49,7 @@ end from day one. Distribution is a tag-triggered
 portable zip, and — from `v0.2.0` — a macOS universal disk image, all under one
 `SHA256SUMS`, each with a minisign signature and a build-provenance attestation.
 
-Health: **1,019 tests on the Windows CI lane plus 10 doctests (1,029 in a local `cargo test`), green on 3 OSes** — the
+Health: **1,020 tests on the Windows CI lane plus 10 doctests (1,030 in a local `cargo test`), green on 3 OSes** — the
 per-OS count differs because the `#![cfg(windows)]` and `#![cfg(unix)]`
 integration suites compile out on the other lanes; clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
