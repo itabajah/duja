@@ -62,12 +62,6 @@ mod win;
 #[cfg(target_os = "macos")]
 mod mac;
 
-// The pure display-surface rule the macOS backend stamps onto each display. It
-// is FFI-free, so it is compiled (and its tests run) on every OS under `test`;
-// outside tests only the macOS backend consumes it.
-#[cfg(any(target_os = "macos", test))]
-mod mac_surface;
-
 #[cfg(test)]
 mod fake;
 

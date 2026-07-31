@@ -58,6 +58,7 @@ use duja_core::dimmer::DisplayBounds;
 use duja_core::id::StableDisplayId;
 use duja_core::manager::DiscoveredDisplay;
 use duja_core::model::{Capabilities, DisplayKind, Feature};
+use duja_panel::PanelGeometry;
 
 /// Capabilities advertised for a hardware-backed display at enumeration time:
 /// brightness only, with a real hardware range. See the module docs.
@@ -78,9 +79,19 @@ pub(crate) fn discover() -> Vec<DiscoveredDisplay> {
 }
 
 /// One display's app-side geometry: its bare id, its display bounds, and the two
-/// platform tokens the dimming channels need. Carried by DDC displays — external
-/// monitors and a (Windows-only) DDC-fallback internal panel alike — but not by
-/// the panel backend's panels, whose geometry is all `None`.
+/// platform tokens the dimming channels need.
+///
+/// Carried by every DDC display — external monitors and a (Windows-only)
+/// DDC-fallback internal panel alike — and by a panel from the OS panel backend
+/// **when that backend can report it**. On macOS it normally can: a
+/// `DisplayServices` panel is an ordinary CoreGraphics display and answers
+/// `CGDisplayBounds`/`CGDisplayMirrorsDisplay` like any other. Two cases still
+/// yield all `None` — a Windows WMI panel, because WMI exposes neither a monitor
+/// rect nor a GDI device for the panel it drives (`docs/debt.md`), and a macOS
+/// panel whose rect came back degenerate, which `duja-panel` withholds rather than
+/// hand on. The three fields move together — see [`duja_panel::PanelGeometry`],
+/// whose absence means "this backend cannot say", never "this display has no
+/// position".
 ///
 /// # Bounds, whose **unit differs by platform**
 ///
@@ -126,31 +137,49 @@ pub(crate) fn discover() -> Vec<DiscoveredDisplay> {
 ///
 /// Duja has no Mac, and the CI runners are virtualized with no external display,
 /// so no test or run has ever observed a real macOS mirror set. What is *proven*
-/// is the surface rule (`duja_ddc`'s `mac_surface` tests, which run on every CI
-/// OS); what is **assumed** is that `CGGetActiveDisplayList` reports every member
-/// of a mirror set rather than only the master. That assumption is deliberately
-/// not load-bearing: if only the master is enumerated, each surface token equals
-/// its own display id, `group_clones` builds the same singletons it builds today,
-/// and behaviour is unchanged. It can only *add* a merge, never remove one — and
-/// it cannot mis-address anything, because addressing no longer goes through it.
-/// See `docs/debt.md`.
+/// is the surface rule ([`duja_core::macos`]'s tests, which run on every CI OS);
+/// what is **assumed** is that the enumeration each backend uses reports every
+/// member of a mirror set rather than only the master. That assumption is deliberately
+/// not load-bearing for *grouping*: if only the master is enumerated, each surface
+/// token equals its own display id, `group_clones` builds the same singletons it
+/// builds today, and behaviour is unchanged. It can only *add* a merge, never
+/// remove one, and it cannot mis-address anything, because addressing no longer
+/// goes through it.
+///
+/// **Placement is a third consumer, and there the reassurance does not hold.** A
+/// merged group takes its one `DimCommand`'s bounds from the anchor, the anchor is
+/// the lowest resolved id string, and an Apple panel's `APP-…`/`AAP-…` sorts ahead
+/// of nearly every monitor PNP id — so adding a merge is exactly what can move an
+/// overlay's geometry onto the built-in panel's rect. "Only adds a merge" is
+/// reassuring about grouping and says nothing about that. See `docs/debt.md`'s
+/// macOS-surface-token row, which carries the same correction.
 #[derive(Debug, Clone)]
 pub(crate) struct DisplayGeom {
     /// The display's **bare** EDID id (pre twin-slot resolution), which is what
     /// `BoundsMap` routes a resolved id back to.
     pub(crate) id: String,
     /// Display bounds in this platform's unit (see above), or `None` for a panel
-    /// backend entry.
+    /// the OS panel backend cannot place — always a Windows WMI panel, and a macOS
+    /// panel whose `CGDisplayBounds` was degenerate.
     pub(crate) bounds: Option<DisplayBounds>,
     /// The token that **addresses** this display for gamma: the GDI device name on
-    /// Windows, this display's own `CGDirectDisplayID` in decimal on macOS.
-    /// `None` for a panel backend entry, which has no gamma device.
+    /// Windows, this display's own `CGDirectDisplayID` in decimal on macOS —
+    /// including for a macOS built-in panel, which is addressed as itself whether
+    /// or not it is mirroring. `None` for a Windows WMI panel, which has no gamma
+    /// device — and for a macOS panel that reported no geometry, whose tokens are
+    /// withheld along with its bounds.
     pub(crate) gamma_token: Option<String>,
     /// The token that names this display's **framebuffer**, which mirrored panels
     /// are grouped by: the GDI device name on Windows (identical to
     /// [`Self::gamma_token`] there), the mirror-set master's `CGDirectDisplayID` in
-    /// decimal on macOS. `None` for a panel backend entry, which cannot be
-    /// correlated to a surface and so stays its own singleton.
+    /// decimal on macOS. A macOS built-in panel carries it too, which is what lets
+    /// a mirror set spanning both backends — the `MacBook`-to-projector layout —
+    /// collapse into one control instead of stacking two overlays on one surface.
+    /// `None` for a Windows WMI panel, which cannot be correlated to a surface and
+    /// so stays its own singleton — and, for the same reason, for a macOS panel
+    /// that reported no geometry. Dropping the token *with* the bounds is what
+    /// keeps such a panel from anchoring a mirror group it can no longer place,
+    /// which would take the whole group's overlay down with it.
     pub(crate) surface_token: Option<String>,
 }
 
@@ -159,10 +188,11 @@ pub(crate) struct DisplayGeom {
 /// Returns the [`DiscoveredDisplay`] list the engine consumes, plus a parallel
 /// [`DisplayGeom`] list in the *same* deterministic order (DDC first, then
 /// panels). The geometry list feeds an app-side
-/// [`BoundsMap`](crate::bin_support::bounds::BoundsMap); the panel backend's
-/// panels contribute no bounds and no tokens, whereas a DDC display — including a
-/// Windows DDC-fallback internal panel — keeps its DDC geometry. See
-/// [`DisplayGeom`] for the per-platform units and the two tokens. Never errors.
+/// [`BoundsMap`](crate::bin_support::bounds::BoundsMap): a DDC display — including
+/// a Windows DDC-fallback internal panel — keeps its DDC geometry, and a panel
+/// keeps whatever the OS panel backend reported for it (everything on macOS,
+/// nothing on Windows). See [`DisplayGeom`] for the per-platform units and the two
+/// tokens. Never errors.
 pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<DisplayGeom>) {
     let ddc: Vec<(DiscoveredDisplay, DisplayGeom)> = discover_ddc()
         .into_iter()
@@ -178,14 +208,9 @@ pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<DisplayGeom>) {
         .collect();
     let panel: Vec<(DiscoveredDisplay, DisplayGeom)> = discover_panel()
         .into_iter()
-        .map(|display| {
-            let geom = DisplayGeom {
-                id: display.id.as_str().to_owned(),
-                bounds: None,
-                gamma_token: None,
-                surface_token: None,
-            };
-            (display, geom)
+        .map(|found| {
+            let geom = panel_geom(&found.display, found.geometry.as_ref());
+            (found.display, geom)
         })
         .collect();
 
@@ -348,23 +373,60 @@ fn discover_ddc() -> Vec<FoundDdc> {
 }
 
 /// Enumerate the OS panel backend's internal panels as [`DiscoveredDisplay`]
-/// metadata. Not cfg-gated: `duja_panel::enumerate` exists on every target (it
-/// returns an empty list where there is no backend), so this reports real panels
-/// on Windows *and* macOS. `open_panel_controller` must therefore be able to open
-/// them on both — a table row stamped `hardware_range: true` that no opener can
-/// serve would claim control Duja does not have.
-fn discover_panel() -> Vec<DiscoveredDisplay> {
+/// metadata plus whatever geometry the backend reported. Not cfg-gated:
+/// `duja_panel::enumerate` exists on every target (it returns an empty list where
+/// there is no backend), so this reports real panels on Windows *and* macOS.
+/// `open_panel_controller` must therefore be able to open them on both — a table
+/// row stamped `hardware_range: true` that no opener can serve would claim control
+/// Duja does not have.
+fn discover_panel() -> Vec<FoundPanel> {
     match duja_panel::enumerate() {
         Ok(panels) => panels
             .into_iter()
-            .map(|p| DiscoveredDisplay {
-                id: p.id().clone(),
-                kind: DisplayKind::InternalPanel,
-                name: Some(p.name().to_owned()),
-                capabilities: hardware_brightness_caps(),
+            .map(|p| FoundPanel {
+                display: DiscoveredDisplay {
+                    id: p.id().clone(),
+                    kind: DisplayKind::InternalPanel,
+                    name: Some(p.name().to_owned()),
+                    capabilities: hardware_brightness_caps(),
+                },
+                geometry: p.geometry().cloned(),
             })
             .collect(),
         Err(_) => Vec::new(),
+    }
+}
+
+/// One panel found by the OS panel backend: its metadata plus whatever geometry
+/// that backend could report — the panel twin of [`FoundDdc`], so both arms of
+/// [`discover_all`] carry their geometry the same way.
+///
+/// (Unlike [`FoundDdc`] the two fields are differently typed, so the struct is
+/// here for symmetry and naming rather than to prevent a transposed pair.)
+struct FoundPanel {
+    display: DiscoveredDisplay,
+    geometry: Option<duja_panel::PanelGeometry>,
+}
+
+/// Fold a panel's backend-reported geometry into a [`DisplayGeom`].
+///
+/// All three fields move together, because [`duja_panel::PanelGeometry`] is
+/// all-or-nothing: a backend either knows where its panel is or does not. Windows
+/// never knows; macOS normally does, but withholds a degenerate rect (see
+/// [`duja_panel::PanelGeometry`]). So this one body produces the panel's full
+/// geometry on an ordinary Mac and the historic all-`None` row on a Windows laptop
+/// or a Mac that could not place its panel — no `cfg` needed, and no platform
+/// assumed.
+///
+/// `None` is what keeps `dimming::plan` from planning an overlay at a rectangle
+/// nobody knows; `Some` is what finally lets it plan one for a macOS built-in
+/// panel, which before this could not be software-dimmed at all.
+fn panel_geom(display: &DiscoveredDisplay, geometry: Option<&PanelGeometry>) -> DisplayGeom {
+    DisplayGeom {
+        id: display.id.as_str().to_owned(),
+        bounds: geometry.map(PanelGeometry::bounds),
+        gamma_token: geometry.map(|g| g.gamma_token().to_owned()),
+        surface_token: geometry.map(|g| g.surface_token().to_owned()),
     }
 }
 
@@ -447,11 +509,66 @@ fn open_panel_controller(
 
 #[cfg(test)]
 mod tests {
-    use super::{DisplayGeom, hardware_brightness_caps, merge_displays};
+    use super::{DisplayGeom, hardware_brightness_caps, merge_displays, panel_geom};
     use duja_core::dimmer::DisplayBounds;
     use duja_core::id::StableDisplayId;
     use duja_core::manager::DiscoveredDisplay;
     use duja_core::model::{DisplayKind, Feature};
+    use duja_panel::PanelGeometry;
+
+    // --- the panel backend's geometry, folded into a `DisplayGeom` ------------
+    //
+    // This is the seam the macOS built-in panel reaches the dimming planner
+    // through, and the only one a test on any lane can observe: `discover_panel`
+    // itself calls `duja_panel::enumerate`, which needs a machine with a panel.
+    // What these pin is the fold — that a reported geometry arrives intact and in
+    // the right slots, and that an unreported one stays absent. What they cannot
+    // pin is that macOS *reports* one; that is `duja-panel`'s
+    // `panel_geometry` tests plus a live Mac (`docs/debt.md`).
+
+    fn panel_display(id: &StableDisplayId) -> DiscoveredDisplay {
+        DiscoveredDisplay {
+            id: id.clone(),
+            kind: DisplayKind::InternalPanel,
+            name: Some("Internal Display".to_owned()),
+            capabilities: hardware_brightness_caps(),
+        }
+    }
+
+    /// A Windows/WMI panel reports no geometry, and must keep contributing none:
+    /// stamping a placeholder would plan an overlay at a rectangle nobody knows.
+    #[test]
+    fn a_panel_without_reported_geometry_contributes_none() {
+        let id = StableDisplayId::from_parts("GSM", 0x5B09, Some("PANEL")).unwrap();
+        let geom = panel_geom(&panel_display(&id), None);
+
+        assert_eq!(geom.id, id.as_str());
+        assert_eq!(geom.bounds, None);
+        assert_eq!(geom.gamma_token, None);
+        assert_eq!(geom.surface_token, None);
+    }
+
+    /// The fix. A macOS built-in panel reports bounds and both tokens, and all
+    /// three must reach the map — without them `dimming::plan` emits no
+    /// `DimCommand` and the panel cannot be software-dimmed at all.
+    ///
+    /// The three values are deliberately all different, and the two tokens are
+    /// the mirror-clone shape (own id `9`, master `4`): a fold that read one
+    /// token twice, or crossed the two, would pass a fixture that reused one
+    /// string and fails here.
+    #[test]
+    fn a_panel_with_reported_geometry_carries_bounds_and_both_tokens() {
+        let id = StableDisplayId::from_parts("APP", 0xA2E5, Some("1")).unwrap();
+        let bounds = DisplayBounds::new(-1512, 12, 1512, 982);
+        let reported = PanelGeometry::new(bounds, "9".to_owned(), "4".to_owned());
+
+        let geom = panel_geom(&panel_display(&id), Some(&reported));
+
+        assert_eq!(geom.id, id.as_str());
+        assert_eq!(geom.bounds, Some(bounds));
+        assert_eq!(geom.gamma_token.as_deref(), Some("9"));
+        assert_eq!(geom.surface_token.as_deref(), Some("4"));
+    }
 
     #[test]
     fn caps_are_brightness_only_hardware_backed() {

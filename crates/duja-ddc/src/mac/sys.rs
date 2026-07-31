@@ -179,20 +179,27 @@ fn display_bounds(id: u32) -> DisplayBounds {
 
 /// The master of `id`'s mirror set, or `kCGNullDirectDisplay` (`0`) when this
 /// display is not mirroring another — which is also what the *master* of a set
-/// reports about itself. Fed to `crate::mac_surface::surface_id`, which owns the
+/// reports about itself. Fed to `duja_core::macos::surface_id`, which owns the
 /// interpretation.
 fn mirrored_master(id: u32) -> u32 {
     CGDisplay::new(id).mirrors_display()
 }
 
-/// Convert a `CGRect` (float origin + size, points) to [`DisplayBounds`]. The
-/// `as` casts are saturating: NaN maps to 0, and a negative extent clamps to 0.
+/// Flatten a `CGRect` into the shared, FFI-free conversion in
+/// [`duja_core::macos::bounds_from_cg_rect`], which owns the saturating-cast
+/// policy (NaN → 0, negative extent → 0) and is tested on every OS.
+///
+/// The field-by-field copy is the whole body: `duja-core` must not depend on
+/// `core-graphics`, and `duja-panel`'s macOS backend does the identical hand-off
+/// for the built-in panel. Keeping the *rule* in one place is what stops the two
+/// from drifting.
 fn rect_to_bounds(rect: CGRect) -> DisplayBounds {
-    let x = rect.origin.x as i32;
-    let y = rect.origin.y as i32;
-    let width = rect.size.width.max(0.0) as u32;
-    let height = rect.size.height.max(0.0) as u32;
-    DisplayBounds::new(x, y, width, height)
+    duja_core::macos::bounds_from_cg_rect(duja_core::macos::CgRect {
+        x: rect.origin.x,
+        y: rect.origin.y,
+        width: rect.size.width,
+        height: rect.size.height,
+    })
 }
 
 // --- EDID via CoreDisplay -------------------------------------------------
@@ -612,10 +619,10 @@ pub(crate) struct MacDisplay {
     /// This display's own id together with `CGDisplayMirrorsDisplay` of it.
     ///
     /// Carried as the pair rather than two loose `u32`s so it is assembled
-    /// exactly once, here at the FFI site that reads both — `crate::mac_surface`
+    /// exactly once, here at the FFI site that reads both — `duja_core::macos`
     /// then interprets it without any downstream caller having to order two
     /// same-typed arguments correctly.
-    pub mirror: crate::mac_surface::MirrorState,
+    pub mirror: duja_core::macos::MirrorState,
     pub edid: Vec<u8>,
     pub bounds: DisplayBounds,
     pub bus: MacI2cBus,
@@ -668,7 +675,7 @@ pub(crate) fn enumerate_displays() -> Result<Vec<MacDisplay>, super::DdcError> {
             continue;
         };
         out.push(MacDisplay {
-            mirror: crate::mac_surface::MirrorState {
+            mirror: duja_core::macos::MirrorState {
                 display_id: id,
                 mirrors: mirrored_master(id),
             },
@@ -691,13 +698,19 @@ mod tests {
         assert!(WRITE_SETTLE < READ_DELAY);
     }
 
+    /// The **flattening** is what this file still owns: totality now lives in
+    /// `duja_core::macos` and is tested there on every OS, so what is left to
+    /// check here is that each `CGRect` field lands in the matching `CgRect`
+    /// field. The asymmetric extents are chosen for exactly that: a transposed
+    /// `width`/`height` would report `100` and `0` instead.
     #[test]
-    fn rect_to_bounds_is_total_on_degenerate_input() {
+    fn rect_to_bounds_maps_each_field_and_stays_total() {
         use core_graphics::geometry::{CGPoint, CGSize};
-        // NaN / negative extents must clamp, never panic or wrap.
         let r = CGRect::new(&CGPoint::new(f64::NAN, -10.0), &CGSize::new(-5.0, 100.0));
         let b = rect_to_bounds(r);
-        assert_eq!(b.width, 0);
+        assert_eq!(b.x, 0, "NaN must clamp, not wrap");
+        assert_eq!(b.y, -10);
+        assert_eq!(b.width, 0, "a negative extent must clamp to zero");
         assert_eq!(b.height, 100);
     }
 

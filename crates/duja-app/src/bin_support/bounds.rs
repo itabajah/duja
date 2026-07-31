@@ -26,9 +26,12 @@
 //! lookup for a resolved id reuses the same [`select_slot_match`] routing the
 //! controller factory uses, so an identical-twin `-slot<n>` id resolves to the
 //! Nth bare-id match — the same slot the manager assigned, because both walk the
-//! same input order. The panel backend's panels contribute no bounds and no
-//! tokens, whereas a (Windows) DDC-fallback internal panel carries DDC geometry
-//! like any DDC display.
+//! same input order. Every display contributes whatever its backend could report:
+//! a DDC display (including a Windows DDC-fallback internal panel) its DDC
+//! geometry, and a macOS `DisplayServices` panel its own CoreGraphics geometry. Two
+//! shapes contribute nothing — no bounds and no tokens: a Windows WMI panel, whose
+//! backend reports neither, and a macOS panel whose `CGDisplayBounds` came back
+//! degenerate, which its backend withholds rather than pass on.
 
 // RATIONALE: these pure modules are consumed only by the tray assembly (Windows and macOS),
 // but stay cross-platform (not cfg-gated) so their unit tests run on every CI
@@ -116,8 +119,8 @@ mod tests {
         }
     }
 
-    /// A panel-backend entry: no bounds, no tokens.
-    fn panel_entry(id: &StableDisplayId) -> DisplayGeom {
+    /// A Windows/WMI panel entry: no bounds, no tokens, because WMI reports none.
+    fn wmi_panel_entry(id: &StableDisplayId) -> DisplayGeom {
         DisplayGeom {
             id: id.as_str().to_owned(),
             bounds: None,
@@ -171,11 +174,39 @@ mod tests {
     }
 
     #[test]
-    fn panel_entry_reports_no_bounds_or_tokens() {
-        let map = BoundsMap::new(vec![panel_entry(&id("A"))]);
+    fn a_wmi_panel_entry_reports_no_bounds_or_tokens() {
+        let map = BoundsMap::new(vec![wmi_panel_entry(&id("A"))]);
         assert_eq!(map.bounds_for(&id("A")), None);
         assert_eq!(map.gamma_token_for(&id("A")), None);
         assert_eq!(map.surface_token_for(&id("A")), None);
+    }
+
+    /// A macOS `DisplayServices` panel is *not* the geometry-less shape above: it
+    /// reports its rect and both tokens like any CoreGraphics display, which is
+    /// what makes it software-dimmable. Routed through the same accessors as a
+    /// monitor — there is no panel-specific path, and there must not be one.
+    ///
+    /// **A non-regression guard, not evidence of the fix.** `BoundsMap` has no
+    /// panel-specific branch to change and did not change: this passes against the
+    /// code that shipped before the panel had any geometry to put in it. It exists
+    /// so a future panel-specific branch here has to red something. The tokens are
+    /// the mirroring shape (`"1"`/`"7"`) rather than a standalone panel's matching
+    /// pair, because equal values would let the two accessors be swapped.
+    #[test]
+    fn a_macos_panel_entry_reports_its_bounds_and_both_tokens() {
+        let panel = DisplayGeom {
+            id: id("A").as_str().to_owned(),
+            bounds: Some(DisplayBounds::new(0, 0, 1512, 982)),
+            gamma_token: Some("1".to_owned()),
+            surface_token: Some("7".to_owned()),
+        };
+        let map = BoundsMap::new(vec![panel]);
+        assert_eq!(
+            map.bounds_for(&id("A")),
+            Some(DisplayBounds::new(0, 0, 1512, 982))
+        );
+        assert_eq!(map.gamma_token_for(&id("A")).as_deref(), Some("1"));
+        assert_eq!(map.surface_token_for(&id("A")).as_deref(), Some("7"));
     }
 
     #[test]

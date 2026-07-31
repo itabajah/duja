@@ -58,7 +58,9 @@
 use std::fmt::Debug;
 
 use duja_core::id::{EdidError, StableDisplayId};
+use duja_core::macos::{CgRect, MirrorState, bounds_from_cg_rect, surface_id};
 
+use crate::PanelGeometry;
 use crate::error::PanelError;
 use crate::transport::{PanelBrightness, PanelTransport};
 
@@ -178,6 +180,78 @@ fn is_controllable_panel(is_builtin: bool, can_change_brightness: bool) -> bool 
     is_builtin && can_change_brightness
 }
 
+/// Build a builtin panel's [`PanelGeometry`] from the two CoreGraphics facts the
+/// enumeration already has in hand: its rect and its mirror state.
+///
+/// The built-in panel is an ordinary CoreGraphics display, so this is the same
+/// derivation `duja-ddc` applies to an external monitor, through the same
+/// [`duja_core::macos`] functions — deliberately, because the two backends' tokens
+/// are compared against each other app-side. A `MacBook` mirroring its screen to a
+/// projector puts the panel (here) and the projector (there) in one mirror set,
+/// and the merge that collapses them into one control is *only* correct if both
+/// sides computed the surface token by the same rule.
+///
+/// The gamma token is the panel's own id: a mirror-set master addresses itself,
+/// and so does a clone. Only the surface token follows the mirror.
+///
+/// # A rect that is not a rectangle yields `None`, not a degenerate geometry
+///
+/// `CGDisplayBounds` answers `CGRectNull` — `{{inf, inf}, {0, 0}}` — for a display
+/// it considers invalid, and this backend enumerates the **online** list, which
+/// deliberately includes a built-in that is online but not the active drawable
+/// (see `imp::online_display_ids`). [`bounds_from_cg_rect`] is total, so that
+/// converts cleanly to bounds at `i32::MAX` with zero extent — an overlay window
+/// of no size, placed nowhere, dimming nothing, with no warning and no retry. That
+/// is the "slider controls nothing" failure this whole change exists to remove,
+/// reintroduced by the fix.
+///
+/// Two conditions are rejected, and the pair is chosen so that **neither is a
+/// threshold**; there is no "plausible display size" magic number here:
+///
+/// - **not finite** — any of the four values infinite or `NaN`. This is what
+///   actually identifies `CGRectNull` (its *origin* is what is infinite), and it
+///   also covers `CGRectInfinite`, whose extents would otherwise survive
+///   `is_empty` and ask for a `u32::MAX`-wide window.
+/// - **empty** — [`duja_core::dimmer::DisplayBounds::is_empty`], a zero width or
+///   height, which encloses no area for an overlay to cover.
+///
+/// The answer is then "this backend cannot say where the panel is", which is what
+/// `None` already means to every consumer. The panel behaves exactly as it did
+/// before geometry existed: un-dimmable below its floor, silently — no worse than
+/// the pure-WMI residual `docs/debt.md` already tracks, and better than the
+/// alternative, which is a zero-size overlay that makes the panel *look* dimmable
+/// while doing nothing for the rest of the session. An overlay already on screen
+/// for it is destroyed rather than stranded (`duja_dimmer`'s `plan_transition`
+/// destroys any current entry absent from the desired batch).
+/// The tokens are discarded with the bounds: all three fields are one answer, and
+/// half of one is not better than none.
+///
+/// `duja-ddc` deliberately does **not** carry this guard for external monitors. It
+/// enumerates the *active* list, whose members are drawable by definition; the
+/// exposure is specific to the online list this backend chose in order to see a
+/// mirrored built-in, so the guard belongs here rather than in the shared rule.
+///
+/// Pure, so it is compiled and tested on every OS even though only the macOS
+/// `imp::enumerate` below calls it.
+fn panel_geometry(rect: CgRect, mirror: MirrorState) -> Option<PanelGeometry> {
+    let is_finite = rect.x.is_finite()
+        && rect.y.is_finite()
+        && rect.width.is_finite()
+        && rect.height.is_finite();
+    if !is_finite {
+        return None;
+    }
+    let bounds = bounds_from_cg_rect(rect);
+    if bounds.is_empty() {
+        return None;
+    }
+    Some(PanelGeometry::new(
+        bounds,
+        mirror.display_id.to_string(),
+        surface_id(mirror).to_string(),
+    ))
+}
+
 /// The three `DisplayServices` brightness operations, abstracted so the real
 /// dlopen'd table and an in-memory fake are interchangeable.
 ///
@@ -258,9 +332,12 @@ mod imp {
 
     use core_graphics::display::CGDisplay;
 
-    use super::{CgDisplayId, DisplayServicesApi, is_controllable_panel, synthesize_panel_id};
+    use super::{
+        CgDisplayId, DisplayServicesApi, is_controllable_panel, panel_geometry, synthesize_panel_id,
+    };
     use crate::PanelDisplay;
     use crate::error::PanelError;
+    use duja_core::macos::{CgRect, MirrorState};
 
     /// `int DisplayServicesGetBrightness(CGDirectDisplayID, float *)`.
     type GetFn = unsafe extern "C" fn(CgDisplayId, *mut f32) -> i32;
@@ -399,6 +476,24 @@ mod imp {
         ) -> i32;
     }
 
+    /// Flatten a `CGRect` into the FFI-free [`CgRect`] the pure code speaks.
+    ///
+    /// A named function rather than four lines inlined at the call site, because
+    /// this is the one step no pure test can reach: a transposed `origin.x`/
+    /// `origin.y` or `size.width`/`size.height` compiles, ships, and puts the
+    /// panel's overlay on the wrong rectangle of every Mac while the whole suite
+    /// stays green. `duja-ddc`'s `mac::sys::rect_to_bounds` is the same hand-off
+    /// with the same reasoning; both are pinned by a test with four *distinct*
+    /// field values, which is the only shape that catches a swap.
+    fn flatten(rect: core_graphics::geometry::CGRect) -> CgRect {
+        CgRect {
+            x: rect.origin.x,
+            y: rect.origin.y,
+            width: rect.size.width,
+            height: rect.size.height,
+        }
+    }
+
     /// The ids of every online display, or an empty list on any CoreGraphics
     /// error (the desktop / headless-runner case).
     fn online_display_ids() -> Vec<CgDisplayId> {
@@ -463,9 +558,49 @@ mod imp {
                 // decimal; `PanelDisplay::open` parses it back to bind a
                 // transport. See the field's docs on the crate root.
                 instance_name: id.to_string(),
+                // The built-in panel is an ordinary CoreGraphics display, so it
+                // has a rect and a mirror state like any other. Read here, in the
+                // same snapshot as everything else about this display, and handed
+                // to the pure builder — which is what makes a macOS panel
+                // software-dimmable at all (`docs/debt.md`).
+                geometry: panel_geometry(
+                    flatten(display.bounds()),
+                    MirrorState {
+                        display_id: id,
+                        mirrors: display.mirrors_display(),
+                    },
+                ),
             });
         }
         panels
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{CgRect, flatten};
+        use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+
+        /// Every field lands in its matching field. All four values differ, and
+        /// the origin is negative where the extents cannot be, so **any** pair
+        /// swapped — x/y, width/height, or origin/size — changes the result.
+        ///
+        /// Runs on the macOS lane only, because `CGRect` exists only there. That
+        /// is the same coverage `duja-ddc`'s twin has, and it is the reason this
+        /// hand-off is a named function at all.
+        #[test]
+        fn flatten_maps_each_cg_rect_field_to_its_own() {
+            let rect = CGRect::new(&CGPoint::new(-11.0, -22.0), &CGSize::new(33.0, 44.0));
+            let flat = flatten(rect);
+            assert_eq!(
+                flat,
+                CgRect {
+                    x: -11.0,
+                    y: -22.0,
+                    width: 33.0,
+                    height: 44.0,
+                }
+            );
+        }
     }
 }
 
@@ -477,6 +612,7 @@ mod tests {
     use super::*;
     use crate::controller::PanelController;
     use duja_core::controller::BrightnessController;
+    use duja_core::dimmer::DisplayBounds;
     use duja_core::model::Feature;
     use duja_core::testing::contract::{Scenario, run_controller_contract};
     use std::collections::VecDeque;
@@ -582,6 +718,144 @@ mod tests {
         // A different model must move the key.
         let c = synthesize_panel_id(0x0610, 0x0000_A2E6, 0).unwrap();
         assert_ne!(a.as_str(), c.as_str());
+    }
+
+    // --- panel geometry ---
+
+    /// A panel rect with **four distinct values**, negative where an extent
+    /// cannot be: a built-in sitting left of and above the primary. A fixture
+    /// with `x == y` (an origin at zero, the tempting realistic choice) would let
+    /// the two be transposed and still pass.
+    fn rect() -> CgRect {
+        CgRect {
+            x: -1512.0,
+            y: -300.0,
+            width: 1512.0,
+            height: 982.0,
+        }
+    }
+
+    fn geometry_of(rect: CgRect, mirror: MirrorState) -> PanelGeometry {
+        panel_geometry(rect, mirror).expect("a non-degenerate rect must yield geometry")
+    }
+
+    fn mirror(display_id: u32, mirrors: u32) -> MirrorState {
+        MirrorState {
+            display_id,
+            mirrors,
+        }
+    }
+
+    #[test]
+    fn panel_geometry_carries_the_rect_in_points() {
+        let geometry = geometry_of(rect(), mirror(1, 0));
+        assert_eq!(
+            geometry.bounds(),
+            DisplayBounds::new(-1512, -300, 1512, 982)
+        );
+    }
+
+    /// `CGDisplayBounds` answers `CGRectNull` for a display it considers invalid,
+    /// and this backend enumerates the *online* list, which can hold a built-in
+    /// that is not the active drawable. Reporting that rect would plan a
+    /// zero-size overlay at `i32::MAX` — dimming nothing, silently. `None` is the
+    /// honest answer and puts the panel back exactly where it was before
+    /// geometry existed.
+    ///
+    /// Each case is asserted separately, and between them both arms of the guard
+    /// are pinned: dropping the finite check reds the `CGRectInfinite` and `NaN`
+    /// cases, dropping `is_empty` reds the flat one. `CGRectNull` is caught by
+    /// *either* arm — its origin is infinite and its extents are zero — so it
+    /// discriminates nothing and is here because it is the shape CoreGraphics
+    /// actually returns.
+    #[test]
+    fn a_degenerate_rect_yields_no_geometry_at_all() {
+        // CGRectNull: {{inf, inf}, {0, 0}}.
+        let null_rect = CgRect {
+            x: f64::INFINITY,
+            y: f64::INFINITY,
+            width: 0.0,
+            height: 0.0,
+        };
+        assert!(
+            panel_geometry(null_rect, mirror(1, 0)).is_none(),
+            "CGRectNull must not become a panel position"
+        );
+
+        // CGRectInfinite: extents survive `is_empty`, so only the finite check
+        // stops a request for a u32::MAX-wide overlay.
+        let infinite = CgRect {
+            x: f64::NEG_INFINITY,
+            y: f64::NEG_INFINITY,
+            width: f64::INFINITY,
+            height: f64::INFINITY,
+        };
+        assert!(
+            panel_geometry(infinite, mirror(1, 0)).is_none(),
+            "an infinite rect must not size an overlay"
+        );
+
+        // NaN in one field is equally unusable.
+        let nan = CgRect {
+            x: f64::NAN,
+            y: 0.0,
+            width: 1512.0,
+            height: 982.0,
+        };
+        assert!(panel_geometry(nan, mirror(1, 0)).is_none());
+
+        // A single zero extent encloses no area, and the tokens go with it: all
+        // three fields are one answer.
+        let flat = CgRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1512.0,
+            height: 0.0,
+        };
+        assert!(panel_geometry(flat, mirror(1, 0)).is_none());
+    }
+
+    /// A standalone built-in panel — the overwhelmingly common Mac — mirrors
+    /// nothing, so it names its own surface and both tokens agree.
+    #[test]
+    fn a_standalone_panel_addresses_and_names_itself() {
+        let geometry = geometry_of(rect(), mirror(1, 0));
+        assert_eq!(geometry.gamma_token(), "1");
+        assert_eq!(geometry.surface_token(), "1");
+    }
+
+    /// The case the two tokens exist for. A panel that *mirrors* an external
+    /// display still has to be addressed as itself for gamma, while grouping by
+    /// the master it draws with. Swapping the two arguments here is the `#66`
+    /// double-overlay defect in one direction and a ramp on the wrong screen in
+    /// the other — and both compile, because both tokens are `String`.
+    #[test]
+    fn a_mirroring_panel_addresses_itself_but_names_its_master() {
+        let geometry = geometry_of(rect(), mirror(1, 7));
+        assert_eq!(geometry.gamma_token(), "1", "gamma must address this panel");
+        assert_eq!(
+            geometry.surface_token(),
+            "7",
+            "grouping must follow the shared framebuffer"
+        );
+    }
+
+    /// The other half of the same mirror set, as `duja-ddc` computes it for the
+    /// external clone when the **panel** is the master. The two backends must land
+    /// on one string or the app cannot merge the set — this asserts the agreement
+    /// directly rather than trusting that both call the same function.
+    #[test]
+    fn a_master_panel_shares_one_surface_token_with_its_external_clone() {
+        // The panel is display 1 and mirrors nothing (it is the master); the
+        // external is display 20 and reports `CGDisplayMirrorsDisplay == 1`.
+        let panel = geometry_of(rect(), mirror(1, 0));
+        let external_surface = surface_id(mirror(20, 1)).to_string();
+        assert_eq!(panel.surface_token(), external_surface);
+        assert_ne!(
+            panel.gamma_token(),
+            "20",
+            "sharing a surface must not merge the two displays' gamma addresses"
+        );
     }
 
     // --- gating ---

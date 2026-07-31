@@ -964,6 +964,13 @@ impl AppState {
         // notifies), so `surface_token_for` is fresh here. A transiently-`None` token
         // degrades gracefully: that panel becomes its own singleton (two rows for one
         // frame) and converges on the next pass, never stranding an overlay.
+        //
+        // One `None` is permanent rather than transient — a macOS panel whose
+        // CGDisplayBounds is degenerate reports no geometry at all — and it degrades
+        // the same way, minus the converging: a lone row that cannot be software
+        // dimmed. That is deliberate, and dropping the token *with* the bounds is
+        // what stops such a panel anchoring a mirror group it can no longer place.
+        // See `duja-panel`'s `panel_geometry` and `backend::DisplayGeom`.
         let members: Vec<clone_group::GroupMember> = {
             let guard = self.bounds.lock().ok();
             snapshots

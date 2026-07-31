@@ -336,9 +336,13 @@ pub(crate) fn run(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
     };
 
     // 6. The gamma channel correlates a resolved display id to the token that
-    //    ADDRESSES it, via the same bounds map the overlay planner reads (DDC
-    //    displays — external monitors and a DDC-fallback internal panel — carry
-    //    one; panel-backend panels do not, so gamma never targets those).
+    //    ADDRESSES it, via the same bounds map the overlay planner reads. Every
+    //    DDC display carries one — external monitors and a DDC-fallback internal
+    //    panel alike — and so does a macOS `DisplayServices` panel, which is
+    //    addressed by its own `CGDirectDisplayID`: gamma on the built-in screen is
+    //    reachable, deliberately, and `docs/debt.md` carries the hazard that comes
+    //    with it. The two that carry no token are a Windows WMI panel and a macOS
+    //    panel whose bounds came back degenerate, and gamma never targets those.
     //
     //    `gamma_token_for`, never `surface_token_for`: the two are the same GDI
     //    device name on Windows but diverge on macOS, where a mirror clone's

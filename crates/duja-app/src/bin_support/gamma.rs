@@ -686,8 +686,27 @@ mod platform {
     /// `surface_token_for`.
     type DeviceResolver = Box<dyn FnMut(&StableDisplayId) -> Option<String>>;
 
-    /// [`RefusalLog`] reason: this id carries no gamma token at all — a
-    /// `DisplayServices` panel, which has none by construction.
+    /// [`RefusalLog`] reason: this id carries no gamma token at all.
+    ///
+    /// On macOS a `DisplayServices` built-in panel normally reports its own
+    /// `CGDirectDisplayID` exactly as a DDC monitor does, so this usually means the
+    /// id is simply not in the map: a display unplugged between the plan and the
+    /// apply, or a `BoundsMap` that has not caught up with an enumeration yet.
+    /// Those are transient, which is what the latch is for.
+    ///
+    /// There is one **non**-transient way to be enumerated and token-less, and the
+    /// point of naming it is that it does *not* reach here. A macOS panel whose
+    /// `CGDisplayBounds` is degenerate — `CGRectNull`, which CoreGraphics answers
+    /// for a display it considers invalid — is reported by `duja_panel::enumerate`
+    /// with no geometry at all, tokens included, and stays that way. With no bounds
+    /// it also gets no [`DimCommand`], so [`GammaCoordinator::engage_phase`] never
+    /// calls `engage` for it and this reason is never logged. That case is silent
+    /// by construction: its only symptom is a built-in panel that stops responding
+    /// below its floor, and its diagnostic is `duja-panel`'s `panel_geometry`, not
+    /// this log line (`docs/debt.md`).
+    ///
+    /// So this line still means only the transient correlation failures above —
+    /// which is what makes the once-only latch the right treatment for it.
     ///
     /// Deliberately **separate** from [`BAD_TOKEN_REASON`]: `RefusalLog` latches per
     /// (id, reason), so folding the two correlation failures into one string would
