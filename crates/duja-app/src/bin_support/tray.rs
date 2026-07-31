@@ -899,13 +899,14 @@ fn load_config(paths: &DujaPaths) -> Config {
 /// the policy "until `applicationDidFinishLaunching` has been called" because
 /// otherwise "the menu bar is initially unresponsive on macOS 10.15".
 ///
-/// # The better fix, once there is a bundle
+/// # The declarative half, now that there is a bundle
 ///
-/// C6 gives Duja a signed `.app`, and `LSUIElement` in its `Info.plist` is the
-/// declarative way to say the same thing — at which point winit's `is_bundled`
-/// branch stops overriding anything and this call becomes belt-and-braces. Setting
-/// it here as well is still right: a portable/unbundled binary has no `Info.plist`
-/// to read.
+/// C6 gives Duja a `.app` whose `Info.plist` carries `LSUIElement` (composed by
+/// `xtask`'s `bundle` module), which is the declarative way to say the same thing —
+/// so for a bundled copy winit's `is_bundled` branch stops overriding anything and
+/// this call is belt-and-braces. Setting it here as well is still right: a
+/// portable/unbundled binary has no `Info.plist` to read, and `launchd` starts the
+/// login-item copy by exec'ing `Contents/MacOS/duja` directly.
 ///
 /// `NSApplication::sharedApplication` creates the shared instance if none exists,
 /// which is harmless here — winit 0.30 deliberately swizzles rather than

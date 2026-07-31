@@ -48,9 +48,172 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ---- macOS: build both slices, fuse, bundle, image ----------------------
+  # Runs FIRST and hands its one artifact to the publishing job below, so the
+  # release keeps a single SHA256SUMS, a single minisign pass, and a single
+  # GitHub Release — rather than two jobs racing to create the same one.
+  #
+  # It holds no secrets on the normal path and needs no write scope, so its
+  # permissions are narrowed to `contents: read` (a job-level block overrides
+  # the workflow-level grant above, which exists for the publishing job).
+  #
+  # It does NOT re-run the quality gate: that lives in the publishing job, on
+  # the same commit, and duplicating cargo-deny/clippy/tests here would double
+  # the release's cost to re-answer a question the 3-OS `ci.yml` matrix and that
+  # gate already answer. The consequence is deliberate: a mac packaging failure
+  # blocks the whole release rather than quietly shipping a Windows-only one.
+  macos:
+    name: build & package (macos-universal)
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    env:
+      # BOTH slices are compiled against this floor, so the x86_64 slice's
+      # LC_BUILD_VERSION agrees with the `LSMinimumSystemVersion` the bundle
+      # advertises instead of silently claiming an older release underneath it.
+      # xtask pins the two together: `bundle.rs`'s deployment-target test reads
+      # this very line and fails if it drifts from `MIN_MACOS`.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Only the version — the authoritative "does the tag match?" check belongs
+      # to the publishing job, which is the one that can publish a mislabeled
+      # artifact. Same first-match-in-Cargo.toml rule as there.
+      - name: Resolve version
+        run: |
+          set -euo pipefail
+          ver="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "$ver" ]; then echo "no version in Cargo.toml" >&2; exit 1; fi
+          echo "VERSION=$ver" >> "$GITHUB_ENV"
+          echo "version=$ver"
+
+      # rust-toolchain.toml pins the toolchain; add the slice the runner is not.
+      - name: Add both Apple targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      # Two thin builds — `lipo` cannot fuse what was never compiled. No
+      # rust-cache, matching the publishing job: the released build stays
+      # hermetic.
+      - name: Build release binaries (arm64)
+        run: cargo build --release --locked --target aarch64-apple-darwin -p duja-app -p dujactl
+      - name: Build release binaries (x86_64)
+        run: cargo build --release --locked --target x86_64-apple-darwin -p duja-app -p dujactl
+
+      # ---- Optional: Developer ID signing + notarization — INERT today -----
+      # Duja has no Apple Developer account, so the bundle ships with an ad-hoc
+      # signature: enough for macOS to *execute* it (Apple Silicon refuses an
+      # unsigned binary outright), not enough for Gatekeeper to open a
+      # downloaded copy without the right-click-Open detour. Same posture as the
+      # unsigned Windows installer and its SmartScreen prompt.
+      #
+      # Enable it with NO edit to this file:
+      #   1. Join the Apple Developer Program; create a "Developer ID
+      #      Application" certificate and export it as a .p12.
+      #   2. Create an App Store Connect API key (Developer ID role).
+      #   3. Repo variables: MACOS_SIGN=true, MACOS_SIGN_IDENTITY (the full
+      #      certificate common name, e.g. "Developer ID Application: … (TEAM)").
+      #   4. Repo secrets: MACOS_CERTIFICATE (base64 of the .p12),
+      #      MACOS_CERTIFICATE_PASSWORD, MACOS_NOTARY_KEY (base64 of the .p8),
+      #      MACOS_NOTARY_KEY_ID, MACOS_NOTARY_ISSUER.
+      # The packaging step below already takes the identity as an argument, so
+      # turning this on changes no step ordering — exactly like the Azure
+      # Trusted Signing block in the publishing job.
+      - name: Import Developer ID certificate
+        if: vars.MACOS_SIGN == 'true'
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/duja-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          # Auto-lock after 15 minutes so the key does not outlive the build.
+          security set-keychain-settings -lut 900 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          cert="$RUNNER_TEMP/certificate.p12"
+          printf '%s' "$CERT_P12" | base64 --decode > "$cert"
+          trap 'rm -f "$cert"' EXIT
+          security import "$cert" -k "$keychain" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          # Let codesign use the key without an interactive prompt.
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+
+      # Fuse → bundle → codesign → DMG, all in the dependency-free xtask so the
+      # same command produces the same artifact on a maintainer's Mac.
+      - name: Package Duja.app and the disk image
+        env:
+          MACOS_SIGN: ${{ vars.MACOS_SIGN }}
+          MACOS_SIGN_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [ "${MACOS_SIGN:-}" = "true" ]; then
+            cargo run --release -p xtask -- dist --version "$VERSION" --sign "$MACOS_SIGN_IDENTITY"
+          else
+            cargo run --release -p xtask -- dist --version "$VERSION"
+          fi
+
+      # The claims xtask's unit tests cannot reach, checked on the bytes that
+      # actually ship: a plist macOS will parse, `LSUIElement` true in the
+      # *written* file, both slices present in both binaries, both compiled
+      # against the advertised floor, a seal that validates, and an image that
+      # mounts.
+      - name: Verify the bundle
+        run: |
+          set -euo pipefail
+          app="target/dist/duja-$VERSION-macos-universal/Duja.app"
+          plist="$app/Contents/Info.plist"
+          plutil -lint "$plist"
+          plutil -extract LSUIElement raw -o - "$plist" | grep -qx true
+          test "$(plutil -extract CFBundleIdentifier raw -o - "$plist")" = "io.github.itabajah.duja"
+          for bin in duja dujactl; do
+            archs="$(lipo -archs "$app/Contents/MacOS/$bin")"
+            echo "$bin: $archs"
+            case "$archs" in *arm64*) ;; *) echo "$bin has no arm64 slice" >&2; exit 1;; esac
+            case "$archs" in *x86_64*) ;; *) echo "$bin has no x86_64 slice" >&2; exit 1;; esac
+            for arch in arm64 x86_64; do
+              minos="$(otool -arch "$arch" -l "$app/Contents/MacOS/$bin" |
+                       awk '/LC_BUILD_VERSION/{f=1} f && /minos/{print $2; exit}')"
+              echo "$bin/$arch minos=$minos"
+              test "$minos" = "$MACOSX_DEPLOYMENT_TARGET"
+            done
+          done
+          codesign --verify --strict --verbose=2 "$app"
+          hdiutil verify "target/dist/duja-$VERSION-macos-universal.dmg"
+
+      - name: Notarize and staple the disk image
+        if: vars.MACOS_SIGN == 'true'
+        env:
+          NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/notary.p8"
+          printf '%s' "$NOTARY_KEY" | base64 --decode > "$key"
+          trap 'rm -f "$key"' EXIT
+          dmg="target/dist/duja-$VERSION-macos-universal.dmg"
+          xcrun notarytool submit "$dmg" \
+            --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" --wait
+          # Staple the ticket so the image also opens on a machine that is offline.
+          xcrun stapler staple "$dmg"
+
+      # The DMG is the only thing the publishing job needs; the staged .app tree
+      # is an intermediate, and a zipped .app would need `ditto` to survive the
+      # signature — the image already is the distributable container.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: duja-macos-universal
+          path: target/dist/duja-${{ env.VERSION }}-macos-universal.dmg
+          if-no-files-found: error
+
   release:
     name: build & publish (windows-x64)
     runs-on: windows-latest
+    # The macOS image is folded into this job's SHA256SUMS, minisign pass,
+    # provenance attestation and Release, so it has to exist first.
+    needs: macos
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -125,6 +288,17 @@ jobs:
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
             "/DMyAppVersion=$env:VERSION" packaging\windows\duja.iss
 
+      # The macOS disk image the `macos` job built, dropped beside the Windows
+      # artifacts so it is covered by the same SHA256SUMS, the same minisign
+      # pass, the same provenance attestation and the same Release. Naming the
+      # artifact extracts its contents straight into `path`, so the .dmg lands
+      # in target/dist rather than in a subdirectory.
+      - name: Fetch the macOS disk image
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: duja-macos-universal
+          path: target/dist
+
       # ---- Optional: Azure Trusted Signing (Authenticode) — INERT today -----
       # Duja ships no code-signing certificate yet, so this step is guarded off.
       # When a cert exists, Authenticode-signing the installer stops SmartScreen
@@ -153,13 +327,14 @@ jobs:
           certificate-profile-name: ${{ vars.AZURE_SIGN_CERT_PROFILE }}
           files: ${{ github.workspace }}/target/dist/duja-setup-${{ env.VERSION }}.exe
 
-      # SHA256SUMS over the two shippable artifacts (two-space `sha256sum -c` form).
+      # SHA256SUMS over every shippable artifact (two-space `sha256sum -c` form).
       - name: Compute SHA256SUMS
         shell: pwsh
         run: |
           Push-Location target/dist
           $files = "duja-setup-${env:VERSION}.exe",
-                   "duja-${env:VERSION}-windows-x64.zip"
+                   "duja-${env:VERSION}-windows-x64.zip",
+                   "duja-${env:VERSION}-macos-universal.dmg"
           # Write LF-only and no BOM: Set-Content -Encoding ascii emits CRLF, which
           # leaves a trailing \r on every filename so Linux `sha256sum -c SHA256SUMS`
           # fails even though the hashes are correct. Keep the two-space form.
@@ -171,18 +346,24 @@ jobs:
           Pop-Location
 
       # Dry-run visibility: always upload the built artifacts for inspection.
+      # Every file SHA256SUMS lists is in here, so a dry run can be verified as
+      # a set rather than leaving the checksum file naming an absent artifact.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: duja-${{ env.VERSION }}-windows-x64
+          name: duja-${{ env.VERSION }}-release
           path: |
             target/dist/duja-setup-${{ env.VERSION }}.exe
             target/dist/duja-${{ env.VERSION }}-windows-x64.zip
+            target/dist/duja-${{ env.VERSION }}-macos-universal.dmg
             target/dist/SHA256SUMS
           if-no-files-found: error
 
       # ---- Publish-only steps (tag pushes) ----------------------------------
 
-      # Sign every artifact (installer, zip, SHA256SUMS) with the offline key.
+      # Sign every artifact (installer, zip, disk image, SHA256SUMS) with the
+      # offline key. The .dmg is signed here like any other file: minisign is
+      # the authenticity story a user can check without an Apple ID, and it is
+      # independent of whatever code signature the bundle inside carries.
       - name: Sign artifacts (minisign)
         if: env.PUBLISH == 'true'
         shell: pwsh
@@ -212,6 +393,7 @@ jobs:
             Push-Location target/dist
             foreach ($f in "duja-setup-${env:VERSION}.exe",
                             "duja-${env:VERSION}-windows-x64.zip",
+                            "duja-${env:VERSION}-macos-universal.dmg",
                             "SHA256SUMS") {
               & $minisign -S -s $keyPath -m $f -c "duja ${env:VERSION}"
               if ($LASTEXITCODE -ne 0) { throw "minisign failed for $f" }
@@ -229,6 +411,7 @@ jobs:
           subject-path: |
             target/dist/duja-setup-${{ env.VERSION }}.exe
             target/dist/duja-${{ env.VERSION }}-windows-x64.zip
+            target/dist/duja-${{ env.VERSION }}-macos-universal.dmg
 
       - name: Install git-cliff
         if: env.PUBLISH == 'true'
@@ -253,5 +436,6 @@ jobs:
           files: |
             target/dist/duja-setup-${{ env.VERSION }}.exe
             target/dist/duja-${{ env.VERSION }}-windows-x64.zip
+            target/dist/duja-${{ env.VERSION }}-macos-universal.dmg
             target/dist/SHA256SUMS
             target/dist/*.minisig

@@ -2,9 +2,10 @@
 
 _Last updated: 2026-07-31 (P6 wave 2: the macOS backends are wired into the app
 and CLI, the tray anchor contract is settled in ADR-0021, tray construction happens
-inside the running event loop, the tray itself runs on macOS, and both gamma
-captions are per-platform. Remaining for P6: packaging, the macOS panel-bounds gap
-that leaves a built-in panel un-dimmable below its floor, and the gate)._
+inside the running event loop, the tray itself runs on macOS, both gamma captions
+are per-platform, and the release pipeline now ships a universal `Duja.app` in a
+disk image. Remaining for P6: the macOS panel-bounds gap that leaves a built-in
+panel un-dimmable below its floor, and the gate)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -31,7 +32,7 @@ display control, automation, and integrations), see
 | **Internal-panel fallback fix** | **`v0.1.3` (Windows)** | ✅ shipped — the built-in panel no longer vanishes on a GPU/OEM-driven backlight |
 | **Dark rebrand + mirror/software-only** | **`v0.1.4` (Windows)** | ✅ shipped — the dark brand identity plus the two laptop-reported issues (#66, #67) |
 | **Sticky software-only fix** | **`v0.1.5` (Windows)** | ✅ shipped — a live monitor no longer sticks as "software-only"; tray Restart. Release verified: 6 assets, SHA256SUMS, minisign, SLSA provenance, `/releases/latest` → v0.1.5 |
-| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the whole app assembly: hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021), event-loop-first tray construction (#94), the mirror-surface token split (#98), the OS hooks' macOS half (#99), the macOS gamma sink (#100), the tray itself on macOS (#102) and the two per-platform gamma captions (#103). Remaining: packaging, the macOS panel-bounds gap (`docs/debt.md`: a built-in panel enters as `(id, None, None)`, so `dimming::plan` emits no `DimCommand` and it cannot be software-dimmed at all), **and the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
+| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the whole app assembly: hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021), event-loop-first tray construction (#94), the mirror-surface token split (#98), the OS hooks' macOS half (#99), the macOS gamma sink (#100), the tray itself on macOS (#102), the two per-platform gamma captions (#103) and macOS packaging — a universal `Duja.app` + DMG on the release pipeline (#104). Remaining: the macOS panel-bounds gap (`docs/debt.md`: a built-in panel enters as `(id, None, None)`, so `dimming::plan` emits no `DimCommand` and it cannot be software-dimmed at all), **and the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
 | P7 Linux port | `m7-linux` / `v0.3.0` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
 
@@ -552,6 +553,85 @@ side is enough to trip the no-hardware detector that `#59` and `#78` hardened. T
 CLI's own runs were clean, which is why the PR that added probing did not catch it
 — it checked the wrong side. Tracked in [debt.md](debt.md); the fix direction is
 for `--report` to prefer IPC, or to say plainly that it is about to contend.
+
+### `#104` — macOS packaging: a universal `Duja.app`, in an image (2026-07-31)
+
+C6. `xtask dist` was hard-wired to Windows — a staging directory and a PowerShell
+`Compress-Archive`. It now picks a target from the host and grew a macOS branch:
+`lipo` the two thin release builds into universal binaries, assemble `Duja.app`
+around them, seal it with `codesign`, and wrap it in a drag-to-install `.dmg`. The
+release workflow gained a `macos` job that runs first and hands its image to the
+Windows job, so the release keeps **one** `SHA256SUMS`, **one** minisign pass, one
+provenance attestation and one Release rather than two jobs racing to create the
+same one.
+
+**The split that made this testable at all.** None of `lipo`, `codesign` or
+`hdiutil` exists off macOS, and Duja has no Mac. The temptation is to write the
+whole branch behind `cfg(target_os = "macos")` and call it unverifiable — which is
+the exact shape `#103` had just been burned by: a platform fact inside a
+`cfg`-gated module is unreachable by every test *and* by every lane's clippy. So
+the module boundary follows what is actually platform-bound rather than what is
+platform-*themed*. Every **decision** — the `Info.plist`, the bundle layout, the
+artifact names, the accepted version alphabet, the host→target mapping — is pure
+code in `xtask`'s new `bundle` and `version` modules and is unit-tested on all
+three lanes, Windows and Linux included. What remains in `dist.rs` is filesystem
+plumbing plus four `Command` invocations — not `cfg` blocks, so they still compile
+into every lane's clippy run. This is the same division `duja-platform`'s
+`autostart::plist` already made for the `LaunchAgent` document, and it is the
+reason a Windows box could develop macOS packaging with tests that bite.
+
+**Two constants that live in three files, pinned by reading the other two.**
+`CFBundleIdentifier` must equal the `launchd` job label `duja-platform` registers
+for launch-at-login, or one program carries two identities; `LSMinimumSystemVersion`
+must equal the `MACOSX_DEPLOYMENT_TARGET` the workflow compiles *both* slices
+against, or the bundle advertises a floor nothing was built for. Neither coupling
+is expressible in the type system across a crate and a YAML file, so the tests read
+the other files: one parses `LABEL: &str = "…"` out of `autostart/plist.rs`, the
+other pulls `MACOSX_DEPLOYMENT_TARGET` out of `release.yml`. Both were written
+red — the deployment-target test failed until the workflow line existed.
+
+**What the tests cannot reach, CI checks on the shipped bytes.** The `macos` job's
+*Verify the bundle* step runs `plutil -lint` on the written plist, asserts
+`LSUIElement` is actually `true` in it, proves both binaries carry an arm64 **and**
+an x86_64 slice, reads `minos` back out of `LC_BUILD_VERSION` for each slice and
+compares it to the advertised floor, validates the code signature, and mounts the
+image. That is the half a unit test cannot see, checked where it exists.
+
+**Signing is the last mutation, and that is not an arrangement choice.** `lipo`
+rewrites the Mach-O and the bundle seal covers the `Info.plist` and everything under
+`Contents`, so the order fuse → assemble → sign → image is forced. Nested code
+(`dujactl`) is signed before the bundle that encloses it, because sealing the bundle
+records the signatures it finds inside. The default identity is ad-hoc (`-`): enough
+for macOS to *execute* the binary — Apple Silicon refuses an unsigned one outright —
+but not notarized, so a downloaded copy still needs right-click → Open. That is the
+exact macOS twin of the SmartScreen prompt on the unsigned Windows installer, and
+`SECURITY.md` now says both. `--sign <identity>` takes a real Developer ID and the
+hardened runtime is applied on **both** paths, so turning signing on is a repo
+variable, not a code change — the same posture as the inert Azure Trusted Signing
+block.
+
+**`LSUIElement` closes a loop from `#102`.** `become_accessory_app` sets the
+activation policy imperatively because winit stops overriding it only for a bundled
+app; the bundle now declares the same thing, so for an installed copy the call is
+belt-and-braces. It stays, because a portable binary has no `Info.plist` to read —
+and because `launchd` starts the login-item copy by exec'ing `Contents/MacOS/duja`
+directly.
+
+**One tightening that was not packaging.** `--version` used to be interpolated raw
+into a single-quoted PowerShell literal; it now reaches the same place through a
+`Version` newtype whose alphabet is the set of characters inert in *all* the
+contexts it lands in — XML text, a volume name, a file name, a shell literal. The
+macOS branch is what made that necessary (an `Info.plist` is a document, not a
+string), but the Windows path was the one that was already exposed.
+
+Two things ship knowingly incomplete and are recorded rather than papered over: the
+bundle has **no icon** (the art is drawn in code and no raster asset exists in the
+tree, so an `.icns` needs a PNG encoder, a Slint dependency in the build tool, or a
+Mac-only pipeline — none of which belongs in a packaging PR), and the packaging path
+has **no PR-time CI coverage** (its only automated exercise is the release workflow's
+`workflow_dispatch` dry run). Both are in [debt.md](debt.md) with the option they
+should be fixed by.
+
 
 ## What is done
 
