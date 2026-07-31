@@ -83,13 +83,15 @@ pub(crate) fn discover() -> Vec<DiscoveredDisplay> {
 ///
 /// Carried by every DDC display — external monitors and a (Windows-only)
 /// DDC-fallback internal panel alike — and by a panel from the OS panel backend
-/// **when that backend can report it**, which today means macOS: a
+/// **when that backend can report it**. On macOS it normally can: a
 /// `DisplayServices` panel is an ordinary CoreGraphics display and answers
-/// `CGDisplayBounds`/`CGDisplayMirrorsDisplay` like any other. A Windows WMI panel
-/// still contributes all `None`, because WMI exposes neither a monitor rect nor a
-/// GDI device for the panel it drives (`docs/debt.md`). The three fields move
-/// together — see [`duja_panel::PanelGeometry`], whose absence means "this backend
-/// cannot say", never "this display has no position".
+/// `CGDisplayBounds`/`CGDisplayMirrorsDisplay` like any other. Two cases still
+/// yield all `None` — a Windows WMI panel, because WMI exposes neither a monitor
+/// rect nor a GDI device for the panel it drives (`docs/debt.md`), and a macOS
+/// panel whose rect came back degenerate, which `duja-panel` withholds rather than
+/// hand on. The three fields move together — see [`duja_panel::PanelGeometry`],
+/// whose absence means "this backend cannot say", never "this display has no
+/// position".
 ///
 /// # Bounds, whose **unit differs by platform**
 ///
@@ -138,24 +140,34 @@ pub(crate) fn discover() -> Vec<DiscoveredDisplay> {
 /// is the surface rule ([`duja_core::macos`]'s tests, which run on every CI OS);
 /// what is **assumed** is that the enumeration each backend uses reports every
 /// member of a mirror set rather than only the master. That assumption is deliberately
-/// not load-bearing: if only the master is enumerated, each surface token equals
-/// its own display id, `group_clones` builds the same singletons it builds today,
-/// and behaviour is unchanged. It can only *add* a merge, never remove one — and
-/// it cannot mis-address anything, because addressing no longer goes through it.
-/// See `docs/debt.md`.
+/// not load-bearing for *grouping*: if only the master is enumerated, each surface
+/// token equals its own display id, `group_clones` builds the same singletons it
+/// builds today, and behaviour is unchanged. It can only *add* a merge, never
+/// remove one, and it cannot mis-address anything, because addressing no longer
+/// goes through it.
+///
+/// **Placement is a third consumer, and there the reassurance does not hold.** A
+/// merged group takes its one `DimCommand`'s bounds from the anchor, the anchor is
+/// the lowest resolved id string, and an Apple panel's `APP-…`/`AAP-…` sorts ahead
+/// of nearly every monitor PNP id — so adding a merge is exactly what can move an
+/// overlay's geometry onto the built-in panel's rect. "Only adds a merge" is
+/// reassuring about grouping and says nothing about that. See `docs/debt.md`'s
+/// macOS-surface-token row, which carries the same correction.
 #[derive(Debug, Clone)]
 pub(crate) struct DisplayGeom {
     /// The display's **bare** EDID id (pre twin-slot resolution), which is what
     /// `BoundsMap` routes a resolved id back to.
     pub(crate) id: String,
     /// Display bounds in this platform's unit (see above), or `None` for a panel
-    /// the OS panel backend cannot place (a Windows WMI panel).
+    /// the OS panel backend cannot place — always a Windows WMI panel, and a macOS
+    /// panel whose `CGDisplayBounds` was degenerate.
     pub(crate) bounds: Option<DisplayBounds>,
     /// The token that **addresses** this display for gamma: the GDI device name on
     /// Windows, this display's own `CGDirectDisplayID` in decimal on macOS —
     /// including for a macOS built-in panel, which is addressed as itself whether
     /// or not it is mirroring. `None` for a Windows WMI panel, which has no gamma
-    /// device.
+    /// device — and for a macOS panel that reported no geometry, whose tokens are
+    /// withheld along with its bounds.
     pub(crate) gamma_token: Option<String>,
     /// The token that names this display's **framebuffer**, which mirrored panels
     /// are grouped by: the GDI device name on Windows (identical to
@@ -164,7 +176,10 @@ pub(crate) struct DisplayGeom {
     /// a mirror set spanning both backends — the `MacBook`-to-projector layout —
     /// collapse into one control instead of stacking two overlays on one surface.
     /// `None` for a Windows WMI panel, which cannot be correlated to a surface and
-    /// so stays its own singleton.
+    /// so stays its own singleton — and, for the same reason, for a macOS panel
+    /// that reported no geometry. Dropping the token *with* the bounds is what
+    /// keeps such a panel from anchoring a mirror group it can no longer place,
+    /// which would take the whole group's overlay down with it.
     pub(crate) surface_token: Option<String>,
 }
 
@@ -396,10 +411,12 @@ struct FoundPanel {
 /// Fold a panel's backend-reported geometry into a [`DisplayGeom`].
 ///
 /// All three fields move together, because [`duja_panel::PanelGeometry`] is
-/// all-or-nothing: a backend either knows where its panel is or does not. Today
-/// macOS knows and Windows does not (see [`duja_panel::PanelGeometry`] for why),
-/// so this one body produces the panel's full geometry on a Mac and the historic
-/// all-`None` row on a Windows laptop — no `cfg` needed, and no platform assumed.
+/// all-or-nothing: a backend either knows where its panel is or does not. Windows
+/// never knows; macOS normally does, but withholds a degenerate rect (see
+/// [`duja_panel::PanelGeometry`]). So this one body produces the panel's full
+/// geometry on an ordinary Mac and the historic all-`None` row on a Windows laptop
+/// or a Mac that could not place its panel — no `cfg` needed, and no platform
+/// assumed.
 ///
 /// `None` is what keeps `dimming::plan` from planning an overlay at a rectangle
 /// nobody knows; `Some` is what finally lets it plan one for a macOS built-in

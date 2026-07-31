@@ -13,11 +13,13 @@
 //!   continuum. The batch is the *full* desired dimmer state: a display at
 //!   alpha 0 is included so [`Dimmer::apply`](duja_core::dimmer::Dimmer::apply)
 //!   removes any stale overlay. A display with no known bounds is omitted — it
-//!   cannot be overlaid, a documented limitation. Today that is exactly one kind
-//!   of display: a **Windows WMI** panel, for which no monitor rect is plumbed
-//!   (`docs/debt.md`). A macOS `DisplayServices` panel reports its own bounds and
-//!   both tokens like any other CoreGraphics display, and a Windows DDC-fallback
-//!   internal panel carries its DDC geometry, so both are dimmable.
+//!   cannot be overlaid, a documented limitation. Two shapes reach that state: a
+//!   **Windows WMI** panel, for which no monitor rect is plumbed at all
+//!   (`docs/debt.md`), and a macOS `DisplayServices` panel whose `CGDisplayBounds`
+//!   is degenerate, which its backend deliberately reports as *no* geometry rather
+//!   than as a rectangle nobody can draw. The ordinary macOS panel reports its
+//!   bounds and both tokens like any other CoreGraphics display, and a Windows
+//!   DDC-fallback internal panel carries its DDC geometry, so both are dimmable.
 //!
 //! The module is OS-free and fully unit-tested; the app's notification loop
 //! calls it and hands the batch to the real `Dimmer`.

@@ -217,10 +217,12 @@ fn is_controllable_panel(is_builtin: bool, can_change_brightness: bool) -> bool 
 ///
 /// The answer is then "this backend cannot say where the panel is", which is what
 /// `None` already means to every consumer. The panel behaves exactly as it did
-/// before geometry existed — un-dimmable below its floor, and visibly so — rather
-/// than appearing dimmable and silently doing nothing, and an overlay already on
-/// screen for it is destroyed rather than stranded (`duja_dimmer`'s
-/// `plan_transition` destroys any current entry absent from the desired batch).
+/// before geometry existed: un-dimmable below its floor, silently — no worse than
+/// the pure-WMI residual `docs/debt.md` already tracks, and better than the
+/// alternative, which is a zero-size overlay that makes the panel *look* dimmable
+/// while doing nothing for the rest of the session. An overlay already on screen
+/// for it is destroyed rather than stranded (`duja_dimmer`'s `plan_transition`
+/// destroys any current entry absent from the desired batch).
 /// The tokens are discarded with the bounds: all three fields are one answer, and
 /// half of one is not better than none.
 ///
@@ -760,12 +762,12 @@ mod tests {
     /// honest answer and puts the panel back exactly where it was before
     /// geometry existed.
     ///
-    /// Each case is asserted separately, and each is rejected by a *different*
-    /// arm of the guard: `CGRectNull` by the finite check (its extents are zero
-    /// but it is the **origin** that is infinite), `CGRectInfinite` by the same
-    /// check where `is_empty` would have waved it through with `u32::MAX`
-    /// extents, and a flat rect by `is_empty` alone. Dropping either arm reds
-    /// exactly one of them.
+    /// Each case is asserted separately, and between them both arms of the guard
+    /// are pinned: dropping the finite check reds the `CGRectInfinite` and `NaN`
+    /// cases, dropping `is_empty` reds the flat one. `CGRectNull` is caught by
+    /// *either* arm — its origin is infinite and its extents are zero — so it
+    /// discriminates nothing and is here because it is the shape CoreGraphics
+    /// actually returns.
     #[test]
     fn a_degenerate_rect_yields_no_geometry_at_all() {
         // CGRectNull: {{inf, inf}, {0, 0}}.

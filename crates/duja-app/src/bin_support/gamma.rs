@@ -688,12 +688,21 @@ mod platform {
 
     /// [`RefusalLog`] reason: this id carries no gamma token at all.
     ///
-    /// On macOS every enumerated display has one — a `DisplayServices` built-in
-    /// panel reports its own `CGDirectDisplayID` exactly as a DDC monitor does — so
-    /// this now means the id is not in the map: a display unplugged between the
-    /// plan and the apply, or a `BoundsMap` that has not caught up with an
-    /// enumeration yet. Both are transient, which is precisely what the latch is
-    /// for.
+    /// On macOS a `DisplayServices` built-in panel normally reports its own
+    /// `CGDirectDisplayID` exactly as a DDC monitor does, so this usually means the
+    /// id is simply not in the map: a display unplugged between the plan and the
+    /// apply, or a `BoundsMap` that has not caught up with an enumeration yet.
+    /// Those are transient, which is what the latch is for.
+    ///
+    /// **One case is not transient**, and it is the one worth recognising here. A
+    /// macOS panel whose `CGDisplayBounds` is degenerate — `CGRectNull`, which
+    /// CoreGraphics answers for a display it considers invalid — is reported by
+    /// `duja_panel::enumerate` with *no* geometry at all, tokens included, so it is
+    /// enumerated and token-less at the same time and stays that way. The latch
+    /// then logs once and goes quiet on a permanent condition. If this line appears
+    /// for a built-in panel on a Mac and the panel never dims, it is evidence about
+    /// `CGDisplayBounds`, not about a hot-plug race — see `duja-panel`'s
+    /// `panel_geometry` and `docs/debt.md`.
     ///
     /// Deliberately **separate** from [`BAD_TOKEN_REASON`]: `RefusalLog` latches per
     /// (id, reason), so folding the two correlation failures into one string would

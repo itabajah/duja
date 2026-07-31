@@ -28,9 +28,10 @@
 //! Nth bare-id match — the same slot the manager assigned, because both walk the
 //! same input order. Every display contributes whatever its backend could report:
 //! a DDC display (including a Windows DDC-fallback internal panel) its DDC
-//! geometry, a macOS `DisplayServices` panel its own CoreGraphics geometry, and a
-//! Windows WMI panel nothing at all — the one shape left with no bounds and no
-//! tokens, because WMI reports neither.
+//! geometry, and a macOS `DisplayServices` panel its own CoreGraphics geometry. Two
+//! shapes contribute nothing — no bounds and no tokens: a Windows WMI panel, whose
+//! backend reports neither, and a macOS panel whose `CGDisplayBounds` came back
+//! degenerate, which its backend withholds rather than pass on.
 
 // RATIONALE: these pure modules are consumed only by the tray assembly (Windows and macOS),
 // but stay cross-platform (not cfg-gated) so their unit tests run on every CI

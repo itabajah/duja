@@ -141,8 +141,12 @@ pub struct CgRect {
 /// faithfully converts that to `x`/`y` at [`i32::MAX`] with zero extent — a
 /// rectangle no caller should act on. Deciding what to do about that is the
 /// caller's job, because only the caller knows what its own absence value means;
-/// `duja-panel`'s `panel_geometry` rejects such a rect outright via
-/// [`DisplayBounds::is_empty`] rather than reporting a panel it cannot place.
+/// `duja-panel`'s `panel_geometry` rejects any rect that is not finite or encloses
+/// no area, rather than reporting a panel it cannot place. Note which arm catches
+/// `CGRectNull`: its *extents* are zero, but so is the extent of a legitimately
+/// collapsed rect, and it is the infinite **origin** that makes it meaningless —
+/// so a caller checking only [`DisplayBounds::is_empty`] would also have to accept
+/// `CGRectInfinite`, whose `u32::MAX` extents pass that test.
 #[must_use]
 pub fn bounds_from_cg_rect(rect: CgRect) -> DisplayBounds {
     // RATIONALE(clippy::cast_possible_truncation, clippy::cast_sign_loss): these
