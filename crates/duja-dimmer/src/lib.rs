@@ -170,13 +170,20 @@ pub fn min_gamma_factor() -> f32 {
 /// likelihood. `CGSetDisplayTransferByFormula` is reported to return
 /// `kCGErrorSuccess` while leaving the display's curve unchanged, on *valid*
 /// triples, in two distinct situations that are deliberately not ranked against
-/// each other: Apple DTS reproduced a **total** no-visual-change on M5 Pro/Max/Neo
-/// under macOS 26.3.1 with **no precondition at all** (both the Table and Formula
-/// entry points, on built-in and external displays), and separately the ramp is
-/// reported not to apply while "Automatically adjust brightness" is on. There is no
-/// rule to comply with, and readback cannot detect it either: DTS confirmed
-/// `CGGetDisplayTransferByTable` returns the values just written while the screen is
-/// unchanged. See `docs/debt.md`.
+/// each other:
+///
+/// - Apple DTS reproduced a **total** no-visual-change on an M5 Max under macOS
+///   26.3.1 (25D2128), through both the Table and Formula entry points and on both
+///   built-in and external displays, with **no setting involved** — and confirmed
+///   an M5 non-Max on the same build is unaffected, so it is narrow, recent
+///   hardware rather than the platform at large. The same failure is *reported*
+///   (by the filer, not reproduced by DTS) on M5 Pro and Neo.
+/// - Separately, the ramp is reported not to apply while "Automatically adjust
+///   brightness" is on.
+///
+/// There is no rule to comply with, and readback cannot detect it either: DTS
+/// confirmed `CGGetDisplayTransferByTable` returns the values just written while
+/// the screen is unchanged. See `docs/debt.md`.
 #[cfg(windows)]
 #[must_use]
 pub fn gamma_is_advisory() -> bool {
@@ -190,11 +197,11 @@ pub fn gamma_is_advisory() -> bool {
 ///
 /// - **macOS**: `true`. `CGSetDisplayTransferByFormula` is reported to return
 ///   `kCGErrorSuccess` while leaving the curve unchanged, on *valid* triples —
-///   DTS-reproduced on M5 Pro/Max/Neo with no precondition, and separately
-///   reported while "Automatically adjust brightness" is on. No rule exists to
-///   comply with, and `CGGetDisplayTransferByTable` returns the written values
-///   while the screen is unchanged, so verification by readback does not detect it
-///   either.
+///   DTS-reproduced on an M5 Max with no setting involved (and *reported* on M5
+///   Pro and Neo), and separately reported while "Automatically adjust brightness"
+///   is on. No rule exists to comply with, and `CGGetDisplayTransferByTable`
+///   returns the written values while the screen is unchanged, so verification by
+///   readback does not detect it either.
 /// - **Other targets**: `false` — there is no gamma backend at all, so nothing can
 ///   silently fail.
 #[cfg(not(windows))]

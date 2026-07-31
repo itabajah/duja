@@ -1093,22 +1093,34 @@ mod binding_tests {
 
         let vm = Rc::new(RefCell::new(SettingsVm::new()));
         let shell = SettingsShell::new(vm.clone()).expect("settings shell instantiates");
-        let render = |limits: GammaLimits, gamma_allowed: bool| {
+        // Two monitors, for realism — but note what that does NOT buy, because the
+        // obvious next step is to assert a count and it does not work. The element
+        // walk reports an `if`-branch child **once**, not once per repeater
+        // instance: measured here, two sections yield 4 "Dim mode" labels (an
+        // unconditional child) and exactly 1 caption. The pre-existing
+        // `"Gamma is unavailable while HDR is active"` caption — same repeater, same
+        // `if`, untouched by this PR — behaves identically, so it is the query API,
+        // not this guard. Presence/absence is therefore the only signal available,
+        // and it is the one these tests are about. Per-section rendering is not at
+        // risk anyway: both fields are platform-wide, so every row carries the same
+        // values (pinned in `the_gamma_limits_reach_every_section_verbatim`).
+        let render = |limits: GammaLimits, gamma_allowed: bool, config: &Config| {
             vm.borrow_mut().set_displays(
-                &[snapshot("A")],
-                &Config::default(),
+                &[snapshot("A"), snapshot("B")],
+                config,
                 gamma_allowed,
                 limits,
             );
             shell.update_from_vm(&vm.borrow());
             gamma_cap_captions(&shell)
         };
+        let defaults = Config::default();
 
-        // A capped OS: exactly one caption, carrying the plumbed figure. This also
-        // pins the `@tr` argument end to end — a `{}` left unsubstituted, or a
-        // number rendered as `62.0`, fails here and nowhere else.
-        let capped = render(CAPPED_ONLY, true);
-        assert_eq!(capped.len(), 1, "one section ⇒ one caption, got {capped:?}");
+        // A capped OS: one caption per section, each carrying the plumbed figure.
+        // This also pins the `@tr` argument end to end — a `{}` left unsubstituted,
+        // or a number rendered as `62.0`, fails here and nowhere else.
+        let capped = render(CAPPED_ONLY, true, &defaults);
+        assert!(!capped.is_empty(), "a capped OS must disclose its cap");
         let caption = capped.first().expect("one caption");
         assert!(
             caption.contains("at most 62%"),
@@ -1119,7 +1131,7 @@ mod binding_tests {
         // the whole range, the overlay substitution never happens, and a caption
         // saying it does would describe a thing that cannot occur.
         assert!(
-            render(GammaLimits::UNLIMITED, true).is_empty(),
+            render(GammaLimits::UNLIMITED, true, &defaults).is_empty(),
             "no cap ⇒ no caption; this is the defect the plumbing exists to fix"
         );
 
@@ -1127,17 +1139,38 @@ mod binding_tests {
         // caption is about a channel the user cannot reach — suppressed by the
         // guard's first term, independently of the cap.
         assert!(
-            render(CAPPED_ONLY, false).is_empty(),
+            render(CAPPED_ONLY, false, &defaults).is_empty(),
             "gamma unavailable ⇒ no caption about how far gamma reaches"
+        );
+
+        // The caption does NOT depend on the selected dim mode: it exists to inform
+        // the choice, so it must be visible before Gamma is picked and stay visible
+        // after. Every other fixture here uses `Config::default()`, where
+        // `dim_mode_index` is 0 — so without this case a guard accidentally
+        // conditioned on the mode is invisible, and the natural way to write that
+        // mistake inverts the caption: shown under Overlay/Off, and gone exactly
+        // when the user selects the mode it is about.
+        let mut gamma_cfg = Config::default();
+        for serial in ["A", "B"] {
+            gamma_cfg.monitors.insert(
+                snapshot(serial).id.as_str().to_owned(),
+                duja_core::config::MonitorConfig {
+                    dim_mode: duja_core::config::DimMode::Gamma,
+                    ..duja_core::config::MonitorConfig::default()
+                },
+            );
+        }
+        assert!(
+            !render(CAPPED_ONLY, true, &gamma_cfg).is_empty(),
+            "the cap caption is mode-independent — it informs the choice"
         );
 
         // An OS that is both capped and advisory still shows the cap. Without this
         // case, `gamma-cap-pct > 0 && !gamma-advisory` passes as a stand-in for the
         // real guard — a plausible "simplification", since no shipping target is
         // both — and the cap caption would vanish the moment one became both.
-        assert_eq!(
-            render(BOTH_LIMITS, true).len(),
-            1,
+        assert!(
+            !render(BOTH_LIMITS, true, &defaults).is_empty(),
             "the cap is disclosed on its own terms, not conditioned on reliability"
         );
     }

@@ -441,10 +441,12 @@ export component SettingsWindow inherits Window {
                                 // return success and leave the display's curve
                                 // untouched. Two reported modes, deliberately not
                                 // ranked here: Apple DTS reproduced a total
-                                // no-visual-change on M5 Pro/Max/Neo with no
-                                // precondition at all, and separately the ramp is
-                                // reported not to apply while "Automatically adjust
-                                // brightness" is on. Unlike the Windows cap
+                                // no-visual-change on an M5 Max with no setting
+                                // involved (an M5 non-Max on the same build is
+                                // fine, so it is narrow recent hardware), and
+                                // separately the ramp is reported not to apply
+                                // while "Automatically adjust brightness" is on.
+                                // Unlike the Windows cap
                                 // there is no rule to comply with and readback
                                 // cannot detect it, so the only thing Duja can do
                                 // is say so before the user picks the mode. Same

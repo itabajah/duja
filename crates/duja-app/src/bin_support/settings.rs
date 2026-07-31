@@ -1,5 +1,7 @@
 //! Turning the typed [`Config`] into the per-display [`ContinuumConfig`] the
-//! dimming planner consumes, plus the HDR gamma guard and theme mapping.
+//! dimming planner consumes, plus the HDR gamma guard, theme mapping, and the
+//! platform's gamma limits for the settings window's captions
+//! ([`platform_gamma_limits`] — the one place here that builds a `duja-ui` type).
 //!
 //! # Floor semantics
 //!
