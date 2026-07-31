@@ -75,7 +75,12 @@ fn settings_shell_instantiates_and_renders() {
         true,
         true,
     );
-    vm.set_displays(&[snapshot("A", 40), snapshot("B", 70)], &config, false);
+    vm.set_displays(
+        &[snapshot("A", 40), snapshot("B", 70)],
+        &config,
+        false,
+        None,
+    );
     let vm = Rc::new(RefCell::new(vm));
 
     let shell = SettingsShell::new(vm.clone()).expect("settings shell instantiates");

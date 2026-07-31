@@ -569,6 +569,11 @@ fn monitor_to_data(
         min_perceived_pct: i32::from(section.min_perceived_pct),
         dim_mode_index: i32::try_from(section.dim_mode_index()).unwrap_or(0),
         gamma_available: section.gamma_available,
+        // 0 = "no cap to disclose": Slint has no optional type, and 0 is not a
+        // meaningful cap (a gamma channel that reaches 0% has no limit to warn
+        // about), so it is free to carry `None`. `gamma_cap_pct` never yields
+        // `Some(0)` — see its docs in `dimming.rs`.
+        gamma_cap_pct: i32::from(section.gamma_cap_pct.unwrap_or(0)),
         has_inputs: !section.inputs.is_empty(),
         inputs: ModelRc::from(inputs.clone()),
         // -1 = no selection (an empty dropdown): a snapshot carries no active-input
@@ -646,6 +651,11 @@ mod tests {
     use duja_core::id::StableDisplayId;
     use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
 
+    /// A gamma cap that is deliberately **not** Windows' 50 — see the twin in
+    /// `settings_vm`'s tests. A mapping that dropped the argument and re-emitted
+    /// the old hardcoded 50 would pass against a 50 fixture.
+    const NOT_THE_WINDOWS_CAP: u8 = 62;
+
     fn snapshot(serial: &str) -> DisplaySnapshot {
         DisplaySnapshot {
             id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap(),
@@ -659,7 +669,7 @@ mod tests {
 
     fn vm_with_one_monitor() -> SettingsVm {
         let mut vm = SettingsVm::new();
-        vm.set_displays(&[snapshot("A")], &Config::default(), true);
+        vm.set_displays(&[snapshot("A")], &Config::default(), true, None);
         vm
     }
 
@@ -752,6 +762,7 @@ mod tests {
             &[snapshot_with_inputs("A", vec![0x11, 0x0F])],
             &Config::default(),
             true,
+            None,
         );
         let mut cache = InputModelCache::new();
         let first = reconcile_input_models(&mut cache, vm.monitors());
@@ -772,6 +783,7 @@ mod tests {
             &[snapshot_with_inputs("A", vec![0x11, 0x0F])],
             &Config::default(),
             true,
+            None,
         );
         let mut cache = InputModelCache::new();
         let first = reconcile_input_models(&mut cache, vm.monitors());
@@ -782,6 +794,7 @@ mod tests {
             &[snapshot_with_inputs("A", vec![0x11])],
             &Config::default(),
             true,
+            None,
         );
         let second = reconcile_input_models(&mut cache, vm.monitors());
         assert!(
@@ -800,6 +813,7 @@ mod tests {
             ],
             &Config::default(),
             true,
+            None,
         );
         let mut cache = InputModelCache::new();
         let _ = reconcile_input_models(&mut cache, vm.monitors());
@@ -810,9 +824,40 @@ mod tests {
             &[snapshot_with_inputs("A", vec![0x11])],
             &Config::default(),
             true,
+            None,
         );
         let _ = reconcile_input_models(&mut cache, vm.monitors());
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn the_gamma_cap_crosses_the_slint_boundary_as_a_number_that_zero_can_disclaim() {
+        // Slint has no optional type, so the boundary has to encode `None` as some
+        // `int`. 0 is that encoding, and it is only sound because a 0 % cap is not
+        // a cap anyone would disclose — the caption it would produce ("gamma dims
+        // to at most 0%") is nonsense, so the value is free.
+        //
+        // What this cannot reach is the `.slint` side of the same rule: the
+        // `gamma-available && gamma-cap-pct > 0` guard on the Text element is not
+        // observable from Rust. This pins the half that is.
+        let inputs: Rc<VecModel<SharedString>> = Rc::new(VecModel::default());
+        let mut vm = SettingsVm::new();
+
+        vm.set_displays(
+            &[snapshot("A")],
+            &Config::default(),
+            true,
+            Some(NOT_THE_WINDOWS_CAP),
+        );
+        let capped = monitor_to_data(vm.monitors().first().expect("one section"), &inputs);
+        assert_eq!(capped.gamma_cap_pct, i32::from(NOT_THE_WINDOWS_CAP));
+
+        vm.set_displays(&[snapshot("A")], &Config::default(), true, None);
+        let uncapped = monitor_to_data(vm.monitors().first().expect("one section"), &inputs);
+        assert_eq!(
+            uncapped.gamma_cap_pct, 0,
+            "no cap must reach Slint as the value its guard suppresses"
+        );
     }
 
     #[test]
@@ -829,6 +874,7 @@ mod tests {
             min_perceived_pct: 25,
             dim_mode_index: 0,
             gamma_available: true,
+            gamma_cap_pct: 0,
             has_inputs: true,
             inputs: ModelRc::from(inputs.clone()),
             selected_input_index: -1,
@@ -905,6 +951,7 @@ mod binding_tests {
             &[snapshot_with_inputs("A", vec![0x11, 0x0F])],
             &Config::default(),
             true,
+            None,
         );
         let vm = Rc::new(RefCell::new(vm));
         let shell = SettingsShell::new(vm.clone()).expect("settings shell instantiates");
@@ -930,7 +977,12 @@ mod binding_tests {
         i_slint_backend_testing::init_no_event_loop();
 
         let mut vm = SettingsVm::new();
-        vm.set_displays(&[snapshot("A"), snapshot("B")], &Config::default(), true);
+        vm.set_displays(
+            &[snapshot("A"), snapshot("B")],
+            &Config::default(),
+            true,
+            None,
+        );
         let vm = Rc::new(RefCell::new(vm));
         let shell = SettingsShell::new(vm).expect("settings shell instantiates");
 

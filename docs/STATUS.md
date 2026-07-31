@@ -1,9 +1,9 @@
 # Duja — Project Status
 
-_Last updated: 2026-07-30 (P6 wave 2: the macOS backends are wired into the app
-and CLI, the tray anchor contract is settled in ADR-0021, and tray construction
-now happens inside the running event loop. Plus two defects found by reading a
-real install's log and config)._
+_Last updated: 2026-07-31 (P6 wave 2 is code-complete: the macOS backends are
+wired into the app and CLI, the tray anchor contract is settled in ADR-0021, tray
+construction happens inside the running event loop, the tray itself runs on macOS,
+and the gamma caption is per-platform. Remaining for P6: packaging and the gate)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -30,7 +30,7 @@ display control, automation, and integrations), see
 | **Internal-panel fallback fix** | **`v0.1.3` (Windows)** | ✅ shipped — the built-in panel no longer vanishes on a GPU/OEM-driven backlight |
 | **Dark rebrand + mirror/software-only** | **`v0.1.4` (Windows)** | ✅ shipped — the dark brand identity plus the two laptop-reported issues (#66, #67) |
 | **Sticky software-only fix** | **`v0.1.5` (Windows)** | ✅ shipped — a live monitor no longer sticks as "software-only"; tray Restart. Release verified: 6 assets, SHA256SUMS, minisign, SLSA provenance, `/releases/latest` → v0.1.5 |
-| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021) and the event-loop-first tray construction (#94). Remaining: the per-platform gamma caption, packaging, **and the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
+| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 is **code-complete**: hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021), event-loop-first tray construction (#94), the mirror-surface token split (#98), the OS hooks' macOS half (#99), the macOS gamma sink (#100), the tray itself on macOS (#102) and the per-platform gamma caption (#103). Remaining: packaging, **and the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
 | P7 Linux port | `m7-linux` / `v0.3.0` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
 
@@ -341,10 +341,69 @@ Windows-only reconciliation the macOS `restore_all` has no use for — which a
 broader allow would have kept hiding. That is the same failure this codebase had
 once before, when the P4 gate found `dim_mode = "gamma"` was a silent no-op.
 
-Still open before the gate: the per-platform gate on the gamma caption, which is
-Windows-specific copy shown on every platform (`docs/debt.md`). ADR-0013 keeps the
-macOS DDC path labelled experimental until there are ≥3 independent community
-confirmations per architecture, which no amount of code closes.
+~~Still open before the gate: the per-platform gate on the gamma caption, which is
+Windows-specific copy shown on every platform~~ — **closed in `#103`**, below.
+ADR-0013 keeps the macOS DDC path labelled experimental until there are ≥3
+independent community confirmations per architecture, which no amount of code
+closes.
+
+### `#103` — the gamma caption stops being a Windows sentence (2026-07-31)
+
+The last code item before packaging, and the only knowingly-wrong string in the
+tree: *"Gamma dims to at most 50% on Windows"*, rendered on every platform by a
+settings window that `#102` had just made live on macOS.
+
+The interesting decision was **a number, not a bool**. `docs/debt.md` proposed a
+`gamma_capped: bool` and, separately, "decide whether the figure should be plumbed
+rather than duplicated". Those look like two follow-ups; they are one. A bool
+gates the caption and leaves the hardcoded `50` — a second copy of
+`duja_dimmer::MIN_ACCEPTED_GAMMA` that no test can catch drifting, in a crate that
+depends on neither `duja-dimmer` nor `duja-platform` and so cannot check it.
+Plumbing the percentage gates it *for free*, because "this OS imposes no cap" and
+"there is nothing to disclose" are the same fact. So `MonitorSection` and
+`SettingsMonitorData` gained one `Option<u8>`, sourced from
+`dimming::gamma_cap_pct_for_platform()` — the same seam shape as
+`plan_for_platform`, so the choice of `min_gamma_factor()` over a literal is pinned
+by a test instead of living at an `AppState` call site no test can reach. The copy
+became "at most {}% **on this system**": the platform is now carried by whether the
+caption appears at all, so naming one in the sentence would be the same mistake in
+a new place.
+
+Two things this shape forced that are worth recording.
+
+**A fixture that agrees with the bug proves nothing.** The first version of the
+view-model tests passed `Some(50)` — the real Windows figure. Sabotaging
+`build_section` to ignore its argument and re-emit a hardcoded `50` left them
+**green**, because the wrong answer and the right one coincide. The fixtures are
+now `62`, and the same sabotage reds all three. The one test that legitimately
+asserts `50` is in `duja-app`, where 50 is a *derivation* from
+`min_gamma_factor()` rather than an input. This is the second time in this wave
+that fixtures agreeing on an incidental property hid a live mutation.
+
+**One test still cannot see the platform.** `gamma_cap_pct_for_platform` is pinned
+per-lane, but on Windows the hardcoded-50 sabotage passes it too — 50 is the right
+answer there for the wrong reason. Only the non-Windows lanes red. That is stated
+in the test rather than left for a reader to discover.
+
+Not verifiable here: the `.slint` half. The
+`gamma-available && gamma-cap-pct > 0` guard on the `Text` element is not
+observable from Rust, and no Slint API exposes a rendered `if` branch. What *was*
+verified, against the pinned `i-slint-core` source rather than assumed, is the
+piece with a real failure mode — that `@tr`'s `{}` is a positional argument
+substituted by `translations::formatter` (the codebase's first `@tr` with an
+argument), and that `shared_string_from_number(50.0)` renders `50` and not `50.0`.
+
+Deliberately **not** done: option (c) of the macOS silent-gamma-failure row — a
+hazard caption for `CGSetDisplayTransferByFormula` returning success without
+applying the ramp. It would have been one more field through the same plumbing,
+which is exactly why it was tempting. The reason to stop is a fact that row did not
+have when it was written: `SetDeviceGammaRamp` is documented with the *same*
+failure shape, so a plumbed `gamma_may_silently_fail` is `true` on both platforms
+and the "per-platform gate" would put a new hazard caption in front of every
+Windows user, on a path hardware-verified to work on the only display Duja has run
+on. What differs is likelihood, not mechanism, and encoding that is a copy
+judgement the debt row already says needs a Mac. It moves to the P6 gate with the
+mechanism now in place, so whichever way it goes it is a field and a `Text`.
 
 The `#90` row's prediction that the sink would need "a `ScreenStateGuard` twin and
 a crash-marker policy — a design decision, not a port" is **drained, and it was
