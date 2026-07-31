@@ -18,9 +18,13 @@
 
 use std::fmt;
 
-/// The longest version string accepted. Semantic versions with build metadata
-/// stay far below this; the bound exists so a pathological argument cannot end
-/// up as a 4 KB file name.
+/// The longest version string accepted, in bytes.
+///
+/// An arbitrary sanity cap, and named as one rather than dressed up: none of the
+/// contexts a version reaches has a limit anywhere near it (an HFS+ volume name
+/// allows 255 characters, and every path here is well inside `PATH_MAX`). It is
+/// here so a pasted-in file or a shell mishap becomes an error message instead
+/// of a 4 KB artifact name, not because 64 is a boundary of anything.
 const MAX_LEN: usize = 64;
 
 /// A release version that is safe to place in a file name, an XML text node, a
@@ -48,7 +52,7 @@ impl Version {
         }
         if raw.len() > MAX_LEN {
             return Err(format!(
-                "`--version` is {} characters; the limit is {MAX_LEN}",
+                "`--version` is {} bytes; the limit is {MAX_LEN}",
                 raw.len()
             ));
         }

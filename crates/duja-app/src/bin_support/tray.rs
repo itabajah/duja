@@ -904,9 +904,12 @@ fn load_config(paths: &DujaPaths) -> Config {
 /// C6 gives Duja a `.app` whose `Info.plist` carries `LSUIElement` (composed by
 /// `xtask`'s `bundle` module), which is the declarative way to say the same thing —
 /// so for a bundled copy winit's `is_bundled` branch stops overriding anything and
-/// this call is belt-and-braces. Setting it here as well is still right: a
-/// portable/unbundled binary has no `Info.plist` to read, and `launchd` starts the
-/// login-item copy by exec'ing `Contents/MacOS/duja` directly.
+/// this call is belt-and-braces. Setting it here as well is still right, for the
+/// reason that is actually checkable: a `cargo run` or portable copy has no
+/// `Info.plist` to read at all. (Not for the reason it is tempting to give — a
+/// `launchd`-exec'd copy *inside* the bundle is still bundled, because `NSBundle`
+/// resolves upward from the executable path, which is the same thing winit's
+/// `is_bundled` branch asks about.)
 ///
 /// `NSApplication::sharedApplication` creates the shared instance if none exists,
 /// which is harmless here — winit 0.30 deliberately swizzles rather than

@@ -54,8 +54,10 @@ turn on Authenticode / Azure Trusted Signing later) is in
 > certificate, so SmartScreen may warn on first run. On macOS the `.app` inside
 > the disk image is signed **ad-hoc** (`codesign -s -`) rather than with a
 > Developer ID: enough for macOS to execute it — Apple Silicon refuses an
-> unsigned binary outright — but not notarized, so Gatekeeper blocks a plain
-> double-click and the first launch needs right-click → **Open**. Verify
+> unsigned binary outright — but not notarized, so Gatekeeper blocks the first
+> open. Allow it in **System Settings → Privacy & Security → Open Anyway**;
+> macOS 15 Sequoia removed the older Control-click → Open shortcut, so the
+> instruction you will find in most guides no longer works. Verify
 > authenticity with the checksums and minisign signature below instead; both
 > gaps are one paid developer account away and the pipeline already has the
 > inert steps wired (see the release checklist).

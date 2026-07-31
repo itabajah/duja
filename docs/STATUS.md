@@ -45,11 +45,11 @@ signed off** (user, 2026-07-16), which were the two gates. Shipping as a clean
 **stable** `v0.1.0` (not `-alpha`) so the built-in update checker — which only
 prompts on newer *stable* releases via GitHub's `/releases/latest` — works end to
 end from day one. Distribution is a tag-triggered
-[`release.yml`](../.github/workflows/release.yml): an Inno Setup installer + a
-portable zip, each with `SHA256SUMS`, a minisign signature, and a build-provenance
-attestation.
+[`release.yml`](../.github/workflows/release.yml): an Inno Setup installer, a
+portable zip, and — from `v0.2.0` — a macOS universal disk image, all under one
+`SHA256SUMS`, each with a minisign signature and a build-provenance attestation.
 
-Health: **951 tests (Windows lane) plus 10 doctests, green on 3 OSes** — the
+Health: **1,026 tests locally (Windows, including doctests), green on 3 OSes** — the
 per-OS count differs because the `#![cfg(windows)]` and `#![cfg(unix)]`
 integration suites compile out on the other lanes; clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
@@ -631,6 +631,67 @@ Mac-only pipeline — none of which belongs in a packaging PR), and the packagin
 has **no PR-time CI coverage** (its only automated exercise is the release workflow's
 `workflow_dispatch` dry run). Both are in [debt.md](debt.md) with the option they
 should be fixed by.
+
+#### What the review changed
+
+The adversarial pass blocked the first version, and three of its findings changed
+the code rather than the prose.
+
+**A pin between two string literals is not a pin.** The deployment-target test
+compares a Rust constant to a value in `release.yml` — and *neither of them is what
+reaches the compiler*. The recipe this PR itself documented for packaging locally
+omitted `MACOSX_DEPLOYMENT_TARGET` entirely, so following it produced an `x86_64`
+slice at rustc's default inside a bundle advertising 11.0: exactly the drift the
+test exists to prevent, invisible to it. The fix moves the invariant onto the
+artifact. `xtask` now reads the Mach-O header itself — a new `macho` module, ~180
+lines of bounds-checked integer reads — and `verify_slices` refuses to sign a
+bundle whose slices are not all present and all built for the advertised floor.
+Parsing it in Rust rather than shelling to `otool` is the point: the check then
+runs **identically on a maintainer's Mac and in CI**, and is unit-testable on every
+lane against synthetic fat binaries. The workflow keeps its `otool` check as an
+*independent* implementation, since a second opinion is the only thing that catches
+the first one being wrong.
+
+**A justification that was simply false.** The 11.0 floor was defended with "a
+universal binary cannot honestly advertise a release that predates Apple Silicon".
+That is not how universal binaries work: the deployment target is per-slice, Launch
+Services gates on `LSMinimumSystemVersion` alone, and an `x86_64` slice built for
+10.13 inside a 10.13 bundle runs on a 10.13 Intel Mac with the `arm64` slice's floor
+never consulted. 11.0 survives as a **support decision** — the lowest floor both
+slices share from one setting, and the lowest one that does not assert support for
+releases nothing tests — with the real cost (Macs older than ~2013–2014) and the
+real remedy (a per-arch deployment target) written into `debt.md` instead of a
+wrong claim written into the constant.
+
+**Shipping a DMG created a new way to lose the login item.** The `LaunchAgent`
+plist records a *path*, and a disk image invites one specific sequence: mount,
+run `Duja.app` from the volume, enable "start with the system", eject. The plist
+then names `/Volumes/…` forever, `launchd` fails to exec it at every login, and
+`is_enabled`'s presence policy keeps reporting it as **on**. A setting that says
+yes and does nothing, permanently, is the "vanished" failure the degrade rule
+forbids — and it was newly reachable because of this PR. `set_enabled(true)` now
+refuses when the executable is on a mounted volume, with a message naming
+`/Applications`; the app's existing `apply_autostart` re-reads the real state, so
+the toggle springs back rather than lying. The rule is a pure path predicate in its
+own module, tested on all three lanes; that `set_enabled` consults it can only be
+checked on the macOS lane, and the test says so.
+
+Two smaller corrections worth recording because they were both *confident and
+wrong*: `hdiutil verify` only checks the image's stored checksum and never
+attaches, so three sentences claiming CI proved the image "mounts" were false —
+the step now actually mounts it, checks `Duja.app` and the `Applications` symlink
+are there, and detaches. And the one user-facing instruction the PR added, "first
+launch needs right-click → Open", stopped being true in macOS 15: Sequoia removed
+that Gatekeeper override, and the user must go to System Settings → Privacy &
+Security → Open Anyway. It was wrong in five places, on every macOS this release
+targets.
+
+Two tests were deleted for being tautologies (`assert_eq!(BINARIES, [MAIN, HELPER])`
+where `BINARIES` is *defined* as that), and the coupling they pretended to check is
+now real: the executable names are read out of each crate's `[[bin]]` section, the
+architecture list out of the workflow's `cargo build --target` lines, and both
+cross-file readers now assert that **every** occurrence agrees rather than the
+first.
 
 
 ## What is done

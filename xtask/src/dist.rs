@@ -34,7 +34,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use self::verified::Verified;
 use crate::bundle::{self, BundleInputs};
+use crate::macho;
 use crate::repo_root;
 use crate::version::Version;
 
@@ -45,8 +47,18 @@ const EXTRA_FILES: [&str; 3] = ["LICENSE-MIT", "LICENSE-APACHE", "README.md"];
 /// The binaries Duja ships.
 const BINARIES: [&str; 2] = [bundle::MAIN_EXECUTABLE, bundle::HELPER_EXECUTABLE];
 
-/// The two Rust targets fused into the universal macOS binary, in `lipo` order.
-const MAC_ARCHES: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
+/// The two architectures fused into the universal macOS binary, as (Rust target
+/// triple, the name `lipo` and the Mach-O header use).
+///
+/// Both halves are load-bearing: the triple locates the build output, and the
+/// arch name is what [`Verified::checked`] reads back out of the result. The order
+/// here is arm64-first because that is the majority of shipping Macs, not
+/// because it survives: `lipo` sorts slices by CPU type, so `lipo -archs` on the
+/// result prints `x86_64 arm64` whatever order it was given.
+const MAC_ARCHES: [(&str, &str); 2] = [
+    ("aarch64-apple-darwin", "arm64"),
+    ("x86_64-apple-darwin", "x86_64"),
+];
 
 /// `codesign`'s ad-hoc identity: a valid signature with no certificate behind
 /// it. Enough to *run* (Apple Silicon refuses to execute an unsigned binary at
@@ -109,40 +121,81 @@ impl Target {
 /// Returns a human-readable message if `--version` is missing or malformed, a
 /// source file is absent (usually: the release build has not run), or an I/O,
 /// archiving, or packaging-tool step fails.
-pub(crate) fn run(mut args: std::env::Args) -> Result<(), String> {
-    let mut version: Option<Version> = None;
-    let mut target: Option<Target> = None;
-    let mut identity: Option<String> = None;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--version" => {
-                let raw = args.next().ok_or("`--version` needs a value")?;
-                version = Some(Version::parse(&raw)?);
-            }
-            "--target" => {
-                let raw = args.next().ok_or("`--target` needs a value")?;
-                target = Some(Target::parse(&raw)?);
-            }
-            "--sign" => identity = Some(args.next().ok_or("`--sign` needs a value")?),
-            other => return Err(format!("unknown `dist` argument `{other}`")),
-        }
-    }
-    let version = version.ok_or("usage: cargo xtask dist --version X.Y.Z")?;
-    let target = match target {
-        Some(explicit) => explicit,
-        None => Target::host()?,
-    };
-
+pub(crate) fn run(args: std::env::Args) -> Result<(), String> {
+    let parsed = Invocation::parse(args)?;
     let root = repo_root()?;
     let dist = root.join("target").join("dist");
-    match target {
-        Target::Windows => windows(&root, &dist, &version),
-        Target::Macos => macos(
-            &root,
-            &dist,
-            &version,
-            identity.as_deref().unwrap_or(AD_HOC),
-        ),
+    match parsed.target {
+        Target::Windows => windows(&root, &dist, &parsed.version),
+        Target::Macos => macos(&root, &dist, &parsed.version, &parsed.identity),
+    }
+}
+
+/// One resolved `dist` command line.
+///
+/// Parsing is separated from doing so the argument rules — the host default,
+/// the flag-shaped-value rejection, and refusing an option the chosen target
+/// cannot honour — are testable without staging anything.
+#[derive(Debug, PartialEq, Eq)]
+struct Invocation {
+    /// The validated release version.
+    version: Version,
+    /// The platform to package for.
+    target: Target,
+    /// The `codesign` identity; [`AD_HOC`] unless `--sign` said otherwise.
+    identity: String,
+}
+
+impl Invocation {
+    /// Parse the arguments following `dist`.
+    ///
+    /// # Errors
+    /// A human-readable message for a missing or malformed `--version`, an
+    /// unknown flag, a flag whose value is missing or is itself a flag, a host
+    /// with no packaging and no explicit `--target`, or `--sign` on a target
+    /// that has nothing to sign.
+    fn parse<I: Iterator<Item = String>>(mut args: I) -> Result<Invocation, String> {
+        let mut version: Option<Version> = None;
+        let mut target: Option<Target> = None;
+        let mut identity: Option<String> = None;
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--version" => version = Some(Version::parse(&value(&mut args, "--version")?)?),
+                "--target" => target = Some(Target::parse(&value(&mut args, "--target")?)?),
+                "--sign" => identity = Some(value(&mut args, "--sign")?),
+                other => return Err(format!("unknown `dist` argument `{other}`")),
+            }
+        }
+        let version = version.ok_or("usage: cargo xtask dist --version X.Y.Z")?;
+        let target = match target {
+            Some(explicit) => explicit,
+            None => Target::host()?,
+        };
+        // Accepting an argument and then ignoring it is a lie about what ran:
+        // there is nothing for `--sign` to sign in a Windows zip.
+        if identity.is_some() && target != Target::Macos {
+            return Err("`--sign` applies to the macOS target only".to_owned());
+        }
+        Ok(Invocation {
+            version,
+            target,
+            identity: identity.unwrap_or_else(|| AD_HOC.to_owned()),
+        })
+    }
+}
+
+/// The value following `flag`.
+///
+/// # Errors
+/// Rejects a missing value, and one that is itself flag-shaped: `--version
+/// --target macos` would otherwise parse as the *version* `--target` — every
+/// character in it is in [`Version`]'s alphabet — and then fail with a message
+/// about the wrong argument entirely.
+fn value<I: Iterator<Item = String>>(args: &mut I, flag: &str) -> Result<String, String> {
+    match args.next() {
+        Some(v) if !v.starts_with("--") => Ok(v),
+        Some(v) => Err(format!("`{flag}` needs a value, but got the flag `{v}`")),
+        None => Err(format!("`{flag}` needs a value")),
     }
 }
 
@@ -216,20 +269,15 @@ fn macos(root: &Path, dist: &Path, version: &Version, identity: &str) -> Result<
         },
     )?;
 
-    // 4. Seal it: nested code first, then the bundle, then verify the seal.
-    codesign(
-        identity,
-        &app.executable(bundle::HELPER_EXECUTABLE),
-        Some(&format!(
-            "{}.{}",
-            bundle::BUNDLE_ID,
-            bundle::HELPER_EXECUTABLE
-        )),
-    )?;
-    codesign(identity, app.root(), None)?;
-    verify_signature(app.root())?;
+    // 4. Read the fused binaries back: both architectures present, and both
+    //    built for the release the plist is about to advertise. Before signing,
+    //    so a wrong artifact is never sealed and never reaches a disk image.
+    let verified = Verified::checked(&app)?;
 
-    // 5. The drag-to-install target, then the image itself.
+    // 5. Seal it: nested code first, then the bundle, then verify the seal.
+    seal(&verified, identity)?;
+
+    // 6. The drag-to-install target, then the image itself.
     link_applications(&stage)?;
     let dmg = dist.join(bundle::dmg_file_name(version));
     if dmg.exists() {
@@ -251,12 +299,14 @@ fn macos(root: &Path, dist: &Path, version: &Version, identity: &str) -> Result<
 fn slices(root: &Path, bin: &str) -> Result<Vec<PathBuf>, String> {
     let target_dir = root.join("target");
     let mut thin = Vec::new();
-    for arch in MAC_ARCHES {
-        let path = target_dir.join(arch).join("release").join(bin);
+    for (triple, _) in MAC_ARCHES {
+        let path = target_dir.join(triple).join("release").join(bin);
         if !path.exists() {
             return Err(format!(
-                "missing {} — run `cargo build --release --target {arch} -p duja-app -p dujactl` first",
-                path.display()
+                "missing {} — run `MACOSX_DEPLOYMENT_TARGET={} cargo build --release \
+                 --target {triple} -p duja-app -p dujactl` first",
+                path.display(),
+                bundle::MIN_MACOS,
             ));
         }
         thin.push(path);
@@ -272,6 +322,110 @@ fn fuse(into: &Path, bin: &str, thin: &[PathBuf]) -> Result<PathBuf, String> {
     cmd.arg("-create").arg("-output").arg(&out).args(thin);
     tool(cmd, "lipo")?;
     Ok(out)
+}
+
+/// The check that stands between `lipo` and `codesign`, behind a token the rest
+/// of this module cannot forge.
+mod verified {
+    use super::{MAC_ARCHES, bundle, macho};
+
+    /// A bundle whose binaries have been read back and agree with its
+    /// `Info.plist`.
+    ///
+    /// The field is private to this module and [`Verified::checked`] is the only
+    /// constructor, so [`super::seal`] — which takes nothing else — cannot be
+    /// reached without the check having run. That is deliberate rather than
+    /// decorative: `dist::macos` cannot execute on the lanes this code is
+    /// written on, so "a test proves the call site is still there" is not
+    /// available. A type makes it *uncompilable* to remove, which is the
+    /// stronger guarantee and the only one on offer here.
+    pub(super) struct Verified<'a> {
+        /// The bundle this token vouches for.
+        app: &'a bundle::Bundle,
+    }
+
+    impl<'a> Verified<'a> {
+        /// Read `app`'s binaries and refuse anything that is not what its
+        /// `Info.plist` claims.
+        ///
+        /// Two failures this catches, both silent and both shipping-grade:
+        ///
+        /// * **A missing slice.** `lipo` fuses however many inputs it is given;
+        ///   a binary without its `x86_64` half runs on exactly the Macs the
+        ///   maintainer tested on and fails on the other half of the world.
+        /// * **The wrong deployment target.** `LSMinimumSystemVersion` is a
+        ///   claim about the *binary*, and only `MACOSX_DEPLOYMENT_TARGET` at
+        ///   build time honours it. Forgetting it yields slices built for
+        ///   whatever rustc defaults to, inside a bundle advertising
+        ///   [`bundle::MIN_MACOS`] — an app that launches fine on the machine
+        ///   that built it. No amount of checking the plist can see this, which
+        ///   is why this reads the Mach-O instead of comparing another pair of
+        ///   strings.
+        ///
+        /// Runs identically locally and in CI, because [`macho`] parses the
+        /// header rather than shelling out to `otool` — which exists on neither
+        /// of the lanes this code is developed on.
+        ///
+        /// # Errors
+        /// A message naming the binary, the architecture, and the `cargo build`
+        /// that would fix it.
+        pub(super) fn checked(app: &'a bundle::Bundle) -> Result<Self, String> {
+            for name in [bundle::MAIN_EXECUTABLE, bundle::HELPER_EXECUTABLE] {
+                let path = app.executable(name);
+                let bytes =
+                    std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+                let found =
+                    macho::slices(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+                let present: Vec<&str> = found.iter().map(|s| s.arch.as_str()).collect();
+                for (triple, arch) in MAC_ARCHES {
+                    let slice = found.iter().find(|s| s.arch == arch).ok_or_else(|| {
+                        format!(
+                            "{} has no {arch} slice (it has: {}) — build {triple} too",
+                            path.display(),
+                            present.join(", "),
+                        )
+                    })?;
+                    if slice.min_os.as_deref() != Some(bundle::MIN_MACOS) {
+                        return Err(format!(
+                            "{} {arch} slice targets macOS {}, but the bundle advertises {} — \
+                             rebuild it with MACOSX_DEPLOYMENT_TARGET={}",
+                            path.display(),
+                            slice.min_os.as_deref().unwrap_or("<no recorded minimum>"),
+                            bundle::MIN_MACOS,
+                            bundle::MIN_MACOS,
+                        ));
+                    }
+                }
+            }
+            Ok(Verified { app })
+        }
+
+        /// The bundle this token vouches for.
+        pub(super) fn bundle(&self) -> &bundle::Bundle {
+            self.app
+        }
+    }
+}
+
+/// Seal the bundle: nested code first, then the bundle itself, then read the
+/// seal back.
+///
+/// Inside-out order is required, not stylistic: sealing a bundle records the
+/// signatures of the code it finds nested inside, so a `dujactl` signed
+/// afterwards would invalidate the enclosing seal.
+fn seal(verified: &Verified<'_>, identity: &str) -> Result<(), String> {
+    let app = verified.bundle();
+    codesign(
+        identity,
+        &app.executable(bundle::HELPER_EXECUTABLE),
+        Some(&format!(
+            "{}.{}",
+            bundle::BUNDLE_ID,
+            bundle::HELPER_EXECUTABLE
+        )),
+    )?;
+    codesign(identity, app.root(), None)?;
+    verify_signature(app.root())
 }
 
 /// Sign `path` with `identity`, optionally forcing the signing identifier.
@@ -333,9 +487,13 @@ fn link_applications(stage: &Path) -> Result<(), String> {
 
 /// Wrap `stage` in a compressed read-only disk image.
 ///
-/// `HFS+` rather than the newer APFS: an APFS image is unreadable before macOS
-/// 10.13, and a compressed HFS+ image costs nothing on the systems Duja does
-/// support. `UDZO` is the zlib-compressed read-only format every macOS reads.
+/// Nothing ever writes to a read-only compressed image, so the filesystem inside
+/// it is an implementation detail; `HFS+` is chosen for breadth, not for
+/// anything APFS lacks. It is what `hdiutil create -srcfolder` produces by
+/// default and what every mount helper and archiver handles. (The reason usually
+/// given for it — that APFS images are unreadable before macOS 10.13 — does
+/// *not* apply here: Duja's own floor is already higher than that.) `UDZO` is
+/// the zlib-compressed read-only format every macOS reads.
 fn image(stage: &Path, dmg: &Path, version: &Version) -> Result<(), String> {
     let mut cmd = Command::new("hdiutil");
     cmd.arg("create")
@@ -403,12 +561,17 @@ fn compress(stage: &Path, zip: &Path) -> Result<(), String> {
         "-Command",
         &script,
     ]);
-    tool(cmd, "Compress-Archive")
+    tool(cmd, "powershell")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parse a command line written the way it would be typed.
+    fn args(argv: &[&str]) -> Result<Invocation, String> {
+        Invocation::parse(argv.iter().map(|s| (*s).to_owned()))
+    }
 
     /// The *choice* of target, not a literal. Packaging for the wrong platform
     /// is silent — a Windows zip staged on a Mac looks like a successful run —
@@ -437,21 +600,118 @@ mod tests {
         assert!(err.contains("expected"), "{err}");
     }
 
-    /// Both artifacts carry the same two programs, and the macOS bundle's names
-    /// are the ones the `Info.plist` and the signing step reference.
+    /// Assemble a bundle whose two binaries are the given synthetic universal
+    /// files, and run the packaging check over it.
+    fn checked(tag: &str, binary: &[(&str, (u32, u32, u32))]) -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("duja-verify-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let bytes = macho::fixtures::universal(binary);
+        let main = dir.join("duja-fat");
+        let helper = dir.join("dujactl-fat");
+        std::fs::write(&main, &bytes).expect("main");
+        std::fs::write(&helper, &bytes).expect("helper");
+        let app = bundle::assemble(
+            &dir,
+            &Version::parse("9.9.9").expect("version"),
+            &BundleInputs {
+                main: &main,
+                helper: &helper,
+                resources: &[],
+            },
+        )
+        .expect("assemble");
+        let out = Verified::checked(&app).map(|_| ());
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }
+
+    /// What `lipo` produces when both builds ran with the right deployment
+    /// target — the only artifact that may be signed.
     #[test]
-    fn the_shipped_binaries_are_the_ones_the_bundle_names() {
+    fn a_universal_binary_at_the_advertised_floor_is_accepted() {
         assert_eq!(
-            BINARIES,
-            [bundle::MAIN_EXECUTABLE, bundle::HELPER_EXECUTABLE]
+            checked("good", &[("arm64", (11, 0, 0)), ("x86_64", (11, 0, 0))]),
+            Ok(())
         );
     }
 
-    /// `lipo` order is arch order; a universal binary missing a slice runs on
-    /// half the Macs and is invisible until one of them tries.
+    /// Forgetting `MACOSX_DEPLOYMENT_TARGET` on one build. The bundle would
+    /// still assemble, still sign, still mount, and still claim 11.0 — the whole
+    /// reason the check reads the Mach-O rather than comparing two strings.
     #[test]
-    fn the_universal_binary_covers_both_apple_architectures() {
-        assert!(MAC_ARCHES.contains(&"aarch64-apple-darwin"));
-        assert!(MAC_ARCHES.contains(&"x86_64-apple-darwin"));
+    fn a_slice_below_the_advertised_floor_is_refused() {
+        let err = checked("floor", &[("arm64", (11, 0, 0)), ("x86_64", (10, 12, 0))])
+            .expect_err("wrong floor");
+        assert!(err.contains("targets macOS 10.12"), "{err}");
+        assert!(err.contains("MACOSX_DEPLOYMENT_TARGET"), "{err}");
+    }
+
+    /// A "universal" binary with one slice runs on exactly the Macs the person
+    /// who built it owns.
+    #[test]
+    fn a_single_arch_binary_is_refused() {
+        let err = checked("single", &[("arm64", (11, 0, 0))]).expect_err("one slice");
+        assert!(err.contains("no x86_64 slice"), "{err}");
+        assert!(err.contains("x86_64-apple-darwin"), "{err}");
+    }
+
+    /// The arch list lives in three places — here, the workflow's `rustup target
+    /// add`, and its two `cargo build --target` lines — and only the last of
+    /// those decides what is actually compiled. Dropping one `cargo build` line
+    /// is the realistic drift, and it yields a single-arch "universal" binary.
+    /// `verify_slices` catches that at package time, but only once somebody runs
+    /// a release; reading the workflow catches it on every lane.
+    #[test]
+    fn the_workflow_builds_every_architecture_this_fuses() {
+        let workflow = crate::read_repo_file(&[".github", "workflows", "release.yml"]);
+        for (triple, _) in MAC_ARCHES {
+            assert!(
+                workflow.contains(&format!("--target {triple}")),
+                "release.yml never builds {triple}, so `lipo` would fuse one slice"
+            );
+        }
+    }
+
+    /// Every flag spelling is a legal version string, so a missing value used to
+    /// be swallowed as the version and surface as a confusing complaint about
+    /// the *next* argument.
+    #[test]
+    fn a_flag_shaped_value_is_rejected_rather_than_taken_as_the_version() {
+        let err = args(&["--version", "--target", "macos"]).expect_err("flag as value");
+        assert!(err.contains("got the flag `--target`"), "{err}");
+    }
+
+    /// `--sign` has no meaning for a zip. Accepting it and doing nothing would
+    /// report success for a signing run that never signed.
+    #[test]
+    fn sign_is_refused_where_there_is_nothing_to_sign() {
+        let err = args(&["--version", "1.0.0", "--target", "windows", "--sign", "me"])
+            .expect_err("--sign on windows");
+        assert!(err.contains("macOS target only"), "{err}");
+    }
+
+    #[test]
+    fn the_signing_identity_defaults_to_ad_hoc() {
+        let parsed = args(&["--version", "1.0.0", "--target", "macos"]).expect("parse");
+        assert_eq!(parsed.identity, "-");
+        let parsed = args(&[
+            "--version",
+            "1.0.0",
+            "--target",
+            "macos",
+            "--sign",
+            "Developer ID",
+        ])
+        .expect("parse");
+        assert_eq!(parsed.identity, "Developer ID");
+    }
+
+    #[test]
+    fn a_run_without_a_version_says_how_to_invoke_it() {
+        let err = args(&["--target", "macos"]).expect_err("no version");
+        assert!(err.contains("usage:"), "{err}");
+        let err = args(&["--frobnicate"]).expect_err("unknown flag");
+        assert!(err.contains("unknown `dist` argument"), "{err}");
     }
 }

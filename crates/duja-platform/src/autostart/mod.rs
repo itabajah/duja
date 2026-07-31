@@ -16,7 +16,10 @@
 //! - The `Duja = "<quoted exe>"` command string is composed by the pure
 //!   [`run_command`], tested without touching the registry.
 //! - macOS uses a `launchd` `LaunchAgent` plist (see the `mac` module); its plist
-//!   generation and parsing are pure and host-tested (see the `plist` module).
+//!   generation and parsing are pure and host-tested (see the `plist` module),
+//!   as is the rule refusing to register a copy running from a mounted volume
+//!   (see the `mac_location` module — Duja ships as a disk image, and a login
+//!   item pointing inside one dies the moment it is ejected).
 //! - Any remaining target gets a stub whose every operation reports
 //!   [`AutostartError::Unsupported`].
 //!
@@ -37,6 +40,10 @@ mod mac;
 // unit-tested cross-platform without a real `~/Library`.
 #[cfg(any(test, target_os = "macos"))]
 mod plist;
+
+// Same arrangement, for the rule about *where* a macOS copy may register from.
+#[cfg(any(test, target_os = "macos"))]
+mod mac_location;
 
 #[cfg(windows)]
 pub use win::{WindowsAutostart, system};

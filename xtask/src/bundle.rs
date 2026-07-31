@@ -70,12 +70,27 @@ pub(crate) const BUNDLE_ID: &str = "io.github.itabajah.duja";
 
 /// `LSMinimumSystemVersion` — the oldest macOS this bundle claims to run on.
 ///
-/// 11.0 rather than something older because that is the floor Rust's
-/// `aarch64-apple-darwin` target itself has: a universal binary cannot honestly
-/// advertise a release that predates Apple Silicon. The release workflow builds
-/// **both** slices with `MACOSX_DEPLOYMENT_TARGET` set to this same value so the
-/// `x86_64` slice's `LC_BUILD_VERSION` agrees with what the plist says, rather
-/// than silently claiming 10.12 underneath an 11.0 bundle.
+/// **A support decision, not a technical necessity.** A universal binary records
+/// a deployment target *per slice*, and Launch Services gates launch on this key
+/// alone, so a bundle advertising 10.13 with an `x86_64` slice built for 10.13
+/// would run on an Intel Mac at 10.13 — the `arm64` slice's own 11.0 floor is
+/// never consulted on hardware that could not use it anyway. That is the ordinary
+/// arrangement; an earlier version of this comment claimed it was dishonest,
+/// which was simply wrong.
+///
+/// 11.0 is chosen because it is the lowest floor **both** slices can be built at
+/// from one `MACOSX_DEPLOYMENT_TARGET`, and going below it means asserting
+/// support for releases no lane tests and nobody has run Duja on. The cost is
+/// bounded and specific: Big Sur covers Intel Macs from roughly 2013–2014
+/// onwards, so what is excluded is hardware a decade older than that — not the
+/// Intel population whose DDC confirmations `docs/debt.md` is waiting on.
+/// Lowering it needs a per-arch deployment target *and* someone with the
+/// hardware; that is recorded as debt rather than guessed at.
+///
+/// The claim is enforced on the artifact, not on paper: the release workflow
+/// builds both slices with `MACOSX_DEPLOYMENT_TARGET` set to this value, and
+/// `dist`'s `verify_slices` reads the `minos` back out of the fused binary and
+/// refuses to sign a bundle whose slices disagree with it.
 pub(crate) const MIN_MACOS: &str = "11.0";
 
 /// The four-byte legacy type/creator record in `Contents/PkgInfo`.
@@ -108,8 +123,10 @@ pub(crate) fn volume_name(version: &Version) -> String {
 /// no separate build counter, so they are the same string — which is also what
 /// makes a pre-release tag like `0.2.0-beta.1` land in
 /// `CFBundleShortVersionString`. That is not the strict dotted-integer form the
-/// App Store requires; Duja does not ship through the App Store, and both
-/// notarization and Launch Services accept it.
+/// App Store validates on submission; Duja does not ship through the App Store,
+/// and Launch Services does not validate this key at launch. Whether Apple's
+/// notary service would object is untested — nothing here has ever been
+/// notarized — so if a pre-release tag is ever notarized, check it.
 ///
 /// The text is emitted rather than escaped: [`Version`] has already rejected
 /// every character that means something to XML, and every other value here is a
@@ -358,57 +375,98 @@ mod tests {
         assert_eq!(value_of(&plist, "NSHighResolutionCapable"), Some("<true/>"));
     }
 
+    /// Every occurrence of `pattern`\'s trailing capture in `text`, where the
+    /// value runs to the next `terminator`.
+    ///
+    /// Collects **all** matches rather than the first: a workflow that grows a
+    /// second job with its own `MACOSX_DEPLOYMENT_TARGET`, or a module that
+    /// grows a second `LABEL`, must not be able to hide a drifted value behind
+    /// an agreeing one.
+    fn captures(text: &str, pattern: &str, terminator: char) -> Vec<String> {
+        text.split(pattern)
+            .skip(1)
+            .filter_map(|rest| rest.split(terminator).next())
+            .map(|v| v.trim().trim_matches(['"', '\'']).to_owned())
+            .collect()
+    }
+
+    /// Assert every occurrence agrees with `expected`, and that there is at
+    /// least one — an absent pattern means the pin stopped pinning, which is a
+    /// failure, not a pass.
+    fn every_occurrence_is(found: &[String], expected: &str, what: &str) {
+        assert!(!found.is_empty(), "nothing to check: {what}");
+        for value in found {
+            assert_eq!(value, expected, "{what}");
+        }
+    }
+
     /// The identifier is not a free-form label: `duja-platform` registers the
-    /// launch-at-login job under the *same* reverse-DNS string, so if these two
-    /// drift the bundle and its login item become two identities of one program.
-    /// Read the other crate's constant rather than restating it here, so the
-    /// duplication cannot rot silently.
+    /// launch-at-login job under the *same* reverse-DNS string, and the release
+    /// workflow asserts it on the shipped plist. Three copies, so read the other
+    /// two rather than restating them, and check every occurrence in each.
     #[test]
     fn the_bundle_identifier_is_the_launch_agent_label() {
-        let path = crate::repo_root()
-            .expect("repo root")
-            .join("crates")
-            .join("duja-platform")
-            .join("src")
-            .join("autostart")
-            .join("plist.rs");
-        let src = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-        let label = src
-            .split("LABEL: &str = \"")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .unwrap_or_else(|| panic!("no `LABEL: &str = \"…\"` in {}", path.display()));
-        assert_eq!(
-            BUNDLE_ID, label,
-            "the bundle identifier and the launchd job label must be one string"
+        let plist_rs =
+            crate::read_repo_file(&["crates", "duja-platform", "src", "autostart", "plist.rs"]);
+        every_occurrence_is(
+            &captures(&plist_rs, "LABEL: &str = \"", '"'),
+            BUNDLE_ID,
+            "the bundle identifier and the launchd job label must be one string",
+        );
+
+        let workflow = crate::read_repo_file(&[".github", "workflows", "release.yml"]);
+        every_occurrence_is(
+            &captures(
+                &workflow,
+                "CFBundleIdentifier raw -o - \"$plist\")\" = \"",
+                '"',
+            ),
+            BUNDLE_ID,
+            "release.yml checks the shipped plist against a stale identifier",
         );
     }
 
-    /// `LSMinimumSystemVersion` is a claim about the *binary*, and only the
-    /// build honours it. The release workflow sets `MACOSX_DEPLOYMENT_TARGET`
-    /// for both slices; if that value is changed or dropped, the plist would go
-    /// on advertising a floor nothing compiled against.
+    /// `LSMinimumSystemVersion` is a claim about the *binary*, and only the build
+    /// honours it. The release workflow sets `MACOSX_DEPLOYMENT_TARGET` for both
+    /// slices; if that value is changed or dropped, the plist would go on
+    /// advertising a floor nothing compiled against. (`dist::verify_slices`
+    /// enforces the same thing on the artifact — this catches the drift before a
+    /// release ever runs.)
     #[test]
     fn the_deployment_target_matches_the_minimum_the_bundle_advertises() {
-        let path = crate::repo_root()
-            .expect("repo root")
-            .join(".github")
-            .join("workflows")
-            .join("release.yml");
-        let src = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-        let value = src
-            .lines()
-            .find_map(|line| line.trim_start().strip_prefix("MACOSX_DEPLOYMENT_TARGET:"))
-            .unwrap_or_else(|| panic!("no MACOSX_DEPLOYMENT_TARGET in {}", path.display()))
-            .trim()
-            .trim_matches(['"', '\''])
-            .to_owned();
-        assert_eq!(
-            MIN_MACOS, value,
-            "the workflow's deployment target and the plist's minimum must agree"
+        let workflow = crate::read_repo_file(&[".github", "workflows", "release.yml"]);
+        every_occurrence_is(
+            &captures(&workflow, "MACOSX_DEPLOYMENT_TARGET:", '\n'),
+            MIN_MACOS,
+            "the workflow's deployment target and the plist's minimum must agree",
         );
+    }
+
+    /// `CFBundleExecutable` and the staged file names are *cargo* binary names:
+    /// `dist` looks for `target/<triple>/release/<name>`, which is whatever the
+    /// `[[bin]]` sections say. Renaming a binary would leave the plist naming a
+    /// file that is never produced — and the layout tests could not see it,
+    /// because they take both sides of the comparison from these constants.
+    #[test]
+    fn the_executable_names_are_the_ones_cargo_produces() {
+        for (crate_dir, expected) in [
+            ("duja-app", MAIN_EXECUTABLE),
+            ("dujactl", HELPER_EXECUTABLE),
+        ] {
+            let manifest = crate::read_repo_file(&["crates", crate_dir, "Cargo.toml"]);
+            let after_bin = manifest
+                .split("[[bin]]")
+                .nth(1)
+                .unwrap_or_else(|| panic!("no [[bin]] section in crates/{crate_dir}/Cargo.toml"));
+            every_occurrence_is(
+                &captures(after_bin, "name = \"", '"')
+                    .into_iter()
+                    .take(1)
+                    .collect::<Vec<_>>(),
+                expected,
+                "the bundle stages a binary name cargo does not produce",
+            );
+        }
     }
 
     // ---- the assembled directory ----------------------------------------

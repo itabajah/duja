@@ -9,6 +9,7 @@
 
 mod bundle;
 mod dist;
+mod macho;
 mod version;
 
 use std::path::{Path, PathBuf};
@@ -61,4 +62,21 @@ fn repo_root() -> Result<PathBuf, String> {
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| "cannot resolve the repository root".to_owned())
+}
+
+/// Read a repository file by path components, for the tests that pin a constant
+/// here against the *other* file that has to agree with it.
+///
+/// Several couplings in this crate cross a boundary no type can span — a
+/// constant in another crate, a value in a YAML workflow, a `[[bin]]` name in a
+/// manifest. Restating them in a comment is what rots; reading the other file is
+/// what does not. Panics with the path if it cannot be read, which is the
+/// intended behaviour: a moved file must fail loudly, not silently stop checking.
+#[cfg(test)]
+fn read_repo_file(parts: &[&str]) -> String {
+    let mut path = repo_root().expect("repo root");
+    for part in parts {
+        path.push(part);
+    }
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
 }

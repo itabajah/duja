@@ -16,6 +16,14 @@
 //! writes the `LaunchAgent` plist directly — the long-standing approach that needs
 //! no bundle. Migration to `SMAppService` is tracked in `docs/debt.md`.
 //!
+//! # Where a copy may register from
+//!
+//! [`set_enabled(true)`](super::Autostart::set_enabled) **refuses** when the running
+//! executable is on a mounted volume. Duja ships as a disk image, and a login
+//! item pointing inside one stops working the instant it is ejected while still
+//! reporting itself enabled. See [`mac_location`](super::mac_location) for the
+//! rule and what the prefix test costs.
+//!
 //! # Stale-path policy
 //!
 //! [`is_enabled`](MacAutostart::is_enabled) mirrors the Windows backend's
@@ -26,6 +34,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::mac_location::{is_on_a_mounted_volume, mounted_volume_message};
 use super::plist::{generate_plist, parse_program_argument0, plist_file_name};
 use super::{Autostart, AutostartError};
 
@@ -62,6 +71,12 @@ impl Autostart for MacAutostart {
 
     fn set_enabled(&mut self, on: bool) -> Result<(), AutostartError> {
         if on {
+            // The plist records a path, so registering one that is about to be
+            // unmounted produces a login item that is dead and still reports
+            // itself enabled. Refuse instead — see `mac_location`.
+            if is_on_a_mounted_volume(&self.exe) {
+                return Err(AutostartError::Io(mounted_volume_message(&self.exe)));
+            }
             write_atomically(&self.plist_path, &generate_plist(&self.exe))
         } else {
             remove_if_present(&self.plist_path)
@@ -173,6 +188,27 @@ mod tests {
         // Disabling again (already absent) is a no-op success.
         backend.set_enabled(false).expect("disable-absent");
         let _ = std::fs::remove_dir_all(plist.parent().expect("parent"));
+    }
+
+    /// The wiring, not the rule: `mac_location`'s prefix test runs on every
+    /// lane, but that `set_enabled` actually consults it can only be checked
+    /// here — this module is `cfg(target_os = "macos")`, so **this test reds on
+    /// the macOS lane only**. Deleting the guard leaves Windows and Linux green.
+    #[test]
+    fn enabling_from_a_mounted_volume_is_refused_and_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!("duja-autostart-{}-dmg", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plist = dir.join(plist_file_name());
+        let mut backend = MacAutostart::at(
+            plist.clone(),
+            PathBuf::from("/Volumes/Duja 0.2.0/Duja.app/Contents/MacOS/duja"),
+        );
+
+        let err = backend.set_enabled(true).expect_err("mounted volume");
+        assert!(err.to_string().contains("/Applications"), "{err}");
+        assert!(!plist.exists(), "no plist may be written for a doomed path");
+        assert!(!backend.is_enabled().expect("query"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

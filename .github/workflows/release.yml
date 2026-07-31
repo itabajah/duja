@@ -104,8 +104,9 @@ jobs:
       # Duja has no Apple Developer account, so the bundle ships with an ad-hoc
       # signature: enough for macOS to *execute* it (Apple Silicon refuses an
       # unsigned binary outright), not enough for Gatekeeper to open a
-      # downloaded copy without the right-click-Open detour. Same posture as the
-      # unsigned Windows installer and its SmartScreen prompt.
+      # downloaded copy without a trip through System Settings → Privacy &
+      # Security → Open Anyway. Same posture as the unsigned Windows installer
+      # and its SmartScreen prompt.
       #
       # Enable it with NO edit to this file:
       #   1. Join the Apple Developer Program; create a "Developer ID
@@ -141,7 +142,9 @@ jobs:
           security list-keychains -d user -s "$keychain" login.keychain-db
 
       # Fuse → bundle → codesign → DMG, all in the dependency-free xtask so the
-      # same command produces the same artifact on a maintainer's Mac.
+      # same command produces the same artifact on a maintainer's Mac — provided
+      # the two builds above ran with the same MACOSX_DEPLOYMENT_TARGET, which
+      # `xtask`'s `verify_slices` refuses to package without.
       - name: Package Duja.app and the disk image
         env:
           MACOS_SIGN: ${{ vars.MACOS_SIGN }}
@@ -154,15 +157,20 @@ jobs:
             cargo run --release -p xtask -- dist --version "$VERSION"
           fi
 
-      # The claims xtask's unit tests cannot reach, checked on the bytes that
-      # actually ship: a plist macOS will parse, `LSUIElement` true in the
-      # *written* file, both slices present in both binaries, both compiled
-      # against the advertised floor, a seal that validates, and an image that
-      # mounts.
+      # Checked on the bytes that actually ship, with Apple's own tools. The
+      # arch/`minos` half duplicates what `xtask`'s `verify_slices` already
+      # refused to sign without — deliberately, because that check reads the
+      # Mach-O header with code written here, and a second implementation is the
+      # only thing that catches *that* code being wrong.
+      #
+      # `otool` output goes to a file rather than through a pipe: `awk … exit`
+      # closes the read end while `otool` may still be writing, and under
+      # `pipefail` a SIGPIPE'd `otool` would fail the release for no reason.
       - name: Verify the bundle
         run: |
           set -euo pipefail
           app="target/dist/duja-$VERSION-macos-universal/Duja.app"
+          dmg="target/dist/duja-$VERSION-macos-universal.dmg"
           plist="$app/Contents/Info.plist"
           plutil -lint "$plist"
           plutil -extract LSUIElement raw -o - "$plist" | grep -qx true
@@ -173,18 +181,41 @@ jobs:
             case "$archs" in *arm64*) ;; *) echo "$bin has no arm64 slice" >&2; exit 1;; esac
             case "$archs" in *x86_64*) ;; *) echo "$bin has no x86_64 slice" >&2; exit 1;; esac
             for arch in arm64 x86_64; do
-              minos="$(otool -arch "$arch" -l "$app/Contents/MacOS/$bin" |
-                       awk '/LC_BUILD_VERSION/{f=1} f && /minos/{print $2; exit}')"
+              otool -arch "$arch" -l "$app/Contents/MacOS/$bin" > "$RUNNER_TEMP/otool.txt"
+              minos="$(awk '/LC_BUILD_VERSION/{f=1} f && /minos/{v=$2} END{print v}' "$RUNNER_TEMP/otool.txt")"
               echo "$bin/$arch minos=$minos"
               test "$minos" = "$MACOSX_DEPLOYMENT_TARGET"
             done
           done
           codesign --verify --strict --verbose=2 "$app"
-          hdiutil verify "target/dist/duja-$VERSION-macos-universal.dmg"
+          # `hdiutil verify` only checks the image's stored checksum — it never
+          # attaches, so an image whose filesystem is unmountable passes it.
+          # Mount it and look, which is what a user's first double-click does.
+          hdiutil verify "$dmg"
+          mount="$RUNNER_TEMP/dmg-check"
+          mkdir -p "$mount"
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount"
+          trap 'hdiutil detach "$mount" -force || true' EXIT
+          test -x "$mount/Duja.app/Contents/MacOS/duja"
+          test -L "$mount/Applications"
+          codesign --verify --strict "$mount/Duja.app"
+          hdiutil detach "$mount"
+          trap - EXIT
 
+      # Also INERT until MACOS_SIGN is set. Note this step is NOT PUBLISH-gated:
+      # notarization is a network round-trip to Apple that can fail for reasons a
+      # build cannot predict, and a dry run that skipped it would not be a dry
+      # run of the thing most likely to break. The cost is that a notary outage
+      # fails the whole release rather than half of it — re-running the workflow
+      # on the same tag recovers, because the Release is updated rather than
+      # re-created (docs/release-checklist.md says so where it will be read).
+      # `--timeout` bounds a stuck submission to something shorter than the
+      # 6-hour job limit, so a hung queue fails loudly instead of burning a
+      # runner.
       - name: Notarize and staple the disk image
         if: vars.MACOS_SIGN == 'true'
         env:
+          MACOS_SIGN_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY }}
           NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
           NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
@@ -194,8 +225,13 @@ jobs:
           printf '%s' "$NOTARY_KEY" | base64 --decode > "$key"
           trap 'rm -f "$key"' EXIT
           dmg="target/dist/duja-$VERSION-macos-universal.dmg"
+          # Sign the image itself, not only the app inside it: an unsigned
+          # container gets a notarization ticket built from its contents, while a
+          # signed one has the ticket cover the image a user actually downloads.
+          codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$dmg"
           xcrun notarytool submit "$dmg" \
-            --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" --wait
+            --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" \
+            --wait --timeout 30m
           # Staple the ticket so the image also opens on a machine that is offline.
           xcrun stapler staple "$dmg"
 

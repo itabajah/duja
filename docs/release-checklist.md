@@ -96,10 +96,13 @@ hdiutil detach /Volumes/Duja\ 0.1.0
 ```
 
 Until a Developer ID signature is enabled (below), the bundle carries an **ad-hoc**
-signature: `codesign --verify` passes, `spctl --assess` does not, and the first
-launch of a downloaded copy needs right-click → Open. That is the macOS twin of
-the SmartScreen prompt on the unsigned Windows installer, and both are called out
-in `SECURITY.md`.
+signature: `codesign --verify` passes, `spctl --assess` does not, and Gatekeeper
+blocks the first open of a downloaded copy. The user allows it in **System
+Settings → Privacy & Security → Open Anyway** — macOS 15 Sequoia removed the
+Control-click → Open shortcut, so any instruction that still says "right-click →
+Open" is wrong on every release Duja targets. That is the macOS twin of the
+SmartScreen prompt on the unsigned Windows installer, and both are called out in
+`SECURITY.md`.
 
 ## Enabling Authenticode (Azure Trusted Signing) later
 
@@ -149,3 +152,10 @@ this changes no step ordering and no packaging code.
 > `workflow_dispatch` dry run signs and notarizes too. That is deliberate:
 > notarization is a network round-trip to Apple that can fail for reasons a build
 > cannot predict, and finding that out on a dry run is the point.
+>
+> The same unpredictability applies on a tag push, where `needs: macos` means a
+> notary outage fails the *whole* release. **That is recoverable and does not
+> burn the tag**: re-run the workflow from the Actions tab on the same tag. The
+> gate, the builds and the packaging all repeat, and `softprops/action-gh-release`
+> updates the existing Release rather than creating a second one. Do not delete
+> and re-push the tag.
