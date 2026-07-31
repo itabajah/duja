@@ -328,12 +328,20 @@ impl FakeI2cBus {
     /// Validate a request's trailing XOR checksum the way a real display would,
     /// re-deriving the seed from the framing and the op-code.
     ///
-    /// This is the one production assumption the fake can check **without**
-    /// re-implementing production's layout: it reads a value the codec computes
-    /// rather than recomputing where the codec puts things. Without it the
-    /// checksum seed was untested end to end — inverting the seed reddened only
+    /// Without this the seed was untested end to end: inverting it reddened only
     /// the two exact-byte unit tests, and every `mac_transport_*` round trip
     /// closed regardless, because `read()` just hands back a scripted reply.
+    ///
+    /// **What this does and does not buy.** It checks a value the codec
+    /// *computes* rather than re-deriving where the codec *puts* things, so it is
+    /// independent of the layout — which is the assumption that was wrong. It is
+    /// not independent of the seed rule, which it necessarily restates: a change
+    /// made to both sides at once would still pass, the same limit every fake
+    /// has. What it catches is the realistic regression — one side edited alone.
+    ///
+    /// The constants are spelled literally rather than imported, like the
+    /// op-codes above. That is deliberate: sharing production's constants is how
+    /// the layout assumption got shared in the first place.
     fn request_checksum_ok(wire: DdcWire, data: &[u8]) -> bool {
         let Some((&stamped, covered)) = data.split_last() else {
             return false;
