@@ -11,8 +11,11 @@
 //!   source address travels on the wire. The Intel `IOI2CSendRequest` path puts
 //!   it in the packet; Apple Silicon's private `IOAVServiceWriteI2C` takes it as
 //!   a separate `dataAddress` argument, so its packet is the Intel one with that
-//!   leading byte removed — and its checksum seed absorbs the difference. Both
-//!   are encoded here, per-arm, with cited constants.
+//!   leading byte removed. The checksum seed then differs per request shape, and
+//!   **not** in a way that cancels out: a Set folds `0x51` back in and so lands
+//!   on the same checksum Intel computes (`0x9A` for `0x10 = 0x0032` either way),
+//!   while a Get does not and so differs from Intel by exactly `0x51` (`0xFD` vs
+//!   `0xAC`). Both arms are encoded here, with cited constants.
 //! - [`decode_get_vcp_reply`] and [`decode_caps_reply`] parse the display's
 //!   replies, which are the *same* standard DDC/CI reply frame on both arms.
 //! - [`DdcCiTransport`] turns an [`I2cBus`] (a couple of raw byte operations)
@@ -26,22 +29,42 @@
 //! [`I2cBus`] implementations are platform- and hardware-specific.
 //!
 //! # Protocol references
-//! Byte layouts, the two framings, and the checksum convention are quoted from
-//! the mature open-source implementations Duja cross-checked: MonitorControl
-//! (`MonitorControl/Support/Arm64DDC.swift` and `IntelDDC.swift`), m1ddc
-//! (`sources/i2c.m`), and the `ddc-macos` crate. Every magic constant below
-//! cites its role; see ADR-0013.
+//! Byte layouts, the two framings, and the checksum convention are cross-checked
+//! against four open-source implementations. They do **not** all agree, so the
+//! standing of each matters:
 //!
-//! **Cross-check the Apple Silicon framing against m1ddc, not MonitorControl
-//! alone.** MonitorControl builds the packet as
+//! - **fastfetch** (`src/detection/brightness/brightness_apple.c`) — the most
+//!   useful reference, because it implements *both* arms in one file: it emits
+//!   `82 01 10 FD` on Apple Silicon and `51 82 01 10 AC` on Intel, which pins the
+//!   relationship between them rather than either alone.
+//! - **MonitorControl** (`Support/Arm64DDC.swift`, `IntelDDC.swift`) and
+//!   **m1ddc** (`sources/i2c.m`) — agree with fastfetch. Treat them as **one**
+//!   source, not two: `Arm64DDC.swift` credits `@waydabber`, who also wrote
+//!   m1ddc.
+//! - **`ddc-macos`** (with `ddc-rs`) — **disagrees**. It builds the Intel packet
+//!   and strips byte 0 while keeping the Intel checksum, so its Get is
+//!   `82 01 10 AC`. Duja follows the other three, which are the field-dominant
+//!   implementations.
+//!
+//! Every magic constant below cites its role; see ADR-0013.
+//!
+//! **Do not cross-check the Apple Silicon framing against `Arm64DDC.swift`
+//! alone.** It builds the packet as
 //! `[0x80 | (send.count + 1), UInt8(send.count)] + send`, where `send` excludes
 //! the DDC op-code. That second element is therefore the *op-code*, not a second
 //! length field — it only looks like one because a Get sends 1 byte and its
 //! op-code is `0x01`, and a Set sends 3 and its op-code is `0x03`. Reading it as
 //! a length is what produced the malformed frames the P6 gate found: every
-//! request carried a spurious byte and a Get used the wrong checksum seed, so no
-//! Apple Silicon display ever answered. m1ddc writes the same bytes as literals
-//! (`data[0] = 0x82; data[1] = 0x01;`) and is unambiguous.
+//! request carried a spurious byte, and a Get used the wrong checksum seed.
+//!
+//! Those frames cannot have been answered — the old Get carried `0x02` in the
+//! op-code position (*VCP Feature Reply*, a display→host code) and the old Set
+//! carried `0x04`, which MCCS does not define — but note this is a reading of
+//! the wire, not an observation: Duja has never run against Apple Silicon
+//! hardware. The old checksum was *self-consistent*, so the frames were
+//! semantically wrong rather than corrupt, which is why nothing rejected them
+//! loudly. fastfetch and m1ddc both write these bytes as literals
+//! (`data[0] = 0x82; data[1] = 0x01;`) and are unambiguous.
 
 // RATIONALE: the codec's public vocabulary (`DdcCiError`, `DdcCiTransport`,
 // `DdcWire`) shares the `ddcci` module stem; the qualified names read best at
@@ -171,17 +194,20 @@ impl DdcWire {
                 let mut packet = Vec::with_capacity(body.len().saturating_add(2));
                 packet.push(LENGTH_FLAG | (len & 0x7F));
                 packet.extend_from_slice(body);
-                // Seed: 0x6E for a Get, else 0x6E ^ 0x51. Both references agree
-                // on the asymmetry and neither explains it, so it is reproduced
-                // rather than rationalised — they are the implementations proven
-                // against real Apple Silicon displays.
+                // Seed: 0x6E for a Get, else 0x6E ^ 0x51. The references agree on
+                // the asymmetry and none explains it, so it is reproduced rather
+                // than rationalised — they are the implementations proven against
+                // real Apple Silicon displays.
                 //
-                // `body.len() == 2` is the Get-VCP shape (op-code + VCP code).
-                // Arm64DDC.swift spells the same condition `send.count == 1`
-                // because its `send` excludes the op-code that duja's `body`
-                // carries; transliterating that `1` literally is what produced
-                // the malformed frames this replaced.
-                let seed = if body.len() == 2 {
+                // Arm64DDC.swift spells this `send.count == 1`, which is duja's
+                // `body.len() == 2` because its `send` excludes the op-code that
+                // `body` carries. Keying off the op-code instead says the same
+                // thing for every shape this codec builds (Get 2, caps 3, Set 4)
+                // while staying correct if a future one-argument op-code is
+                // added — under a length test that would silently inherit the
+                // Get seed. Transliterating the reference's `1` as a literal
+                // length is what produced the malformed frames this replaced.
+                let seed = if body.first() == Some(&OP_GET_VCP) {
                     DISPLAY_WRITE_ADDRESS
                 } else {
                     DISPLAY_WRITE_ADDRESS ^ HOST_SOURCE_ADDRESS

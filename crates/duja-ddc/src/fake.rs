@@ -325,6 +325,35 @@ impl FakeI2cBus {
     /// the right answer and every round trip closed. A fake that shares the
     /// production framing assumption cannot test that assumption; keying off
     /// [`DdcWire`] is what makes the two independent.
+    /// Validate a request's trailing XOR checksum the way a real display would,
+    /// re-deriving the seed from the framing and the op-code.
+    ///
+    /// This is the one production assumption the fake can check **without**
+    /// re-implementing production's layout: it reads a value the codec computes
+    /// rather than recomputing where the codec puts things. Without it the
+    /// checksum seed was untested end to end — inverting the seed reddened only
+    /// the two exact-byte unit tests, and every `mac_transport_*` round trip
+    /// closed regardless, because `read()` just hands back a scripted reply.
+    fn request_checksum_ok(wire: DdcWire, data: &[u8]) -> bool {
+        let Some((&stamped, covered)) = data.split_last() else {
+            return false;
+        };
+        // Intel folds the on-wire 0x51 in as an ordinary covered byte. Apple
+        // Silicon does not carry it, and folds it into the seed for everything
+        // except a Get — see `DdcWire::AppleSilicon`.
+        let seed = match wire {
+            DdcWire::Intel => 0x6E,
+            DdcWire::AppleSilicon => {
+                if Self::request_body(wire, data).and_then(<[u8]>::first) == Some(&OP_GET_VCP) {
+                    0x6E
+                } else {
+                    0x6E ^ 0x51
+                }
+            }
+        };
+        covered.iter().fold(seed, |acc, &b| acc ^ b) == stamped
+    }
+
     fn request_body(wire: DdcWire, data: &[u8]) -> Option<&[u8]> {
         let length_index: usize = match wire {
             DdcWire::Intel => 1,
@@ -354,6 +383,11 @@ impl I2cBus for FakeI2cBus {
     fn write(&mut self, data: &[u8]) -> Result<(), TransportError> {
         if !self.connected {
             return Err(TransportError::Disconnected);
+        }
+        if !Self::request_checksum_ok(self.wire, data) {
+            // A real display NAKs a bad checksum, which the transport sees as no
+            // reply at all.
+            return Err(TransportError::Timeout);
         }
         let Some(body) = Self::request_body(self.wire, data) else {
             return Err(TransportError::Timeout);

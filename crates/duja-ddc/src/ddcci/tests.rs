@@ -78,16 +78,17 @@ fn apple_silicon_frames_the_same_message_as_intel_without_the_source_byte() {
     // byte vectors) is what would have caught the extra length byte this test
     // file used to enshrine: a transposed or invented header byte breaks it even
     // if someone "fixes" both corpora to agree with each other.
-    for body in [
+    for (apple, intel) in [
         DdcWire::AppleSilicon.encode_get_vcp(0x10),
         DdcWire::AppleSilicon.encode_set_vcp(0x10, 0x0032),
+        DdcWire::AppleSilicon.encode_caps_request(0x0000),
     ]
     .into_iter()
     .zip([
         DdcWire::Intel.encode_get_vcp(0x10),
         DdcWire::Intel.encode_set_vcp(0x10, 0x0032),
+        DdcWire::Intel.encode_caps_request(0x0000),
     ]) {
-        let (apple, intel) = body;
         assert_eq!(
             intel.first(),
             Some(&0x51),
@@ -108,11 +109,34 @@ fn apple_silicon_frames_the_same_message_as_intel_without_the_source_byte() {
 }
 
 #[test]
-fn apple_silicon_and_intel_framings_differ() {
-    // The whole reason DdcWire exists: the two arms are not interchangeable.
-    assert_ne!(
+fn the_two_arms_agree_on_a_set_checksum_and_differ_on_a_get() {
+    // Replaces an `assert_ne!` that constrained nothing: the two frames have
+    // different LENGTHS, so it held for any pair of arms that were not literally
+    // identical, and the only mutation that reddened it also reddened nine other
+    // tests.
+    //
+    // The real relationship is sharper and asymmetric. A Set folds 0x51 into the
+    // seed, which is exactly what Intel folds in by carrying it on the wire, so
+    // the two land on the same checksum. A Get does not, so it differs from
+    // Intel by exactly 0x51. Anything that "simplifies" the seed to one constant
+    // breaks one of these two assertions whichever constant it picks.
+    let (apple_set, intel_set) = (
+        DdcWire::AppleSilicon.encode_set_vcp(0x10, 0x0032),
+        DdcWire::Intel.encode_set_vcp(0x10, 0x0032),
+    );
+    assert_eq!(apple_set.last(), intel_set.last(), "a Set absorbs the 0x51");
+
+    let (apple_get, intel_get) = (
+        DdcWire::AppleSilicon.encode_get_vcp(0x10),
         DdcWire::Intel.encode_get_vcp(0x10),
-        DdcWire::AppleSilicon.encode_get_vcp(0x10)
+    );
+    let (Some(&apple_chk), Some(&intel_chk)) = (apple_get.last(), intel_get.last()) else {
+        panic!("both frames carry a checksum");
+    };
+    assert_eq!(
+        apple_chk ^ intel_chk,
+        0x51,
+        "a Get does not, so it differs by exactly the source address"
     );
 }
 
