@@ -20,10 +20,14 @@
 //!
 //! # Leaks and recovery
 //!
-//! When a write goes unacked past [`EngineConfig::watchdog_timeout`], or a
-//! worker reports a panic, the display is marked unresponsive, its worker
-//! handle is **dropped without joining** (the OS thread is detached — never
-//! join a thread stuck in a GPU driver), and its in-flight entries are cleared.
+//! When a write goes unacked past [`EngineConfig::watchdog_timeout`], or the
+//! **currently registered** worker reports a panic, the display is marked
+//! unresponsive, its worker handle is **dropped without joining** (the OS thread
+//! is detached — never join a thread stuck in a GPU driver), and its in-flight
+//! entries are cleared. A panic from an already-replaced worker is ignored on a
+//! generation match, exactly like a stale
+//! [`OpenFailed`](crate::protocol::AckOutcome::OpenFailed) — otherwise a driver
+//! panic that raced a replug would grey the healthy replacement.
 //! A later enumeration that sights the display (manager emits
 //! [`Responsive`](duja_core::manager::ManagerEvent::Responsive) or
 //! [`Reattached`](duja_core::manager::ManagerEvent::Reattached)) spawns a fresh
@@ -580,9 +584,27 @@ impl EngineState {
                     }
                 }
             }
-            AckOutcome::Panicked { key, seq } => {
+            AckOutcome::Panicked {
+                key,
+                seq,
+                generation,
+            } => {
+                // Clearing the in-flight slot is already `seq`-gated, so it is
+                // safe unconditionally. Marking the display stuck is not: act
+                // only if the CURRENTLY registered worker is the one that
+                // panicked (generation match, exactly like `OpenFailed` and
+                // `SoftwareFallback`), so a panic that raced a respawn or replug
+                // cannot retire the fresh worker that superseded it, grey a
+                // healthy display, and spend one of the two stuck marks that
+                // abandon it for the session (see `MAX_STUCK_RESPAWNS`).
                 self.clear_inflight_match(&id, key, seq);
-                self.mark_stuck(&id);
+                if self
+                    .workers
+                    .get(&id)
+                    .is_some_and(|handle| handle.generation == generation)
+                {
+                    self.mark_stuck(&id);
+                }
             }
             AckOutcome::OpenFailed { generation } => {
                 // The deferred open failed on the worker thread. Act only if the

@@ -14,9 +14,12 @@
 //! 4. acks every performed op back to the engine.
 //!
 //! Every controller call runs under [`catch_unwind`]; a panic becomes an
-//! [`AckOutcome::Panicked`] and the worker exits (the engine then marks the
-//! display unresponsive). A stuck (never-returning) controller call simply
-//! never acks — the engine's watchdog handles that by leaking this thread.
+//! [`AckOutcome::Panicked`] carrying this worker's `generation`, and the worker
+//! exits. The engine marks the display unresponsive **only if this worker is
+//! still the registered one** — a panic that finished after a respawn or replug
+//! is ignored, so it cannot grey the healthy worker that replaced us. A stuck
+//! (never-returning) controller call simply never acks — the engine's watchdog
+//! handles that by leaking this thread.
 //!
 //! A worker also observes a shared `retired` flag the engine flips on detach: it
 //! checks the flag after every controller call and before performing any buffered
@@ -324,6 +327,7 @@ fn perform_reads(
     controller: &mut Box<dyn BrightnessController>,
     verify: &mut Verify,
     id: &StableDisplayId,
+    generation: u64,
     ack_tx: &Sender<WorkerAck>,
     retired: &Arc<AtomicBool>,
 ) -> bool {
@@ -350,6 +354,7 @@ fn perform_reads(
             Err(_) => AckOutcome::Panicked {
                 key: InflightKey::Get(feature),
                 seq,
+                generation,
             },
         };
         let is_panic = matches!(outcome, AckOutcome::Panicked { .. });
@@ -424,7 +429,15 @@ fn worker_loop(
         }
 
         // 3a. Perform reads (not rate-limited).
-        if perform_reads(&mut gets, &mut controller, &mut verify, id, ack_tx, retired) {
+        if perform_reads(
+            &mut gets,
+            &mut controller,
+            &mut verify,
+            id,
+            generation,
+            ack_tx,
+            retired,
+        ) {
             return;
         }
 
@@ -454,6 +467,7 @@ fn worker_loop(
                     outcome: AckOutcome::Panicked {
                         key: InflightKey::Set(feature),
                         seq,
+                        generation,
                     },
                 });
                 return;

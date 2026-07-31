@@ -68,11 +68,25 @@ pub(crate) enum AckOutcome {
         result: Result<FeatureRange, ControlError>,
     },
     /// The controller panicked during an operation; the worker is exiting.
+    ///
+    /// Like [`OpenFailed`](Self::OpenFailed) and
+    /// [`SoftwareFallback`](Self::SoftwareFallback) it carries the worker's
+    /// `generation`, so a panic that raced a respawn or replug cannot retire the
+    /// fresh worker that superseded it. This variant went without one until the
+    /// P6 gate: the `seq` below gates only the in-flight *clearing*, so the
+    /// stuck-marking ran unconditionally and a doomed op finishing after a
+    /// replug greyed the healthy replacement — and spent one of the **two**
+    /// stuck marks after which a display is abandoned for the session
+    /// (`MAX_STUCK_RESPAWNS` is 2 and the recovery gate is `<`, so the first
+    /// mark still permits a respawn and the second abandons). Two such races
+    /// therefore cost a working display until the next launch.
     Panicked {
         /// The operation that was in progress when the panic occurred.
         key: InflightKey,
         /// The sequence number of that operation.
         seq: u64,
+        /// The generation of the worker that panicked.
+        generation: u64,
     },
     /// The deferred open (run on the worker thread) failed to produce a
     /// controller; the worker never entered its loop and is exiting.
