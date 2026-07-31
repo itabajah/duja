@@ -75,8 +75,11 @@ pub(crate) enum AckOutcome {
     /// fresh worker that superseded it. This variant went without one until the
     /// P6 gate: the `seq` below gates only the in-flight *clearing*, so the
     /// stuck-marking ran unconditionally and a doomed op finishing after a
-    /// replug greyed the healthy replacement — and burned one of the three
-    /// stuck-respawns after which a display is abandoned for the session.
+    /// replug greyed the healthy replacement — and spent one of the **two**
+    /// stuck marks after which a display is abandoned for the session
+    /// (`MAX_STUCK_RESPAWNS` is 2 and the recovery gate is `<`, so the first
+    /// mark still permits a respawn and the second abandons). Two such races
+    /// therefore cost a working display until the next launch.
     Panicked {
         /// The operation that was in progress when the panic occurred.
         key: InflightKey,

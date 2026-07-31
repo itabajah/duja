@@ -1701,9 +1701,10 @@ impl BrightnessController for GatedPanic {
 fn stale_panicked_does_not_retire_a_fresh_worker() {
     // E-C (generation), the third arm. `OpenFailed` and `SoftwareFallback` both
     // ignore an ack from an already-replaced worker; `Panicked` did not, so a
-    // panic that raced a replug greyed the HEALTHY replacement and burned a
-    // stuck-respawn budget entry. Three of those abandon the display for the
-    // session.
+    // panic that raced a replug greyed the HEALTHY replacement and spent one of
+    // the two stuck marks that abandon a display for the session
+    // (`MAX_STUCK_RESPAWNS` is 2, gated with `<`: the first mark still permits a
+    // respawn, the second abandons). Two such races cost a working display.
     let id = display_id();
     let (platform_tx, platform_rx) = unbounded::<()>();
     let (writes_tx, writes_rx) = unbounded();
@@ -1786,9 +1787,17 @@ fn stale_panicked_does_not_retire_a_fresh_worker() {
     release_tx.send(()).unwrap();
 
     // The stale ack must NOT grey the display — B is healthy.
+    //
+    // This assertion is NEGATIVE, so a runner too loaded to deliver the
+    // notification in time degrades it into a silent pass on buggy code rather
+    // than a red. 2 s, matching the widest sibling budget in this file: measured
+    // ~7 ms idle against the unfixed engine, and this file already has a
+    // documented CI run that took 10.3 s against a 2 s budget (`docs/debt.md`).
+    // The "B still writes 44" assertion below is only a partial backstop — it
+    // saves the test only if the late ack is processed before that dispatch.
     let want = id.clone();
     assert!(
-        !wait_note(&notes, Duration::from_millis(600), |n| {
+        !wait_note(&notes, Duration::from_secs(2), |n| {
             matches!(n, EngineNotification::DisplayUnresponsive(x) if *x == want)
         }),
         "a stale Panicked must not mark the fresh worker's display unresponsive"
