@@ -1671,6 +1671,144 @@ fn stale_open_failed_does_not_retire_a_fresh_worker() {
     let _ = platform_tx;
 }
 
+/// A controller whose `set` announces it was entered, blocks until released,
+/// then panics — so a test can hold a doomed op in flight, force a respawn, and
+/// then deliver the resulting `Panicked` ack as a *stale* one.
+#[derive(Debug)]
+struct GatedPanic {
+    entered: Sender<()>,
+    release: Receiver<()>,
+}
+
+impl BrightnessController for GatedPanic {
+    fn probe(&mut self) -> Result<Capabilities, ControlError> {
+        Ok(caps())
+    }
+    fn get(&mut self, _feature: Feature) -> Result<FeatureRange, ControlError> {
+        Ok(FeatureRange {
+            current: 50,
+            max: 100,
+        })
+    }
+    fn set(&mut self, _feature: Feature, _value: u16) -> Result<(), ControlError> {
+        let _ = self.entered.send(());
+        let _ = self.release.recv();
+        panic!("simulated driver panic inside set()");
+    }
+}
+
+#[test]
+fn stale_panicked_does_not_retire_a_fresh_worker() {
+    // E-C (generation), the third arm. `OpenFailed` and `SoftwareFallback` both
+    // ignore an ack from an already-replaced worker; `Panicked` did not, so a
+    // panic that raced a replug greyed the HEALTHY replacement and burned a
+    // stuck-respawn budget entry. Three of those abandon the display for the
+    // session.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (writes_tx, writes_rx) = unbounded();
+    let (set_entered_tx, set_entered_rx) = unbounded::<()>();
+    let (release_tx, release_rx) = unbounded::<()>();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    // First open: a controller that blocks in `set` and then panics. Later
+    // opens: an ordinary recording controller.
+    let call = Arc::new(Mutex::new(0u32));
+    let factory: duja_app::ControllerFactory = {
+        let writes_tx = writes_tx.clone();
+        Box::new(move |_id| {
+            let n = {
+                let mut c = call.lock().unwrap();
+                *c += 1;
+                *c
+            };
+            let writes_tx = writes_tx.clone();
+            let set_entered_tx = set_entered_tx.clone();
+            let release_rx = release_rx.clone();
+            Box::new(move || {
+                if n == 1 {
+                    Some(Box::new(GatedPanic {
+                        entered: set_entered_tx,
+                        release: release_rx,
+                    }) as Box<dyn BrightnessController>)
+                } else {
+                    Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>)
+                }
+            }) as duja_app::ControllerOpener
+        })
+    };
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(10),
+        watchdog_timeout: Duration::from_secs(30),
+        displaychange_debounce: Duration::from_millis(60),
+        level_poll_interval: Duration::from_millis(50),
+    };
+    let (engine, notes) = Engine::spawn(
+        cfg,
+        enumerator(state.clone(), calls_tx),
+        factory,
+        platform_rx,
+    );
+    let cmds = engine.sender();
+
+    // Drive worker A (generation 1) into the doomed `set` and hold it there.
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 22,
+    })
+    .unwrap();
+    set_entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("worker A should enter set()");
+
+    // Unplug + replug: A is retired and healthy worker B (generation 2) spawns.
+    *state.lock().unwrap() = Vec::new();
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+    assert!(snapshot(&cmds).is_empty(), "display should be gone");
+    *state.lock().unwrap() = vec![discovered(&id)];
+    cmds.send(EngineCommand::RefreshNow).unwrap();
+
+    // B is live: a user write flows through it.
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 33,
+    })
+    .unwrap();
+    let (_c, seen) = drain_writes(&writes_rx, |f, v| f == Feature::Brightness && v == 33);
+    assert!(
+        seen.contains(&(Feature::Brightness, 33)),
+        "worker B should be the live worker"
+    );
+
+    // Release A: it panics and emits a STALE Panicked (generation 1).
+    release_tx.send(()).unwrap();
+
+    // The stale ack must NOT grey the display — B is healthy.
+    let want = id.clone();
+    assert!(
+        !wait_note(&notes, Duration::from_millis(600), |n| {
+            matches!(n, EngineNotification::DisplayUnresponsive(x) if *x == want)
+        }),
+        "a stale Panicked must not mark the fresh worker's display unresponsive"
+    );
+    // ...and B still writes.
+    cmds.send(EngineCommand::SetUserLevel {
+        id: id.clone(),
+        pct: 44,
+    })
+    .unwrap();
+    let (_c2, seen2) = drain_writes(&writes_rx, |f, v| f == Feature::Brightness && v == 44);
+    assert!(
+        seen2.contains(&(Feature::Brightness, 44)),
+        "worker B must remain live after the stale ack"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+    let _ = platform_tx;
+}
+
 #[test]
 fn abandoned_display_is_not_un_greyed_on_resight() {
     // E-D: after MAX_STUCK_RESPAWNS stuck cycles a display is abandoned (no more

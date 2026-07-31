@@ -324,6 +324,7 @@ fn perform_reads(
     controller: &mut Box<dyn BrightnessController>,
     verify: &mut Verify,
     id: &StableDisplayId,
+    generation: u64,
     ack_tx: &Sender<WorkerAck>,
     retired: &Arc<AtomicBool>,
 ) -> bool {
@@ -350,6 +351,7 @@ fn perform_reads(
             Err(_) => AckOutcome::Panicked {
                 key: InflightKey::Get(feature),
                 seq,
+                generation,
             },
         };
         let is_panic = matches!(outcome, AckOutcome::Panicked { .. });
@@ -424,7 +426,15 @@ fn worker_loop(
         }
 
         // 3a. Perform reads (not rate-limited).
-        if perform_reads(&mut gets, &mut controller, &mut verify, id, ack_tx, retired) {
+        if perform_reads(
+            &mut gets,
+            &mut controller,
+            &mut verify,
+            id,
+            generation,
+            ack_tx,
+            retired,
+        ) {
             return;
         }
 
@@ -454,6 +464,7 @@ fn worker_loop(
                     outcome: AckOutcome::Panicked {
                         key: InflightKey::Set(feature),
                         seq,
+                        generation,
                     },
                 });
                 return;

@@ -580,9 +580,26 @@ impl EngineState {
                     }
                 }
             }
-            AckOutcome::Panicked { key, seq } => {
+            AckOutcome::Panicked {
+                key,
+                seq,
+                generation,
+            } => {
+                // Clearing the in-flight slot is already `seq`-gated, so it is
+                // safe unconditionally. Marking the display stuck is not: act
+                // only if the CURRENTLY registered worker is the one that
+                // panicked (generation match, exactly like `OpenFailed` and
+                // `SoftwareFallback`), so a panic that raced a respawn or replug
+                // cannot retire the fresh worker that superseded it, grey a
+                // healthy display, and spend one of its three stuck-respawns.
                 self.clear_inflight_match(&id, key, seq);
-                self.mark_stuck(&id);
+                if self
+                    .workers
+                    .get(&id)
+                    .is_some_and(|handle| handle.generation == generation)
+                {
+                    self.mark_stuck(&id);
+                }
             }
             AckOutcome::OpenFailed { generation } => {
                 // The deferred open failed on the worker thread. Act only if the
