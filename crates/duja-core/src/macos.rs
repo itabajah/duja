@@ -134,8 +134,15 @@ pub struct CgRect {
 /// Total by construction, which is the whole point of having one copy of it: a
 /// float→integer `as` cast in Rust saturates at the target's bounds and maps
 /// `NaN` to `0`, and the extents are clamped at `0` first, so no input — however
-/// degenerate — produces a wrapped origin or a nonsense size. A zero extent is
-/// then caught downstream by [`DisplayBounds::is_empty`].
+/// degenerate — produces a wrapped origin or a nonsense size.
+///
+/// Total is not the same as meaningful. `CGDisplayBounds` answers `CGRectNull`
+/// (`{{inf, inf}, {0, 0}}`) for a display it considers invalid, and this function
+/// faithfully converts that to `x`/`y` at [`i32::MAX`] with zero extent — a
+/// rectangle no caller should act on. Deciding what to do about that is the
+/// caller's job, because only the caller knows what its own absence value means;
+/// `duja-panel`'s `panel_geometry` rejects such a rect outright via
+/// [`DisplayBounds::is_empty`] rather than reporting a panel it cannot place.
 #[must_use]
 pub fn bounds_from_cg_rect(rect: CgRect) -> DisplayBounds {
     // RATIONALE(clippy::cast_possible_truncation, clippy::cast_sign_loss): these

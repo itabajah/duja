@@ -451,6 +451,14 @@ mod tests {
     /// Both backends now derive the token from `duja_core::macos::surface_id`, so
     /// the master panel and its clone agree on the master's id and the set
     /// collapses to one control with one overlay.
+    ///
+    /// **What this test is and is not.** It is a non-regression guard on a
+    /// *documented configuration*, and it passes against the code that shipped
+    /// before the panel had a token — `group_clones` needed no change, and does
+    /// not consult `kind` at all. What actually changed is upstream, where the
+    /// panel's `device` stops being `None`; that is pinned in `backend.rs`. This
+    /// one exists so the cross-backend case is written down as a case, and so a
+    /// future "panels group separately" special-case has to red something.
     #[test]
     fn a_macos_panel_and_the_external_mirroring_it_form_one_group() {
         // Display 1 is the built-in panel and the mirror-set master, so it names

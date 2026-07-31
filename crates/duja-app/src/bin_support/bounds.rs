@@ -184,13 +184,20 @@ mod tests {
     /// reports its rect and both tokens like any CoreGraphics display, which is
     /// what makes it software-dimmable. Routed through the same accessors as a
     /// monitor — there is no panel-specific path, and there must not be one.
+    ///
+    /// **A non-regression guard, not evidence of the fix.** `BoundsMap` has no
+    /// panel-specific branch to change and did not change: this passes against the
+    /// code that shipped before the panel had any geometry to put in it. It exists
+    /// so a future panel-specific branch here has to red something. The tokens are
+    /// the mirroring shape (`"1"`/`"7"`) rather than a standalone panel's matching
+    /// pair, because equal values would let the two accessors be swapped.
     #[test]
     fn a_macos_panel_entry_reports_its_bounds_and_both_tokens() {
         let panel = DisplayGeom {
             id: id("A").as_str().to_owned(),
             bounds: Some(DisplayBounds::new(0, 0, 1512, 982)),
             gamma_token: Some("1".to_owned()),
-            surface_token: Some("1".to_owned()),
+            surface_token: Some("7".to_owned()),
         };
         let map = BoundsMap::new(vec![panel]);
         assert_eq!(
@@ -198,7 +205,7 @@ mod tests {
             Some(DisplayBounds::new(0, 0, 1512, 982))
         );
         assert_eq!(map.gamma_token_for(&id("A")).as_deref(), Some("1"));
-        assert_eq!(map.surface_token_for(&id("A")).as_deref(), Some("1"));
+        assert_eq!(map.surface_token_for(&id("A")).as_deref(), Some("7"));
     }
 
     #[test]

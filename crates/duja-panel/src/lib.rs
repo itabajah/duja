@@ -66,9 +66,13 @@ use duja_core::id::StableDisplayId;
 ///
 /// Reported by the backends that can report it, which today means macOS alone:
 ///
-/// - **macOS** — always present. `DisplayServices` panels are CoreGraphics
-///   displays, so `CGDisplayBounds` and `CGDisplayMirrorsDisplay` answer for the
-///   built-in screen exactly as they do for an external monitor.
+/// - **macOS** — present whenever CoreGraphics gives a usable rectangle, which is
+///   every ordinary case: `DisplayServices` panels are CoreGraphics displays, so
+///   `CGDisplayBounds` and `CGDisplayMirrorsDisplay` answer for the built-in
+///   screen exactly as they do for an external monitor. It is withheld for a
+///   *degenerate* rect (`CGRectNull`, which CoreGraphics returns for a display it
+///   considers invalid), because a zero-size rectangle placed nowhere is not a
+///   position — see `display_services`' `panel_geometry`.
 /// - **Windows** — always absent. WMI's `WmiMonitorBrightnessMethods` exposes no
 ///   monitor rectangle and no GDI device for the panel it controls, so there is
 ///   nothing honest to put here; a Windows laptop panel that needs software

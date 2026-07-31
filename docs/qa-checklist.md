@@ -24,6 +24,17 @@ with the phases; keep entries as observable behaviors, not implementation.
 - [ ] Flyout on a Space with a fullscreen app; overlay joins all Spaces.
 - [ ] Gamma (if enabled) re-applies after wake.
 - [ ] DDC on Apple Silicon over USB-C (not built-in HDMI on M1/entry-M2 — expected unsupported).
+- [ ] **Built-in panel below the backlight floor**: dragging its slider into the sub-floor zone
+      keeps dimming, and the overlay covers the built-in screen **exactly** — no offset, no
+      partial cover, nothing spilling onto a second display. This is the first behaviour to
+      exercise `CGDisplayBounds` for the panel; a wrong rect shows up here and nowhere else.
+- [ ] **Mirror the built-in to an external** (Displays → Mirror): the two collapse into **one**
+      row with **one** overlay, correctly placed — two rows, or visible double-darkening where
+      they overlap, is the `#66` shape. Then break the mirror and confirm they split back into
+      two independent rows.
+- [ ] **Mirrored + software-only member**: with a mirror set whose external cannot be driven over
+      DDC, the laptop backlight is pinned to full and the shared overlay does the dimming (the
+      documented group rule) — confirm it is not left stuck dark or double-dimmed.
 
 ## Linux
 - [ ] X11 (KDE/GNOME) and KDE Wayland: tray menu, overlay, backlight.

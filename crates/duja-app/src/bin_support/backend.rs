@@ -135,9 +135,9 @@ pub(crate) fn discover() -> Vec<DiscoveredDisplay> {
 ///
 /// Duja has no Mac, and the CI runners are virtualized with no external display,
 /// so no test or run has ever observed a real macOS mirror set. What is *proven*
-/// is the surface rule (`duja_ddc`'s `mac_surface` tests, which run on every CI
-/// OS); what is **assumed** is that `CGGetActiveDisplayList` reports every member
-/// of a mirror set rather than only the master. That assumption is deliberately
+/// is the surface rule ([`duja_core::macos`]'s tests, which run on every CI OS);
+/// what is **assumed** is that the enumeration each backend uses reports every
+/// member of a mirror set rather than only the master. That assumption is deliberately
 /// not load-bearing: if only the master is enumerated, each surface token equals
 /// its own display id, `group_clones` builds the same singletons it builds today,
 /// and behaviour is unchanged. It can only *add* a merge, never remove one — and
@@ -358,11 +358,12 @@ fn discover_ddc() -> Vec<FoundDdc> {
 }
 
 /// Enumerate the OS panel backend's internal panels as [`DiscoveredDisplay`]
-/// metadata. Not cfg-gated: `duja_panel::enumerate` exists on every target (it
-/// returns an empty list where there is no backend), so this reports real panels
-/// on Windows *and* macOS. `open_panel_controller` must therefore be able to open
-/// them on both — a table row stamped `hardware_range: true` that no opener can
-/// serve would claim control Duja does not have.
+/// metadata plus whatever geometry the backend reported. Not cfg-gated:
+/// `duja_panel::enumerate` exists on every target (it returns an empty list where
+/// there is no backend), so this reports real panels on Windows *and* macOS.
+/// `open_panel_controller` must therefore be able to open them on both — a table
+/// row stamped `hardware_range: true` that no opener can serve would claim control
+/// Duja does not have.
 fn discover_panel() -> Vec<FoundPanel> {
     match duja_panel::enumerate() {
         Ok(panels) => panels
@@ -382,8 +383,11 @@ fn discover_panel() -> Vec<FoundPanel> {
 }
 
 /// One panel found by the OS panel backend: its metadata plus whatever geometry
-/// that backend could report. Named fields for the same reason [`FoundDdc`] has
-/// them.
+/// that backend could report — the panel twin of [`FoundDdc`], so both arms of
+/// [`discover_all`] carry their geometry the same way.
+///
+/// (Unlike [`FoundDdc`] the two fields are differently typed, so the struct is
+/// here for symmetry and naming rather than to prevent a transposed pair.)
 struct FoundPanel {
     display: DiscoveredDisplay,
     geometry: Option<duja_panel::PanelGeometry>,

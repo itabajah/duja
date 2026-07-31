@@ -32,7 +32,7 @@ display control, automation, and integrations), see
 | **Internal-panel fallback fix** | **`v0.1.3` (Windows)** | ✅ shipped — the built-in panel no longer vanishes on a GPU/OEM-driven backlight |
 | **Dark rebrand + mirror/software-only** | **`v0.1.4` (Windows)** | ✅ shipped — the dark brand identity plus the two laptop-reported issues (#66, #67) |
 | **Sticky software-only fix** | **`v0.1.5` (Windows)** | ✅ shipped — a live monitor no longer sticks as "software-only"; tray Restart. Release verified: 6 assets, SHA256SUMS, minisign, SLSA provenance, `/releases/latest` → v0.1.5 |
-| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the whole app assembly: hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021), event-loop-first tray construction (#94), the mirror-surface token split (#98), the OS hooks' macOS half (#99), the macOS gamma sink (#100), the tray itself on macOS (#102), the two per-platform gamma captions (#103) macOS packaging — a universal `Duja.app` + DMG on the release pipeline (#104) — and the built-in panel's geometry, which makes it software-dimmable (#105). Remaining: **the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
+| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the whole app assembly: hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021), event-loop-first tray construction (#94), the mirror-surface token split (#98), the OS hooks' macOS half (#99), the macOS gamma sink (#100), the tray itself on macOS (#102), the two per-platform gamma captions (#103), macOS packaging — a universal `Duja.app` + DMG on the release pipeline (#104) — and the built-in panel's geometry, which makes it software-dimmable (#105). Remaining: **the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
 | P7 Linux port | `m7-linux` / `v0.3.0` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
 
@@ -49,7 +49,7 @@ end from day one. Distribution is a tag-triggered
 portable zip, and — from `v0.2.0` — a macOS universal disk image, all under one
 `SHA256SUMS`, each with a minisign signature and a build-provenance attestation.
 
-Health: **1,035 tests on the Windows CI lane plus 10 doctests (1,045 in a local `cargo test --workspace --all-features`), green on 3 OSes** — the
+Health: **1,036 tests on the Windows CI lane plus 10 doctests (1,046 in a local `cargo test --workspace --all-features`), green on 3 OSes** — the
 per-OS count differs because the `#![cfg(windows)]` and `#![cfg(unix)]`
 integration suites compile out on the other lanes; clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
@@ -768,13 +768,34 @@ and `CGRect`→`DisplayBounds` both moved into a new pure `duja_core::macos`. Bo
 stay FFI-free and tested on every lane, as they were before; there is now one of
 each rather than two.
 
-Fifteen tests, red-first where a red was available: the app-side fold was extracted
-with its shipped all-`None` body first and the new test failed against it (`left:
-None`, `right: Some(DisplayBounds { .. })`), then each token assertion was proven
-load-bearing by mutation — crossing the two reds one, reading one twice reds the
-other. What no test can reach is that macOS *reports* any of this: the two new
-CoreGraphics calls have never run, like every other macOS path here, and the debt
-row says so rather than leaving the suite to imply otherwise.
+Sixteen tests on the Windows lane and a seventeenth on the macOS one (the
+`CGRect` flattening can only compile there), red-first where a red was available:
+the app-side fold was extracted with its shipped all-`None` body first and the new test failed against it
+(`left: None`, `right: Some(DisplayBounds { .. })`), then each token assertion was
+proven load-bearing by mutation — crossing the two reds one, reading one twice reds
+the other.
+
+Three of the sixteen are **not** evidence of anything and say so in their own doc
+comments, per the precedent `#92` set: `a_macos_panel_entry_reports_its_bounds_and_both_tokens`,
+`an_internal_panel_with_bounds_gets_an_overlay_command` and
+`a_macos_panel_and_the_external_mirroring_it_form_one_group` all pass against the
+code that shipped before this change. `BoundsMap`, the planner and `group_clones`
+needed no edit — the planner never had a kind-based exclusion to remove, and
+`group_clones` does not consult `kind` at all. They are guards against a future
+panel-specific special case, not demonstrations of the fix, which lives one layer
+up in `backend.rs`.
+
+What no test can reach is that macOS *reports* any of this: the two new
+CoreGraphics calls have never run, like every other macOS path here. One hazard
+they surface *is* handled at the source — `CGDisplayBounds` answers `CGRectNull`
+for a display it considers invalid, and this backend reads the *online* list, which
+can hold a built-in that is not the active drawable, so `panel_geometry` refuses a
+degenerate rect outright rather than planning a zero-size overlay at `i32::MAX`.
+The rest is in the debt row, including the one the review found: because the anchor
+of a group is its lowest id string and an Apple panel's `APP-…` sorts ahead of
+nearly every monitor id, a mirrored set's single overlay is now usually **placed**
+from the panel's rect. Grouping was documented as unable to mis-address anything;
+placement is a third consumer, and that argument never covered it.
 
 
 ## What is done

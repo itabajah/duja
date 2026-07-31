@@ -179,7 +179,7 @@ fn display_bounds(id: u32) -> DisplayBounds {
 
 /// The master of `id`'s mirror set, or `kCGNullDirectDisplay` (`0`) when this
 /// display is not mirroring another — which is also what the *master* of a set
-/// reports about itself. Fed to `crate::mac_surface::surface_id`, which owns the
+/// reports about itself. Fed to `duja_core::macos::surface_id`, which owns the
 /// interpretation.
 fn mirrored_master(id: u32) -> u32 {
     CGDisplay::new(id).mirrors_display()

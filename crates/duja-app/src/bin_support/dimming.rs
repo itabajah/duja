@@ -587,6 +587,14 @@ mod tests {
     ///
     /// A macOS built-in panel now arrives with one (a Windows WMI panel still does
     /// not), which is why this pairs with the test above rather than replacing it.
+    ///
+    /// **A non-regression guard, not evidence of the fix.** The planner never had
+    /// a kind-based exclusion to remove — `continuum_for` discards `kind`
+    /// outright — so this passes against the code that shipped before any panel
+    /// had bounds. What changed is which displays reach it with `Some(bounds)`,
+    /// and that is pinned in `backend.rs`. Kept because "an internal panel is
+    /// excluded as a kind" is a plausible future mistake with nothing else
+    /// standing against it.
     #[test]
     fn an_internal_panel_with_bounds_gets_an_overlay_command() {
         let displays = [input("A", DisplayKind::InternalPanel, 10)];
