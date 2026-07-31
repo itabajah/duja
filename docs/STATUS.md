@@ -2,9 +2,10 @@
 
 _Last updated: 2026-07-31 (P6 wave 2: the macOS backends are wired into the app
 and CLI, the tray anchor contract is settled in ADR-0021, tray construction happens
-inside the running event loop, the tray itself runs on macOS, and both gamma
-captions are per-platform. Remaining for P6: packaging, the macOS panel-bounds gap
-that leaves a built-in panel un-dimmable below its floor, and the gate)._
+inside the running event loop, the tray itself runs on macOS, both gamma captions
+are per-platform, and the release pipeline now ships a universal `Duja.app` in a
+disk image. Remaining for P6: the macOS panel-bounds gap that leaves a built-in
+panel un-dimmable below its floor, and the gate)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -31,7 +32,7 @@ display control, automation, and integrations), see
 | **Internal-panel fallback fix** | **`v0.1.3` (Windows)** | ✅ shipped — the built-in panel no longer vanishes on a GPU/OEM-driven backlight |
 | **Dark rebrand + mirror/software-only** | **`v0.1.4` (Windows)** | ✅ shipped — the dark brand identity plus the two laptop-reported issues (#66, #67) |
 | **Sticky software-only fix** | **`v0.1.5` (Windows)** | ✅ shipped — a live monitor no longer sticks as "software-only"; tray Restart. Release verified: 6 assets, SHA256SUMS, minisign, SLSA provenance, `/releases/latest` → v0.1.5 |
-| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the whole app assembly: hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021), event-loop-first tray construction (#94), the mirror-surface token split (#98), the OS hooks' macOS half (#99), the macOS gamma sink (#100), the tray itself on macOS (#102) and the two per-platform gamma captions (#103). Remaining: packaging, the macOS panel-bounds gap (`docs/debt.md`: a built-in panel enters as `(id, None, None)`, so `dimming::plan` emits no `DimCommand` and it cannot be software-dimmed at all), **and the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
+| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the whole app assembly: hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021), event-loop-first tray construction (#94), the mirror-surface token split (#98), the OS hooks' macOS half (#99), the macOS gamma sink (#100), the tray itself on macOS (#102), the two per-platform gamma captions (#103) and macOS packaging — a universal `Duja.app` + DMG on the release pipeline (#104). Remaining: the macOS panel-bounds gap (`docs/debt.md`: a built-in panel enters as `(id, None, None)`, so `dimming::plan` emits no `DimCommand` and it cannot be software-dimmed at all), **and the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
 | P7 Linux port | `m7-linux` / `v0.3.0` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
 
@@ -44,11 +45,11 @@ signed off** (user, 2026-07-16), which were the two gates. Shipping as a clean
 **stable** `v0.1.0` (not `-alpha`) so the built-in update checker — which only
 prompts on newer *stable* releases via GitHub's `/releases/latest` — works end to
 end from day one. Distribution is a tag-triggered
-[`release.yml`](../.github/workflows/release.yml): an Inno Setup installer + a
-portable zip, each with `SHA256SUMS`, a minisign signature, and a build-provenance
-attestation.
+[`release.yml`](../.github/workflows/release.yml): an Inno Setup installer, a
+portable zip, and — from `v0.2.0` — a macOS universal disk image, all under one
+`SHA256SUMS`, each with a minisign signature and a build-provenance attestation.
 
-Health: **951 tests (Windows lane) plus 10 doctests, green on 3 OSes** — the
+Health: **1,020 tests on the Windows CI lane plus 10 doctests (1,030 in a local `cargo test`), green on 3 OSes** — the
 per-OS count differs because the `#![cfg(windows)]` and `#![cfg(unix)]`
 integration suites compile out on the other lanes; clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
@@ -552,6 +553,185 @@ side is enough to trip the no-hardware detector that `#59` and `#78` hardened. T
 CLI's own runs were clean, which is why the PR that added probing did not catch it
 — it checked the wrong side. Tracked in [debt.md](debt.md); the fix direction is
 for `--report` to prefer IPC, or to say plainly that it is about to contend.
+
+### `#104` — macOS packaging: a universal `Duja.app`, in an image (2026-07-31)
+
+C6. `xtask dist` was hard-wired to Windows — a staging directory and a PowerShell
+`Compress-Archive`. It now picks a target from the host and grew a macOS branch:
+`lipo` the two thin release builds into universal binaries, assemble `Duja.app`
+around them, seal it with `codesign`, and wrap it in a drag-to-install `.dmg`. The
+release workflow gained a `macos` job that runs first and hands its image to the
+Windows job, so the release keeps **one** `SHA256SUMS`, **one** minisign pass, one
+provenance attestation and one Release rather than two jobs racing to create the
+same one.
+
+**The split that made this testable at all.** None of `lipo`, `codesign` or
+`hdiutil` exists off macOS, and Duja has no Mac. The temptation is to write the
+whole branch behind `cfg(target_os = "macos")` and call it unverifiable — which is
+the exact shape `#103` had just been burned by: a platform fact inside a
+`cfg`-gated module is unreachable by every test *and* by every lane's clippy. So
+the module boundary follows what is actually platform-bound rather than what is
+platform-*themed*. Every **decision** — the `Info.plist`, the bundle layout, the
+artifact names, the accepted version alphabet, the host→target mapping — is pure
+code in `xtask`'s new `bundle` and `version` modules and is unit-tested on all
+three lanes, Windows and Linux included. What remains in `dist.rs` is filesystem
+plumbing plus four `Command` invocations — not `cfg` blocks, so they still compile
+into every lane's clippy run. This is the same division `duja-platform`'s
+`autostart::plist` already made for the `LaunchAgent` document, and it is the
+reason a Windows box could develop macOS packaging with tests that bite.
+
+**Two constants that live in three files, pinned by reading the other two.**
+`CFBundleIdentifier` must equal the `launchd` job label `duja-platform` registers
+for launch-at-login, or one program carries two identities; `LSMinimumSystemVersion`
+must equal the `MACOSX_DEPLOYMENT_TARGET` the workflow compiles *both* slices
+against, or the bundle advertises a floor nothing was built for. Neither coupling
+is expressible in the type system across a crate and a YAML file, so the tests read
+the other files: one parses `LABEL: &str = "…"` out of `autostart/plist.rs`, the
+other pulls `MACOSX_DEPLOYMENT_TARGET` out of `release.yml`. Both were written
+red — the deployment-target test failed until the workflow line existed.
+
+**What the tests cannot reach, CI checks on the shipped bytes.** The `macos` job's
+*Verify the bundle* step runs `plutil -lint` on the written plist, asserts
+`LSUIElement` is actually `true` in it, proves both binaries carry an arm64 **and**
+an x86_64 slice, reads `minos` back out of `LC_BUILD_VERSION` for each slice and
+compares it to the advertised floor, validates the code signature, and mounts the
+image. That is the half a unit test cannot see, checked where it exists.
+
+**Signing is the last mutation, and that is not an arrangement choice.** `lipo`
+rewrites the Mach-O and the bundle seal covers the `Info.plist` and everything under
+`Contents`, so the order fuse → assemble → sign → image is forced. Nested code
+(`dujactl`) is signed before the bundle that encloses it, because sealing the bundle
+records the signatures it finds inside. The default identity is ad-hoc (`-`): enough
+for macOS to *execute* the binary — Apple Silicon refuses an unsigned one outright —
+but not notarized, so Gatekeeper blocks the first open of a downloaded copy and the
+user must allow it in System Settings → Privacy & Security → **Open Anyway**. That
+is the exact macOS twin of the SmartScreen prompt on the unsigned Windows installer,
+and `SECURITY.md` now says both. `--sign <identity>` takes a real Developer ID and the
+hardened runtime is applied on **both** paths, so turning signing on is a repo
+variable, not a code change — the same posture as the inert Azure Trusted Signing
+block.
+
+**`LSUIElement` closes a loop from `#102`.** `become_accessory_app` sets the
+activation policy imperatively because winit stops overriding it only for a bundled
+app; the bundle now declares the same thing, so for an installed copy the call is
+belt-and-braces. It stays for the reason that is actually checkable: a `cargo run`
+or portable copy has no `Info.plist` at all. Not for the reason it is tempting to
+give — a `launchd`-exec'd copy *inside* the bundle is still bundled, because
+`NSBundle` resolves upward from the executable path, which is the same question
+winit's `is_bundled` branch asks.
+
+**One tightening that was not packaging.** `--version` used to be interpolated raw
+into a single-quoted PowerShell literal; it now reaches the same place through a
+`Version` newtype whose alphabet is the set of characters inert in *all* the
+contexts it lands in — XML text, a volume name, a file name, a shell literal. The
+macOS branch is what made that necessary (an `Info.plist` is a document, not a
+string), but the Windows path was the one that was already exposed.
+
+Two things ship knowingly incomplete and are recorded rather than papered over: the
+bundle has **no icon** (the art is drawn in code and no raster asset exists in the
+tree, so an `.icns` needs a PNG encoder, a Slint dependency in the build tool, or a
+Mac-only pipeline — none of which belongs in a packaging PR), and the packaging path
+has **no PR-time CI coverage** (its only automated exercise is the release workflow's
+`workflow_dispatch` dry run). Both are in [debt.md](debt.md) with the option they
+should be fixed by.
+
+#### What the review changed
+
+The adversarial pass blocked the first version, and three of its findings changed
+the code rather than the prose.
+
+**A pin between two string literals is not a pin.** The deployment-target test
+compares a Rust constant to a value in `release.yml` — and *neither of them is what
+reaches the compiler*. The recipe this PR itself documented for packaging locally
+omitted `MACOSX_DEPLOYMENT_TARGET` entirely, so following it produced an `x86_64`
+slice at rustc's default inside a bundle advertising 11.0: exactly the drift the
+test exists to prevent, invisible to it. The fix moves the invariant onto the
+artifact. `xtask` now reads the Mach-O header itself — a new `macho` module, ~180
+lines of bounds-checked integer reads — and `Verified::checked` refuses to sign a
+bundle whose slices are not all present and all built for the advertised floor.
+Parsing it in Rust rather than shelling to `otool` is the point: the check then
+runs **identically on a maintainer's Mac and in CI**, and is unit-testable on every
+lane against synthetic fat binaries. The workflow keeps its `otool` check as an
+*independent* implementation, since a second opinion is the only thing that catches
+the first one being wrong.
+
+**A justification that was simply false.** The 11.0 floor was defended with "a
+universal binary cannot honestly advertise a release that predates Apple Silicon".
+That is not how universal binaries work: the deployment target is per-slice, Launch
+Services gates on `LSMinimumSystemVersion` alone, and an `x86_64` slice built for
+10.13 inside a 10.13 bundle runs on a 10.13 Intel Mac with the `arm64` slice's floor
+never consulted. 11.0 survives as a **support decision** — the lowest floor both
+slices share from one setting, and the lowest one that does not assert support for
+releases nothing tests — with the real cost (Macs older than ~2013–2014) and the
+real remedy (a per-arch deployment target) written into `debt.md` instead of a
+wrong claim written into the constant.
+
+**Shipping a DMG created a new way to lose the login item.** The `LaunchAgent`
+plist records a *path*, and a disk image invites one specific sequence: mount,
+run `Duja.app` from the volume, enable "start with the system", eject. The plist
+then names `/Volumes/…` forever, `launchd` fails to exec it at every login, and
+`is_enabled`'s presence policy keeps reporting it as **on**. A setting that says
+yes and does nothing, permanently, is the "vanished" failure the degrade rule
+forbids — and it was newly reachable because of this PR. `set_enabled(true)` now
+refuses when the executable is on a mounted volume, with a message naming
+`/Applications`; the app's existing `apply_autostart` re-reads the real state, so
+the toggle springs back rather than lying. The rule is a pure path predicate in its
+own module, tested on all three lanes; that `set_enabled` consults it can only be
+checked on the macOS lane, and the test says so.
+
+Two smaller corrections worth recording because they were both *confident and
+wrong*: `hdiutil verify` only checks the image's stored checksum and never
+attaches, so three sentences claiming CI proved the image "mounts" were false —
+the step now actually mounts it, checks `Duja.app` and the `Applications` symlink
+are there, and detaches. And the one user-facing instruction the PR added, "first
+launch needs right-click → Open", stopped being true in macOS 15: Sequoia removed
+that Gatekeeper override, and the user must go to System Settings → Privacy &
+Security → Open Anyway. It was wrong everywhere it appeared, on every macOS this
+release targets.
+
+Two tests were deleted for being tautologies (`assert_eq!(BINARIES, [MAIN, HELPER])`
+where `BINARIES` is *defined* as that), and the coupling they pretended to check is
+now real: the executable names are read out of each crate's `[[bin]]` section, the
+architecture list out of the workflow's `cargo build --target` lines, and both
+cross-file readers now assert that **every** occurrence agrees rather than the
+first.
+
+#### And what the second review changed
+
+Round 2 blocked it again, and the best finding was that the mounted-volume guard
+**does not fire in the scenario it was written for**. A downloaded `.dmg` is
+quarantined, and macOS will not run a quarantined app in place: **App
+Translocation** mounts a throwaway read-only mirror and runs it from
+`/private/var/folders/…/AppTranslocation/…`. So `current_exe()` never starts with
+`/Volumes/`, the guard passes, the plist is written — and that mount is destroyed
+when the app *quits*, which is sooner than ejecting. The fix catches the marker as
+a path component too, and the test for it is the one that would have failed. This
+is the second time in this PR that a guard was written against the case that was
+easy to imagine rather than the case that actually happens.
+
+Second: the Mach-O fixtures wrote `sdk == minos`, so **reading `sdk` instead of
+`minos` left all 31 tests green** — and that specific mistake would compare the
+build machine's SDK against the advertised floor and refuse to package *every*
+release. The fixtures now use a distinct SDK, and the two offsets are pinned by a
+test that names why. While there, the parser stopped taking the first
+`LC_BUILD_VERSION` it finds: a zippered binary carries a Mac Catalyst one too, so
+it now selects `PLATFORM_MACOS`.
+
+What could not be fixed is recorded rather than glossed: the fixtures import the
+same constants the parser compares against, so **no test constrains the constants
+themselves** — a wrong one would block every release while the suite stayed green.
+Every value was read off Apple's `cctools` and dyld and is cited at its definition,
+and the dry run feeds the parser a real `lipo` output; the debt row names the fix
+(capture a real fat header as a byte fixture) and why it needs a Mac.
+
+Three more corrections of confident prose: `hdiutil create -srcfolder` does **not**
+default to APFS — it inherits the source volume's filesystem, which is the actual
+reason to name `HFS+` explicitly; the `Verified` token makes a *signed-but-unchecked*
+artifact uncompilable, not every omission (deleting the check and the seal together
+still compiles, and `dead_code` under CI's clippy is what catches that); and the
+"re-run recovers the tag" note gave the wrong reason, since with `needs:` the
+publishing job never ran and there is no Release to update.
+
 
 ## What is done
 

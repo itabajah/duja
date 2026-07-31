@@ -35,22 +35,32 @@ Local attack surface and mitigations:
 Pinned lockfile; `cargo-deny` (advisories + license allowlist) on every PR **and
 again on the tagged commit at release time**; GitHub Actions pinned by commit SHA.
 Each tagged release
-([`.github/workflows/release.yml`](.github/workflows/release.yml)) ships two
-binaries (the Windows installer `.exe` and a portable `.zip`), each carrying a
-GitHub **build-provenance attestation**. Alongside them a **SHA256SUMS** file
-lists their hashes, and a **minisign** signature (`.minisig`) covers each binary
-*and* `SHA256SUMS` itself. The minisigned `SHA256SUMS` is the root of trust:
-verify it, then its hashes chain to the two binaries. The provenance attestation
-covers **the two binaries only**; `SHA256SUMS` and the `.minisig` files are
-verified through minisign, not attestation.
+([`.github/workflows/release.yml`](.github/workflows/release.yml)) ships the
+Windows installer `.exe`, a portable `.zip`, and — from `v0.2.0` — a macOS
+universal `.dmg`, each carrying a GitHub **build-provenance attestation**.
+Alongside them a **SHA256SUMS** file lists their hashes, and a **minisign**
+signature (`.minisig`) covers each binary *and* `SHA256SUMS` itself. The
+minisigned `SHA256SUMS` is the root of trust: verify it, then its hashes chain to
+the binaries. The provenance attestation covers **the binaries only**;
+`SHA256SUMS` and the `.minisig` files are verified through minisign, not
+attestation.
 
 The step-by-step release procedure (dry run, per-asset verification, and how to
 turn on Authenticode / Azure Trusted Signing later) is in
 [`docs/release-checklist.md`](docs/release-checklist.md).
 
-> **Note on code signing.** Release binaries are **not** yet signed with an
-> Authenticode certificate, so Windows SmartScreen may warn on first run. Verify
-> authenticity with the checksums and minisign signature below instead.
+> **Note on code signing.** Release binaries carry no OS-recognised publisher
+> identity yet, on either platform. On Windows there is no Authenticode
+> certificate, so SmartScreen may warn on first run. On macOS the `.app` inside
+> the disk image is signed **ad-hoc** (`codesign -s -`) rather than with a
+> Developer ID: enough for macOS to execute it — Apple Silicon refuses an
+> unsigned binary outright — but not notarized, so Gatekeeper blocks the first
+> open. Allow it in **System Settings → Privacy & Security → Open Anyway**;
+> macOS 15 Sequoia removed the older Control-click → Open shortcut, so the
+> instruction you will find in most guides no longer works. Verify
+> authenticity with the checksums and minisign signature below instead; both
+> gaps are one paid developer account away and the pipeline already has the
+> inert steps wired (see the release checklist).
 
 ### Verifying a release
 
