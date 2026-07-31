@@ -78,6 +78,35 @@ pub struct InputChoice {
     pub label: String,
 }
 
+/// What **this platform's** OS does to a gamma ramp, as the settings window needs
+/// to describe it.
+///
+/// Both facts come from `duja-dimmer`, which `duja-ui` does not depend on, so they
+/// arrive as an argument. They travel together in a struct rather than as two more
+/// parameters because [`advisory`](Self::advisory) would otherwise sit beside
+/// `gamma_allowed` as a second `bool` on the same call — and swapping those two
+/// compiles cleanly, suppresses the HDR guard, and shows a hazard caption to
+/// everyone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GammaLimits {
+    /// How far down the gamma channel reaches on this OS, as a percentage of full
+    /// brightness — or `None` where the OS accepts the whole range.
+    pub cap_pct: Option<u8>,
+    /// Whether this OS can report a gamma write as accepted without applying it,
+    /// in a way Duja cannot pre-empt (`duja_dimmer::gamma_is_advisory`).
+    pub advisory: bool,
+}
+
+impl GammaLimits {
+    /// An OS that takes the whole gamma range and applies what it accepts — i.e.
+    /// nothing to disclose. The [`Default`], and what tests pass unless the limit
+    /// is their subject.
+    pub const UNLIMITED: GammaLimits = GammaLimits {
+        cap_pct: None,
+        advisory: false,
+    };
+}
+
 /// One per-monitor settings section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonitorSection {
@@ -95,16 +124,15 @@ pub struct MonitorSection {
     /// Whether gamma is offered: `false` under the HDR guard, where the gamma
     /// option is shown disabled with a tooltip and a selection is rejected.
     pub gamma_available: bool,
-    /// How far down the gamma channel reaches on this OS, as a percentage of full
-    /// brightness — or `None` where the OS accepts the whole range.
+    /// What this platform's OS does to a gamma ramp — the two captions under the
+    /// dim-mode row.
     ///
-    /// `Some(50)` renders the caption "gamma dims to at most 50%; below that Duja
-    /// uses the overlay". `None` renders nothing: there is no substitution to
-    /// disclose. The figure is supplied by the app because it is the *OS's* limit
-    /// (`duja_dimmer::min_gamma_factor()`), and `duja-ui` depends on neither
-    /// `duja-dimmer` nor `duja-platform` — which is why it used to be a hardcoded
-    /// `50` shown on every platform.
-    pub gamma_cap_pct: Option<u8>,
+    /// Per-section because that is where it renders, but the values are the
+    /// *platform's*: every section in one run carries the same [`GammaLimits`].
+    /// Supplied by the app because `duja-ui` depends on neither `duja-dimmer` nor
+    /// `duja-platform`, which is why the cap used to be a hardcoded `50` shown on
+    /// every platform.
+    pub gamma_limits: GammaLimits,
     /// The allowed input sources; empty when input switching is unsupported (the
     /// dropdown is then hidden).
     pub inputs: Vec<InputChoice>,
@@ -298,16 +326,17 @@ impl SettingsVm {
     /// `gamma_allowed` is the once-per-run HDR verdict: `false` marks every
     /// section's gamma option unavailable. Sections follow the snapshot order.
     ///
-    /// `gamma_cap_pct` is the OS's own limit on how far the gamma channel reaches
-    /// (`None` where it accepts the whole range), which drives the caption under
-    /// the dim-mode row. Both are platform facts this crate cannot query for
-    /// itself, so they arrive as arguments rather than as `cfg` in the `.slint`.
+    /// `gamma_limits` is what the *platform's* OS does to a ramp — how far the
+    /// channel reaches, and whether the OS can accept a write without applying it.
+    /// Both drive captions under the dim-mode row. None of the three is a fact this
+    /// crate can query for itself, so they arrive as arguments rather than as `cfg`
+    /// in the `.slint`.
     pub fn set_displays(
         &mut self,
         snapshots: &[DisplaySnapshot],
         config: &Config,
         gamma_allowed: bool,
-        gamma_cap_pct: Option<u8>,
+        gamma_limits: GammaLimits,
     ) {
         self.monitors = snapshots
             .iter()
@@ -316,7 +345,7 @@ impl SettingsVm {
                     snap,
                     &monitor_config(config, snap.id.as_str()),
                     gamma_allowed,
-                    gamma_cap_pct,
+                    gamma_limits,
                 )
             })
             .collect();
@@ -585,7 +614,7 @@ fn build_section(
     snap: &DisplaySnapshot,
     monitor: &MonitorConfig,
     gamma_allowed: bool,
-    gamma_cap_pct: Option<u8>,
+    gamma_limits: GammaLimits,
 ) -> MonitorSection {
     let inputs = snap
         .capabilities
@@ -605,7 +634,7 @@ fn build_section(
             .clamp(MIN_PERCEIVED_RANGE.0, MIN_PERCEIVED_RANGE.1),
         dim_mode: monitor.dim_mode.into(),
         gamma_available: gamma_allowed,
-        gamma_cap_pct,
+        gamma_limits,
         inputs,
         // No active-input readback exists in a snapshot; start unselected.
         selected_input_index: None,
@@ -809,7 +838,12 @@ mod tests {
     fn set_displays_builds_sections_from_config() {
         let mut vm = SettingsVm::new();
         let config = config_with_monitor("A", 20, ConfigDimMode::Gamma);
-        vm.set_displays(&[snap("A", "Left", vec![0x11, 0x0F])], &config, true, None);
+        vm.set_displays(
+            &[snap("A", "Left", vec![0x11, 0x0F])],
+            &config,
+            true,
+            GammaLimits::UNLIMITED,
+        );
         let section = vm.monitors().first().expect("one section");
         assert_eq!(section.name, "Left");
         assert_eq!(section.floor_pct, 20);
@@ -835,7 +869,12 @@ mod tests {
     fn floor_is_clamped_to_max() {
         let mut vm = SettingsVm::new();
         let config = config_with_monitor("A", 90, ConfigDimMode::Overlay);
-        vm.set_displays(&[snap("A", "Left", vec![])], &config, true, None);
+        vm.set_displays(
+            &[snap("A", "Left", vec![])],
+            &config,
+            true,
+            GammaLimits::UNLIMITED,
+        );
         // The over-max config value is clamped on build.
         assert_eq!(
             vm.monitors().first().map(|s| s.floor_pct),
@@ -847,7 +886,12 @@ mod tests {
     fn set_monitor_floor_clamps_and_emits() {
         let mut vm = SettingsVm::new();
         let config = config_with_monitor("A", 0, ConfigDimMode::Overlay);
-        vm.set_displays(&[snap("A", "Left", vec![])], &config, true, None);
+        vm.set_displays(
+            &[snap("A", "Left", vec![])],
+            &config,
+            true,
+            GammaLimits::UNLIMITED,
+        );
         let id = snap("A", "Left", vec![]).id;
         assert_eq!(
             vm.set_monitor_floor(0, 80),
@@ -867,7 +911,12 @@ mod tests {
     fn set_monitor_min_perceived_clamps_and_emits() {
         let mut vm = SettingsVm::new();
         let config = config_with_monitor("A", 0, ConfigDimMode::Overlay);
-        vm.set_displays(&[snap("A", "Left", vec![])], &config, true, None);
+        vm.set_displays(
+            &[snap("A", "Left", vec![])],
+            &config,
+            true,
+            GammaLimits::UNLIMITED,
+        );
         let id = snap("A", "Left", vec![]).id;
         // The default anchor is the schema's 25.
         assert_eq!(vm.monitors().first().map(|s| s.min_perceived_pct), Some(25));
@@ -899,7 +948,12 @@ mod tests {
     fn dim_mode_selection_emits_the_chosen_mode() {
         let mut vm = SettingsVm::new();
         let config = config_with_monitor("A", 0, ConfigDimMode::Overlay);
-        vm.set_displays(&[snap("A", "Left", vec![])], &config, true, None);
+        vm.set_displays(
+            &[snap("A", "Left", vec![])],
+            &config,
+            true,
+            GammaLimits::UNLIMITED,
+        );
         let id = snap("A", "Left", vec![]).id;
         // Index 2 = Off.
         assert_eq!(
@@ -915,47 +969,58 @@ mod tests {
         );
     }
 
+    /// A platform whose OS both caps the ramp and can fail to apply it. No real
+    /// target is both today (Windows caps, macOS is advisory) — which is exactly
+    /// why the fixture is: it is the only shape that can catch the two facts being
+    /// collapsed into one, or either being derived from the other.
+    const BOTH_LIMITS: GammaLimits = GammaLimits {
+        cap_pct: Some(NOT_THE_WINDOWS_CAP),
+        advisory: true,
+    };
+
     #[test]
-    fn the_gamma_cap_reaches_every_section_verbatim() {
-        // The caption's figure must arrive unchanged: this crate has no way to
-        // check it (the OS limit lives in `duja-dimmer`), so anything it did to the
-        // number here — a clamp, a floor, a swap with `floor_pct` — would be a
-        // wrong percentage stated to the user as fact.
+    fn the_gamma_limits_reach_every_section_verbatim() {
+        // The captions' inputs must arrive unchanged: this crate has no way to
+        // check them (they live in `duja-dimmer`), so anything it did to the number
+        // here — a clamp, a floor, a swap with `floor_pct` — would be a wrong
+        // percentage stated to the user as fact.
         let mut vm = SettingsVm::new();
         let config = config_with_monitor("A", 20, ConfigDimMode::Gamma);
         let displays = [snap("A", "Left", vec![]), snap("B", "Right", vec![])];
-        vm.set_displays(&displays, &config, true, Some(NOT_THE_WINDOWS_CAP));
+        vm.set_displays(&displays, &config, true, BOTH_LIMITS);
         assert_eq!(
             vm.monitors()
                 .iter()
-                .map(|s| s.gamma_cap_pct)
+                .map(|s| s.gamma_limits)
                 .collect::<Vec<_>>(),
-            vec![Some(NOT_THE_WINDOWS_CAP), Some(NOT_THE_WINDOWS_CAP)],
-            "the cap is the platform's, so every section carries the same one"
+            vec![BOTH_LIMITS, BOTH_LIMITS],
+            "the limits are the platform's, so every section carries the same ones"
         );
         // And `None` stays `None` rather than collapsing to a `Some(0)` the shell
         // could not tell apart from "no cap".
-        vm.set_displays(&displays, &config, true, None);
-        assert!(vm.monitors().iter().all(|s| s.gamma_cap_pct.is_none()));
+        vm.set_displays(&displays, &config, true, GammaLimits::UNLIMITED);
+        assert!(
+            vm.monitors()
+                .iter()
+                .all(|s| s.gamma_limits == GammaLimits::UNLIMITED)
+        );
     }
 
     #[test]
-    fn the_gamma_cap_is_independent_of_the_hdr_verdict() {
-        // Two different facts about gamma that the caption block reads together:
-        // HDR decides whether gamma is *offered*, the cap decides how far it
-        // reaches once offered. Collapsing either into the other would suppress a
-        // live disclosure (or show one for a channel the user cannot select).
+    fn the_gamma_limits_are_independent_of_the_hdr_verdict() {
+        // Three different facts the caption block reads together: HDR decides
+        // whether gamma is *offered*, the cap decides how far it reaches once
+        // offered, and `advisory` decides whether it takes effect at all.
+        // Collapsing any into another would suppress a live disclosure (or show one
+        // for a channel the user cannot select). The HDR verdict is a live runtime
+        // probe and the other two are platform constants, so the seam between them
+        // is exactly where a mix-up would hide.
         let mut vm = SettingsVm::new();
         let config = config_with_monitor("A", 0, ConfigDimMode::Overlay);
-        vm.set_displays(
-            &[snap("A", "Left", vec![])],
-            &config,
-            false,
-            Some(NOT_THE_WINDOWS_CAP),
-        );
+        vm.set_displays(&[snap("A", "Left", vec![])], &config, false, BOTH_LIMITS);
         let section = vm.monitors().first().expect("one section");
         assert!(!section.gamma_available);
-        assert_eq!(section.gamma_cap_pct, Some(NOT_THE_WINDOWS_CAP));
+        assert_eq!(section.gamma_limits, BOTH_LIMITS);
     }
 
     #[test]
@@ -963,7 +1028,12 @@ mod tests {
         let mut vm = SettingsVm::new();
         let config = config_with_monitor("A", 0, ConfigDimMode::Overlay);
         // gamma_allowed = false ⇒ HDR guard.
-        vm.set_displays(&[snap("A", "Left", vec![])], &config, false, None);
+        vm.set_displays(
+            &[snap("A", "Left", vec![])],
+            &config,
+            false,
+            GammaLimits::UNLIMITED,
+        );
         assert!(!vm.monitors().first().unwrap().gamma_available);
         // Index 1 = Gamma → rejected, mode unchanged.
         assert_eq!(vm.select_monitor_dim_mode(0, 1), None);
@@ -977,7 +1047,12 @@ mod tests {
     fn input_selection_emits_raw_code() {
         let mut vm = SettingsVm::new();
         let config = config_with_monitor("A", 0, ConfigDimMode::Overlay);
-        vm.set_displays(&[snap("A", "Left", vec![0x11, 0x0F])], &config, true, None);
+        vm.set_displays(
+            &[snap("A", "Left", vec![0x11, 0x0F])],
+            &config,
+            true,
+            GammaLimits::UNLIMITED,
+        );
         let id = snap("A", "Left", vec![]).id;
         assert_eq!(
             vm.select_monitor_input(0, 1),
@@ -991,7 +1066,12 @@ mod tests {
     fn input_selection_records_the_selected_index() {
         let mut vm = SettingsVm::new();
         let config = config_with_monitor("A", 0, ConfigDimMode::Overlay);
-        vm.set_displays(&[snap("A", "Left", vec![0x11, 0x0F])], &config, true, None);
+        vm.set_displays(
+            &[snap("A", "Left", vec![0x11, 0x0F])],
+            &config,
+            true,
+            GammaLimits::UNLIMITED,
+        );
         // A snapshot carries no active-input readback, so the section starts with
         // no selection — the dropdown renders empty rather than a misleading 0.
         assert_eq!(

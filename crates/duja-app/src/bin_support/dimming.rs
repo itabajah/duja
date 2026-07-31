@@ -155,10 +155,19 @@ pub(crate) fn plan_for_platform(
 /// so [`reachable_output`]'s substitution is unreachable and a caption about it
 /// would describe a thing that never happens.
 ///
-/// The percentage is the gamma **factor**, which under the continuum is the
-/// perceived-brightness fraction the channel is being asked for
-/// (`gamma == 1 - alpha`) — so `Some(50)` reads as "gamma dims to at most 50%",
-/// which is the shipped copy.
+/// The percentage is the gamma **factor**, i.e. how far the ramp scales the
+/// scanout — so `Some(50)` reads as "gamma dims to at most 50%", which is the
+/// shipped copy.
+///
+/// It is deliberately **not** described as a slider position, because it is one
+/// only on a software-only display. [`map_user_level`] maps the sub-floor zone
+/// `0..transition` onto the whole factor range, so `gamma == user_pct / transition`
+/// on a display with a working backlight and `gamma == user_pct / 100` without one.
+/// With the shipped defaults (`hw_floor_pct = 0`, `min_perceived_pct = 25`)
+/// `transition` is 25, so a factor of `0.5` is reached at slider 12, not slider 50.
+/// The factor is a fraction of the *floor-level* picture, and the caption's "%"
+/// means the gamma channel's own reach rather than a mark on the slider. Whether
+/// the copy should say so is a separate question — `docs/debt.md` carries it.
 ///
 /// Robust rather than trusting: `min_gamma` below the floor, or `NaN`, both
 /// answer `None`. Neither is reachable through

@@ -79,7 +79,7 @@ fn settings_shell_instantiates_and_renders() {
         &[snapshot("A", 40), snapshot("B", 70)],
         &config,
         false,
-        None,
+        duja_ui::GammaLimits::UNLIMITED,
     );
     let vm = Rc::new(RefCell::new(vm));
 

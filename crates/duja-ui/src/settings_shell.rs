@@ -573,7 +573,8 @@ fn monitor_to_data(
         // meaningful cap (a gamma channel that reaches 0% has no limit to warn
         // about), so it is free to carry `None`. `gamma_cap_pct` never yields
         // `Some(0)` — see its docs in `dimming.rs`.
-        gamma_cap_pct: i32::from(section.gamma_cap_pct.unwrap_or(0)),
+        gamma_cap_pct: i32::from(section.gamma_limits.cap_pct.unwrap_or(0)),
+        gamma_advisory: section.gamma_limits.advisory,
         has_inputs: !section.inputs.is_empty(),
         inputs: ModelRc::from(inputs.clone()),
         // -1 = no selection (an empty dropdown): a snapshot carries no active-input
@@ -647,6 +648,7 @@ fn clamp_pct(value: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings_vm::GammaLimits;
     use duja_core::config::Config;
     use duja_core::id::StableDisplayId;
     use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
@@ -669,7 +671,12 @@ mod tests {
 
     fn vm_with_one_monitor() -> SettingsVm {
         let mut vm = SettingsVm::new();
-        vm.set_displays(&[snapshot("A")], &Config::default(), true, None);
+        vm.set_displays(
+            &[snapshot("A")],
+            &Config::default(),
+            true,
+            GammaLimits::UNLIMITED,
+        );
         vm
     }
 
@@ -762,7 +769,7 @@ mod tests {
             &[snapshot_with_inputs("A", vec![0x11, 0x0F])],
             &Config::default(),
             true,
-            None,
+            GammaLimits::UNLIMITED,
         );
         let mut cache = InputModelCache::new();
         let first = reconcile_input_models(&mut cache, vm.monitors());
@@ -783,7 +790,7 @@ mod tests {
             &[snapshot_with_inputs("A", vec![0x11, 0x0F])],
             &Config::default(),
             true,
-            None,
+            GammaLimits::UNLIMITED,
         );
         let mut cache = InputModelCache::new();
         let first = reconcile_input_models(&mut cache, vm.monitors());
@@ -794,7 +801,7 @@ mod tests {
             &[snapshot_with_inputs("A", vec![0x11])],
             &Config::default(),
             true,
-            None,
+            GammaLimits::UNLIMITED,
         );
         let second = reconcile_input_models(&mut cache, vm.monitors());
         assert!(
@@ -813,7 +820,7 @@ mod tests {
             ],
             &Config::default(),
             true,
-            None,
+            GammaLimits::UNLIMITED,
         );
         let mut cache = InputModelCache::new();
         let _ = reconcile_input_models(&mut cache, vm.monitors());
@@ -824,7 +831,7 @@ mod tests {
             &[snapshot_with_inputs("A", vec![0x11])],
             &Config::default(),
             true,
-            None,
+            GammaLimits::UNLIMITED,
         );
         let _ = reconcile_input_models(&mut cache, vm.monitors());
         assert_eq!(cache.len(), 1);
@@ -837,9 +844,9 @@ mod tests {
         // a cap anyone would disclose — the caption it would produce ("gamma dims
         // to at most 0%") is nonsense, so the value is free.
         //
-        // What this cannot reach is the `.slint` side of the same rule: the
-        // `gamma-available && gamma-cap-pct > 0` guard on the Text element is not
-        // observable from Rust. This pins the half that is.
+        // This is the boundary itself; the `.slint` side of the same rule — that a
+        // 0 really does suppress the caption — is driven end to end by
+        // `the_gamma_cap_caption_renders_only_where_there_is_a_cap_to_disclose`.
         let inputs: Rc<VecModel<SharedString>> = Rc::new(VecModel::default());
         let mut vm = SettingsVm::new();
 
@@ -847,17 +854,27 @@ mod tests {
             &[snapshot("A")],
             &Config::default(),
             true,
-            Some(NOT_THE_WINDOWS_CAP),
+            GammaLimits {
+                cap_pct: Some(NOT_THE_WINDOWS_CAP),
+                advisory: true,
+            },
         );
         let capped = monitor_to_data(vm.monitors().first().expect("one section"), &inputs);
         assert_eq!(capped.gamma_cap_pct, i32::from(NOT_THE_WINDOWS_CAP));
+        assert!(capped.gamma_advisory);
 
-        vm.set_displays(&[snapshot("A")], &Config::default(), true, None);
+        vm.set_displays(
+            &[snapshot("A")],
+            &Config::default(),
+            true,
+            GammaLimits::UNLIMITED,
+        );
         let uncapped = monitor_to_data(vm.monitors().first().expect("one section"), &inputs);
         assert_eq!(
             uncapped.gamma_cap_pct, 0,
             "no cap must reach Slint as the value its guard suppresses"
         );
+        assert!(!uncapped.gamma_advisory);
     }
 
     #[test]
@@ -875,6 +892,7 @@ mod tests {
             dim_mode_index: 0,
             gamma_available: true,
             gamma_cap_pct: 0,
+            gamma_advisory: false,
             has_inputs: true,
             inputs: ModelRc::from(inputs.clone()),
             selected_input_index: -1,
@@ -909,10 +927,60 @@ mod binding_tests {
     use super::*;
     use crate::accent::AccentChoice;
     use crate::command::ThemeChoice;
+    use crate::settings_vm::GammaLimits;
     use duja_core::config::Config;
     use duja_core::id::StableDisplayId;
     use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
-    use i_slint_backend_testing::ElementHandle;
+    use i_slint_backend_testing::{ElementHandle, ElementRoot};
+
+    /// A gamma cap that is deliberately **not** Windows' 50 — see the twin in the
+    /// `tests` module above.
+    const NOT_THE_WINDOWS_CAP: u8 = 62;
+
+    /// A capped-but-reliable OS — Windows' shape.
+    const CAPPED_ONLY: GammaLimits = GammaLimits {
+        cap_pct: Some(NOT_THE_WINDOWS_CAP),
+        advisory: false,
+    };
+
+    /// An uncapped OS that can accept a ramp and not apply it — macOS' shape.
+    const ADVISORY_ONLY: GammaLimits = GammaLimits {
+        cap_pct: None,
+        advisory: true,
+    };
+
+    /// The rendered dim-mode captions in `shell`'s element tree whose text starts
+    /// with `prefix`.
+    ///
+    /// Reads the `.slint` side of a caption directly: every builtin `Text` gets a
+    /// default `accessible-label: text` binding from the compiler's accessibility
+    /// pass, and the element walk visits only *instantiated* elements — so a
+    /// suppressed `if` branch contributes nothing and an empty result means the
+    /// guard fired. This is the only way to observe either term of a
+    /// `gamma-available && …` guard from Rust.
+    fn captions_starting_with(shell: &SettingsShell, prefix: &'static str) -> Vec<String> {
+        shell
+            .ui
+            .root_element()
+            .query_descendants()
+            .match_predicate(move |element| {
+                element
+                    .accessible_label()
+                    .is_some_and(|label| label.starts_with(prefix))
+            })
+            .find_all()
+            .iter()
+            .filter_map(|element| element.accessible_label().map(|l| l.to_string()))
+            .collect()
+    }
+
+    fn gamma_cap_captions(shell: &SettingsShell) -> Vec<String> {
+        captions_starting_with(shell, "Gamma dims to at most")
+    }
+
+    fn gamma_advisory_captions(shell: &SettingsShell) -> Vec<String> {
+        captions_starting_with(shell, "Gamma may not take effect")
+    }
 
     fn snapshot(serial: &str) -> DisplaySnapshot {
         DisplaySnapshot {
@@ -951,7 +1019,7 @@ mod binding_tests {
             &[snapshot_with_inputs("A", vec![0x11, 0x0F])],
             &Config::default(),
             true,
-            None,
+            GammaLimits::UNLIMITED,
         );
         let vm = Rc::new(RefCell::new(vm));
         let shell = SettingsShell::new(vm.clone()).expect("settings shell instantiates");
@@ -981,7 +1049,7 @@ mod binding_tests {
             &[snapshot("A"), snapshot("B")],
             &Config::default(),
             true,
-            None,
+            GammaLimits::UNLIMITED,
         );
         let vm = Rc::new(RefCell::new(vm));
         let shell = SettingsShell::new(vm).expect("settings shell instantiates");
@@ -996,6 +1064,117 @@ mod binding_tests {
             matches, 4,
             "each per-monitor section must render its calibration slider"
         );
+    }
+
+    // The gamma-cap caption is the whole point of the `gamma_cap_pct` plumbing, and
+    // until this test existed it was pinned by **nothing**: deleting
+    // `&& monitor.gamma-cap-pct > 0` from the `.slint` guard — which restores the
+    // exact defect the plumbing was written to fix, a Windows-only sentence shown on
+    // macOS — left the whole suite green. Every other fixture in the crate passes
+    // `None`, so the `Text` was instantiated by no test at all.
+    //
+    // Both terms of the guard and the `@tr` interpolation are driven here, through
+    // the real `.slint`. The cap is 62 rather than 50 for the reason the pure tests
+    // use 62: a 50 fixture agrees with the hardcoded string this replaced.
+    #[test]
+    fn the_gamma_cap_caption_renders_only_where_there_is_a_cap_to_disclose() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let vm = Rc::new(RefCell::new(SettingsVm::new()));
+        let shell = SettingsShell::new(vm.clone()).expect("settings shell instantiates");
+        let render = |limits: GammaLimits, gamma_allowed: bool| {
+            vm.borrow_mut().set_displays(
+                &[snapshot("A")],
+                &Config::default(),
+                gamma_allowed,
+                limits,
+            );
+            shell.update_from_vm(&vm.borrow());
+            gamma_cap_captions(&shell)
+        };
+
+        // A capped OS: exactly one caption, carrying the plumbed figure. This also
+        // pins the `@tr` argument end to end — a `{}` left unsubstituted, or a
+        // number rendered as `62.0`, fails here and nowhere else.
+        let capped = render(CAPPED_ONLY, true);
+        assert_eq!(capped.len(), 1, "one section ⇒ one caption, got {capped:?}");
+        let caption = capped.first().expect("one caption");
+        assert!(
+            caption.contains("at most 62%"),
+            "the caption must interpolate the plumbed cap, got {caption:?}"
+        );
+
+        // An uncapped OS (macOS, and every other non-Windows target): the OS accepts
+        // the whole range, the overlay substitution never happens, and a caption
+        // saying it does would describe a thing that cannot occur.
+        assert!(
+            render(GammaLimits::UNLIMITED, true).is_empty(),
+            "no cap ⇒ no caption; this is the defect the plumbing exists to fix"
+        );
+
+        // Under the HDR guard the gamma option is not selectable at all, so the
+        // caption is about a channel the user cannot reach — suppressed by the
+        // guard's first term, independently of the cap.
+        assert!(
+            render(CAPPED_ONLY, false).is_empty(),
+            "gamma unavailable ⇒ no caption about how far gamma reaches"
+        );
+    }
+
+    // The macOS hazard caption: `CGSetDisplayTransferByFormula` can return success
+    // and leave the curve untouched, with no rule to comply with and no readback
+    // that detects it. The only thing Duja can do is say so, and the only thing a
+    // test can do is prove it is said exactly where it is true — a caption that
+    // leaked onto Windows would be a hazard warning for a path this project's own
+    // `MIN_ACCEPTED_GAMMA` tests prove compliant.
+    //
+    // The two captions are deliberately driven against *each other's* fixture:
+    // deriving either guard from the other flag, or from `gamma-cap-pct`, reds here.
+    #[test]
+    fn the_advisory_caption_renders_only_where_gamma_can_silently_do_nothing() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let vm = Rc::new(RefCell::new(SettingsVm::new()));
+        let shell = SettingsShell::new(vm.clone()).expect("settings shell instantiates");
+        let render = |limits: GammaLimits, gamma_allowed: bool| {
+            vm.borrow_mut().set_displays(
+                &[snapshot("A")],
+                &Config::default(),
+                gamma_allowed,
+                limits,
+            );
+            shell.update_from_vm(&vm.borrow());
+            (
+                gamma_advisory_captions(&shell).len(),
+                gamma_cap_captions(&shell).len(),
+            )
+        };
+
+        // macOS' shape: the hazard is disclosed, and the cap caption stays away —
+        // macOS accepts the whole range, so there is no substitution to describe.
+        assert_eq!(
+            render(ADVISORY_ONLY, true),
+            (1, 0),
+            "an advisory OS discloses the hazard and nothing about a cap"
+        );
+
+        // Windows' shape: the cap is disclosed and the hazard is not. This is the
+        // half the review's corrected reasoning turns on — Windows' silent-failure
+        // mode has a documented trigger that `min_gamma_factor()` keeps Duja clear
+        // of, so warning about it here would be telling users a path is unreliable
+        // when this crate's tests prove it compliant.
+        assert_eq!(
+            render(CAPPED_ONLY, true),
+            (0, 1),
+            "a capped-but-reliable OS discloses the cap and no hazard"
+        );
+
+        // The HDR guard suppresses both: neither caption is about anything the user
+        // can select.
+        assert_eq!(render(ADVISORY_ONLY, false), (0, 0));
+
+        // And an OS with neither limit says nothing at all.
+        assert_eq!(render(GammaLimits::UNLIMITED, true), (0, 0));
     }
 
     // The settings window must follow the resolved theme. Before the fix,

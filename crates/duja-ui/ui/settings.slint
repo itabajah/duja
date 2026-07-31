@@ -22,6 +22,9 @@ export struct SettingsMonitorData {
     // optional type, so `Option<u8>::None` arrives as 0; the VM field is the
     // authority on the meaning.
     gamma-cap-pct: int,
+    // Whether this OS can report a gamma write as accepted without applying it,
+    // in a way Duja cannot pre-empt. See `GammaLimits::advisory`.
+    gamma-advisory: bool,
     inputs: [string],
     has-inputs: bool,
     // The selector index of the input the user last picked (-1 = none yet). A
@@ -430,6 +433,22 @@ export component SettingsWindow inherits Window {
                                 // would describe a thing that cannot occur.
                                 if monitor.gamma-available && monitor.gamma-cap-pct > 0: Text {
                                     text: @tr("Gamma dims to at most {}% on this system; below that Duja uses the overlay, which cannot cover full-screen games or the mouse pointer", monitor.gamma-cap-pct);
+                                    color: Palette.text-faint;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                                // On macOS `CGSetDisplayTransferByFormula` can
+                                // return success and leave the display's curve
+                                // untouched — reported on current hardware, with a
+                                // trigger as ordinary as leaving "Automatically
+                                // adjust brightness" on. Unlike the Windows cap
+                                // there is no rule to comply with and readback
+                                // cannot detect it, so the only thing Duja can do
+                                // is say so before the user picks the mode. Same
+                                // decision as the cap above: keep gamma, disclose
+                                // the limit. See `duja_dimmer::gamma_is_advisory`.
+                                if monitor.gamma-available && monitor.gamma-advisory: Text {
+                                    text: @tr("Gamma may not take effect on this system: macOS can accept a ramp and not apply it, most often while \"Automatically adjust brightness\" is on. If the screen does not dim, use the overlay instead");
                                     color: Palette.text-faint;
                                     font-size: 11px;
                                     wrap: word-wrap;
