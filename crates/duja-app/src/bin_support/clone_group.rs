@@ -9,9 +9,11 @@
 //!
 //! This module is the app-layer policy that collapses a mirrored set into one
 //! control (ADR-0018: the app owns policy; the engine stays per-panel). Displays
-//! are grouped by their GDI source; each group presents as one merged row, drives
-//! one dimming command per shared surface, and fans a level change back out to its
-//! members:
+//! are grouped by their **display-surface token** — the GDI source on Windows,
+//! the mirror-set master's `CGDirectDisplayID` on macOS, where the same reasoning
+//! holds and a set can span both backends (`duja_core::macos` has the rule). Each
+//! group presents as one merged row, drives one dimming command per shared
+//! surface, and fans a level change back out to its members:
 //!
 //! - **all members have working hardware** → drive every member's hardware to the
 //!   target (the shared content stays uniform; the one overlay only appears below
@@ -57,9 +59,16 @@ pub(crate) struct GroupMember {
     /// software). Kept per-member because the fan-out treats hardware and
     /// software-only members of the same group differently.
     pub(crate) software_only: bool,
-    /// The GDI source (`\\.\DISPLAY<n>`, case-folded on grouping) the panel draws
-    /// from, or `None` for a pure-WMI panel with no plumbed GDI device — which then
-    /// cannot be grouped and stays its own singleton.
+    /// The **display-surface token** the panel draws from, case-folded on
+    /// grouping: the GDI source (`\\.\DISPLAY<n>`) on Windows, the mirror-set
+    /// master's `CGDirectDisplayID` in decimal on macOS. `None` only for a
+    /// pure-WMI panel, whose backend plumbs no such value — which then cannot be
+    /// grouped and stays its own singleton.
+    ///
+    /// A macOS built-in panel *does* carry one, so a `MacBook` mirroring its
+    /// screen to a projector groups the panel and the monitor together even though
+    /// they come from two different backends. The name is historical; the value is
+    /// a surface key on both platforms.
     pub(crate) device: Option<String>,
     /// Human-readable name (from EDID), for the merged row label.
     pub(crate) name: String,
@@ -113,15 +122,21 @@ impl CloneGrouping {
     }
 }
 
-/// Group panels by their shared GDI source into [`CloneGroup`]s.
+/// Group panels by their shared display surface into [`CloneGroup`]s.
 ///
 /// Panels with the same (case-folded) `device` form one mirrored group; a panel
-/// with `device: None` (a pure-WMI panel with no GDI source) cannot be correlated
-/// to any surface and stays its own singleton (a documented residual). The anchor
-/// of each group is the lowest-id member, so the grouping is a pure function of the
-/// member set and stable across enumeration-order churn.
+/// with `device: None` (a pure-WMI panel with no surface token) cannot be
+/// correlated to any surface and stays its own singleton (a documented residual).
+/// The anchor of each group is the lowest-id member, so the grouping is a pure
+/// function of the member set and stable across enumeration-order churn.
+///
+/// Members can come from **different backends**: on macOS a built-in panel
+/// (`duja-panel`) and the external monitor mirroring it (`duja-ddc`) both report
+/// the mirror-set master's id, so they meet in one bucket here. That is exactly
+/// what this function is for — the token is a key, and where it came from is not
+/// its business.
 pub(crate) fn group_clones(members: &[GroupMember]) -> CloneGrouping {
-    // Bucket by the case-folded GDI source. A `None` device (a pure-WMI panel)
+    // Bucket by the case-folded surface token. A `None` device (a pure-WMI panel)
     // cannot be correlated to a surface, so it becomes its own singleton group
     // immediately rather than sharing a bucket with other `None`s.
     let mut keyed: BTreeMap<String, Vec<GroupMember>> = BTreeMap::new();
@@ -424,6 +439,37 @@ mod tests {
         let b_group = grouping.group_of(&id("B")).expect("B grouped");
         assert!(b_group.mirrored);
         assert_eq!(b_group.members.len(), 2);
+    }
+
+    /// The commonest Mac mirror layout there is: a `MacBook` showing its built-in
+    /// screen on a projector. The panel comes from `duja-panel` and the projector
+    /// from `duja-ddc`, and until the panel reported a surface token the two
+    /// landed in *different* groups — a `None` singleton beside the external — so
+    /// two overlays covered one framebuffer at identical bounds. That is `#66`,
+    /// arrived at from the other direction.
+    ///
+    /// Both backends now derive the token from `duja_core::macos::surface_id`, so
+    /// the master panel and its clone agree on the master's id and the set
+    /// collapses to one control with one overlay.
+    #[test]
+    fn a_macos_panel_and_the_external_mirroring_it_form_one_group() {
+        // Display 1 is the built-in panel and the mirror-set master, so it names
+        // its own surface; the external clone reports the master's id.
+        let members = vec![
+            member("A", DisplayKind::InternalPanel, false, Some("1"), "Panel"),
+            member("B", DisplayKind::ExternalDdc, false, Some("1"), "Projector"),
+        ];
+        let grouping = group_clones(&members);
+
+        assert_eq!(grouping.groups().len(), 1, "one framebuffer, one control");
+        let group = grouping.group_of(&id("A")).expect("A grouped");
+        assert!(group.mirrored);
+        assert_eq!(group.members.len(), 2);
+        assert_eq!(
+            grouping.group_of(&id("B")).map(|g| g.anchor.clone()),
+            Some(group.anchor.clone()),
+            "both members must route to the same control"
+        );
     }
 
     #[test]

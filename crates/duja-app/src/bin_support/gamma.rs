@@ -686,8 +686,14 @@ mod platform {
     /// `surface_token_for`.
     type DeviceResolver = Box<dyn FnMut(&StableDisplayId) -> Option<String>>;
 
-    /// [`RefusalLog`] reason: this id carries no gamma token at all — a
-    /// `DisplayServices` panel, which has none by construction.
+    /// [`RefusalLog`] reason: this id carries no gamma token at all.
+    ///
+    /// On macOS every enumerated display has one — a `DisplayServices` built-in
+    /// panel reports its own `CGDirectDisplayID` exactly as a DDC monitor does — so
+    /// this now means the id is not in the map: a display unplugged between the
+    /// plan and the apply, or a `BoundsMap` that has not caught up with an
+    /// enumeration yet. Both are transient, which is precisely what the latch is
+    /// for.
     ///
     /// Deliberately **separate** from [`BAD_TOKEN_REASON`]: `RefusalLog` latches per
     /// (id, reason), so folding the two correlation failures into one string would

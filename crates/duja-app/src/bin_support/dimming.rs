@@ -13,11 +13,11 @@
 //!   continuum. The batch is the *full* desired dimmer state: a display at
 //!   alpha 0 is included so [`Dimmer::apply`](duja_core::dimmer::Dimmer::apply)
 //!   removes any stale overlay. A display with no known bounds is omitted — it
-//!   cannot be overlaid, a documented limitation. That is any panel from the OS
-//!   panel backend: a Windows WMI panel (no monitor rect is plumbed) and equally a
-//!   macOS `DisplayServices` panel (no bounds are stamped for it yet, though its
-//!   `CGDirectDisplayID` makes them cheap to obtain — see `docs/debt.md`). A
-//!   Windows DDC-fallback internal panel does carry bounds and is dimmable.
+//!   cannot be overlaid, a documented limitation. Today that is exactly one kind
+//!   of display: a **Windows WMI** panel, for which no monitor rect is plumbed
+//!   (`docs/debt.md`). A macOS `DisplayServices` panel reports its own bounds and
+//!   both tokens like any other CoreGraphics display, and a Windows DDC-fallback
+//!   internal panel carries its DDC geometry, so both are dimmable.
 //!
 //! The module is OS-free and fully unit-tested; the app's notification loop
 //! calls it and hands the batch to the real `Dimmer`.
@@ -577,6 +577,32 @@ mod tests {
             NO_GAMMA_LIMIT,
         );
         assert!(plan.commands.is_empty());
+        assert_eq!(plan.hardware, vec![(id("A"), 40)]);
+    }
+
+    /// The other side of the same coin, and what the macOS panel-geometry fix
+    /// buys: an internal panel is not excluded from software dimming *as a kind*
+    /// — only for want of bounds. Give the same panel a rectangle and it plans an
+    /// overlay like any monitor.
+    ///
+    /// A macOS built-in panel now arrives with one (a Windows WMI panel still does
+    /// not), which is why this pairs with the test above rather than replacing it.
+    #[test]
+    fn an_internal_panel_with_bounds_gets_an_overlay_command() {
+        let displays = [input("A", DisplayKind::InternalPanel, 10)];
+        let mon = monitor(40, ConfigDimMode::Overlay);
+        let plan = plan(
+            &displays,
+            |_| continuum_for(DisplayKind::InternalPanel, false, &mon, true),
+            |_| Some(bounds()),
+            NO_GAMMA_LIMIT,
+        );
+        let cmd = plan.commands.first().expect("the panel must get a command");
+        assert_eq!(cmd.bounds, bounds());
+        assert!(
+            cmd.has_overlay(),
+            "a panel at slider 10 under a floor of 40 must be overlaid, not left bright"
+        );
         assert_eq!(plan.hardware, vec![(id("A"), 40)]);
     }
 

@@ -58,7 +58,9 @@
 use std::fmt::Debug;
 
 use duja_core::id::{EdidError, StableDisplayId};
+use duja_core::macos::{CgRect, MirrorState, bounds_from_cg_rect, surface_id};
 
+use crate::PanelGeometry;
 use crate::error::PanelError;
 use crate::transport::{PanelBrightness, PanelTransport};
 
@@ -178,6 +180,30 @@ fn is_controllable_panel(is_builtin: bool, can_change_brightness: bool) -> bool 
     is_builtin && can_change_brightness
 }
 
+/// Build a builtin panel's [`PanelGeometry`] from the two CoreGraphics facts the
+/// enumeration already has in hand: its rect and its mirror state.
+///
+/// The built-in panel is an ordinary CoreGraphics display, so this is the same
+/// derivation `duja-ddc` applies to an external monitor, through the same
+/// [`duja_core::macos`] functions — deliberately, because the two backends' tokens
+/// are compared against each other app-side. A `MacBook` mirroring its screen to a
+/// projector puts the panel (here) and the projector (there) in one mirror set,
+/// and the merge that collapses them into one control is *only* correct if both
+/// sides computed the surface token by the same rule.
+///
+/// The gamma token is the panel's own id: a mirror-set master addresses itself,
+/// and so does a clone. Only the surface token follows the mirror.
+///
+/// Pure, so it is compiled and tested on every OS even though only the macOS
+/// `imp::enumerate` below calls it.
+fn panel_geometry(rect: CgRect, mirror: MirrorState) -> PanelGeometry {
+    PanelGeometry::new(
+        bounds_from_cg_rect(rect),
+        mirror.display_id.to_string(),
+        surface_id(mirror).to_string(),
+    )
+}
+
 /// The three `DisplayServices` brightness operations, abstracted so the real
 /// dlopen'd table and an in-memory fake are interchangeable.
 ///
@@ -258,9 +284,12 @@ mod imp {
 
     use core_graphics::display::CGDisplay;
 
-    use super::{CgDisplayId, DisplayServicesApi, is_controllable_panel, synthesize_panel_id};
+    use super::{
+        CgDisplayId, DisplayServicesApi, is_controllable_panel, panel_geometry, synthesize_panel_id,
+    };
     use crate::PanelDisplay;
     use crate::error::PanelError;
+    use duja_core::macos::{CgRect, MirrorState};
 
     /// `int DisplayServicesGetBrightness(CGDirectDisplayID, float *)`.
     type GetFn = unsafe extern "C" fn(CgDisplayId, *mut f32) -> i32;
@@ -453,6 +482,7 @@ mod imp {
             ) else {
                 continue;
             };
+            let rect = display.bounds();
             panels.push(PanelDisplay {
                 id: stable_id,
                 // CoreGraphics exposes no friendly name for a builtin panel; a
@@ -463,6 +493,23 @@ mod imp {
                 // decimal; `PanelDisplay::open` parses it back to bind a
                 // transport. See the field's docs on the crate root.
                 instance_name: id.to_string(),
+                // The built-in panel is an ordinary CoreGraphics display, so it
+                // has a rect and a mirror state like any other. Read here, in the
+                // same snapshot as everything else about this display, and handed
+                // to the pure builder — which is what makes a macOS panel
+                // software-dimmable at all (`docs/debt.md`).
+                geometry: Some(panel_geometry(
+                    CgRect {
+                        x: rect.origin.x,
+                        y: rect.origin.y,
+                        width: rect.size.width,
+                        height: rect.size.height,
+                    },
+                    MirrorState {
+                        display_id: id,
+                        mirrors: display.mirrors_display(),
+                    },
+                )),
             });
         }
         panels
@@ -477,6 +524,7 @@ mod tests {
     use super::*;
     use crate::controller::PanelController;
     use duja_core::controller::BrightnessController;
+    use duja_core::dimmer::DisplayBounds;
     use duja_core::model::Feature;
     use duja_core::testing::contract::{Scenario, run_controller_contract};
     use std::collections::VecDeque;
@@ -582,6 +630,73 @@ mod tests {
         // A different model must move the key.
         let c = synthesize_panel_id(0x0610, 0x0000_A2E6, 0).unwrap();
         assert_ne!(a.as_str(), c.as_str());
+    }
+
+    // --- panel geometry ---
+
+    fn rect() -> CgRect {
+        CgRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1512.0,
+            height: 982.0,
+        }
+    }
+
+    fn mirror(display_id: u32, mirrors: u32) -> MirrorState {
+        MirrorState {
+            display_id,
+            mirrors,
+        }
+    }
+
+    #[test]
+    fn panel_geometry_carries_the_rect_in_points() {
+        let geometry = panel_geometry(rect(), mirror(1, 0));
+        assert_eq!(geometry.bounds(), DisplayBounds::new(0, 0, 1512, 982));
+    }
+
+    /// A standalone built-in panel — the overwhelmingly common Mac — mirrors
+    /// nothing, so it names its own surface and both tokens agree.
+    #[test]
+    fn a_standalone_panel_addresses_and_names_itself() {
+        let geometry = panel_geometry(rect(), mirror(1, 0));
+        assert_eq!(geometry.gamma_token(), "1");
+        assert_eq!(geometry.surface_token(), "1");
+    }
+
+    /// The case the two tokens exist for. A panel that *mirrors* an external
+    /// display still has to be addressed as itself for gamma, while grouping by
+    /// the master it draws with. Swapping the two arguments here is the `#66`
+    /// double-overlay defect in one direction and a ramp on the wrong screen in
+    /// the other — and both compile, because both tokens are `String`.
+    #[test]
+    fn a_mirroring_panel_addresses_itself_but_names_its_master() {
+        let geometry = panel_geometry(rect(), mirror(1, 7));
+        assert_eq!(geometry.gamma_token(), "1", "gamma must address this panel");
+        assert_eq!(
+            geometry.surface_token(),
+            "7",
+            "grouping must follow the shared framebuffer"
+        );
+    }
+
+    /// The other half of the same mirror set, as `duja-ddc` computes it for the
+    /// external clone when the **panel** is the master. The two backends must land
+    /// on one string or the app cannot merge the set — this asserts the agreement
+    /// directly rather than trusting that both call the same function.
+    #[test]
+    fn a_master_panel_shares_one_surface_token_with_its_external_clone() {
+        // The panel is display 1 and mirrors nothing (it is the master); the
+        // external is display 20 and reports `CGDisplayMirrorsDisplay == 1`.
+        let panel = panel_geometry(rect(), mirror(1, 0));
+        let external_surface = surface_id(mirror(20, 1)).to_string();
+        assert_eq!(panel.surface_token(), external_surface);
+        assert_ne!(
+            panel.gamma_token(),
+            "20",
+            "sharing a surface must not merge the two displays' gamma addresses"
+        );
     }
 
     // --- gating ---

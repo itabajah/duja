@@ -6,6 +6,12 @@
 //! platform-independent. OS backends implement the traits defined here; the UI
 //! consumes the models defined here.
 //!
+//! [`macos`] is the one module named after a platform, and it does not break that
+//! rule: it holds arithmetic over values CoreGraphics reports, not calls into it,
+//! and it is compiled and tested on every target. It lives here because **two**
+//! backend crates must apply those rules identically and neither may depend on
+//! the other — see its own docs.
+//!
 //! # Module map
 //!
 //! Implemented (first wave, built test-first in phase P2):
@@ -28,6 +34,10 @@
 //! - [`caps`] — total MCCS capability-string parser ([`caps::ParsedCaps`])
 //! - [`input_source`] — MCCS VCP `0x60` input-source code ↔ name mapping
 //! - [`quirks`] — quirk database + stable-id matcher ([`quirks::QuirkDb`])
+//! - [`macos`] — the two pure macOS display rules (`CGDisplayMirrorsDisplay` →
+//!   surface token, `CGRect` → [`dimmer::DisplayBounds`]) that both macOS
+//!   backends must apply identically; FFI-free, so it is compiled and tested on
+//!   every target like the rest of this crate
 //! - `testing` (feature `test-support`) — fakes + the controller contract suite
 //!
 //! # Example
@@ -61,6 +71,7 @@ pub mod debounce;
 pub mod dimmer;
 pub mod id;
 pub mod input_source;
+pub mod macos;
 pub mod manager;
 pub mod model;
 pub mod quirks;

@@ -3,9 +3,9 @@
 _Last updated: 2026-07-31 (P6 wave 2: the macOS backends are wired into the app
 and CLI, the tray anchor contract is settled in ADR-0021, tray construction happens
 inside the running event loop, the tray itself runs on macOS, both gamma captions
-are per-platform, and the release pipeline now ships a universal `Duja.app` in a
-disk image. Remaining for P6: the macOS panel-bounds gap that leaves a built-in
-panel un-dimmable below its floor, and the gate)._
+are per-platform, the release pipeline now ships a universal `Duja.app` in a disk
+image, and a macOS built-in panel finally reports its geometry so it can be dimmed
+below its backlight's floor. Remaining for P6: the gate)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -32,7 +32,7 @@ display control, automation, and integrations), see
 | **Internal-panel fallback fix** | **`v0.1.3` (Windows)** | ✅ shipped — the built-in panel no longer vanishes on a GPU/OEM-driven backlight |
 | **Dark rebrand + mirror/software-only** | **`v0.1.4` (Windows)** | ✅ shipped — the dark brand identity plus the two laptop-reported issues (#66, #67) |
 | **Sticky software-only fix** | **`v0.1.5` (Windows)** | ✅ shipped — a live monitor no longer sticks as "software-only"; tray Restart. Release verified: 6 assets, SHA256SUMS, minisign, SLSA provenance, `/releases/latest` → v0.1.5 |
-| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the whole app assembly: hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021), event-loop-first tray construction (#94), the mirror-surface token split (#98), the OS hooks' macOS half (#99), the macOS gamma sink (#100), the tray itself on macOS (#102), the two per-platform gamma captions (#103) and macOS packaging — a universal `Duja.app` + DMG on the release pipeline (#104). Remaining: the macOS panel-bounds gap (`docs/debt.md`: a built-in panel enters as `(id, None, None)`, so `dimming::plan` emits no `DimCommand` and it cannot be software-dimmed at all), **and the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
+| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the whole app assembly: hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021), event-loop-first tray construction (#94), the mirror-surface token split (#98), the OS hooks' macOS half (#99), the macOS gamma sink (#100), the tray itself on macOS (#102), the two per-platform gamma captions (#103) macOS packaging — a universal `Duja.app` + DMG on the release pipeline (#104) — and the built-in panel's geometry, which makes it software-dimmable (#105). Remaining: **the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
 | P7 Linux port | `m7-linux` / `v0.3.0` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
 
@@ -49,7 +49,7 @@ end from day one. Distribution is a tag-triggered
 portable zip, and — from `v0.2.0` — a macOS universal disk image, all under one
 `SHA256SUMS`, each with a minisign signature and a build-provenance attestation.
 
-Health: **1,020 tests on the Windows CI lane plus 10 doctests (1,030 in a local `cargo test`), green on 3 OSes** — the
+Health: **1,035 tests on the Windows CI lane plus 10 doctests (1,045 in a local `cargo test --workspace --all-features`), green on 3 OSes** — the
 per-OS count differs because the `#![cfg(windows)]` and `#![cfg(unix)]`
 integration suites compile out on the other lanes; clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
@@ -731,6 +731,50 @@ artifact uncompilable, not every omission (deleting the check and the seal toget
 still compiles, and `dead_code` under CI's clippy is what catches that); and the
 "re-run recovers the tag" note gave the wrong reason, since with `needs:` the
 publishing job never ran and there is no Release to update.
+
+### `#105` — the built-in panel gets a position, so it can be dimmed (2026-07-31)
+
+The last P6 code item. A macOS built-in panel reached the app as `(id, None, None,
+None)` — no bounds, no gamma token, no surface token — the same shape as a Windows
+WMI panel. `dimming::plan` emits a `DimCommand` only for a display it can place, so
+the panel got none: below the backlight's floor there was nothing to dim it with,
+on the one screen a laptop user actually looks at.
+
+On Windows that shape is honest. WMI exposes no rectangle for the panel it drives,
+so `None` means what it says. On macOS it was never true: a `DisplayServices` panel
+is an ordinary CoreGraphics display, and `CGDisplayBounds` answers for it exactly
+as it does for a monitor.
+
+The fix is where the debt row asked for it — on `duja-panel`'s own API. `enumerate`
+now reports a `PanelGeometry` beside each panel, `Some` on macOS and `None` on
+Windows, and the app folds it into the same `DisplayGeom` a DDC display produces.
+No `cfg` in the app, no display FFI in the app binary, and nothing re-parsing
+`instance_name`, which is documented opaque and would have been the tempting
+shortcut.
+
+**Bounds alone would have been a regression.** Give the panel a rectangle and
+nothing else, and a `MacBook` mirroring its screen to a projector has the panel (a
+`None`-token singleton) and the monitor at *identical* bounds in two different
+groups — two overlay windows stacked on one framebuffer. That is `#66`, arrived at
+from the opposite direction, and it would have shipped as a fix. So all three
+values move together: bounds, the surface token that groups the mirror set, and the
+gamma token that addresses the panel itself.
+
+That put the same rule in two crates, which is the arrangement that invites drift:
+`duja-ddc` computes the external clone's token, `duja-panel` the master's, and the
+app merges them by comparing the two strings. A rule two crates must agree on, kept
+in two copies, agrees until it does not — so `CGDisplayMirrorsDisplay`→surface-token
+and `CGRect`→`DisplayBounds` both moved into a new pure `duja_core::macos`. Both
+stay FFI-free and tested on every lane, as they were before; there is now one of
+each rather than two.
+
+Fifteen tests, red-first where a red was available: the app-side fold was extracted
+with its shipped all-`None` body first and the new test failed against it (`left:
+None`, `right: Some(DisplayBounds { .. })`), then each token assertion was proven
+load-bearing by mutation — crossing the two reds one, reading one twice reds the
+other. What no test can reach is that macOS *reports* any of this: the two new
+CoreGraphics calls have never run, like every other macOS path here, and the debt
+row says so rather than leaving the suite to imply otherwise.
 
 
 ## What is done

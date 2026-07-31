@@ -403,6 +403,10 @@ fn panel_from_monitor_id(object: &IWbemClassObject) -> Result<PanelDisplay, Pane
         id,
         name,
         instance_name,
+        // WMI exposes no monitor rectangle and no GDI device for the panel
+        // `WmiMonitorBrightnessMethods` controls, so there is nothing honest to
+        // report. `None` means "this backend cannot say" — see `PanelGeometry`.
+        geometry: None,
     })
 }
 

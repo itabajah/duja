@@ -108,9 +108,8 @@ pub struct DdcDisplay {
     /// that display need not be one this backend returned — the built-in panel is
     /// filtered out (`CGDisplayIsBuiltin`) yet is the master whenever a `MacBook`
     /// mirrors its own screen to a projector. Comparing it is correct; passing it
-    /// to a per-display call is not. The full rule is on the crate-private
-    /// `mac_surface` module (not linked: this item is public and that module is
-    /// not, which `rustdoc -D warnings` rejects).
+    /// to a per-display call is not. The full rule, and why it is shared with
+    /// `duja-panel` rather than copied, is on [`duja_core::macos`].
     pub surface_id: u32,
     bus: MacI2cBus,
     sort_key: u32,
@@ -159,8 +158,8 @@ pub fn enumerate() -> Result<Vec<DdcDisplay>, DdcError> {
             cg_display_id: raw.mirror.display_id,
             // `raw.mirror` was assembled once, at the FFI site that reads both
             // values, so there is no positional pair to get the wrong way round
-            // here. See `mac_surface::MirrorState`.
-            surface_id: crate::mac_surface::surface_id(raw.mirror),
+            // here. See `duja_core::macos::MirrorState`.
+            surface_id: duja_core::macos::surface_id(raw.mirror),
             bus: raw.bus,
             sort_key: raw.mirror.display_id,
         });
