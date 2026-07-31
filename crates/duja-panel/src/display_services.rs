@@ -194,26 +194,51 @@ fn is_controllable_panel(is_builtin: bool, can_change_brightness: bool) -> bool 
 /// The gamma token is the panel's own id: a mirror-set master addresses itself,
 /// and so does a clone. Only the surface token follows the mirror.
 ///
-/// # A degenerate rect yields `None`, not a degenerate geometry
+/// # A rect that is not a rectangle yields `None`, not a degenerate geometry
 ///
 /// `CGDisplayBounds` answers `CGRectNull` — `{{inf, inf}, {0, 0}}` — for a display
 /// it considers invalid, and this backend enumerates the **online** list, which
 /// deliberately includes a built-in that is online but not the active drawable
-/// (see `imp::online_display_ids`). Passed through, that becomes bounds at
-/// `i32::MAX` with zero extent: an overlay window of no size, placed nowhere,
-/// dimming nothing, with no warning and no retry — the "slider controls nothing"
-/// failure this whole change exists to remove.
+/// (see `imp::online_display_ids`). [`bounds_from_cg_rect`] is total, so that
+/// converts cleanly to bounds at `i32::MAX` with zero extent — an overlay window
+/// of no size, placed nowhere, dimming nothing, with no warning and no retry. That
+/// is the "slider controls nothing" failure this whole change exists to remove,
+/// reintroduced by the fix.
 ///
-/// So an empty rect is reported as "this backend cannot say where the panel is",
-/// which is what `None` already means to every consumer. The panel then behaves
-/// exactly as it did before geometry existed — un-dimmable below its floor, and
-/// visibly so — instead of appearing dimmable and silently doing nothing. The
-/// tokens are discarded with it: all three fields are one answer, and half of one
-/// is not better than none.
+/// Two conditions are rejected, and the pair is chosen so that **neither is a
+/// threshold**; there is no "plausible display size" magic number here:
+///
+/// - **not finite** — any of the four values infinite or `NaN`. This is what
+///   actually identifies `CGRectNull` (its *origin* is what is infinite), and it
+///   also covers `CGRectInfinite`, whose extents would otherwise survive
+///   `is_empty` and ask for a `u32::MAX`-wide window.
+/// - **empty** — [`duja_core::dimmer::DisplayBounds::is_empty`], a zero width or
+///   height, which encloses no area for an overlay to cover.
+///
+/// The answer is then "this backend cannot say where the panel is", which is what
+/// `None` already means to every consumer. The panel behaves exactly as it did
+/// before geometry existed — un-dimmable below its floor, and visibly so — rather
+/// than appearing dimmable and silently doing nothing, and an overlay already on
+/// screen for it is destroyed rather than stranded (`duja_dimmer`'s
+/// `plan_transition` destroys any current entry absent from the desired batch).
+/// The tokens are discarded with the bounds: all three fields are one answer, and
+/// half of one is not better than none.
+///
+/// `duja-ddc` deliberately does **not** carry this guard for external monitors. It
+/// enumerates the *active* list, whose members are drawable by definition; the
+/// exposure is specific to the online list this backend chose in order to see a
+/// mirrored built-in, so the guard belongs here rather than in the shared rule.
 ///
 /// Pure, so it is compiled and tested on every OS even though only the macOS
 /// `imp::enumerate` below calls it.
 fn panel_geometry(rect: CgRect, mirror: MirrorState) -> Option<PanelGeometry> {
+    let is_finite = rect.x.is_finite()
+        && rect.y.is_finite()
+        && rect.width.is_finite()
+        && rect.height.is_finite();
+    if !is_finite {
+        return None;
+    }
     let bounds = bounds_from_cg_rect(rect);
     if bounds.is_empty() {
         return None;
@@ -734,17 +759,51 @@ mod tests {
     /// zero-size overlay at `i32::MAX` — dimming nothing, silently. `None` is the
     /// honest answer and puts the panel back exactly where it was before
     /// geometry existed.
+    ///
+    /// Each case is asserted separately, and each is rejected by a *different*
+    /// arm of the guard: `CGRectNull` by the finite check (its extents are zero
+    /// but it is the **origin** that is infinite), `CGRectInfinite` by the same
+    /// check where `is_empty` would have waved it through with `u32::MAX`
+    /// extents, and a flat rect by `is_empty` alone. Dropping either arm reds
+    /// exactly one of them.
     #[test]
     fn a_degenerate_rect_yields_no_geometry_at_all() {
+        // CGRectNull: {{inf, inf}, {0, 0}}.
         let null_rect = CgRect {
             x: f64::INFINITY,
             y: f64::INFINITY,
             width: 0.0,
             height: 0.0,
         };
-        assert!(panel_geometry(null_rect, mirror(1, 0)).is_none());
-        // A single zero extent is equally unusable, and the tokens go with it:
-        // all three fields are one answer.
+        assert!(
+            panel_geometry(null_rect, mirror(1, 0)).is_none(),
+            "CGRectNull must not become a panel position"
+        );
+
+        // CGRectInfinite: extents survive `is_empty`, so only the finite check
+        // stops a request for a u32::MAX-wide overlay.
+        let infinite = CgRect {
+            x: f64::NEG_INFINITY,
+            y: f64::NEG_INFINITY,
+            width: f64::INFINITY,
+            height: f64::INFINITY,
+        };
+        assert!(
+            panel_geometry(infinite, mirror(1, 0)).is_none(),
+            "an infinite rect must not size an overlay"
+        );
+
+        // NaN in one field is equally unusable.
+        let nan = CgRect {
+            x: f64::NAN,
+            y: 0.0,
+            width: 1512.0,
+            height: 982.0,
+        };
+        assert!(panel_geometry(nan, mirror(1, 0)).is_none());
+
+        // A single zero extent encloses no area, and the tokens go with it: all
+        // three fields are one answer.
         let flat = CgRect {
             x: 0.0,
             y: 0.0,
