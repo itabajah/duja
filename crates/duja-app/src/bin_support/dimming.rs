@@ -38,6 +38,15 @@
 //! *levels* by construction (the continuum defines `gamma == 1 - alpha`, and a
 //! Windows layered overlay blends in the same encoded space a ramp scales), but
 //! they are **not** the same coverage — see `docs/debt.md`.
+//!
+//! Because the substitution is invisible (the level is right; the surfaces it
+//! covers are not), the settings window discloses it. That caption needs the same
+//! number, so [`gamma_cap_pct`] lives here too: it is the minimum expressed as a
+//! percentage, and `None` — no cap — is simultaneously the answer to "how far
+//! down does gamma reach" and to "is there anything to say about it". `duja-ui`
+//! cannot derive either for itself; it depends on neither `duja-dimmer` nor
+//! `duja-platform`, which is why the figure was a hardcoded `50`, shown on every
+//! platform, until `#103`.
 
 // RATIONALE: these pure modules are consumed only by the tray assembly (Windows and macOS),
 // but stay cross-platform (not cfg-gated) so their unit tests run on every CI
@@ -45,7 +54,7 @@
 #![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
 use duja_core::continuum::{ContinuumConfig, ContinuumOutput, map_user_level};
-use duja_core::dimmer::{DimCommand, DisplayBounds, clamp_gamma};
+use duja_core::dimmer::{DimCommand, DisplayBounds, GAMMA_FLOOR, clamp_gamma};
 use duja_core::id::StableDisplayId;
 use duja_core::model::{DimMode, DisplayKind};
 
@@ -138,6 +147,61 @@ pub(crate) fn plan_for_platform(
     )
 }
 
+/// How far down the gamma channel reaches on an OS whose minimum is `min_gamma`,
+/// as a percentage — or `None` when there is nothing to disclose.
+///
+/// This is the settings window's caption, expressed as a number instead of a
+/// sentence. `None` means the OS accepts every factor the continuum can produce,
+/// so [`reachable_output`]'s substitution is unreachable and a caption about it
+/// would describe a thing that never happens.
+///
+/// The percentage is the gamma **factor**, i.e. how far the ramp scales the
+/// scanout — so `Some(50)` reads as "gamma dims to at most 50%", which is the
+/// shipped copy.
+///
+/// It is deliberately **not** described as a slider position, because it is one
+/// only on a software-only display. [`map_user_level`] maps the sub-floor zone
+/// `0..transition` onto the whole factor range, so `gamma == user_pct / transition`
+/// on a display with a working backlight and `gamma == user_pct / 100` without one.
+/// With the shipped defaults (`hw_floor_pct = 0`, `min_perceived_pct = 25`)
+/// `transition` is 25, so a factor of `0.5` falls at slider 12.5 — the substitution
+/// takes over at slider 12 and below, not at slider 50.
+/// The factor is a fraction of the *floor-level* picture, and the caption's "%"
+/// means the gamma channel's own reach rather than a mark on the slider. Whether
+/// the copy should say so is a separate question — `docs/debt.md` carries it.
+///
+/// Robust rather than trusting: `min_gamma` below the floor, or `NaN`, both
+/// answer `None`. Neither is reachable through
+/// [`gamma_cap_pct_for_platform`] — `duja-dimmer` pins
+/// `min_gamma_factor() >= GAMMA_FLOOR` on every lane — but this function is the
+/// one that turns a number into a user-facing claim, and the failure it would
+/// otherwise have (a `0%` cap, or a claim that gamma reaches lower than Duja
+/// itself allows) is a lie rather than a glitch.
+pub(crate) fn gamma_cap_pct(min_gamma: f32) -> Option<u8> {
+    // NaN first: `NaN <= x` is false, so without this it would fall through to the
+    // cast, and `NaN as u8` is 0 — a caption claiming gamma dims to at most 0%.
+    if min_gamma.is_nan() || min_gamma <= GAMMA_FLOOR {
+        return None;
+    }
+    let pct = (min_gamma * 100.0).round().clamp(0.0, 100.0);
+    // RATIONALE (cast_possible_truncation, cast_sign_loss): `pct` is integral after
+    // `round()` and clamped into `0.0..=100.0`, so the cast is exact and in range.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let out = pct as u8;
+    Some(out)
+}
+
+/// [`gamma_cap_pct`] with **this platform's** gamma minimum supplied.
+///
+/// The same seam as [`plan_for_platform`], for the same reason: the *choice* of
+/// minimum is pinned by a test instead of living at a call site no test can reach.
+/// `duja-ui` cannot make this call itself — it depends on neither `duja-dimmer`
+/// nor `duja-platform`, which is why the figure used to be a hardcoded `50` in
+/// `settings.slint` shown on every platform.
+pub(crate) fn gamma_cap_pct_for_platform() -> Option<u8> {
+    gamma_cap_pct(duja_dimmer::min_gamma_factor())
+}
+
 /// Map `user_pct` under `cfg`, substituting an overlay for a gamma factor the
 /// platform cannot accept.
 ///
@@ -175,7 +239,6 @@ mod tests {
     use crate::bin_support::settings::continuum_for;
     use duja_core::config::{DimMode as ConfigDimMode, MonitorConfig};
     use duja_core::continuum::{MAX_ALPHA, geometry};
-    use duja_core::dimmer::GAMMA_FLOOR;
 
     /// An OS that accepts every factor the continuum can produce — i.e. no
     /// platform limit beyond Duja's own [`GAMMA_FLOOR`], which is what
@@ -577,5 +640,65 @@ mod tests {
         );
         assert!(plan.hardware.is_empty());
         assert!(plan.commands.first().is_some_and(DimCommand::has_overlay));
+    }
+
+    #[test]
+    fn an_os_that_accepts_the_whole_range_has_no_cap_to_disclose() {
+        // The caption's gate. An OS with no limit beyond `GAMMA_FLOOR` never makes
+        // `reachable_output` substitute an overlay, so a caption saying it does
+        // would describe a thing that cannot happen — which is what shipped, on
+        // every platform, before this.
+        assert_eq!(gamma_cap_pct(NO_GAMMA_LIMIT), None);
+        // Strictly below the floor is the same answer for a different reason: the
+        // limit is not the OS's, it is Duja's own, and the OS has nothing to add.
+        assert_eq!(gamma_cap_pct(0.1), None);
+    }
+
+    #[test]
+    fn a_capped_os_discloses_the_factor_as_a_percentage() {
+        // The number the caption interpolates. 50 is what the hardcoded string
+        // said, so a Windows user sees the identical sentence they saw before.
+        assert_eq!(gamma_cap_pct(WINDOWS_MIN_GAMMA), Some(50));
+        // Not Windows-specific arithmetic: any tighter OS reports its own figure,
+        // rounded to the nearest percent rather than truncated (0.578 -> 58, which
+        // a truncating implementation would call 57 — understating the cap, i.e.
+        // promising a reach the OS does not give).
+        assert_eq!(gamma_cap_pct(0.578), Some(58));
+        assert_eq!(gamma_cap_pct(1.0), Some(100));
+    }
+
+    #[test]
+    fn a_nonsensical_minimum_disclaims_rather_than_claiming_zero() {
+        // Unreachable through `gamma_cap_pct_for_platform` — `duja-dimmer` pins
+        // `min_gamma_factor() >= GAMMA_FLOOR` on every lane — but this is the
+        // function that turns a float into a sentence shown to a user, and the
+        // untended failure is a claim ("gamma dims to at most 0%"), not a glitch.
+        // `NaN as u8` is 0, and `NaN <= GAMMA_FLOOR` is false, so without the
+        // explicit NaN arm this is exactly what would be printed.
+        assert_eq!(gamma_cap_pct(f32::NAN), None);
+        assert_eq!(gamma_cap_pct(f32::NEG_INFINITY), None);
+        // Above 1.0 is not a cap on dimming at all (a factor over 1 brightens),
+        // but it must still not overflow the `u8` the UI carries.
+        assert_eq!(gamma_cap_pct(f32::INFINITY), Some(100));
+        assert_eq!(gamma_cap_pct(4.0), Some(100));
+    }
+
+    #[test]
+    fn gamma_cap_pct_for_platform_uses_the_dimmer_crates_gamma_minimum() {
+        // The wiring, pinned the same way `plan_for_platform`'s is: the caption is
+        // only correct per-platform because the figure comes from the dimmer crate
+        // rather than a literal. Substituting `GAMMA_FLOOR` reds the Windows arm.
+        #[cfg(windows)]
+        assert_eq!(
+            gamma_cap_pct_for_platform(),
+            Some(50),
+            "Windows caps the ramp at MIN_ACCEPTED_GAMMA, and the caption says so"
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            gamma_cap_pct_for_platform(),
+            None,
+            "off Windows the OS imposes no cap, so the caption must not appear"
+        );
     }
 }

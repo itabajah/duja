@@ -451,6 +451,7 @@ impl AppState {
             &self.snapshots,
             &self.config,
             self.gamma_allowed,
+            settings::platform_gamma_limits(),
         );
         self.settings_shell
             .update_from_vm(&self.settings_vm.borrow());
@@ -569,7 +570,12 @@ impl AppState {
                 update_check_on,
                 dark,
             );
-            vm.set_displays(&self.snapshots, &self.config, self.gamma_allowed);
+            vm.set_displays(
+                &self.snapshots,
+                &self.config,
+                self.gamma_allowed,
+                settings::platform_gamma_limits(),
+            );
             vm.set_hotkeys(hotkeys);
         }
     }
@@ -1025,6 +1031,7 @@ impl AppState {
             &self.snapshots,
             &self.config,
             self.gamma_allowed,
+            settings::platform_gamma_limits(),
         );
         self.settings_shell
             .update_from_vm(&self.settings_vm.borrow());

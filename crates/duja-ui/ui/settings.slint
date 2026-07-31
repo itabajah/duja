@@ -17,6 +17,14 @@ export struct SettingsMonitorData {
     min-perceived-pct: int,
     dim-mode-index: int,
     gamma-available: bool,
+    // How far down the gamma channel reaches on this OS, as a percentage — 0 when
+    // the OS accepts the whole range and there is nothing to disclose. Slint has no
+    // optional type, so `Option<u8>::None` arrives as 0; the VM field is the
+    // authority on the meaning.
+    gamma-cap-pct: int,
+    // Whether this OS can report a gamma write as accepted without applying it,
+    // in a way Duja cannot pre-empt. See `GammaLimits::advisory`.
+    gamma-advisory: bool,
     inputs: [string],
     has-inputs: bool,
     // The selector index of the input the user last picked (-1 = none yet). A
@@ -412,17 +420,40 @@ export component SettingsWindow inherits Window {
                                     font-size: 11px;
                                     wrap: word-wrap;
                                 }
-                                // Windows refuses a gamma ramp below 50% (its own
-                                // anti-lockout rule), so Duja substitutes the
-                                // overlay for the darker half of the range. The
-                                // level is identical; the coverage is not. The
-                                // figure is hardcoded because duja-ui depends on
-                                // neither duja-dimmer nor duja-platform — see
-                                // `duja_dimmer::MIN_ACCEPTED_GAMMA` for the real
-                                // constant, and docs/debt.md for the (currently
-                                // inert) per-platform gating this still wants.
-                                if monitor.gamma-available: Text {
-                                    text: @tr("Gamma dims to at most 50% on Windows; below that Duja uses the overlay, which cannot cover full-screen games or the mouse pointer");
+                                // Some operating systems refuse a gamma ramp past a
+                                // point (Windows' anti-lockout rule stops at 50%),
+                                // so Duja substitutes the overlay for the rest of
+                                // the range. The level is identical; the coverage
+                                // is not. Both the figure and whether this appears
+                                // at all come from the app — duja-ui depends on
+                                // neither duja-dimmer nor duja-platform, so it
+                                // cannot read `min_gamma_factor()` itself. A 0 cap
+                                // means the OS accepts the whole range and the
+                                // substitution never happens, so saying it does
+                                // would describe a thing that cannot occur.
+                                if monitor.gamma-available && monitor.gamma-cap-pct > 0: Text {
+                                    text: @tr("Gamma dims to at most {}% on this system; below that Duja uses the overlay, which cannot cover full-screen games or the mouse pointer", monitor.gamma-cap-pct);
+                                    color: Palette.text-faint;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                                // On macOS `CGSetDisplayTransferByFormula` can
+                                // return success and leave the display's curve
+                                // untouched. Two reported modes, deliberately not
+                                // ranked here: Apple DTS reproduced a total
+                                // no-visual-change on an M5 Max with no setting
+                                // involved (an M5 non-Max on the same build is
+                                // fine, so it is narrow recent hardware), and
+                                // separately the ramp is reported not to apply
+                                // while "Automatically adjust brightness" is on.
+                                // Unlike the Windows cap
+                                // there is no rule to comply with and readback
+                                // cannot detect it, so the only thing Duja can do
+                                // is say so before the user picks the mode. Same
+                                // decision as the cap above: keep gamma, disclose
+                                // the limit. See `duja_dimmer::gamma_is_advisory`.
+                                if monitor.gamma-available && monitor.gamma-advisory: Text {
+                                    text: @tr("Gamma may not take effect on this system: macOS can accept a ramp and not apply it — on some recent Macs regardless of settings, and on others while \"Automatically adjust brightness\" is on. If the screen does not dim, use the overlay instead");
                                     color: Palette.text-faint;
                                     font-size: 11px;
                                     wrap: word-wrap;
