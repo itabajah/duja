@@ -1266,8 +1266,11 @@ candidate), and the unix-socket hardening that became live on macOS. All carry r
 The push build for `#112` — the docs-only commit that closed this phase — went red
 on `test (windows-latest)`: `worker_panic_does_not_kill_engine` missed a 2 s wait,
 taking 2.850 s. Re-running the identical commit `f96e4bd` turned it green at
-0.069 s. That is the third time this test has gone red on CI and the third time an
-unchanged re-run has passed.
+0.069 s. That is the **fourth** time this test has gone red on CI; three of the
+four were re-run unchanged and all three passed. The fourth (run 30504679809,
+2026-07-30, 2.804 s) was never re-run — which is worth stating, because it is the
+only one of the four whose outcome could have contradicted the environmental
+reading, and it went unrecorded until review counted the runs.
 
 What settled it was a test with no panic in it: in the same red job,
 `loop_time_assembly`'s zero-duration single-shot went 0.363 s → **4.308 s** →
@@ -1286,12 +1289,12 @@ failures. Five green Windows runs paid the same cost at 0.057–0.184 s. The rev
 blocked it on exactly that arithmetic.
 
 So the fix shipped as two separable things, which is how the debt row had
-prescribed it all along: `LIVENESS_BUDGET` (10 s) for the 53 positive waits in
+prescribed it all along: `LIVENESS_BUDGET` (10 s) for **every** positive wait in
 `tests/engine.rs` — the half that actually addresses a runner stall — and the
-panic-hook mute as a ~50 ms cleanup that also de-noises the log. The single
-negative wait keeps its 2 s, since an assertion of absence elapses in full every
-run. The hook keeps each muted panic's message and location, because that header
-is what made the cost measurable in the first place.
+panic-hook mute as a ~50 ms cleanup that also de-noises the log. The **14**
+negative waits keep their own short literals, since an assertion of absence
+elapses in full every run. The hook keeps each muted panic's thread, message and
+location, because that header is what made the cost measurable in the first place.
 
 The generalisable lesson, and the reason this is in STATUS rather than only in the
 ledger: **a mechanism you can measure is not thereby the cause.** The measurement
@@ -1299,6 +1302,17 @@ was sound, the location was right, the fix was worth making — and the causal c
 was off by a factor of ~15–50, refuted by the author's own prior notes. The free
 experiment that settles environment-vs-code was a re-run button, and it was not
 pressed until review demanded it.
+
+The corrected version then failed a second review, and the second lesson is
+narrower but cheaper to act on: **quantifiers were asserted without counting.**
+"the third red run" (four), "the one negative wait" (fourteen), "all 53 positive
+waits" (53 of ~76), "a different binary" (the same one) — four claims that a
+`grep -c` would have settled before they were written, and one, the PDB size, that
+was made *less* accurate by a "correction" that silently compared MiB against MB.
+The counting error was not cosmetic: the omitted red run is the only one of the
+four that was never re-run, so the one data point that could have falsified the
+environmental reading was also the one missing from the record. Both rounds share
+a root — writing the sentence before doing the arithmetic that would check it.
 
 ## P5 gate results
 

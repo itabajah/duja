@@ -10,7 +10,7 @@
 //! panic runtime's backtrace symbolization, which lands inside the **worker's**
 //! `catch_unwind` ahead of the ack a test is waiting for; it is small but it is
 //! pure overhead, and [`mute_simulated_driver_panics`] removes it. The other is
-//! the CI runner itself, which has stalled for seconds at a time on three
+//! the CI runner itself, which has stalled for seconds at a time on four
 //! separate occasions. The deadlines are therefore sized as liveness guards
 //! rather than latency assertions — see [`LIVENESS_BUDGET`].
 
@@ -202,19 +202,26 @@ impl BrightnessController for GatedGet {
 /// instant its event arrives, so a generous value costs nothing when the code is
 /// healthy and only changes how long a real hang takes to report.
 ///
-/// It is 10 s because 2 s was not survivable on a shared CI runner. Three
-/// separate red runs on the Windows lane recorded this file's waits blowing a 2 s
-/// budget - 6.6 s and 10.3 s on the two logged in `docs/debt.md`, and 2.85 s on
-/// run 30700482072. That last one is the informative one: in the same job a test
-/// that contains no panic at all (`loop_time_assembly`'s zero-duration
-/// single-shot) went from ~0.4 s to 4.3 s, while the median test was 1.04x its
-/// green time. A stall that hits an unrelated event-loop test twelvefold is not
-/// something a panic-path fix can bound, so the guard has to tolerate it.
+/// It is 10 s because a shared CI runner stalls. **Four** red runs on the Windows
+/// lane have recorded this file's waits blowing their budget: 2.804 s (run
+/// 30504679809), 10.266 s (30597183871), 6.589 s (30620730412) and 2.850 s
+/// (30700482072). Three were re-run unchanged and went green; the first never
+/// was. That is worth knowing, because it is the only one of the four whose
+/// outcome could have falsified the environmental reading, and at 2.804 s it is
+/// the near-twin of the last.
+///
+/// The informative one is 30700482072: in that job a test containing no panic at
+/// all (`loop_time_assembly`'s zero-duration single-shot) went from 0.363 s to
+/// **4.308 s**, while the median test ran at 1.04x its green time. A stall that
+/// hits an unrelated event-loop test twelvefold is not something a panic-path fix
+/// can bound, so the guard has to tolerate it - and every positive wait in this
+/// file now routes through here, including those already at 3 s and 5 s, since
+/// those sit *below* the stall this constant exists to survive.
 ///
 /// **A negative wait must not use this.** An assertion that something does *not*
 /// arrive elapses its budget in full every run, so raising it spends real
-/// wall-clock. The one such wait on a 2 s budget keeps it explicitly, with a note
-/// pointing here.
+/// wall-clock. The file has **14** of them (500-700 ms, 1 s, and one at 2 s); they
+/// keep their own short literals deliberately.
 const LIVENESS_BUDGET: Duration = Duration::from_secs(10);
 
 /// The message prefix shared by every fake in this file that panics on purpose.
@@ -227,7 +234,7 @@ const SIMULATED_PANIC: &str = "simulated driver panic";
 ///
 /// The default hook runs at the panic site — inside the **worker's**
 /// `catch_unwind` (`worker.rs`), ahead of the `Panicked` ack — so when
-/// `RUST_BACKTRACE` is set it makes dbghelp symbolize this binary's ~25 MB PDB
+/// `RUST_BACKTRACE` is set it makes dbghelp symbolize this binary's ~30 MB PDB
 /// before the engine can hear about the panic. That is pure overhead sitting
 /// inside a deadline, and it buys nothing: these panics are deliberate and their
 /// stacks are never read.
@@ -272,9 +279,13 @@ fn mute_simulated_driver_panics() {
             if let Some(message) = message
                 && message.starts_with(SIMULATED_PANIC)
             {
+                // The thread name is what distinguishes a worker's panic from the
+                // test's own assert panic in a failure log; keep it.
                 let location = info.location().map(ToString::to_string);
+                let thread = thread::current();
+                let name = thread.name().unwrap_or("<unnamed>");
                 eprintln!(
-                    "panicked at {}: {message} (backtrace muted: deliberate)",
+                    "thread '{name}' panicked at {}: {message} (backtrace muted: deliberate)",
                     location.as_deref().unwrap_or("an unknown location")
                 );
                 return;
@@ -402,7 +413,7 @@ fn drain_writes(
 ) -> (usize, Vec<(Feature, u16)>) {
     let mut seen = Vec::new();
     loop {
-        match writes.recv_timeout(Duration::from_secs(3)) {
+        match writes.recv_timeout(LIVENESS_BUDGET) {
             Ok((f, v)) => {
                 seen.push((f, v));
                 if pred(f, v) {
@@ -1148,7 +1159,7 @@ fn displaychange_ticks_are_debounced() {
 
     // Startup performs exactly one enumeration.
     calls_rx
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(LIVENESS_BUDGET)
         .expect("startup enumeration");
 
     // A storm of 10 ticks must collapse to a single enumeration.
@@ -1156,7 +1167,7 @@ fn displaychange_ticks_are_debounced() {
         platform_tx.send(()).unwrap();
     }
     calls_rx
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(LIVENESS_BUDGET)
         .expect("one debounced enumeration");
 
     // No further enumeration follows the single debounced fire.
@@ -1185,7 +1196,7 @@ fn idle_engine_performs_no_enumerations() {
 
     // One startup enumeration, then silence: no timers, no idle wakeups.
     calls_rx
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(LIVENESS_BUDGET)
         .expect("startup enumeration");
     assert!(
         calls_rx.recv_timeout(Duration::from_millis(500)).is_err(),
@@ -1313,7 +1324,7 @@ fn spawn_polling(
     );
     let cmds = engine.sender();
     assert!(
-        wait_note(&notes, Duration::from_secs(3), |n| matches!(
+        wait_note(&notes, LIVENESS_BUDGET, |n| matches!(
             n,
             EngineNotification::DisplaysChanged(s)
                 if s.first().map(|d| d.user_level_pct) == Some(learned)
@@ -1336,7 +1347,7 @@ fn polling_reflects_an_external_change() {
         .unwrap();
 
     assert!(
-        wait_note(&notes, Duration::from_secs(5), |n| matches!(
+        wait_note(&notes, LIVENESS_BUDGET, |n| matches!(
             n,
             EngineNotification::LevelRead { hw_pct: 80, .. }
         )),
@@ -1383,7 +1394,7 @@ fn polling_stops_when_disabled() {
     cmds.send(EngineCommand::SetLevelPolling { on: true })
         .unwrap();
     assert!(
-        wait_note(&notes, Duration::from_secs(5), |n| matches!(
+        wait_note(&notes, LIVENESS_BUDGET, |n| matches!(
             n,
             EngineNotification::LevelRead { hw_pct: 80, .. }
         )),
@@ -1515,7 +1526,7 @@ fn shutdown_does_not_hang_on_a_blocked_worker() {
     );
 
     // Shutdown must complete within a bounded time despite the wedged worker.
-    within(Duration::from_secs(8), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
     let _ = release_tx;
 }
@@ -1623,7 +1634,7 @@ fn detached_worker_performs_no_second_write() {
         "detached worker A must not perform a second write (double-writer)"
     );
 
-    within(Duration::from_secs(4), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -1913,7 +1924,7 @@ fn stale_panicked_does_not_retire_a_fresh_worker() {
     })
     .unwrap();
     set_entered_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(LIVENESS_BUDGET)
         .expect("worker A should enter set()");
 
     // Unplug + replug: A is retired and healthy worker B (generation 2) spawns.
@@ -2315,7 +2326,7 @@ fn probe_without_hardware_range_downgrades_to_software_only() {
     );
 
     assert!(
-        wait_software_only(&notes, &id, true, Duration::from_secs(3)),
+        wait_software_only(&notes, &id, true, LIVENESS_BUDGET),
         "a probe reporting no hardware range must downgrade the display to software-only"
     );
     assert_eq!(
@@ -2356,7 +2367,7 @@ fn ack_but_silent_noop_write_downgrades_to_software_only() {
     // Wait until the initial Get has been learned (60), so the worker knows the
     // pre-write value and the next write is an unambiguous, meaningful change.
     assert!(
-        wait_note(&notes, Duration::from_secs(3), |n| matches!(
+        wait_note(&notes, LIVENESS_BUDGET, |n| matches!(
             n,
             EngineNotification::DisplaysChanged(s)
                 if s.first().map(|d| d.user_level_pct) == Some(60)
@@ -2372,7 +2383,7 @@ fn ack_but_silent_noop_write_downgrades_to_software_only() {
     .unwrap();
 
     assert!(
-        wait_software_only(&notes, &id, true, Duration::from_secs(3)),
+        wait_software_only(&notes, &id, true, LIVENESS_BUDGET),
         "an ACK-but-no-op first write must downgrade the display to software-only"
     );
 
@@ -2410,7 +2421,7 @@ fn slow_but_working_controller_is_not_falsely_downgraded() {
 
     // Learn the initial level (60), then drive a real, meaningful change.
     assert!(
-        wait_note(&notes, Duration::from_secs(3), |n| matches!(
+        wait_note(&notes, LIVENESS_BUDGET, |n| matches!(
             n,
             EngineNotification::DisplaysChanged(s)
                 if s.first().map(|d| d.user_level_pct) == Some(60)
@@ -2469,7 +2480,7 @@ fn wrongly_forced_display_self_heals_to_hardware() {
     // Learn 60, then a meaningful write the panel is too slow to reflect within the
     // retries ⇒ wrongly forced software-only.
     assert!(
-        wait_note(&notes, Duration::from_secs(3), |n| matches!(
+        wait_note(&notes, LIVENESS_BUDGET, |n| matches!(
             n,
             EngineNotification::DisplaysChanged(s)
                 if s.first().map(|d| d.user_level_pct) == Some(60)
@@ -2482,7 +2493,7 @@ fn wrongly_forced_display_self_heals_to_hardware() {
     })
     .unwrap();
     assert!(
-        wait_software_only(&notes, &id, true, Duration::from_secs(3)),
+        wait_software_only(&notes, &id, true, LIVENESS_BUDGET),
         "the very slow panel should first be (wrongly) forced software-only"
     );
 
@@ -2492,7 +2503,7 @@ fn wrongly_forced_display_self_heals_to_hardware() {
     cmds.send(EngineCommand::SetLevelPolling { on: true })
         .unwrap();
     assert!(
-        wait_software_only(&notes, &id, false, Duration::from_secs(5)),
+        wait_software_only(&notes, &id, false, LIVENESS_BUDGET),
         "a wrongly-forced display must self-heal to ExternalDdc once proven live"
     );
 
@@ -2524,7 +2535,7 @@ fn rejected_first_write_downgrades_to_software_only() {
     let cmds = engine.sender();
 
     assert!(
-        wait_note(&notes, Duration::from_secs(3), |n| matches!(
+        wait_note(&notes, LIVENESS_BUDGET, |n| matches!(
             n,
             EngineNotification::DisplaysChanged(s)
                 if s.first().map(|d| d.user_level_pct) == Some(60)
@@ -2539,7 +2550,7 @@ fn rejected_first_write_downgrades_to_software_only() {
     .unwrap();
 
     assert!(
-        wait_software_only(&notes, &id, true, Duration::from_secs(3)),
+        wait_software_only(&notes, &id, true, LIVENESS_BUDGET),
         "a rejected first brightness write must downgrade the display to software-only"
     );
 
@@ -2729,7 +2740,7 @@ fn healthy_reattach_clears_a_wrongly_forced_software_only_display() {
 
     // The dead first controller forces the display software-only (probe-driven).
     assert!(
-        wait_software_only(&notes, &id, true, Duration::from_secs(3)),
+        wait_software_only(&notes, &id, true, LIVENESS_BUDGET),
         "the no-hardware controller must first force the display software-only"
     );
 
@@ -2746,7 +2757,7 @@ fn healthy_reattach_clears_a_wrongly_forced_software_only_display() {
     // The reattach clears the overlay and the fresh healthy detection keeps the
     // display hardware-backed: it returns to ExternalDdc.
     assert!(
-        wait_software_only(&notes, &id, false, Duration::from_secs(3)),
+        wait_software_only(&notes, &id, false, LIVENESS_BUDGET),
         "a healthy reattach must clear the software-only overlay and return to ExternalDdc"
     );
     // ...and it must STAY ExternalDdc — a healthy fresh worker never re-forces it.
@@ -2793,7 +2804,7 @@ fn still_dead_reattach_is_re_forced_software_only() {
 
     // Forced software-only by the first dead controller.
     assert!(
-        wait_software_only(&notes, &id, true, Duration::from_secs(3)),
+        wait_software_only(&notes, &id, true, LIVENESS_BUDGET),
         "the no-hardware controller must first force the display software-only"
     );
 
@@ -2809,12 +2820,12 @@ fn still_dead_reattach_is_re_forced_software_only() {
 
     // The reattach first clears the overlay (transient ExternalDdc)...
     assert!(
-        wait_software_only(&notes, &id, false, Duration::from_secs(3)),
+        wait_software_only(&notes, &id, false, LIVENESS_BUDGET),
         "a reattach must clear the overlay first (a transient ExternalDdc)"
     );
     // ...then the fresh worker's detection re-forces the genuinely dead panel.
     assert!(
-        wait_software_only(&notes, &id, true, Duration::from_secs(3)),
+        wait_software_only(&notes, &id, true, LIVENESS_BUDGET),
         "a still-dead reattach must be re-forced software-only by the fresh worker's detection"
     );
 

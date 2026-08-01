@@ -280,8 +280,11 @@ mod tests {
         // This used to `set_hook(saved)` immediately (a no-op round trip) and end
         // with a bare `take_hook()`, which restores the *default* rather than
         // whatever was there — so the comment promised an isolation the code did
-        // not provide. Latent, since nothing else in this binary installs a hook,
-        // but the sibling test file `tests/engine.rs` now does install one.
+        // not provide. Still latent: nothing else in this binary installs a hook,
+        // and `tests/engine.rs`, which now does, compiles into a different test
+        // binary (`duja-app::engine` vs `duja-app::bin/duja`) and so a different
+        // process. Fixed because the code should do what its comment says, not
+        // because anything is currently broken by it.
         let saved = std::panic::take_hook();
         install_panic_hook(Some(path.clone()));
         let result = std::panic::catch_unwind(|| panic!("simulated field crash"));
