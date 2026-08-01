@@ -379,10 +379,16 @@ mod tests {
             // asserted, since every unix applies those verbatim.
             let applied = mode_of(&dir);
             if applied != mode {
+                // The predicate is the *difference*, not the request. Testing
+                // `mode & SPECIAL_BITS` instead — as the first version did — gets
+                // both arms backwards: `0o2700` stored as `0o0700` would panic
+                // (the case meant to be skipped) while `0o755` mangled to `0o750`
+                // would skip silently (the case meant to fail, and the vacuous
+                // pass this guard exists to prevent).
                 assert_eq!(
-                    mode & SPECIAL_BITS,
+                    (mode ^ applied) & !SPECIAL_BITS,
                     0,
-                    "chmod {mode:04o} became {applied:04o}, and only special bits may be refused"
+                    "chmod {mode:04o} became {applied:04o}; only special bits may be refused"
                 );
                 eprintln!("skipping {mode:04o}: this platform stored it as {applied:04o}");
                 let _ = std::fs::remove_dir_all(&dir);

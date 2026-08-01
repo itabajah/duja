@@ -759,10 +759,12 @@ struct BoundSocket {
 /// Because the lock covers the caller's plain `bind` as well, the inode found
 /// here was almost always either bound by a fully-started server or left behind by
 /// a dead one. One further case exists and is worth naming rather than denying: a
-/// **live** server whose listen backlog is full. Reaching it needs ~128 queued
-/// connections from a process of the same uid, which is inside the trust boundary
-/// and so is self-harm rather than an attack, but the two platforms then fail
-/// differently and neither is benign:
+/// **live** server whose listen backlog is full. Reaching it needs enough queued
+/// connections from a process of the same uid to fill that backlog — std passes
+/// `listen(fd, -1)`, so the depth is `somaxconn` on Linux (4096 by default since
+/// 5.4) and 128 on Apple — which is inside the trust boundary and so is self-harm
+/// rather than an attack. But the two platforms then fail differently and neither
+/// is benign:
 ///
 /// - On the BSDs `connect` returns `ECONNREFUSED`, so a **live** server is misread
 ///   as stale and its socket is unlinked — the exact defect this module exists to
@@ -826,11 +828,29 @@ fn takeover_bind(path: &Path) -> Result<UnixListener, IpcTransportError> {
 /// certain. That is the behaviour every release before this one shipped, so
 /// degrading to it is not a regression — but it is a degradation, and it is named
 /// here so nobody reads the guarantee as unconditional.
+/// `CLOEXEC` is not decoration: `rustix::fs::open` does **not** add it (unlike
+/// every `std` descriptor in this module, which does), and `duja-app`'s tray has a
+/// live `exec` path — "Restart" spawns a detached `duja --relaunch` while the
+/// outgoing server is still up. Without the flag that child inherits the pin and
+/// holds an about-to-be-unlinked inode for its whole life, and each restart
+/// generation inherits its predecessor's. Harmless to correctness — a pinned inode
+/// only makes the comparison more conservative — but it is an fd leak into an
+/// unrelated long-lived process.
+///
+/// `NOFOLLOW` here means the documented `O_PATH | O_NOFOLLOW` idiom: it pins the
+/// **symlink itself** rather than refusing one, which is the opposite of what
+/// `NOFOLLOW` means at this module's other two uses. It is still the right choice
+/// — without it a planted symlink would redirect the pin to an arbitrary object —
+/// but note that [`socket_identity`] uses `std::fs::metadata`, which *follows*.
+/// So for a path that is somehow a symlink the two would name different inodes and
+/// the pin would protect nothing, degrading to the pre-pin guarantee. Unreachable
+/// in practice: the directory is `0700` and the bind lock is held across both, so
+/// only a same-uid process could arrange it.
 #[cfg(target_os = "linux")]
 fn pin_inode(path: &Path) -> Option<std::os::fd::OwnedFd> {
     rustix::fs::open(
         path,
-        rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )
     .ok()
