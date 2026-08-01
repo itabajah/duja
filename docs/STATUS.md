@@ -1306,9 +1306,14 @@ pressed until review demanded it.
 The corrected version then failed a second review, and the second lesson is
 narrower but cheaper to act on: **quantifiers were asserted without counting.**
 "the third red run" (four), "the one negative wait" (fourteen), "all 53 positive
-waits" (53 of ~76), "a different binary" (the same one) — four claims that a
-`grep -c` would have settled before they were written, and one, the PDB size, that
-was made *less* accurate by a "correction" that silently compared MiB against MB.
+waits" (53 of ~76), "reached from 14 tests" (13 call sites across 10), and a
+`logging.rs` hazard called live when the two tests are in different binaries. Two
+of those a `grep -c` settles outright; the red-run count needed the GitHub API,
+and the binary claim needed the PDB sizes. A sixth, the PDB figure itself, was
+made *less* accurate by a "correction" that silently compared MiB against MB.
+Worth noting how the last one arrived: `grep -c` is what produced "14 tests", by
+counting the function's own definition line — the checking tool used carelessly is
+its own failure mode.
 The counting error was not cosmetic: the omitted red run is the only one of the
 four that was never re-run, so the one data point that could have falsified the
 environmental reading was also the one missing from the record. Both rounds share

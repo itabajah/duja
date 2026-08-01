@@ -224,6 +224,18 @@ impl BrightnessController for GatedGet {
 /// keep their own short literals deliberately.
 const LIVENESS_BUDGET: Duration = Duration::from_secs(10);
 
+/// What `shutdown_does_not_hang_on_a_blocked_worker` allows for a shutdown that
+/// has to stay bounded despite a worker wedged in a driver call.
+///
+/// Unlike [`LIVENESS_BUDGET`] this **is** a latency assertion, which is why it is
+/// not that constant: the engine's `SHUTDOWN_JOIN_BUDGET` is 2 s applied as one
+/// shared deadline across every worker (ADR-0017), and the property under test is
+/// that the bound exists at all. 4x it absorbs a stalling runner while still
+/// failing if that deadline ever goes per-worker or the constant itself is raised
+/// — which is the specific regression this test exists to catch, and which a
+/// 10 s liveness guard would let through.
+const SHUTDOWN_ASSERTION_BUDGET: Duration = Duration::from_secs(8);
+
 /// The message prefix shared by every fake in this file that panics on purpose.
 /// [`mute_simulated_driver_panics`] filters on it, so the panic sites and the
 /// filter cannot drift apart.
@@ -1526,7 +1538,8 @@ fn shutdown_does_not_hang_on_a_blocked_worker() {
     );
 
     // Shutdown must complete within a bounded time despite the wedged worker.
-    within(LIVENESS_BUDGET, move || engine.shutdown());
+    // A latency assertion, so deliberately not `LIVENESS_BUDGET`.
+    within(SHUTDOWN_ASSERTION_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
     let _ = release_tx;
 }
