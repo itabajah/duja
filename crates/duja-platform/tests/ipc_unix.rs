@@ -499,19 +499,28 @@ fn a_writable_socket_directory_is_refused_outright() {
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).expect("loosen");
     let path = dir.join("writable.sock");
 
-    let err = PipeServer::serve_named(path_str(&path), fake_handler)
+    let outcome = PipeServer::serve_named(path_str(&path), fake_handler);
+    let bound = path.exists();
+    // Restore before asserting. An assertion failure below would otherwise panic
+    // out of the test and leave a world-writable directory behind, which on a
+    // developer's machine is the very thing this test is about.
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+
+    let err = outcome
         .err()
         .expect("a world-writable socket dir must refuse the bind");
+    // Match the message, not just the variant: `Io(_)` would also pass for any
+    // unrelated transport failure on the way, so it would not pin the refusal this
+    // test is named for.
+    let duja_platform::ipc::IpcTransportError::Io(message) = &err else {
+        panic!("expected an Io refusal, got {err:?}");
+    };
     assert!(
-        matches!(err, duja_platform::ipc::IpcTransportError::Io(_)),
-        "got {err:?}"
+        message.contains("writable beyond its owner"),
+        "the error must say why the directory was refused: {message}"
     );
-    assert!(
-        !path.exists(),
-        "nothing may be bound in a refused directory"
-    );
+    assert!(!bound, "nothing may be bound in a refused directory");
 
-    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

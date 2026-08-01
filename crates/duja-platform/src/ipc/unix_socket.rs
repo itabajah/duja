@@ -132,8 +132,10 @@ use duja_ipc::{Request, Response};
 
 use super::{IpcTransportError, MAX_CONNECTIONS, MAX_HANDLER_THREADS, READ_TIMEOUT};
 
-/// How long the listener backs off before retrying when it is at the connection
-/// cap (no free slot to accept the next one).
+/// The generic short backoff in this module: the listener's wait when it is at the
+/// connection cap, its retry after a transient `accept` fault, the client's
+/// connect retry, and [`BindLock`]'s poll. Short enough that none of them adds
+/// perceptible latency, long enough that none of them spins.
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// The slice a non-blocking `accept` sleeps between polls, and the slice each
@@ -469,6 +471,10 @@ pub struct PipeServer {
     /// read. Compared before unlinking so a shutdown cannot delete a *successor's*
     /// socket — see [`unlink_if_ours`].
     socket_identity: Option<(u64, u64)>,
+    /// A spare descriptor on the bound socket, kept open until after the unlink so
+    /// the kernel cannot recycle its inode number. Never accepted on; its whole
+    /// job is to keep [`socket_identity`](Self::socket_identity) meaningful.
+    _keeper: Option<UnixListener>,
 }
 
 impl PipeServer {
@@ -494,12 +500,16 @@ impl PipeServer {
         H: Fn(Request) -> Response + Send + Sync + 'static,
     {
         let path = PathBuf::from(name);
-        let listener = bind_listener(&path)?;
-        // Which inode is *ours*, recorded while `bind_listener`'s lock still made
-        // the answer unambiguous. Every unlink below is conditioned on it.
-        let identity = socket_identity(&path);
+        let (listener, identity) = bind_listener(&path)?;
+        // A second descriptor on the same socket, held until after the final
+        // unlink. It is what makes `identity` mean anything — see `unlink_if_ours`
+        // for why an inode number alone does not.
+        let keeper = listener.try_clone().ok();
         // Defence-in-depth beyond the 0700 parent dir (see module docs).
-        set_mode(&path, 0o600).map_err(|e| IpcTransportError::Io(e.to_string()))?;
+        set_mode(&path, 0o600).map_err(|e| {
+            unlink_if_ours(&path, identity);
+            IpcTransportError::Io(e.to_string())
+        })?;
         listener.set_nonblocking(true).map_err(|e| {
             unlink_if_ours(&path, identity);
             IpcTransportError::Io(e.to_string())
@@ -565,6 +575,7 @@ impl PipeServer {
             workers,
             socket_path: path,
             socket_identity: identity,
+            _keeper: keeper,
         })
     }
 
@@ -707,22 +718,33 @@ fn serve_connection(
 /// that a filesystem without working `flock` fails the server closed rather than
 /// starting it unserialised; every path this resolves to is tmpfs, `/tmp` or
 /// APFS, where `flock` works.
-fn bind_listener(path: &Path) -> Result<UnixListener, IpcTransportError> {
+fn bind_listener(path: &Path) -> Result<(UnixListener, Option<(u64, u64)>), IpcTransportError> {
     prepare_socket_dir(path).map_err(|e| IpcTransportError::Io(e.to_string()))?;
     let _guard = BindLock::acquire(path)?;
-    match UnixListener::bind(path) {
-        Ok(listener) => Ok(listener),
-        Err(e) if e.kind() == io::ErrorKind::AddrInUse => takeover_bind(path),
-        Err(e) => Err(IpcTransportError::Io(e.to_string())),
-    }
+    let listener = match UnixListener::bind(path) {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => takeover_bind(path)?,
+        Err(e) => return Err(IpcTransportError::Io(e.to_string())),
+    };
+    // Read the identity here, still under the lock, so "this inode is ours" is
+    // established at the one moment nothing else can be touching the path. An
+    // earlier version read it in the caller and claimed the same thing, which was
+    // false: the guard is a local and dies with this function.
+    let identity = socket_identity(path);
+    Ok((listener, identity))
 }
 
 /// The `AddrInUse` path, called with [`BindLock`] held: probe for a live owner,
 /// else unlink the stale inode and rebind.
 ///
 /// Because the lock covers the caller's plain `bind` as well, the inode found
-/// here was either bound by a fully-started server or left behind by a dead one.
-/// There is no third case to worry about.
+/// here was almost always either bound by a fully-started server or left behind by
+/// a dead one. One further case exists and is worth naming rather than denying: a
+/// **live** server whose listen backlog is saturated answers `connect` with
+/// `ECONNREFUSED` on the BSDs, so it would be misread as stale. Reaching that
+/// needs ~128 queued connections from a process of the same uid, which is inside
+/// the trust boundary and therefore self-harm, but "there is no third case" would
+/// be an overstatement.
 fn takeover_bind(path: &Path) -> Result<UnixListener, IpcTransportError> {
     if UnixStream::connect(path).is_ok() {
         // A live server accepted the probe: we are the second instance.
@@ -759,6 +781,32 @@ fn socket_identity(path: &Path) -> Option<(u64, u64)> {
 /// this server bound makes step 3 a no-op, and the comparison runs under the same
 /// [`BindLock`] so it cannot be raced between the `stat` and the `unlink`.
 ///
+/// # Why an inode *number* is not enough on its own
+///
+/// `(dev, ino)` only identifies an object while that object exists. **ext4 and XFS
+/// recycle inode numbers**: at step 2 the fd closes and the link count is still 1,
+/// but `Q`'s `remove_file` at step 4 drops it to 0 and frees the inode, and
+/// `ext4_new_inode` then takes the lowest free entry in the parent's block group —
+/// which, in a directory holding two files, is very likely the number `P` just
+/// recorded. `P` would match on a coincidence and delete `Q`'s socket after all.
+/// The `BindLock` does not help: it orders steps 4 and 5, it does not make the
+/// number unique.
+///
+/// This matters precisely where the debt row says it would. tmpfs allocates from a
+/// monotonic counter (`get_next_ino`) and APFS never reuses, so
+/// `$XDG_RUNTIME_DIR` and macOS are immune — but the `/tmp/duja-<uid>` fallback,
+/// the one the row calls "a routine cron/ssh/container condition" on Linux, is
+/// usually ext4.
+///
+/// So [`PipeServer`] keeps a second descriptor on the bound socket open until
+/// after this runs. An inode with an open descriptor cannot be freed, so `Q`'s
+/// rebind is *guaranteed* a different number and the comparison is exact rather
+/// than probable. The descriptor does a second job for free: while it is open the
+/// socket is still connectable, so a concurrent `takeover_bind` probe succeeds and
+/// that instance refuses to start rather than unlinking anything — the race cannot
+/// even reach step 4. The cost is that a start racing our shutdown gets "already
+/// listening" for the microseconds this takes, which is a true statement.
+///
 /// An unreadable identity (either at bind or now) means the socket is already
 /// gone or unstattable, so there is nothing to unlink and nothing to risk.
 fn unlink_if_ours(path: &Path, ours: Option<(u64, u64)>) {
@@ -787,8 +835,10 @@ fn bind_lock_path(socket: &Path) -> PathBuf {
 /// The lock file is a sibling of the socket inside the same `0700` directory, so
 /// it inherits that directory's access barrier and needs no separate one. It is
 /// deliberately **not** the single-instance lock file: that one is held for the
-/// whole process lifetime, so reusing it would make the first instance's own
-/// takeover deadlock against itself.
+/// whole process lifetime, so reusing it would leave the first instance's own bind
+/// waiting on a lock it already holds — which, since this poll is bounded, means
+/// failing to start after [`LOCK_WAIT`] rather than hanging, but failing all the
+/// same.
 ///
 /// **The lock file is never unlinked**, including on shutdown, and that is load
 /// bearing rather than laziness. `flock` locks an *inode*, not a path: if one
@@ -831,6 +881,12 @@ impl BindLock {
                     )));
                 }
             }
+            // `is_none_or`, deliberately the opposite of `connect_named`'s
+            // `is_some_and` on the same shape: there a `None` deadline (an
+            // `Instant` overflow) means "no timeout", here it means "give up now".
+            // Fail-closed is right for a lock — the alternative is an unbounded
+            // wait, which is the thing this loop exists to prevent. Unreachable
+            // either way: `Instant` is boot-relative on both targets.
             if deadline.is_none_or(|d| Instant::now() >= d) {
                 return Err(IpcTransportError::Io(format!(
                     "{} was held by another process for longer than {LOCK_WAIT:?}",

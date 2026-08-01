@@ -48,13 +48,22 @@
 //! - `ctl.sock` simply unlinked, so clients get `NotRunning` and `dujactl`
 //!   silently falls back to driving the hardware directly.
 //! - `ctl.sock.lock` or `duja.lock` planted as a **regular file** they hold a
-//!   `flock` on. `O_NOFOLLOW` does not catch a regular file, so Duja would block
-//!   on a lock another user owns, or read `already_running` and exit.
+//!   `flock` on. `O_NOFOLLOW` does not catch a regular file, so Duja would fail to
+//!   start after the bind lock's timeout, or read `already_running` and exit.
 //!
-//! None of that is reachable without write permission. Group or other **read and
-//! execute** only grants traverse and list: the socket is `0600` and `connect`
-//! requires write permission on the inode, and the lock files are `0600` too, so
-//! nothing can be planted, replaced or removed. That state is also the one that
+//! None of that is reachable without write permission **at some point**, and the
+//! qualifier is load-bearing: a directory that was `0777`, had something planted
+//! in it, and was then tightened by its owner to `0755` reaches `Tighten` here and
+//! is accepted. That is why [`open_private_file`] checks the *owner* of the file it
+//! opens rather than trusting the directory — the one thing `O_NOFOLLOW` cannot do
+//! is catch a planted regular file. The socket itself has no equivalent check; what
+//! covers it is that `takeover_bind`'s probe would connect to the squatter's
+//! listener and refuse to start rather than adopting it.
+//!
+//! Group or other **read and execute** grants only traverse and list: the socket is
+//! `0600` and `connect` requires write permission on the inode, and the lock files
+//! this module creates are `0600`, so nothing can be planted, replaced or removed
+//! while that is the state. That state is also the one that
 //! arises innocently — `create_dir_all` leaves `0755` under an ordinary `umask`,
 //! which is exactly how a caller that makes the directory before handing over the
 //! path produces it, Duja's own IPC integration tests included. Refusing it would
@@ -349,7 +358,13 @@ mod tests {
     /// `create_dir_all` produces under an ordinary umask.
     #[test]
     fn tightens_a_directory_of_ours_that_is_readable_but_not_writable() {
-        for mode in [0o755, 0o750, 0o705, 0o701, 0o710, 0o500] {
+        // `2700`/`1700` are here because `SPECIAL_BITS` is otherwise pinned only by
+        // the pure `verdict` test: a fresh `mkdir` under a setgid parent inherits
+        // setgid on Linux, and `ensure_private_dir` returns straight from the
+        // create arm without inspecting it, so the repair happens on the *second*
+        // launch. `Mode::RWXU` is a full chmod rather than an OR, which is what
+        // makes these come back as a flat 0700.
+        for mode in [0o755, 0o750, 0o705, 0o701, 0o710, 0o500, 0o2700, 0o1700] {
             let dir = scratch(&format!("mode-{mode:o}"));
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
