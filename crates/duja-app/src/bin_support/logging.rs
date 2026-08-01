@@ -272,14 +272,20 @@ mod tests {
     fn panic_hook_leaves_a_crash_record_on_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(CRASH_FILE);
-        // Save the current hook and restore it after, so this test does not leak
-        // its hook into any sibling test sharing the process.
+        // Take the current hook and put it back at the end, so this test does not
+        // leak its own hook into a sibling test sharing the process. `take_hook`
+        // leaves the default installed, which is what `install_panic_hook` then
+        // captures and chains to.
+        //
+        // This used to `set_hook(saved)` immediately (a no-op round trip) and end
+        // with a bare `take_hook()`, which restores the *default* rather than
+        // whatever was there — so the comment promised an isolation the code did
+        // not provide. Latent, since nothing else in this binary installs a hook,
+        // but the sibling test file `tests/engine.rs` now does install one.
         let saved = std::panic::take_hook();
-        std::panic::set_hook(saved);
         install_panic_hook(Some(path.clone()));
         let result = std::panic::catch_unwind(|| panic!("simulated field crash"));
-        // Restore the default hook.
-        let _ = std::panic::take_hook();
+        std::panic::set_hook(saved);
 
         assert!(result.is_err());
         let contents = fs::read_to_string(&path).expect("crash record must exist");

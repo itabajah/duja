@@ -6,10 +6,13 @@
 //! flake-free under repetition. Every join is timeout-guarded so a regression
 //! surfaces as a failure, not a hang.
 //!
-//! One cost is not synchronization at all and had to be removed rather than
-//! waited out: the panic runtime's own backtrace symbolization, which lands
-//! inside the engine's `catch_unwind` and ahead of the ack the tests wait on.
-//! See [`mute_simulated_driver_panics`].
+//! Two things that are *not* the engine sit inside those deadlines. One is the
+//! panic runtime's backtrace symbolization, which lands inside the **worker's**
+//! `catch_unwind` ahead of the ack a test is waiting for; it is small but it is
+//! pure overhead, and [`mute_simulated_driver_panics`] removes it. The other is
+//! the CI runner itself, which has stalled for seconds at a time on three
+//! separate occasions. The deadlines are therefore sized as liveness guards
+//! rather than latency assertions — see [`LIVENESS_BUDGET`].
 
 // RATIONALE: integration tests are a separate crate and do not inherit the
 // library's `cfg(test)` lint allows. These tests use unwrap/expect for brevity
@@ -189,6 +192,31 @@ impl BrightnessController for GatedGet {
     }
 }
 
+/// How long a *positive* wait (an event that must arrive) is given before it is
+/// called a failure.
+///
+/// This is a liveness guard, not a latency assertion. Nothing in the product
+/// depends on it: the real backstop is `EngineConfig::watchdog_timeout` (5 s in
+/// production), and a genuinely wedged test is caught by `.config/nextest.toml`'s
+/// 60 s slow-timeout with a 180 s terminate. Every one of these waits returns the
+/// instant its event arrives, so a generous value costs nothing when the code is
+/// healthy and only changes how long a real hang takes to report.
+///
+/// It is 10 s because 2 s was not survivable on a shared CI runner. Three
+/// separate red runs on the Windows lane recorded this file's waits blowing a 2 s
+/// budget - 6.6 s and 10.3 s on the two logged in `docs/debt.md`, and 2.85 s on
+/// run 30700482072. That last one is the informative one: in the same job a test
+/// that contains no panic at all (`loop_time_assembly`'s zero-duration
+/// single-shot) went from ~0.4 s to 4.3 s, while the median test was 1.04x its
+/// green time. A stall that hits an unrelated event-loop test twelvefold is not
+/// something a panic-path fix can bound, so the guard has to tolerate it.
+///
+/// **A negative wait must not use this.** An assertion that something does *not*
+/// arrive elapses its budget in full every run, so raising it spends real
+/// wall-clock. The one such wait on a 2 s budget keeps it explicitly, with a note
+/// pointing here.
+const LIVENESS_BUDGET: Duration = Duration::from_secs(10);
+
 /// The message prefix shared by every fake in this file that panics on purpose.
 /// [`mute_simulated_driver_panics`] filters on it, so the panic sites and the
 /// filter cannot drift apart.
@@ -197,23 +225,40 @@ const SIMULATED_PANIC: &str = "simulated driver panic";
 /// Stop the default panic hook from symbolizing a backtrace for this file's
 /// *deliberate* driver panics.
 ///
-/// The engine catches a controller panic and acks it, and the tests below assert
-/// on how quickly that ack becomes a notification. The default hook runs at the
-/// panic site — inside the worker's `catch_unwind`, ahead of the ack — and when
-/// `RUST_BACKTRACE` is set it captures **and symbolizes** a full backtrace
-/// there. On Windows that means dbghelp faulting in this binary's ~30 MB PDB:
-/// unbounded work charged to a bounded wait.
+/// The default hook runs at the panic site — inside the **worker's**
+/// `catch_unwind` (`worker.rs`), ahead of the `Panicked` ack — so when
+/// `RUST_BACKTRACE` is set it makes dbghelp symbolize this binary's ~25 MB PDB
+/// before the engine can hear about the panic. That is pure overhead sitting
+/// inside a deadline, and it buys nothing: these panics are deliberate and their
+/// stacks are never read.
 ///
-/// This is why `worker_panic_does_not_kill_engine` blew its 2 s budget on CI run
-/// 30700482072 (a docs-only commit) after 3,014 local runs passed: `ci.yml` sets
-/// `RUST_BACKTRACE=1` for every job, and a bare `cargo nextest run` does not.
-/// The budget was never the bug, and raising it would not have bounded the cost.
+/// **This is not why CI run 30700482072 went red, and it is worth being precise
+/// about that**, because the tempting story is wrong. The cost is real but
+/// small: 0.056 s vs 0.007 s locally (n=25), and on the Windows CI lane the
+/// whole test measured 0.057-0.184 s across five green runs that all paid it
+/// (`ci.yml` sets `RUST_BACKTRACE=1` workflow-wide, so every green run
+/// symbolized too). The red run took 2.850 s. Removing ~50 ms cannot explain a
+/// 2.8 s failure, and the 3,014-run control set in `docs/debt.md` includes 960
+/// runs *with* `RUST_BACKTRACE=1` that passed. See [`LIVENESS_BUDGET`] for what
+/// actually had to change; this function is a cleanup that happens to be in the
+/// same area.
 ///
-/// Only payloads starting with [`SIMULATED_PANIC`] are dropped; everything else
-/// is forwarded to the previous hook, so a genuine panic — here or in a test
-/// running concurrently — keeps its message and backtrace. Installation is
-/// process-global, hence the `Once`: nextest gives each test its own process,
-/// but plain `cargo test` shares one across threads.
+/// Only payloads starting with [`SIMULATED_PANIC`] are dropped, and even those
+/// keep their message and location — only the backtrace goes. Everything else is
+/// forwarded to the previous hook untouched. That matters: the header line
+/// (`panicked at engine.rs:NNN`) is exactly what made the cost identifiable in
+/// the first place, and a future failure of these tests should not be silent
+/// about a worker having panicked.
+///
+/// Two properties of the installation, both deliberate:
+///
+/// - It is never uninstalled, so in a shared process every later test inherits
+///   the filter. Harmless (it only ever drops this file's own payload) but it is
+///   a one-way door, hence the narrow prefix.
+/// - `take_hook`/`set_hook` is not atomic. A panic landing between them sees the
+///   default hook and prints normally. The `Once` makes the install idempotent
+///   rather than making it safe: under nextest each test is its own process, and
+///   under a shared `cargo test` this is the only hook installer in the binary.
 fn mute_simulated_driver_panics() {
     static INSTALL: Once = Once::new();
     INSTALL.call_once(|| {
@@ -224,7 +269,14 @@ fn mute_simulated_driver_panics() {
                 .downcast_ref::<&str>()
                 .copied()
                 .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
-            if message.is_some_and(|m| m.starts_with(SIMULATED_PANIC)) {
+            if let Some(message) = message
+                && message.starts_with(SIMULATED_PANIC)
+            {
+                let location = info.location().map(ToString::to_string);
+                eprintln!(
+                    "panicked at {}: {message} (backtrace muted: deliberate)",
+                    location.as_deref().unwrap_or("an unknown location")
+                );
                 return;
             }
             previous(info);
@@ -367,7 +419,7 @@ fn snapshot(cmds: &Sender<EngineCommand>) -> Vec<DisplaySnapshot> {
     let (reply, reply_rx) = unbounded();
     cmds.send(EngineCommand::Snapshot { reply }).unwrap();
     reply_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(LIVENESS_BUDGET)
         .expect("engine did not answer Snapshot")
 }
 
@@ -465,7 +517,7 @@ fn controller_is_opened_on_the_worker_thread() {
     // The engine dispatches an initial Get on add; it runs the controller's
     // `get` on the worker thread and signals.
     signal_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(LIVENESS_BUDGET)
         .expect("initial get should run on the worker");
 
     let opened = *open_thread.lock().unwrap();
@@ -476,7 +528,7 @@ fn controller_is_opened_on_the_worker_thread() {
         "controller must be opened on the same (worker) thread that uses it"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -527,7 +579,7 @@ fn burst_yields_single_hw_write() {
         "the last value must win"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -581,7 +633,7 @@ fn drag_burst_delivers_final_value() {
         "the final drag value must land on the hardware, not an intermediate one"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -634,7 +686,7 @@ fn set_input_rejects_code_not_in_probed_list() {
         "a code not in the probed list must never reach the worker, saw {seen:?}"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -667,7 +719,7 @@ fn stuck_controller_marks_display_unresponsive() {
 
     let want = id.clone();
     assert!(
-        wait_note(&notes, Duration::from_secs(2), |n| {
+        wait_note(&notes, LIVENESS_BUDGET, |n| {
             matches!(n, EngineNotification::DisplayUnresponsive(x) if *x == want)
         }),
         "expected a DisplayUnresponsive notification"
@@ -686,7 +738,7 @@ fn stuck_controller_marks_display_unresponsive() {
         "display should still be listed (greyed, not hidden)"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -738,7 +790,7 @@ fn recovered_display_gets_fresh_worker() {
     .unwrap();
     let want = id.clone();
     assert!(
-        wait_note(&notes, Duration::from_secs(2), |n| {
+        wait_note(&notes, LIVENESS_BUDGET, |n| {
             matches!(n, EngineNotification::DisplayUnresponsive(x) if *x == want)
         }),
         "expected DisplayUnresponsive before recovery"
@@ -760,7 +812,7 @@ fn recovered_display_gets_fresh_worker() {
         "writes should resume through the fresh worker"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -817,7 +869,7 @@ fn replug_restores_last_level() {
         "replug should restore the last level"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -882,7 +934,7 @@ fn reattach_of_unresponsive_display_restores_level_not_power_on_default() {
     // The wedged write trips the watchdog.
     let want = id.clone();
     assert!(
-        wait_note(&notes, Duration::from_secs(2), |n| {
+        wait_note(&notes, LIVENESS_BUDGET, |n| {
             matches!(n, EngineNotification::DisplayUnresponsive(x) if *x == want)
         }),
         "expected the wedged write to mark the display unresponsive"
@@ -919,7 +971,7 @@ fn reattach_of_unresponsive_display_restores_level_not_power_on_default() {
         "reattach re-learned the power-on 50%, losing the user's 30%"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -983,7 +1035,7 @@ fn stale_get_ack_cannot_clobber_fresh_learn() {
 
     // Worker A entered its initial Get (value 20) and is now blocked.
     assert_eq!(
-        entered_rx.recv_timeout(Duration::from_secs(2)).ok(),
+        entered_rx.recv_timeout(LIVENESS_BUDGET).ok(),
         Some(20),
         "worker A should enter its initial Get"
     );
@@ -997,7 +1049,7 @@ fn stale_get_ack_cannot_clobber_fresh_learn() {
 
     // Worker B entered its fresh initial Get (value 70) and is now blocked.
     assert_eq!(
-        entered_rx.recv_timeout(Duration::from_secs(2)).ok(),
+        entered_rx.recv_timeout(LIVENESS_BUDGET).ok(),
         Some(70),
         "worker B should enter its fresh initial Get"
     );
@@ -1008,13 +1060,13 @@ fn stale_get_ack_cannot_clobber_fresh_learn() {
     // enqueued (and thus processed, FIFO) before B's fresh ack.
     release_a_tx.send(()).unwrap();
     returned_a_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(LIVENESS_BUDGET)
         .expect("worker A should return from its stale Get");
     let _ = snapshot(&cmds);
     release_b_tx.send(()).unwrap();
 
     // The fresh reading (70) must be the learned level — not A's stale 20.
-    let learned_fresh = wait_note(&notes, Duration::from_secs(2), |n| {
+    let learned_fresh = wait_note(&notes, LIVENESS_BUDGET, |n| {
         matches!(
             n,
             EngineNotification::DisplaysChanged(snaps)
@@ -1026,7 +1078,7 @@ fn stale_get_ack_cannot_clobber_fresh_learn() {
         "the fresh Get reading (70) must be learned; a stale ack must not consume the learn"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -1059,7 +1111,7 @@ fn worker_panic_does_not_kill_engine() {
 
     let want = id.clone();
     assert!(
-        wait_note(&notes, Duration::from_secs(2), |n| {
+        wait_note(&notes, LIVENESS_BUDGET, |n| {
             matches!(n, EngineNotification::DisplayUnresponsive(x) if *x == want)
         }),
         "a worker panic should mark the display unresponsive"
@@ -1069,7 +1121,7 @@ fn worker_panic_does_not_kill_engine() {
     let snaps = snapshot(&cmds);
     assert!(snaps.iter().any(|s| s.id == id));
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -1113,7 +1165,7 @@ fn displaychange_ticks_are_debounced() {
         "the debounced storm must yield exactly one enumeration"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
 }
 
 #[test]
@@ -1140,7 +1192,7 @@ fn idle_engine_performs_no_enumerations() {
         "an idle engine must not enumerate on its own"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -1160,7 +1212,7 @@ fn shutdown_joins_cleanly() {
     );
     let _ = engine.sender();
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -1180,7 +1232,7 @@ fn drop_shuts_down() {
     );
 
     // Dropping the handle must shut the engine down without hanging.
-    within(Duration::from_secs(2), move || drop(engine));
+    within(LIVENESS_BUDGET, move || drop(engine));
     let _ = platform_tx;
 }
 
@@ -1290,7 +1342,7 @@ fn polling_reflects_an_external_change() {
         )),
         "an external change must surface as LevelRead(80)"
     );
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -1316,7 +1368,7 @@ fn self_write_echo_is_suppressed() {
         )),
         "Duja's own write must not echo back as a LevelRead"
     );
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -1349,7 +1401,7 @@ fn polling_stops_when_disabled() {
         )),
         "no LevelRead may arrive once polling is disabled (zero idle wakeups)"
     );
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -1368,7 +1420,7 @@ fn idle_engine_performs_no_polls() {
         )),
         "with polling off, an external change must not be observed"
     );
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -1399,7 +1451,7 @@ fn self_write_echo_suppressed_on_a_sub_100_max_panel() {
         )),
         "Duja's own write must not echo back on a sub-100-max panel"
     );
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -1458,7 +1510,7 @@ fn shutdown_does_not_hang_on_a_blocked_worker() {
     })
     .unwrap();
     assert!(
-        wait_tag(&entered_rx, 1, Duration::from_secs(2)),
+        wait_tag(&entered_rx, 1, LIVENESS_BUDGET),
         "the worker should enter its (blocking) set()"
     );
 
@@ -1532,7 +1584,7 @@ fn detached_worker_performs_no_second_write() {
     })
     .unwrap();
     assert!(
-        wait_tag(&entered_rx, 1, Duration::from_secs(2)),
+        wait_tag(&entered_rx, 1, LIVENESS_BUDGET),
         "worker A should enter its wedged set()"
     );
 
@@ -1552,7 +1604,7 @@ fn detached_worker_performs_no_second_write() {
     // The watchdog fires: A is detached and marked unresponsive.
     let want = id.clone();
     assert!(
-        wait_note(&notes, Duration::from_secs(2), |n| {
+        wait_note(&notes, LIVENESS_BUDGET, |n| {
             matches!(n, EngineNotification::DisplayUnresponsive(x) if *x == want)
         }),
         "the wedged worker should be marked unresponsive"
@@ -1601,7 +1653,7 @@ fn open_failure_marks_display_unresponsive() {
     // The failed open must surface as unresponsive...
     let want = id.clone();
     assert!(
-        wait_note(&notes, Duration::from_secs(2), |n| {
+        wait_note(&notes, LIVENESS_BUDGET, |n| {
             matches!(n, EngineNotification::DisplayUnresponsive(x) if *x == want)
         }),
         "a failed open must mark the display unresponsive"
@@ -1613,7 +1665,7 @@ fn open_failure_marks_display_unresponsive() {
         "the display should still be listed (greyed)"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -1671,7 +1723,7 @@ fn stale_open_failed_does_not_retire_a_fresh_worker() {
 
     // Worker A's open is wedged (generation 1).
     open_entered_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(LIVENESS_BUDGET)
         .expect("worker A should start opening");
 
     // Unplug + replug: A is retired and healthy worker B (generation 2) spawns.
@@ -1716,7 +1768,7 @@ fn stale_open_failed_does_not_retire_a_fresh_worker() {
         "worker B must remain live after the stale ack"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -1787,13 +1839,13 @@ fn a_platform_event_announces_itself_before_any_enumeration_settles() {
     platform_tx.send(()).unwrap();
 
     assert!(
-        wait_note(&notes, Duration::from_secs(2), |n| {
+        wait_note(&notes, LIVENESS_BUDGET, |n| {
             matches!(n, EngineNotification::PlatformWake)
         }),
         "a platform event must announce itself so gamma can be re-asserted"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
 }
 
 #[test]
@@ -1897,6 +1949,9 @@ fn stale_panicked_does_not_retire_a_fresh_worker() {
     // saves the test only if the late ack is processed before that dispatch.
     let want = id.clone();
     assert!(
+        // Deliberately NOT `LIVENESS_BUDGET`: this asserts an absence, so the
+        // wait elapses in full on every green run. Raising it would spend the
+        // difference in real wall-clock for no added confidence.
         !wait_note(&notes, Duration::from_secs(2), |n| {
             matches!(n, EngineNotification::DisplayUnresponsive(x) if *x == want)
         }),
@@ -1914,7 +1969,7 @@ fn stale_panicked_does_not_retire_a_fresh_worker() {
         "worker B must remain live after the stale ack"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -1952,7 +2007,7 @@ fn abandoned_display_is_not_un_greyed_on_resight() {
     .unwrap();
     let want = id.clone();
     assert!(
-        wait_note(&notes, Duration::from_secs(2), |n| matches!(
+        wait_note(&notes, LIVENESS_BUDGET, |n| matches!(
             n,
             EngineNotification::DisplayUnresponsive(x) if *x == want
         )),
@@ -1971,7 +2026,7 @@ fn abandoned_display_is_not_un_greyed_on_resight() {
     .unwrap();
     let want2 = id.clone();
     assert!(
-        wait_note(&notes, Duration::from_secs(2), |n| matches!(
+        wait_note(&notes, LIVENESS_BUDGET, |n| matches!(
             n,
             EngineNotification::DisplayUnresponsive(x) if *x == want2
         )),
@@ -1990,7 +2045,7 @@ fn abandoned_display_is_not_un_greyed_on_resight() {
         "an abandoned display must not be reported responsive (stays greyed)"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -2045,7 +2100,7 @@ fn watchdog_recovery_restores_user_level_not_relearn() {
     .unwrap();
     let want = id.clone();
     assert!(
-        wait_note(&notes, Duration::from_secs(2), |n| matches!(
+        wait_note(&notes, LIVENESS_BUDGET, |n| matches!(
             n,
             EngineNotification::DisplayUnresponsive(x) if *x == want
         )),
@@ -2061,7 +2116,7 @@ fn watchdog_recovery_restores_user_level_not_relearn() {
         "recovery must restore the user's 30%, not relearn from hardware; saw {seen:?}"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -2269,7 +2324,7 @@ fn probe_without_hardware_range_downgrades_to_software_only() {
         "the downgrade must be probe-driven — no dead hardware write is required"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -2321,7 +2376,7 @@ fn ack_but_silent_noop_write_downgrades_to_software_only() {
         "an ACK-but-no-op first write must downgrade the display to software-only"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -2380,7 +2435,7 @@ fn slow_but_working_controller_is_not_falsely_downgraded() {
         "a slow-but-working controller must stay hardware-backed (not software-only)"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -2441,7 +2496,7 @@ fn wrongly_forced_display_self_heals_to_hardware() {
         "a wrongly-forced display must self-heal to ExternalDdc once proven live"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -2488,7 +2543,7 @@ fn rejected_first_write_downgrades_to_software_only() {
         "a rejected first brightness write must downgrade the display to software-only"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -2549,7 +2604,7 @@ fn stale_software_fallback_does_not_downgrade_fresh_worker() {
 
     // Worker A is wedged inside its probe (generation 1).
     probe_entered_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(LIVENESS_BUDGET)
         .expect("worker A should enter its probe");
 
     // Unplug + replug: A is retired and healthy worker B (generation 2) spawns.
@@ -2587,7 +2642,7 @@ fn stale_software_fallback_does_not_downgrade_fresh_worker() {
         "the display must remain hardware-backed after a stale fallback"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -2700,7 +2755,7 @@ fn healthy_reattach_clears_a_wrongly_forced_software_only_display() {
         "a healthy reattached display must not be re-forced software-only"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
 
@@ -2763,6 +2818,6 @@ fn still_dead_reattach_is_re_forced_software_only() {
         "a still-dead reattach must be re-forced software-only by the fresh worker's detection"
     );
 
-    within(Duration::from_secs(2), move || engine.shutdown());
+    within(LIVENESS_BUDGET, move || engine.shutdown());
     let _ = platform_tx;
 }
