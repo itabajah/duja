@@ -138,21 +138,15 @@ fn size_to(w: &WinitWindow, logical_width: f32, logical_height: f32, scale: f32)
     let _ = w.request_inner_size(size);
 }
 
-/// Convert a logical extent to a physical pixel count at `scale`, clamped to at
-/// least one pixel and guarded against a degenerate scale.
+/// Convert a logical extent to a **physical pixel** count at `scale`, clamped to
+/// at least one pixel and guarded against a degenerate scale.
+///
+/// The arithmetic is [`duja_core::scale::scale_extent`], shared with
+/// `duja-app`'s tray placement, which applies it to a different unit. This
+/// wrapper exists to keep the *unit* named here: everything `dpi` produces is
+/// physical pixels for a winit inner-size request.
 fn physical(logical: f32, scale: f32) -> u32 {
-    let scale = if scale.is_finite() && scale >= 0.1 {
-        scale
-    } else {
-        1.0
-    };
-    let scaled = (logical.max(1.0) * scale).round();
-    // RATIONALE (cast_possible_truncation, cast_sign_loss): `scaled` is finite,
-    // >= 1.0, and a rounded pixel count far inside u32; the guards above rule out
-    // negatives, NaN and infinities.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let out = scaled as u32;
-    out.max(1)
+    duja_core::scale::scale_extent(logical, scale)
 }
 
 #[cfg(test)]

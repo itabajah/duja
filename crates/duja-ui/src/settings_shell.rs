@@ -986,7 +986,7 @@ mod binding_tests {
     }
 
     fn gamma_cap_captions(shell: &SettingsShell) -> Vec<String> {
-        captions_starting_with(shell, "Gamma dims to at most")
+        captions_starting_with(shell, "Gamma can only darken")
     }
 
     fn gamma_advisory_captions(shell: &SettingsShell) -> Vec<String> {
@@ -1116,15 +1116,23 @@ mod binding_tests {
         };
         let defaults = Config::default();
 
-        // A capped OS: one caption per section, each carrying the plumbed figure.
-        // This also pins the `@tr` argument end to end — a `{}` left unsubstituted,
-        // or a number rendered as `62.0`, fails here and nowhere else.
+        // A capped OS: one caption per section.
+        //
+        // The caption no longer interpolates the figure, so there is no `{}`
+        // substitution left to pin. `gamma_cap_pct` still GATES it — that is what
+        // the `UNLIMITED` case below proves — but the number itself is not shown,
+        // because it is the gamma *factor* and a percentage beside a slider reads
+        // as a slider position: with shipped defaults a 50 % cap means the
+        // substitution happens near slider 12. So assert the caption is present
+        // and says nothing numeric, which is the property that would break if
+        // someone re-interpolated it.
         let capped = render(CAPPED_ONLY, true, &defaults);
         assert!(!capped.is_empty(), "a capped OS must disclose its cap");
         let caption = capped.first().expect("one caption");
         assert!(
-            caption.contains("at most 62%"),
-            "the caption must interpolate the plumbed cap, got {caption:?}"
+            !caption.chars().any(|c| c.is_ascii_digit()),
+            "the cap caption must not quote a figure the user will read as a \
+             slider position, got {caption:?}"
         );
 
         // An uncapped OS (macOS, and every other non-Windows target): the OS accepts
