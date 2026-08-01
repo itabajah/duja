@@ -221,6 +221,11 @@ impl EngineState {
                 Wake::Cmd(Err(_)) => break,
                 Wake::Ack(Ok(ack)) => self.handle_ack(ack),
                 Wake::Evt(Ok(())) => {
+                    // Tell the app before the debounce, and unconditionally. A
+                    // resume that changes no display emits no `DisplaysChanged`,
+                    // so this is the only signal that the OS may have dropped the
+                    // gamma ramps — see `EngineNotification::PlatformWake`.
+                    self.notify(EngineNotification::PlatformWake);
                     self.debouncer.on_event(Instant::now());
                 }
                 Wake::Evt(Err(_)) => self.platform_open = false,

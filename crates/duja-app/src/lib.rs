@@ -225,6 +225,22 @@ pub enum EngineNotification {
         /// The observed hardware brightness percentage (0–100).
         hw_pct: u8,
     },
+    /// The OS reported a display-affecting event — a resume, a session unlock, or
+    /// a display-configuration change — and any gamma ramp Duja set may no longer
+    /// be live.
+    ///
+    /// Emitted **immediately**, before the enumeration debounce, and independently
+    /// of whether the display set turns out to have changed. That is the point:
+    /// the case this exists for is a resume where nothing changed, so no
+    /// [`DisplaysChanged`](Self::DisplaysChanged) follows and there would
+    /// otherwise be no signal at all. ADR-0003 records that both platforms drop
+    /// ramps here — macOS on wake, Windows on display events.
+    ///
+    /// The app answers it by invalidating its gamma coordinator and re-planning,
+    /// so every ramp it believes is live gets rewritten once. Nothing about the
+    /// *displays* is asserted, so a consumer that does not drive gamma may ignore
+    /// it.
+    PlatformWake,
 }
 
 /// A handle to a running [`Engine`] actor: a command sender plus the join
