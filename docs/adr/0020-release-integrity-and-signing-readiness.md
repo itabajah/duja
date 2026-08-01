@@ -30,21 +30,42 @@ uphold:
 
 2. **Publish only a gated, green commit.** The release job re-runs the full gate
    (`cargo deny check` + clippy + tests + doctests) on the tagged commit before
-   building or publishing, catching advisory/yank drift since the merge and a tag
-   placed on a never-CI'd commit. The tag must equal the `Cargo.toml` version
-   (guard) or the run fails fast.
+   publishing, catching advisory/yank drift since the merge and a tag placed on a
+   never-CI'd commit. The tag must equal the `Cargo.toml` version (guard) or the
+   run fails fast.
+
+   > **Amended at the P6 gate.** This said "before building or publishing", which
+   > stopped being true when P6 added the `macos` job. That job runs **first**,
+   > with no gate of its own, so both Apple slices are built, fused, bundled and
+   > `codesign`ed — and notarized and stapled when `MACOS_SIGN` is on — before
+   > `cargo deny` runs. The *publish* guarantee is intact (`release` needs `macos`
+   > and every publish step is `PUBLISH`-gated). What a tag on a bad commit costs
+   > is a full macOS build, and — **once `MACOS_SIGN` is enabled**, which it is
+   > not today, so the notarize and staple steps do not run — a notarization
+   > submission, which is a permanent request to Apple.
+   > The gate's clippy and tests also run on `windows-latest` only, so they
+   > compile no `cfg(target_os = "macos")` item; `cargo deny` is the exception and
+   > does cover the whole graph.
 
 3. **Hermetic, verifiable artifacts.** The signed build restores no mutable cache;
    third-party tools are version-pinned with a required checksum (Inno Setup via
    choco `--require-checksums`; minisign downloaded and hash-checked). `SHA256SUMS`
-   is written **LF-only, no BOM**, so `sha256sum -c` passes on Linux and macOS.
+   is written **LF-only, no BOM**, so a `-c` check passes wherever the tool
+   exists (a CRLF file would fail on a trailing `\r`). The *tool* differs: macOS
+   has no `sha256sum` (GNU coreutils), and uses `shasum -a 256 -c`.
    The signing key is written to an absolute temp path and wiped in a `finally`
    regardless of the working directory or a mid-signing failure.
 
-4. **Honest, scoped attestation.** The build-provenance attestation covers the two
-   binaries (installer + portable zip); `SHA256SUMS` and the `.minisig` files are
-   covered by minisign (the checksums file is itself minisigned as the root of
-   trust). `SECURITY.md` states this scope exactly, without overstatement.
+4. **Honest, scoped attestation.** The build-provenance attestation covers the
+   **three** artifacts (installer `.exe`, portable `.zip`, macOS `.dmg`);
+   `SHA256SUMS` and the `.minisig` files are covered by minisign (the checksums
+   file is itself minisigned as the root of trust). `SECURITY.md` states this
+   scope exactly, without overstatement.
+
+   > **Amended at the P6 gate**, which added the `.dmg` to `subject-path`. This
+   > clause said "two binaries" — the number is the whole content of a scope
+   > claim, so it went stale the moment a third artifact was attested, and a Mac
+   > user reading it would conclude their download carried no attestation.
 
 5. **Signing readiness.** An Authenticode step (Azure Trusted Signing) is staged
    in the pipeline **inert** — SHA-pinned, secret/variable-gated, and placed

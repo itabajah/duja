@@ -89,7 +89,8 @@ signature (`.minisig`) for each artifact, plus a GitHub build-provenance attesta
 
 ```sh
 # 1. checksums (run in the folder with your download + SHA256SUMS)
-sha256sum -c SHA256SUMS
+sha256sum -c SHA256SUMS          # Linux
+shasum -a 256 -c SHA256SUMS      # macOS (sha256sum is GNU coreutils, not preinstalled)
 
 # 2. minisign signature (Duja's public key is published in SECURITY.md)
 minisign -Vm SHA256SUMS -P <DUJA_MINISIGN_PUBLIC_KEY>
@@ -104,11 +105,21 @@ The public key and full instructions live in [SECURITY.md](SECURITY.md).
 | External DDC/CI | ✅ | 🧪 experimental¹ | ⏳ planned (X11/Wayland²) |
 | Internal panel | ✅ | 🧪 | ⏳ |
 | Overlay dimming | ✅ | 🧪 | ⏳ (not GNOME Wayland³) |
-| Tray + flyout | ✅ | ⏳ | ⏳ |
-| Hotkeys, input switch, `dujactl` | ✅ | ⏳ | ⏳ |
+| Tray + flyout | ✅ | 🧪 | ⏳ |
+| Hotkeys, input switch, `dujactl` | ✅ | 🧪 | ⏳ |
 
-¹ Apple-Silicon DDC uses private APIs (same approach as MonitorControl / Lunar); the macOS app
-shell is still in progress. ² Will require the `i2c-dev` module and a udev rule; the Linux DDC
+✅ shipping · 🧪 written and CI-tested, **never run on real hardware** · ⏳ not written
+
+**There is no macOS download yet.** Every macOS cell above describes code that
+exists and builds, not a release you can install: the `.dmg` is produced by the
+release workflow but has not been published, so macOS is source-only for now
+(see [Build from source](#build-from-source)). The matrix answers "is it
+implemented". For macOS, the answer to "can I install it" is still no.
+
+¹ Apple-Silicon DDC uses private APIs (same approach as MonitorControl / Lunar).
+On macOS `dujactl` lives inside `Duja.app/Contents/MacOS/`, so it is not on
+`PATH` without a symlink.
+² Will require the `i2c-dev` module and a udev rule; the Linux DDC
 backend is not written yet, so nothing checks for them today. ³ GNOME Wayland exposes no
 third-party overlay/gamma path; hardware control still works.
 

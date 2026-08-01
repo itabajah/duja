@@ -6,9 +6,25 @@ and trust rationale is
 [ADR-0016](adr/0016-windows-distribution-and-signing.md).
 
 A tag push (`v*`) builds, gates, signs, and publishes. `workflow_dispatch` runs
-the identical build as an **artifacts-only dry run** (no publish). Every run first
-re-validates the tagged commit (cargo-deny + clippy + tests), so a red or
-advisory-drifted commit fails before anything is built.
+the identical build as an **artifacts-only dry run** (no publish).
+
+The gate (cargo-deny + clippy + tests) re-validates the tagged commit, so a red
+or advisory-drifted commit fails the run before anything is **published**. Be
+precise about *when*, because it is not "before anything is built": the gate
+steps live in the `release` job, and the `macos` job runs **first** with no gate
+of its own. So both Apple slices are compiled, fused, bundled and `codesign`ed —
+and, on the `MACOS_SIGN` path, submitted to Apple's notary and stapled — before
+`cargo deny` has run. Nothing unverified can reach the Releases page. What a tag
+on a bad commit does cost is a full macOS build, and — **once `MACOS_SIGN` is
+enabled**, which it is not today, so the notarize and staple steps do not run —
+a notarization submission, which is a permanent request to Apple for a build you
+then throw away.
+
+Two further limits worth knowing before trusting a green run: the gate's clippy
+and tests execute on **`windows-latest` only**, so no `cfg(target_os = "macos")`
+item is compiled by them (`cargo deny` *does* cover the macOS dependency graph —
+`deny.toml` sets `all-features` with no target restriction). And the `macos` job
+runs on floating `runs-on: macos-latest` in a workflow that SHA-pins every action.
 
 Two jobs: `macos` builds both Apple slices, fuses them, and produces the signed
 `Duja.app` inside a disk image; `release` then does everything else on Windows
@@ -68,9 +84,11 @@ notes with git-cliff, and creates the GitHub Release.
 Download all assets from the release into one directory, then:
 
 ```sh
-# 1. Checksums. SHA256SUMS is written LF-only with no BOM, so -c passes on Linux
-#    and macOS (a CRLF file would fail with a trailing \r on each filename).
-sha256sum -c SHA256SUMS
+# 1. Checksums. SHA256SUMS is written LF-only with no BOM, so -c passes wherever
+#    the tool exists (a CRLF file would fail with a trailing \r on each filename).
+#    The TOOL differs: sha256sum is GNU coreutils and is NOT on a stock macOS.
+sha256sum -c SHA256SUMS          # Linux
+shasum -a 256 -c SHA256SUMS      # macOS (byte-identical digests)
 
 # 2. minisign. The checksums file is the root of trust; verifying it chains to the
 #    binaries via their hashes. The public key is published in SECURITY.md.
@@ -121,7 +139,9 @@ to the workflow:
 The step runs **before** `SHA256SUMS` is computed, so the checksums and the
 provenance attestation automatically cover the signed installer — no reordering
 needed. Only the installer `.exe` is Authenticode-signable; the portable `.zip`
-and `SHA256SUMS` stay covered by minisign + provenance. Once signing is confirmed
+stays covered by minisign + provenance, and `SHA256SUMS` by **minisign only** —
+`subject-path` lists the three binaries and deliberately excludes it, as the
+"All three must pass" note above says. Once signing is confirmed
 on a real release, drop the SmartScreen note from `SECURITY.md` / README.
 
 > **Note.** The Azure step is also `PUBLISH`-gated, so a `workflow_dispatch` dry

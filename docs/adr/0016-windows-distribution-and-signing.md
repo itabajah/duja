@@ -37,7 +37,10 @@ every artifact carries:
   (`minisign -G -W`); the secret is a GitHub Actions secret, the public key is
   committed and published in `SECURITY.md`/README, and
 - a GitHub **build-provenance attestation** (`actions/attest-build-provenance`)
-  binding each artifact to the workflow run.
+  binding each **binary** to the workflow run — the installer `.exe`, the
+  portable `.zip`, and (since P6) the macOS `.dmg`. It does **not** cover
+  `SHA256SUMS` or the `.minisig` files, which minisign covers; see ADR-0020
+  clause 4.
 
 A `workflow_dispatch` runs the whole pipeline as an **artifacts-only dry run**
 (no publish), and a **tag == workspace-version guard** fails the run rather than
