@@ -21,8 +21,15 @@
 //! when the last file description closes *or the process dies*, so a crash never
 //! leaves a stuck lock — the next launch takes over the (still-present) lock file.
 //! The lock lives in the macOS Application Support data dir, else
-//! `$XDG_RUNTIME_DIR/duja/`, else `/tmp/duja-<uid>/`; each directory is created
-//! `0700`. `rustix`'s safe wrappers keep this module free of `unsafe`.
+//! `$XDG_RUNTIME_DIR/duja/`, else `/tmp/duja-<uid>/`. That directory is created
+//! `0700` or else **verified** through [`crate::unix_dir`], which refuses one
+//! another user owns or can write to; the lock file itself is opened `O_NOFOLLOW`
+//! and checked to be ours. When the directory is refused the guard degrades to
+//! "first" rather than refusing to launch — running is better than not, and the
+//! point of the check is that the lock is never taken inside a directory Duja
+//! cannot vouch for. The cost of degrading is a second instance, which the IPC
+//! socket bind then refuses anyway. `rustix`'s safe wrappers keep this module free
+//! of `unsafe`.
 //!
 //! On any other target the guard is a no-op that always reports "first".
 
@@ -375,9 +382,23 @@ mod unix {
     mod tests {
         use super::*;
 
-        /// A unique per-process lock path under the temp dir.
+        /// A unique per-process lock path, inside a directory of its own.
+        ///
+        /// The nesting is load-bearing, not tidiness. This used to drop the lock
+        /// file straight into `std::env::temp_dir()`, which made that shared
+        /// directory the one `acquire_at` handed to `ensure_private_dir` — and on
+        /// a GitHub ubuntu runner `TMPDIR` is unset, so it was `/tmp`: root-owned,
+        /// refused, and every guard degraded to "first". The test then failed on
+        /// its own second assertion.
+        ///
+        /// Production never has that shape. `lock_path` is always
+        /// `lock_dir()/duja.lock`, and `lock_dir` always resolves a Duja-specific
+        /// leaf (`$XDG_RUNTIME_DIR/duja`, `/tmp/duja-<uid>`, or the macOS
+        /// bundle-id directory). The test now mirrors it.
         fn temp_lock_path(tag: &str) -> PathBuf {
-            std::env::temp_dir().join(format!("duja-si-{}-{tag}.lock", std::process::id()))
+            std::env::temp_dir()
+                .join(format!("duja-si-{}-{tag}", std::process::id()))
+                .join(LOCK_FILE)
         }
 
         #[test]
@@ -420,7 +441,7 @@ mod unix {
                 "the stale lock file is taken over after the owner releases"
             );
             drop(fresh);
-            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
         }
 
         #[test]

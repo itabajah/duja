@@ -379,13 +379,19 @@ fn stale_socket_is_taken_over() {
         Response::Ok
     );
 
-    // The takeover ran under its sibling lock. Asserted structurally because the
+    // The bind ran under its sibling lock. Asserted structurally because the
     // concurrency test below can only ever be one-sided evidence: this is the
     // deterministic half, and it fails if the serialisation is ever removed.
-    let lock = PathBuf::from(format!("{}.lock", path.display()));
+    //
+    // It pins that the lock file is *created*, not that the `flock` was taken -
+    // the syscall leaves no filesystem trace to assert on. Paired with the
+    // concurrency test, which pins the effect.
+    let mut lock_name = path.clone().into_os_string();
+    lock_name.push(".lock");
+    let lock = PathBuf::from(lock_name);
     assert!(
         lock.exists(),
-        "the unlink+rebind sequence must run under {}",
+        "the bind sequence must run under {}",
         lock.display()
     );
 
@@ -449,20 +455,21 @@ fn concurrent_starts_on_a_stale_socket_leave_exactly_one_server() {
 }
 
 #[test]
-fn a_socket_directory_of_ours_that_is_open_to_others_is_tightened() {
-    // A pre-existing directory belonging to us is repaired rather than refused:
-    // `create_dir_all` leaves 0755 under an ordinary umask, and that is exactly
-    // how a caller (including the test above) hands the server a path. Ownership
-    // is what cannot be repaired; mode is.
+fn a_readable_socket_directory_of_ours_is_tightened() {
+    // 0755 is what `create_dir_all` leaves under an ordinary umask, which is
+    // exactly how a caller that makes the directory first hands the server a path
+    // (the two tests above do it). Others can traverse and list, but cannot plant
+    // or remove anything, so this is repaired rather than refused.
+    //
     // A directory of its own, not the per-process one `unique_socket` shares: this
     // test mutates the mode, and under plain `cargo test` (one process, threaded)
     // a sibling test's server would tighten it back before the assertion, leaving
     // a green run that proved nothing.
-    let dir = PathBuf::from(format!("/tmp/duja-it-{}-loose", std::process::id()));
+    let dir = PathBuf::from(format!("/tmp/duja-it-{}-readable", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mk dir");
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).expect("loosen");
-    let path = dir.join("loose.sock");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("loosen");
+    let path = dir.join("readable.sock");
 
     let server = PipeServer::serve_named(path_str(&path), fake_handler).expect("server up");
 
@@ -471,12 +478,40 @@ fn a_socket_directory_of_ours_that_is_open_to_others_is_tightened() {
         .permissions()
         .mode()
         & 0o777;
-    assert_eq!(
-        mode, 0o700,
-        "a loose socket dir must be tightened, not kept"
-    );
+    assert_eq!(mode, 0o700, "a readable socket dir must be tightened");
 
     server.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_writable_socket_directory_is_refused_outright() {
+    // The other side of the line, and the one the first version of this change got
+    // wrong by repairing it. Write permission on a directory is permission to
+    // create, rename and unlink entries in it, so by the time Duja arrives another
+    // user could already have replaced `ctl.sock` with their own socket - and
+    // `PipeClient` performs no server-identity check, so `dujactl` would act on
+    // forged replies. Tightening the mode afterwards does not undo that, which is
+    // why the server refuses to start instead.
+    let dir = PathBuf::from(format!("/tmp/duja-it-{}-writable", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mk dir");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).expect("loosen");
+    let path = dir.join("writable.sock");
+
+    let err = PipeServer::serve_named(path_str(&path), fake_handler)
+        .err()
+        .expect("a world-writable socket dir must refuse the bind");
+    assert!(
+        matches!(err, duja_platform::ipc::IpcTransportError::Io(_)),
+        "got {err:?}"
+    );
+    assert!(
+        !path.exists(),
+        "nothing may be bound in a refused directory"
+    );
+
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -2,30 +2,63 @@
 //!
 //! Two Duja subsystems keep per-user state in a directory they expect to own:
 //! [`ipc::unix_socket`](crate::ipc) puts `ctl.sock` in one, and
-//! [`single_instance`](crate::single_instance) puts `duja.lock` in one. Both used
-//! to create that directory with a *recursive* builder, which returns `Ok` for a
-//! directory that already exists **without inspecting it** — so a directory
-//! another local user had created first was accepted, silently, as Duja's own.
+//! [`single_instance`](crate::single_instance) puts `duja.lock` in one. Neither
+//! used to establish that the directory was actually theirs, and the two failed
+//! differently:
 //!
-//! That is fail-open, and this module is the fail-closed replacement.
+//! - `single_instance`'s `ensure_dir_0700` was a *recursive* `DirBuilder`, which
+//!   returns `Ok` for a directory that already exists **without inspecting it**.
+//!   A directory another local user created first was adopted silently. That one
+//!   was fail-open.
+//! - The socket's `prepare_socket_dir` was `create_dir_all` followed by
+//!   `set_mode(0700)`, and `chmod` on another uid's directory is `EPERM`, so a
+//!   squatted directory made the server fail to start. That one failed *closed*,
+//!   with a confusing error. Its real hole was different: `set_mode` follows
+//!   symlinks, so a symlink planted at `/tmp/duja-<uid>` redirected both the
+//!   `chmod` and the `bind`.
 //!
-//! # Ownership is refused; mode is repaired
+//! This module replaces both with one rule, and closes the symlink hole with
+//! `O_NOFOLLOW`.
 //!
-//! The two properties are not the same trust question, and treating them alike
-//! was the first draft's mistake.
+//! # The rule
 //!
-//! **Ownership** cannot be repaired. A directory belonging to another uid is one
-//! Duja must not put a socket or a lock in, and there is nothing to do about it
-//! but refuse and let the caller degrade.
+//! | state of the leaf directory | outcome |
+//! |---|---|
+//! | absent | created `0700` |
+//! | a symlink, or not a directory | **refused** |
+//! | owned by another uid | **refused** |
+//! | group- or other-**writable** | **refused** |
+//! | ours, loose in any other way | `fchmod`ed to `0700` |
+//! | ours and exactly `0700` | accepted |
 //!
-//! **Mode** can be, and refusing on it would break working installations for no
-//! gain. A directory that is *ours* but `0755` is one we may `chmod` — that is a
-//! repair, not a compromise — and it arises legitimately: an unusual `umask`, an
-//! earlier Duja that created it differently, or a caller that made the directory
-//! before handing us the path (Duja's own IPC integration tests do exactly this).
-//! Nor is the loose state itself a breach: the socket is `0600`, so `connect`
-//! needs write permission on the inode and another user is refused at the socket
-//! even while the directory is traversable.
+//! # Why writable is refused and merely-readable is repaired
+//!
+//! This distinction is the whole design, and the first draft of this module got
+//! it wrong twice — first refusing everything (which breaks legitimate cases),
+//! then repairing everything (which is unsound).
+//!
+//! Write permission on a *directory* is permission to create, rename and unlink
+//! entries **inside** it. So on a group- or world-writable directory, by the time
+//! Duja arrives another user may already have planted the very files this module
+//! is supposed to protect, and tightening the mode afterwards does not undo that:
+//!
+//! - `ctl.sock` replaced by **their** socket. [`PipeClient`](crate::PipeClient)
+//!   performs no server-identity check — only the server checks its peer — so
+//!   `dujactl` would talk to them and act on forged replies.
+//! - `ctl.sock` simply unlinked, so clients get `NotRunning` and `dujactl`
+//!   silently falls back to driving the hardware directly.
+//! - `ctl.sock.lock` or `duja.lock` planted as a **regular file** they hold a
+//!   `flock` on. `O_NOFOLLOW` does not catch a regular file, so Duja would block
+//!   on a lock another user owns, or read `already_running` and exit.
+//!
+//! None of that is reachable without write permission. Group or other **read and
+//! execute** only grants traverse and list: the socket is `0600` and `connect`
+//! requires write permission on the inode, and the lock files are `0600` too, so
+//! nothing can be planted, replaced or removed. That state is also the one that
+//! arises innocently — `create_dir_all` leaves `0755` under an ordinary `umask`,
+//! which is exactly how a caller that makes the directory before handing over the
+//! path produces it, Duja's own IPC integration tests included. Refusing it would
+//! break working installations to prevent nothing.
 //!
 //! The `chmod` is `fchmod` on the descriptor already opened for the ownership
 //! check, not a second path lookup, so the bits tightened belong to the object
@@ -36,78 +69,91 @@
 //! [`ensure_private_dir`] creates missing parents permissively and applies the
 //! rule only to the final component. The parents are pre-existing system
 //! locations — `$XDG_RUNTIME_DIR`, `/tmp`, `~/Library/Application Support` — that
-//! Duja does not own and cannot vouch for; the leaf (`duja`, `duja-<uid>`, or the
-//! macOS bundle-id directory) is the one Duja creates, the one that holds the
-//! socket and the lock, and the one an unprivileged attacker can actually race us
-//! to. Applying the ownership rule to `/tmp` would refuse to start on every
-//! normal system, since `/tmp` is `1777` and owned by root by design.
+//! Duja does not own and cannot vouch for; the leaf is the one Duja creates, the
+//! one that holds the socket and the lock, and the one an unprivileged attacker
+//! can actually race us to.
+//!
+//! **That is a property of the callers, not of this function.** `ensure_private_dir`
+//! will apply the rule to whatever leaf it is handed, so a caller that passes a
+//! *shared* directory gets it refused (`/tmp` is root-owned, so `verdict` says
+//! `Refuse`). Production callers always resolve a Duja-specific leaf —
+//! `$XDG_RUNTIME_DIR/duja`, `/tmp/duja-<uid>`, the macOS bundle-id directory — and
+//! a `single_instance` **test** that did not was the one thing this rule broke
+//! when it landed.
 //!
 //! # How durable the verification is
 //!
 //! Verification is a check followed by a use, and there is no `bindat`: the unix
 //! socket API is path-based all the way down, so the check cannot be fused to the
 //! bind the way `openat` would fuse it for a file. What makes the gap safe is not
-//! timing but the permissions we just verified:
+//! timing but the permissions just established:
 //!
-//! - The directory is `0700` and ours, so no other user can create, rename or
-//!   remove anything *inside* it.
+//! - The directory ends up `0700` and ours, so no other user can create, rename or
+//!   remove anything inside it.
 //! - Replacing the directory itself needs write permission on its **parent**. For
-//!   `$XDG_RUNTIME_DIR` and `~/Library` that parent is already ours. For `/tmp`
-//!   the sticky bit (`1777`) is what forbids it: a user may create entries there
-//!   but may only delete or rename their own. Duja's `/tmp` fallback therefore
-//!   rests on the sticky bit, which is universal but is a real assumption and is
-//!   named here rather than left implicit.
+//!   `$XDG_RUNTIME_DIR` and `~/Library` that parent is already ours. For `/tmp` the
+//!   sticky bit (`1777`) is what forbids it: a user may create entries there but
+//!   may only delete or rename their own.
 //!
-//! So once a directory passes, an unprivileged attacker cannot swap it out from
-//! under the caller. What verification cannot defend against is root, which is
-//! outside the threat model (SECURITY.md).
+//! The `/tmp` case therefore rests on the sticky bit. Every Linux and macOS system
+//! ships `/tmp` sticky, but that is a convention rather than something POSIX
+//! mandates, and this code neither detects nor survives a `/tmp` without it. Named
+//! here rather than left implicit. Root is outside the threat model (SECURITY.md).
 //!
 //! # What CI can and cannot test
 //!
-//! The mode repair and the symlink and not-a-directory refusals are exercised on
-//! both unix lanes. The **foreign-owner** refusal is not: CI runs as a single
-//! user and cannot create a directory owned by somebody else. So ownership
-//! follows the same split the peer-credential check uses — the pure decision
-//! ([`verdict`]) is unit-tested over every uid/mode combination, and only the
-//! `stat` that feeds it is unverified.
+//! The mode repair, the writable refusal, the symlink refusal and the
+//! not-a-directory refusal all run on both unix lanes. The **foreign-owner**
+//! refusal does not: CI runs as a single user and cannot create a directory owned
+//! by somebody else. So ownership follows the same split the peer-credential check
+//! uses — the pure decision ([`verdict`]) is unit-tested over a chosen grid of
+//! uid/mode pairs, and only the `stat` that feeds it is unverified.
 
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
-/// The permission bits that must be **clear** on a directory Duja trusts: every
-/// group and other bit.
-const GROUP_AND_OTHER: u32 = 0o077;
+/// Write permission for group or other. The bit that turns a loose directory
+/// from untidy into unsound, because it is permission to plant entries.
+const GROUP_OR_OTHER_WRITE: u32 = 0o022;
+
+/// Every group and other permission bit.
+const NON_OWNER_ACCESS: u32 = 0o077;
+
+/// `setuid` / `setgid` / sticky. Duja never wants any of them on its own state
+/// directory, and leaving them set while tightening the rest would be an odd
+/// half-measure.
+const SPECIAL_BITS: u32 = 0o7000;
 
 /// The owner bits that must be **set**: Duja has to read, write and traverse its
-/// own directory. Checked so a directory left at `0000` by a pathological `umask`
-/// is repaired rather than accepted and then failing at every use.
+/// own directory.
 const OWNER_ALL: u32 = 0o700;
 
 /// What to do about a directory that already exists where Duja wants a private
 /// one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verdict {
-    /// Ours and already private: use it as-is.
+    /// Ours and already exactly private: use it as-is.
     Accept,
-    /// Ours but readable or writable beyond the owner: `chmod` it and use it.
+    /// Ours, and loose only in ways that cannot have let anyone plant anything:
+    /// `chmod` it and use it.
     Tighten,
-    /// Somebody else's. Nothing to repair; the caller degrades.
+    /// Another user's, or writable by another user. Nothing safe to repair.
     Refuse,
 }
 
 /// Create `dir` as a private `0700` directory, or adopt the one already there.
 ///
-/// Missing parents are created permissively (see the module docs); only the final
-/// component is held to the rule. An existing directory is refused if it belongs
-/// to another uid and tightened to `0700` if it is merely looser than it should
-/// be.
+/// Missing parents are created permissively; only the final component is held to
+/// the rule, and the caller is responsible for that component being one Duja owns
+/// (see the module docs).
 ///
 /// # Errors
 /// [`io::ErrorKind::PermissionDenied`] if `dir` exists but is a symlink, is not a
-/// directory, or is owned by another uid. Any other I/O error from the underlying
-/// `mkdir`/`open`/`stat`/`fchmod` is returned as-is.
+/// directory, is owned by another uid, or is writable beyond its owner. Errors
+/// from `mkdir`, `stat` and `fchmod` are returned unchanged; errors from the
+/// `open` are re-wrapped (see [`annotate`]).
 pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     if let Some(parent) = dir.parent()
         && !parent.as_os_str().is_empty()
@@ -116,9 +162,16 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     }
     // Non-recursive on purpose: `mkdir` is atomic and fails `EEXIST` rather than
     // succeeding silently, which is exactly the signal the recursive builder threw
-    // away. A `umask` can only *clear* bits, so the created directory is never
-    // more permissive than `0700` — and the `Tighten` arm below covers the
-    // pathological `umask` that clears owner bits too.
+    // away. It is also a single syscall at `0700`, where the old
+    // `create_dir_all` + `set_mode` pair left the directory at `0755` under an
+    // ordinary umask and only then tightened it.
+    //
+    // A `umask` can only *clear* bits, so what this creates is never more
+    // permissive than `0700`. It can be less: a `umask` of `0700` would leave the
+    // directory at `0000`, which Duja then cannot open. That is a self-inflicted
+    // configuration and it fails loudly at first use rather than silently — the
+    // `Tighten` arm below cannot rescue it, because it is only reached when the
+    // directory already existed.
     match DirBuilder::new().mode(0o700).create(dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => adopt_existing_dir(dir),
@@ -126,12 +179,18 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// Adopt an existing `dir`: refuse another user's, tighten a loose one of ours.
+/// Adopt an existing `dir`: refuse another user's or a writable one, tighten a
+/// merely-loose one of ours.
 fn adopt_existing_dir(dir: &Path) -> io::Result<()> {
-    // `O_NOFOLLOW` refuses a symlink standing in for the directory, and
-    // `O_DIRECTORY` refuses a regular file; both fail at `open` rather than
-    // leaving the caller to notice afterwards. Stat the descriptor rather than the
-    // path so the bits examined belong to the object just opened.
+    // `O_NOFOLLOW` refuses a symlink standing in for the directory — the hole the
+    // old `set_mode` had — and `O_DIRECTORY` refuses a regular file; both fail at
+    // `open` rather than leaving the caller to notice afterwards. Stat the
+    // descriptor rather than the path so the bits examined belong to the object
+    // just opened.
+    //
+    // `read(true)` means this also fails `EACCES` on a directory of ours with no
+    // owner-read bit. That is a refusal too, and an honest one: a directory Duja
+    // cannot open is not one it can repair.
     let handle = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
@@ -149,9 +208,11 @@ fn adopt_existing_dir(dir: &Path) -> io::Result<()> {
         Verdict::Refuse => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "{} belongs to uid {}, not to us, so Duja will not keep state in it",
+                "{} is uid {}'s or writable beyond its owner (mode {:04o}), \
+                 so Duja will not keep state in it",
                 dir.display(),
-                meta.uid()
+                meta.uid(),
+                meta.mode() & 0o7777
             ),
         )),
     }
@@ -165,33 +226,54 @@ fn verdict(owner: u32, mode: u32, our_euid: u32) -> Verdict {
     if owner != our_euid {
         return Verdict::Refuse;
     }
-    if mode & GROUP_AND_OTHER == 0 && mode & OWNER_ALL == OWNER_ALL {
-        Verdict::Accept
-    } else {
-        Verdict::Tighten
+    // Someone else could already have planted entries; tightening now is too late.
+    if mode & GROUP_OR_OTHER_WRITE != 0 {
+        return Verdict::Refuse;
     }
+    if mode & NON_OWNER_ACCESS != 0 || mode & SPECIAL_BITS != 0 || mode & OWNER_ALL != OWNER_ALL {
+        return Verdict::Tighten;
+    }
+    Verdict::Accept
 }
 
 /// Open (creating if absent) a `0600` file inside an already-verified private
-/// directory, refusing a symlink at the final component.
+/// directory, refusing a symlink and refusing another user's file.
 ///
-/// The directory's `0700` mode is the real barrier — nobody else can plant a
-/// symlink inside it — so `O_NOFOLLOW` here is defence-in-depth against a
-/// caller that reaches this without [`ensure_private_dir`] having passed.
+/// The directory's `0700` mode is the primary barrier. The two checks here are
+/// what covers the case it cannot: a directory that was loose *before*
+/// [`ensure_private_dir`] tightened it. `O_NOFOLLOW` catches a planted symlink and
+/// the owner check catches a planted regular file, which `O_NOFOLLOW` does not.
 ///
 /// `truncate(false)`: callers want a descriptor to `flock`, not a fresh file, and
-/// truncating would discard bytes some future version may keep there.
+/// truncating would discard bytes some future version may keep there. A
+/// consequence worth knowing: `.mode(0o600)` applies only at creation, so a
+/// pre-existing file keeps whatever mode it has. That is safe given the owner
+/// check above, since only we could have created it.
 ///
 /// # Errors
-/// Whatever `open` returns, including `ELOOP` when the path is a symlink.
+/// `ELOOP` when the path is a symlink, [`io::ErrorKind::PermissionDenied`] when
+/// the file belongs to another uid, or whatever else `open` returns.
 pub(crate) fn open_private_file(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if meta.uid() == our_euid() {
+        Ok(file)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} belongs to uid {}, not to us",
+                path.display(),
+                meta.uid()
+            ),
+        ))
+    }
 }
 
 /// This process's effective uid.
@@ -200,12 +282,17 @@ fn our_euid() -> u32 {
 }
 
 /// Turn the two refusal-shaped `open` failures into the error kind the caller
-/// documents, leaving every other failure alone.
+/// documents, leaving every other failure's *kind* alone.
 ///
 /// `O_NOFOLLOW` on a symlink reports `ELOOP` and `O_DIRECTORY` on a regular file
 /// reports `ENOTDIR`; both mean "something other than our directory is sitting
 /// here", which is a permission decision rather than the plumbing failure their
-/// raw kinds suggest.
+/// raw kinds suggest. POSIX mandates `ELOOP` here and both Linux and Darwin
+/// comply, which is what lets the tests assert one kind on both lanes; some other
+/// BSDs report `EMLINK` or `EFTYPE` instead, and neither is a Duja target.
+///
+/// Every other error keeps its kind but is re-wrapped, so its `raw_os_error` is
+/// lost. Callers here only match on `kind`.
 fn annotate(dir: &Path, err: &io::Error) -> io::Error {
     let raw = err.raw_os_error();
     if raw == Some(libc::ELOOP) || raw == Some(libc::ENOTDIR) {
@@ -251,23 +338,24 @@ mod tests {
     fn accepts_an_existing_private_directory() {
         let dir = scratch("accept");
         ensure_private_dir(&dir).unwrap();
-        // Idempotent: the second call takes the verify path, not the create path.
+        // Idempotent: the second call takes the adopt path, not the create path.
         ensure_private_dir(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Half the regression for the fail-open defect: a pre-existing directory of
-    /// ours that is open to others is **repaired**, where the old recursive
-    /// builder left it exactly as it found it.
+    /// Half the regression for the fail-open defect: a readable-but-not-writable
+    /// directory of ours is **repaired**, where the old recursive builder left it
+    /// exactly as it found it. `0755` is the one that matters — it is what
+    /// `create_dir_all` produces under an ordinary umask.
     #[test]
-    fn tightens_an_existing_directory_of_ours_that_is_open_to_others() {
-        for mode in [0o755, 0o770, 0o707, 0o701, 0o710, 0o777] {
+    fn tightens_a_directory_of_ours_that_is_readable_but_not_writable() {
+        for mode in [0o755, 0o750, 0o705, 0o701, 0o710, 0o500] {
             let dir = scratch(&format!("mode-{mode:o}"));
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
 
             ensure_private_dir(&dir)
-                .unwrap_or_else(|e| panic!("mode {mode:04o} is ours and should be repaired: {e}"));
+                .unwrap_or_else(|e| panic!("mode {mode:04o} is ours and repairable: {e}"));
             assert_eq!(
                 mode_of(&dir),
                 0o700,
@@ -278,18 +366,29 @@ mod tests {
         }
     }
 
-    /// A directory left unusable by a pathological `umask` is repaired too, so
-    /// the caller does not accept it and then fail on every read.
+    /// The other half, and the one the first draft of this module got wrong by
+    /// repairing it: a directory another user can **write** to may already have
+    /// had `ctl.sock` or a lock file planted in it, and a late `chmod` does not
+    /// undo that.
     #[test]
-    fn tightens_a_directory_missing_its_own_owner_bits() {
-        let dir = scratch("mode-0000");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    fn refuses_a_directory_another_user_can_write_to() {
+        for mode in [0o777, 0o770, 0o707, 0o727, 0o702, 0o720] {
+            let dir = scratch(&format!("writable-{mode:o}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
 
-        ensure_private_dir(&dir).unwrap();
-        assert_eq!(mode_of(&dir), 0o700);
+            let err = ensure_private_dir(&dir)
+                .expect_err(&format!("mode {mode:04o} is plantable and must be refused"));
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(
+                mode_of(&dir),
+                mode,
+                "a refused directory must be left alone, not half-repaired"
+            );
 
-        let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
@@ -322,15 +421,15 @@ mod tests {
     }
 
     /// The half CI cannot reach through the filesystem: a directory owned by
-    /// somebody else. Tested as the pure rule instead.
+    /// somebody else. Tested as the pure rule instead, over a chosen grid rather
+    /// than exhaustively.
     ///
-    /// The distinction this pins is the one the module exists for — a foreign
-    /// owner is refused at *any* mode, including the `0700` that would look
-    /// perfect from the outside, while our own directory is never refused no
-    /// matter how loose it is.
+    /// What this pins is that ownership dominates mode in both directions — a
+    /// foreign directory is refused even at the `0700` that looks perfect from
+    /// outside, and our own is never refused for any reason except writability.
     #[test]
-    fn foreign_owner_is_refused_at_every_mode_and_ours_is_never_refused() {
-        for mode in [0o40700, 0o40755, 0o40777, 0o40000] {
+    fn foreign_owner_is_refused_whatever_the_mode() {
+        for mode in [0o40700, 0o40755, 0o40777, 0o40000, 0o42700] {
             assert_eq!(
                 verdict(1001, mode, 1000),
                 Verdict::Refuse,
@@ -341,27 +440,37 @@ mod tests {
                 Verdict::Refuse,
                 "root-owned is still foreign at mode {mode:o}"
             );
-            assert_ne!(
-                verdict(1000, mode, 1000),
-                Verdict::Refuse,
-                "our own directory at mode {mode:o} is repairable, not refusable"
-            );
         }
     }
 
     #[test]
-    fn our_directory_is_accepted_only_when_already_exactly_private() {
+    fn our_directory_is_accepted_only_when_exactly_private_and_refused_only_when_writable() {
         // `S_IFDIR` rides along in `st_mode` and must not be read as access.
         assert_eq!(verdict(1000, 0o40700, 1000), Verdict::Accept);
-        assert_eq!(verdict(1000, 0o40750, 1000), Verdict::Tighten, "group read");
+
+        // Readable or traversable, but nothing can be planted: repair.
+        assert_eq!(verdict(1000, 0o40750, 1000), Verdict::Tighten, "group r-x");
         assert_eq!(verdict(1000, 0o40705, 1000), Verdict::Tighten, "other r-x");
-        assert_eq!(verdict(1000, 0o40701, 1000), Verdict::Tighten, "one bit");
+        assert_eq!(verdict(1000, 0o40701, 1000), Verdict::Tighten, "other x");
         assert_eq!(
             verdict(1000, 0o40600, 1000),
             Verdict::Tighten,
             "no traverse"
         );
         assert_eq!(verdict(1000, 0o40000, 1000), Verdict::Tighten, "unusable");
+        // Special bits are cleared by the same repair rather than left set.
+        assert_eq!(verdict(1000, 0o42700, 1000), Verdict::Tighten, "setgid");
+        assert_eq!(verdict(1000, 0o41700, 1000), Verdict::Tighten, "sticky");
+
+        // Writable by anyone else: too late to repair.
+        assert_eq!(verdict(1000, 0o40777, 1000), Verdict::Refuse, "world write");
+        assert_eq!(verdict(1000, 0o40770, 1000), Verdict::Refuse, "group write");
+        assert_eq!(verdict(1000, 0o40702, 1000), Verdict::Refuse, "other write");
+        assert_eq!(
+            verdict(1000, 0o40720, 1000),
+            Verdict::Refuse,
+            "group w only"
+        );
     }
 
     #[test]
