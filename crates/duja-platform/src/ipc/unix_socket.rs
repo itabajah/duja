@@ -501,10 +501,11 @@ impl PipeServer {
         H: Fn(Request) -> Response + Send + Sync + 'static,
     {
         let path = PathBuf::from(name);
-        let (listener, identity) = bind_listener(&path)?;
-        // Pin the inode `identity` names, held until after the final unlink. See
-        // `unlink_if_ours` for why an inode number alone does not mean anything.
-        let pin = pin_inode(&path);
+        let BoundSocket {
+            listener,
+            identity,
+            pin,
+        } = bind_listener(&path)?;
         // Defence-in-depth beyond the 0700 parent dir (see module docs).
         set_mode(&path, 0o600).map_err(|e| {
             unlink_if_ours(&path, identity);
@@ -718,7 +719,7 @@ fn serve_connection(
 /// that a filesystem without working `flock` fails the server closed rather than
 /// starting it unserialised; every path this resolves to is tmpfs, `/tmp` or
 /// APFS, where `flock` works.
-fn bind_listener(path: &Path) -> Result<(UnixListener, Option<(u64, u64)>), IpcTransportError> {
+fn bind_listener(path: &Path) -> Result<BoundSocket, IpcTransportError> {
     prepare_socket_dir(path).map_err(|e| IpcTransportError::Io(e.to_string()))?;
     let _guard = BindLock::acquire(path)?;
     let listener = match UnixListener::bind(path) {
@@ -726,12 +727,30 @@ fn bind_listener(path: &Path) -> Result<(UnixListener, Option<(u64, u64)>), IpcT
         Err(e) if e.kind() == io::ErrorKind::AddrInUse => takeover_bind(path)?,
         Err(e) => return Err(IpcTransportError::Io(e.to_string())),
     };
-    // Read the identity here, still under the lock, so "this inode is ours" is
-    // established at the one moment nothing else can be touching the path. An
-    // earlier version read it in the caller and claimed the same thing, which was
-    // false: the guard is a local and dies with this function.
+    // Read the identity and take the pin here, still under the lock, so both name
+    // the same inode by construction rather than by argument. An earlier version
+    // read the identity in the caller and claimed it was still locked, which was
+    // false — the guard is a local and dies with this function — and a later one
+    // took the pin there too, which was safe only because a bound socket is
+    // already listening and a concurrent probe would therefore refuse. Sound, but
+    // one subtlety more than this needs.
     let identity = socket_identity(path);
-    Ok((listener, identity))
+    let pin = pin_inode(path);
+    Ok(BoundSocket {
+        listener,
+        identity,
+        pin,
+    })
+}
+
+/// What [`bind_listener`] hands back: the listener, plus the two things that make
+/// a later unlink safe, both established under the bind lock.
+struct BoundSocket {
+    listener: UnixListener,
+    /// `(dev, ino)` of the socket as bound.
+    identity: Option<(u64, u64)>,
+    /// A descriptor keeping that inode from being freed. See [`pin_inode`].
+    pin: Option<std::os::fd::OwnedFd>,
 }
 
 /// The `AddrInUse` path, called with [`BindLock`] held: probe for a live owner,
