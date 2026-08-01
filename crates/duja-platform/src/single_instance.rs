@@ -22,9 +22,11 @@
 //! leaves a stuck lock — the next launch takes over the (still-present) lock file.
 //! The lock lives in the macOS Application Support data dir, else
 //! `$XDG_RUNTIME_DIR/duja/`, else `/tmp/duja-<uid>/`. That directory is created
-//! `0700` or else **verified** through [`crate::unix_dir`], which refuses one
-//! another user owns or can write to; the lock file itself is opened `O_NOFOLLOW`
-//! and checked to be ours. When the directory is refused the guard degrades to
+//! `0700` or else **verified** through the crate's `unix_dir` module, which
+//! refuses one another user owns or can write to; the lock file itself is opened
+//! `O_NOFOLLOW` and checked to be ours. (Named rather than linked: this module
+//! doc compiles on Windows too, where `unix_dir` does not exist, and an
+//! intra-doc link to it fails the `rustdoc -D warnings` lane.) When the directory is refused the guard degrades to
 //! "first" rather than refusing to launch — running is better than not, and the
 //! point of the check is that the lock is never taken inside a directory Duja
 //! cannot vouch for. The cost of degrading is a second instance, which the IPC
