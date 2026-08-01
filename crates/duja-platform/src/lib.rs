@@ -54,6 +54,11 @@ mod installer_guard;
 pub mod ipc;
 mod single_instance;
 
+// The trusted-directory rule shared by the two unix subsystems that keep
+// per-user state on disk: the IPC socket and the single-instance lock.
+#[cfg(unix)]
+mod unix_dir;
+
 pub use autostart::{Autostart, AutostartError};
 pub use desktop::{OpenUrlFailure, animations_enabled, open_url, os_dark_theme};
 pub use geometry::{AnchorUnit, TrayAnchor, WorkRect, cursor_anchor};

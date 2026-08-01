@@ -378,7 +378,150 @@ fn stale_socket_is_taken_over() {
         c.request(&Request::ShowFlyout).expect("served"),
         Response::Ok
     );
+
+    // The bind ran under its sibling lock. Asserted structurally because the
+    // concurrency test below can only ever be one-sided evidence: this is the
+    // deterministic half, and it fails if the serialisation is ever removed.
+    //
+    // It pins that the lock file is *created*, not that the `flock` was taken -
+    // the syscall leaves no filesystem trace to assert on. Paired with the
+    // concurrency test, which pins the effect.
+    let mut lock_name = path.clone().into_os_string();
+    lock_name.push(".lock");
+    let lock = PathBuf::from(lock_name);
+    assert!(
+        lock.exists(),
+        "the bind sequence must run under {}",
+        lock.display()
+    );
+
     server.shutdown();
+}
+
+#[test]
+fn concurrent_starts_on_a_stale_socket_leave_exactly_one_server() {
+    // The regression for the non-atomic takeover. Probe -> unlink -> bind is three
+    // steps against a shared name: without a lock, several starters each see the
+    // stale inode, each unlink, and each bind. Every one of them then holds a
+    // listener it believes is serving, but only the last inode is at the path, so
+    // the rest are unreachable while reporting success.
+    //
+    // This test is deliberately one-sided evidence. A race regression cannot be
+    // proven absent by a green run - it can only be caught when the interleaving
+    // happens - so it is a barrier plus enough starters to make that likely, and
+    // the deterministic half of the proof is the lock-file assertion above.
+    const STARTERS: usize = 8;
+
+    let path = unique_socket("race");
+    std::fs::create_dir_all(path.parent().unwrap()).expect("mk dir");
+    {
+        let stale = UnixListener::bind(path_str(&path)).expect("bind stale");
+        drop(stale);
+    }
+
+    let gate = Arc::new(std::sync::Barrier::new(STARTERS));
+    let mut starters = Vec::with_capacity(STARTERS);
+    for _ in 0..STARTERS {
+        let path = path.clone();
+        let gate = Arc::clone(&gate);
+        starters.push(std::thread::spawn(move || {
+            gate.wait();
+            PipeServer::serve_named(path.to_str().expect("utf-8"), fake_handler)
+        }));
+    }
+
+    let winners: Vec<PipeServer> = starters
+        .into_iter()
+        .filter_map(|s| s.join().expect("starter panicked").ok())
+        .collect();
+
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one of {STARTERS} concurrent starters may own the socket"
+    );
+
+    // The survivor is the one at the path: a winner nobody can reach is the very
+    // failure this guards against, so success is not enough on its own.
+    let mut client = PipeClient::connect_named(path_str(&path), short()).expect("reach survivor");
+    assert_eq!(
+        client.request(&Request::ShowFlyout).expect("served"),
+        Response::Ok
+    );
+
+    for winner in winners {
+        winner.shutdown();
+    }
+}
+
+#[test]
+fn a_readable_socket_directory_of_ours_is_tightened() {
+    // 0755 is what `create_dir_all` leaves under an ordinary umask, which is
+    // exactly how a caller that makes the directory first hands the server a path
+    // (the two tests above do it). Others can traverse and list, but cannot plant
+    // or remove anything, so this is repaired rather than refused.
+    //
+    // A directory of its own, not the per-process one `unique_socket` shares: this
+    // test mutates the mode, and under plain `cargo test` (one process, threaded)
+    // a sibling test's server would tighten it back before the assertion, leaving
+    // a green run that proved nothing.
+    let dir = PathBuf::from(format!("/tmp/duja-it-{}-readable", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mk dir");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("loosen");
+    let path = dir.join("readable.sock");
+
+    let server = PipeServer::serve_named(path_str(&path), fake_handler).expect("server up");
+
+    let mode = std::fs::metadata(&dir)
+        .expect("stat dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, "a readable socket dir must be tightened");
+
+    server.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_writable_socket_directory_is_refused_outright() {
+    // The other side of the line, and the one the first version of this change got
+    // wrong by repairing it. Write permission on a directory is permission to
+    // create, rename and unlink entries in it, so by the time Duja arrives another
+    // user could already have replaced `ctl.sock` with their own socket - and
+    // `PipeClient` performs no server-identity check, so `dujactl` would act on
+    // forged replies. Tightening the mode afterwards does not undo that, which is
+    // why the server refuses to start instead.
+    let dir = PathBuf::from(format!("/tmp/duja-it-{}-writable", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mk dir");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).expect("loosen");
+    let path = dir.join("writable.sock");
+
+    let outcome = PipeServer::serve_named(path_str(&path), fake_handler);
+    let bound = path.exists();
+    // Restore before asserting. An assertion failure below would otherwise panic
+    // out of the test and leave a world-writable directory behind, which on a
+    // developer's machine is the very thing this test is about.
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+
+    let err = outcome
+        .err()
+        .expect("a world-writable socket dir must refuse the bind");
+    // Match the message, not just the variant: `Io(_)` would also pass for any
+    // unrelated transport failure on the way, so it would not pin the refusal this
+    // test is named for.
+    let duja_platform::ipc::IpcTransportError::Io(message) = &err else {
+        panic!("expected an Io refusal, got {err:?}");
+    };
+    assert!(
+        message.contains("writable beyond its owner"),
+        "the error must say why the directory was refused: {message}"
+    );
+    assert!(!bound, "nothing may be bound in a refused directory");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

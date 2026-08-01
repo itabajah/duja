@@ -12,8 +12,18 @@
 //! - The socket path is per-user and lives inside a dedicated directory Duja
 //!   owns: macOS `~/Library/Application Support/duja/ctl.sock`, Linux
 //!   `$XDG_RUNTIME_DIR/duja/ctl.sock` (fallback `/tmp/duja-<uid>/ctl.sock`).
-//! - **The parent directory is the real access barrier**: it is created `0700`,
-//!   so no other user can even traverse into it to reach the socket inode. The
+//!   That directory is **verified, not assumed**: it is created `0700`, or else
+//!   checked to be a real directory (not a symlink) owned by our effective uid.
+//!   One another local user owns, or that any other user can *write* to, is
+//!   refused and the server does not start; one merely readable is tightened. See
+//!   [`crate::unix_dir`], which holds the rule, the reason writability is the
+//!   dividing line, and the argument for how durable the check is. This closed a
+//!   real hole here, though not the one the debt row described: `prepare_socket_dir`
+//!   used to `chmod` the directory, which fails `EPERM` on another uid's, so a
+//!   squat made the server fail *closed*. What it did not survive was a **symlink**
+//!   planted at the path, which redirected both that `chmod` and the `bind`.
+//! - **The parent directory is the real access barrier**: at `0700`,
+//!   no other user can even traverse into it to reach the socket inode. The
 //!   socket itself is additionally `chmod 0600` right after `bind`, as
 //!   defence-in-depth. `std`'s [`UnixListener::bind`] couples `bind` + `listen`
 //!   in one call, so there is no seam to `chmod` *between* them without dropping
@@ -33,6 +43,16 @@
 //!   means a live server already owns the name and we refuse to start a second.
 //!   (On Windows the equivalent split is `FILE_FLAG_FIRST_PIPE_INSTANCE` plus the
 //!   named single-instance mutex; here the bound socket *is* the instance token.)
+//!   Because that sequence is several steps against a shared name rather than one
+//!   atomic call, the **whole** bind runs under a sibling `flock` — otherwise two
+//!   instances starting together both unlink and both bind, leaving one of them
+//!   listening on an unreachable inode while believing it is serving. The lock
+//!   covers the ordinary `bind` too, not just the takeover, because
+//!   [`UnixListener::bind`] is `socket`/`bind`/`listen` and an instance parked
+//!   between the last two is indistinguishable from a stale inode. Shutdown's
+//!   unlink is conditioned on the same lock plus an inode check, since a departing
+//!   server would otherwise delete its successor's socket. See [`bind_listener`]
+//!   and [`unlink_if_ours`].
 //! - The same limits as the pipe: at most [`MAX_CONNECTIONS`]
 //!   connections are in flight, [`MAX_HANDLER_THREADS`]
 //!   serve at once, and the frame codec caps a single body at 64 KiB **before**
@@ -97,7 +117,7 @@
 #![allow(clippy::borrow_as_ptr)]
 
 use std::io::{self, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -112,8 +132,10 @@ use duja_ipc::{Request, Response};
 
 use super::{IpcTransportError, MAX_CONNECTIONS, MAX_HANDLER_THREADS, READ_TIMEOUT};
 
-/// How long the listener backs off before retrying when it is at the connection
-/// cap (no free slot to accept the next one).
+/// The generic short backoff in this module: the listener's wait when it is at the
+/// connection cap, its retry after a transient `accept` fault, the client's
+/// connect retry, and [`BindLock`]'s poll. Short enough that none of them adds
+/// perceptible latency, long enough that none of them spins.
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// The slice a non-blocking `accept` sleeps between polls, and the slice each
@@ -128,6 +150,14 @@ const WAIT_SLICE: Duration = Duration::from_millis(50);
 /// buffer. This deadline (plus the stop flag) caps how long such a peer can pin a
 /// handler in `write`; it mirrors the read timeout.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long [`BindLock`] waits for a contended bind lock before giving up.
+///
+/// Not a latency budget: honest contention is a probe plus two binds and clears
+/// in microseconds. It is the bound that stops a wedged or foreign lock holder
+/// from hanging startup indefinitely, so it is sized to be unmistakably longer
+/// than any legitimate hold.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
 
 /// The default per-user socket path as a string.
 ///
@@ -437,6 +467,15 @@ pub struct PipeServer {
     listener: Option<JoinHandle<()>>,
     workers: Vec<JoinHandle<()>>,
     socket_path: PathBuf,
+    /// `(dev, ino)` of the socket this server bound, or `None` if it could not be
+    /// read. Compared before unlinking so a shutdown cannot delete a *successor's*
+    /// socket — see [`unlink_if_ours`].
+    socket_identity: Option<(u64, u64)>,
+    /// A descriptor that pins the socket's **filesystem inode**, kept open until
+    /// after the unlink so its number cannot be recycled underneath
+    /// [`socket_identity`](Self::socket_identity). `None` where no pin is needed
+    /// or none could be taken — see [`pin_inode`].
+    _pin: Option<std::os::fd::OwnedFd>,
 }
 
 impl PipeServer {
@@ -462,11 +501,18 @@ impl PipeServer {
         H: Fn(Request) -> Response + Send + Sync + 'static,
     {
         let path = PathBuf::from(name);
-        let listener = bind_listener(&path)?;
+        let BoundSocket {
+            listener,
+            identity,
+            pin,
+        } = bind_listener(&path)?;
         // Defence-in-depth beyond the 0700 parent dir (see module docs).
-        set_mode(&path, 0o600).map_err(|e| IpcTransportError::Io(e.to_string()))?;
+        set_mode(&path, 0o600).map_err(|e| {
+            unlink_if_ours(&path, identity);
+            IpcTransportError::Io(e.to_string())
+        })?;
         listener.set_nonblocking(true).map_err(|e| {
-            let _ = std::fs::remove_file(&path);
+            unlink_if_ours(&path, identity);
             IpcTransportError::Io(e.to_string())
         })?;
 
@@ -495,7 +541,7 @@ impl PipeServer {
                     for worker in workers {
                         let _ = worker.join();
                     }
-                    let _ = std::fs::remove_file(&path);
+                    unlink_if_ours(&path, identity);
                     return Err(IpcTransportError::Io(e.to_string()));
                 }
             }
@@ -518,7 +564,7 @@ impl PipeServer {
                     for worker in workers {
                         let _ = worker.join();
                     }
-                    let _ = std::fs::remove_file(&path);
+                    unlink_if_ours(&path, identity);
                     return Err(IpcTransportError::Io(e.to_string()));
                 }
             }
@@ -529,6 +575,8 @@ impl PipeServer {
             listener: Some(listener_handle),
             workers,
             socket_path: path,
+            socket_identity: identity,
+            _pin: pin,
         })
     }
 
@@ -550,7 +598,7 @@ impl PipeServer {
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
-        let _ = std::fs::remove_file(&self.socket_path);
+        unlink_if_ours(&self.socket_path, self.socket_identity);
     }
 }
 
@@ -641,18 +689,97 @@ fn serve_connection(
 }
 
 /// Bind a listener at `path`, preparing its `0700` parent directory and taking
-/// over a stale socket if one is present.
-fn bind_listener(path: &Path) -> Result<UnixListener, IpcTransportError> {
+/// over a stale socket if one is present — the whole of it under a lock.
+///
+/// # The race this closes
+///
+/// Probe → `remove_file` → `bind` is three steps against a shared name, and two
+/// instances starting together interleave them. Both probe the stale inode and
+/// see a refusal; both unlink; both bind. The second `bind` creates a *new* inode
+/// at the same path, so the first instance is left holding a listener no client
+/// can ever reach — it accepts nothing, reports no error, and looks healthy.
+/// Duja's own single-instance guard does not prevent this: it degrades to "first"
+/// whenever its lock cannot be taken, and `dujactl` reaches the socket by path,
+/// not by process.
+///
+/// # Why the lock covers the *plain* bind too
+///
+/// An earlier version of this fix locked only the takeover, on the reasoning that
+/// a plain `bind` is atomic and needs no help. It is not, and the residual window
+/// is real. [`UnixListener::bind`] is `socket` → `bind` → `listen`, and an
+/// instance that has completed `bind` but not yet `listen` is indistinguishable
+/// from a stale inode: the path exists, and a probing `connect` gets
+/// `ECONNREFUSED`. So a starter parked in that two-syscall gap could have its
+/// fresh socket unlinked by a concurrent takeover, and both would end up
+/// "bound" — the exact defect this exists to prevent, reached from one step
+/// earlier. Locking the whole sequence makes "every instance takes the lock
+/// first" true rather than nearly true.
+///
+/// The cost is one `open` and one `flock` per server start. The consequence is
+/// that a filesystem without working `flock` fails the server closed rather than
+/// starting it unserialised; every path this resolves to is tmpfs, `/tmp` or
+/// APFS, where `flock` works.
+fn bind_listener(path: &Path) -> Result<BoundSocket, IpcTransportError> {
     prepare_socket_dir(path).map_err(|e| IpcTransportError::Io(e.to_string()))?;
-    match UnixListener::bind(path) {
-        Ok(listener) => Ok(listener),
-        Err(e) if e.kind() == io::ErrorKind::AddrInUse => takeover_bind(path),
-        Err(e) => Err(IpcTransportError::Io(e.to_string())),
-    }
+    let _guard = BindLock::acquire(path)?;
+    let listener = match UnixListener::bind(path) {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => takeover_bind(path)?,
+        Err(e) => return Err(IpcTransportError::Io(e.to_string())),
+    };
+    // Read the identity and take the pin here, still under the lock, so both name
+    // the same inode by construction rather than by argument. An earlier version
+    // read the identity in the caller and claimed it was still locked, which was
+    // false — the guard is a local and dies with this function — and a later one
+    // took the pin there too, which was safe only because a bound socket is
+    // already listening and a concurrent probe would therefore refuse. Sound, but
+    // one subtlety more than this needs.
+    let identity = socket_identity(path);
+    let pin = pin_inode(path);
+    Ok(BoundSocket {
+        listener,
+        identity,
+        pin,
+    })
 }
 
-/// The `AddrInUse` path: probe for a live owner, else unlink the stale inode and
-/// rebind.
+/// What [`bind_listener`] hands back: the listener, plus the two things that make
+/// a later unlink safe, both established under the bind lock.
+struct BoundSocket {
+    listener: UnixListener,
+    /// `(dev, ino)` of the socket as bound.
+    identity: Option<(u64, u64)>,
+    /// A descriptor keeping that inode from being freed. See [`pin_inode`].
+    pin: Option<std::os::fd::OwnedFd>,
+}
+
+/// The `AddrInUse` path, called with [`BindLock`] held: probe for a live owner,
+/// else unlink the stale inode and rebind.
+///
+/// Because the lock covers the caller's plain `bind` as well, the inode found
+/// here was almost always either bound by a fully-started server or left behind by
+/// a dead one. One further case exists and is worth naming rather than denying: a
+/// **live** server whose listen backlog is full. Reaching it needs enough queued
+/// connections from a process of the same uid to fill that backlog — std passes
+/// `listen(fd, -1)`, so the depth is `somaxconn` on Linux (4096 by default since
+/// 5.4) and 128 on Apple — which is inside the trust boundary and so is self-harm
+/// rather than an attack. But the two platforms then fail differently and neither
+/// is benign:
+///
+/// - On the BSDs `connect` returns `ECONNREFUSED`, so a **live** server is misread
+///   as stale and its socket is unlinked — the exact defect this module exists to
+///   prevent, reached by a route the lock cannot see.
+/// - On Linux `unix_stream_connect` finds the receive queue full and waits, with
+///   no send timeout on a blocking socket, for an `accept` that may never come.
+///   That is the one unbounded wait left in a module that bounds everything else,
+///   and it happens while holding [`BindLock`], so it times every other starter
+///   out at [`LOCK_WAIT`] as well.
+///
+/// The probe predates this change; what is new is that it now runs under the lock,
+/// which widens the second case from "this instance stalls" to "every instance
+/// stalls". Recorded in `docs/debt.md` rather than fixed here: bounding it means a
+/// non-blocking `connect` plus a `poll`, which is a different change from a
+/// locking fix and would be the third mechanism in one PR.
 fn takeover_bind(path: &Path) -> Result<UnixListener, IpcTransportError> {
     if UnixStream::connect(path).is_ok() {
         // A live server accepted the probe: we are the second instance.
@@ -665,17 +792,245 @@ fn takeover_bind(path: &Path) -> Result<UnixListener, IpcTransportError> {
     UnixListener::bind(path).map_err(|e| IpcTransportError::Io(e.to_string()))
 }
 
-/// Create `path`'s parent directory (recursively) and set it `0700`.
+/// Take a descriptor that keeps `path`'s inode from being freed, so its number
+/// cannot be handed to somebody else's socket while we still hold it.
 ///
-/// The parent is always a directory Duja owns (`.../duja/`), never a shared
-/// system directory, because every resolved path nests the socket under a
-/// dedicated `duja` (or `duja-<uid>`) component.
-fn prepare_socket_dir(path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-        set_mode(parent, 0o700)?;
+/// # Why `O_PATH`, and why only Linux
+///
+/// The first version of this dup'd the *listening socket* instead. That pins the
+/// inode — a bound `AF_UNIX` socket holds a `dget`/`mntget` on its path, so the
+/// final `iput` (and with it `ext4_free_inode`, which clears the inode bitmap bit
+/// that makes the number reusable) waits for the socket to be released — but it
+/// also keeps the socket **connectable**, and that turned out to cost more than it
+/// bought:
+///
+/// - If both handler threads die, `listener_loop` exits, but the socket stays in
+///   `LISTEN`. `dujactl` then *connects successfully*, blocks for the read timeout
+///   and exits with a server error — where before it got `ECONNREFUSED`,
+///   translated to `NotRunning`, and **fell back to driving the hardware
+///   directly**. That fallback is a documented degradation path, and a fix for a
+///   shutdown race had no business removing it.
+/// - During shutdown the same window makes a concurrent start fail with "another
+///   duja IPC server is already listening", and `duja-app`'s IPC bridge does not
+///   retry: it logs a warning and runs without IPC for that whole process.
+///
+/// `O_PATH` gives a descriptor that references the inode and nothing else — no
+/// socket semantics, no `LISTEN` state, no connectability — so the pin costs
+/// exactly what it should. It is Linux-only, which is also exactly where it is
+/// needed: **ext4 and XFS recycle inode numbers**, while tmpfs allocates from a
+/// monotonic counter (`get_next_ino`) and macOS's APFS assigns object identifiers
+/// monotonically. So `$XDG_RUNTIME_DIR` and macOS are safe without it, and the
+/// `/tmp/duja-<uid>` fallback — the case `docs/debt.md` row 57 calls a routine
+/// cron/ssh/container condition — is the one that needs it.
+///
+/// `None` on failure rather than an error: the caller still has the `(dev, ino)`
+/// comparison, which without the pin is merely very likely to be right instead of
+/// certain. That is the behaviour every release before this one shipped, so
+/// degrading to it is not a regression — but it is a degradation, and it is named
+/// here so nobody reads the guarantee as unconditional.
+/// `CLOEXEC` is not decoration: `rustix::fs::open` does **not** add it (unlike
+/// every `std` descriptor in this module, which does), and `duja-app`'s tray has a
+/// live `exec` path — "Restart" spawns a detached `duja --relaunch` while the
+/// outgoing server is still up. Without the flag that child inherits the pin and
+/// holds an about-to-be-unlinked inode for its whole life, and each restart
+/// generation inherits its predecessor's. Harmless to correctness — a pinned inode
+/// only makes the comparison more conservative — but it is an fd leak into an
+/// unrelated long-lived process.
+///
+/// `NOFOLLOW` here means the documented `O_PATH | O_NOFOLLOW` idiom: it pins the
+/// **symlink itself** rather than refusing one, which is the opposite of what
+/// `NOFOLLOW` means at this module's other two uses. It is still the right choice
+/// — without it a planted symlink would redirect the pin to an arbitrary object —
+/// but note that [`socket_identity`] uses `std::fs::metadata`, which *follows*.
+/// So for a path that is somehow a symlink the two would name different inodes and
+/// the pin would protect nothing, degrading to the pre-pin guarantee. Unreachable
+/// in practice: the directory is `0700` and the bind lock is held across both, so
+/// only a same-uid process could arrange it.
+#[cfg(target_os = "linux")]
+fn pin_inode(path: &Path) -> Option<std::os::fd::OwnedFd> {
+    rustix::fs::open(
+        path,
+        rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .ok()
+}
+
+/// No pin needed: this target's filesystems do not recycle the numbers
+/// [`socket_identity`] compares. See the Linux variant for the full argument.
+#[cfg(not(target_os = "linux"))]
+fn pin_inode(_path: &Path) -> Option<std::os::fd::OwnedFd> {
+    None
+}
+
+/// `(dev, ino)` of whatever is at `path`, or `None` if it cannot be read.
+fn socket_identity(path: &Path) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.dev(), meta.ino()))
+}
+
+/// Unlink `path` only if it is still the inode this server bound.
+///
+/// # The unlink this refuses to do
+///
+/// Shutdown used to `remove_file` the socket path unconditionally, which is a
+/// second route to the same "two servers, one unreachable" defect the bind lock
+/// closes — reached without any takeover at all:
+///
+/// 1. `P` joins its listener thread, closing the listening fd. The inode is still
+///    at the path, but nothing is accepting on it.
+/// 2. `Q` starts. Its bind gets `AddrInUse`, its probe gets `ECONNREFUSED`, so it
+///    correctly judges the inode stale, unlinks it and binds its own. `Q` serves.
+/// 3. `P` reaches its `remove_file` — and deletes **`Q`'s** socket.
+///
+/// `Q` is then live, healthy and unreachable. Comparing `(dev, ino)` against what
+/// this server bound makes step 3 a no-op, and the comparison runs under the same
+/// [`BindLock`] so it cannot be raced between the `stat` and the `unlink`.
+///
+/// # Why an inode *number* is not enough on its own
+///
+/// `(dev, ino)` only identifies an object while that object exists, and **ext4 and
+/// XFS recycle inode numbers**. In step 1 above `P`'s fd closes while the link
+/// count is still 1; `Q`'s `remove_file` in step 2 drops it to 0, the final `iput`
+/// reaches `ext4_free_inode`, and the number goes back in the block group's inode
+/// bitmap. `ext4_new_inode` then allocates the lowest free bit in that bitmap, so
+/// `Q`'s rebind **can** land on the number `P` recorded, and `P` would match on a
+/// coincidence and delete `Q`'s socket after all. (Not *likely* — the bitmap spans
+/// the whole block group, typically 8192 inodes, not just this directory. The
+/// guard has to be exact regardless.) The [`BindLock`] does not help: it orders
+/// steps 2 and 3, it does not make the number unique.
+///
+/// This matters precisely where `docs/debt.md` row 57 says it would. tmpfs
+/// allocates from a monotonic counter and APFS assigns object ids monotonically,
+/// so `$XDG_RUNTIME_DIR` and macOS are immune — but the `/tmp/duja-<uid>`
+/// fallback, the one the row calls "a routine cron/ssh/container condition" on
+/// Linux, is usually ext4.
+///
+/// So on Linux [`PipeServer`] holds an `O_PATH` descriptor on the socket's inode
+/// until after this runs ([`pin_inode`]). A descriptor referencing an inode keeps
+/// it from being evicted, and `ext4_free_inode` only runs from
+/// `ext4_evict_inode` — so while the pin is held the number cannot return, `Q`'s
+/// rebind is *guaranteed* a different one, and the comparison is exact rather than
+/// probable. Without a pin (a non-Linux target, or an `open` that failed) the
+/// comparison degrades to what shipped before this change: very probably right.
+///
+/// An unreadable identity (either at bind or now) means the socket is already
+/// gone or unstattable, so there is nothing to unlink and nothing to risk.
+///
+/// # Why unlink at all
+///
+/// This is a lot of machinery for a tidy-up, and the alternative — never unlink,
+/// let the next start take the stale socket over — would be simpler and equally
+/// safe. It is kept because the post-shutdown state is load-bearing for the
+/// client: with the socket gone, `dujactl` gets `NotRunning` and falls back to
+/// driving the hardware directly, which is the behaviour
+/// `connect_to_absent_socket_reports_not_running` pins. A leftover socket would
+/// answer `ECONNREFUSED` and reach the same place today, but only by accident of
+/// how `connect` reports it.
+fn unlink_if_ours(path: &Path, ours: Option<(u64, u64)>) {
+    let Some(ours) = ours else { return };
+    let Ok(_guard) = BindLock::acquire(path) else {
+        // Cannot serialise, so cannot prove the inode is still ours. Leaving a
+        // stale socket behind is recoverable (the next start takes it over);
+        // deleting a live one is not.
+        return;
+    };
+    if socket_identity(path) == Some(ours) {
+        let _ = std::fs::remove_file(path);
     }
-    Ok(())
+}
+
+/// The path of the lock guarding a socket's bind/unlink sequence.
+fn bind_lock_path(socket: &Path) -> PathBuf {
+    let mut name = socket.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// An exclusive advisory lock serialising the whole bind/unlink sequence across
+/// instances.
+///
+/// The lock file is a sibling of the socket inside the same `0700` directory, so
+/// it inherits that directory's access barrier and needs no separate one. It is
+/// deliberately **not** the single-instance lock file: that one is held for the
+/// whole process lifetime, so reusing it would leave the first instance's own bind
+/// waiting on a lock it already holds — which, since this poll is bounded, means
+/// failing to start after [`LOCK_WAIT`] rather than hanging, but failing all the
+/// same.
+///
+/// **The lock file is never unlinked**, including on shutdown, and that is load
+/// bearing rather than laziness. `flock` locks an *inode*, not a path: if one
+/// instance held the lock while another unlinked the file and recreated it, the
+/// second would take an uncontended lock on a brand-new inode and both would
+/// believe they had exclusive access — reintroducing the race from one layer
+/// down. An empty `0600` file inside an already-private directory is the cheap
+/// side of that trade.
+///
+/// # Bounded, not blocking
+///
+/// A holder does at most a probe, an unlink and two binds, so honest contention
+/// clears in microseconds and [`LOCK_WAIT`] is enormous by comparison. The reason
+/// it is bounded at all is that `flock` has no notion of *whose* lock it is
+/// waiting on: an unbounded `LockExclusive` would hang startup forever on a lock
+/// file another user planted and held. `unix_dir`'s writable-directory refusal
+/// makes that unreachable, and this makes it survivable — the same
+/// defence-in-depth every other wait in this module has.
+struct BindLock {
+    /// Held open for the lifetime of the guard; closing it releases the `flock`.
+    _file: std::fs::File,
+}
+
+impl BindLock {
+    /// Take the exclusive lock guarding `socket`'s bind sequence.
+    fn acquire(socket: &Path) -> Result<Self, IpcTransportError> {
+        let path = bind_lock_path(socket);
+        let file = crate::unix_dir::open_private_file(&path)
+            .map_err(|e| IpcTransportError::Io(format!("cannot open {}: {e}", path.display())))?;
+
+        let deadline = Instant::now().checked_add(LOCK_WAIT);
+        loop {
+            match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => return Ok(BindLock { _file: file }),
+                Err(e) if e == rustix::io::Errno::WOULDBLOCK || e == rustix::io::Errno::AGAIN => {}
+                Err(e) => {
+                    return Err(IpcTransportError::Io(format!(
+                        "cannot lock {}: {e}",
+                        path.display()
+                    )));
+                }
+            }
+            // `is_none_or`, deliberately the opposite of `connect_named`'s
+            // `is_some_and` on the same shape: there a `None` deadline (an
+            // `Instant` overflow) means "no timeout", here it means "give up now".
+            // Fail-closed is right for a lock — the alternative is an unbounded
+            // wait, which is the thing this loop exists to prevent. Unreachable
+            // either way: `Instant` is boot-relative on both targets.
+            if deadline.is_none_or(|d| Instant::now() >= d) {
+                return Err(IpcTransportError::Io(format!(
+                    "{} was held by another process for longer than {LOCK_WAIT:?}",
+                    path.display()
+                )));
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+}
+
+/// Prepare `path`'s parent as a private `0700` directory Duja owns.
+///
+/// The parent is always a directory dedicated to Duja (`.../duja/` or
+/// `/tmp/duja-<uid>/`), never a shared system directory, because every resolved
+/// path nests the socket under such a component.
+///
+/// This used to create the directory recursively and `chmod` it, which accepted a
+/// pre-existing directory belonging to anybody; it now refuses one that is not
+/// ours and private. See [`crate::unix_dir`] for the rule and for how durable the
+/// check is.
+fn prepare_socket_dir(path: &Path) -> io::Result<()> {
+    match path.parent() {
+        Some(parent) => crate::unix_dir::ensure_private_dir(parent),
+        None => Ok(()),
+    }
 }
 
 /// Set the permission bits of `path` to `mode`.

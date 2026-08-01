@@ -57,12 +57,17 @@ windows = { version = "0.62", default-features = false, features = [
 # -- Unix backends (macOS today, Linux at P7) -------------------------------
 [target.'cfg(unix)'.dependencies]
 # IPC unix-domain-socket transport (P6 macOS / P7 Linux): the sockets and
-# permissions come from `std::os::unix`; `libc` is confined to the peer-credential
-# seam (getpeereid / SO_PEERCRED) and the euid/uid lookups.
+# permissions come from `std::os::unix`. `libc` covers two things std does not
+# expose — the peer-credential seam (`getpeereid` / `SO_PEERCRED`), which is the
+# only `unsafe` on this side, and the `open` flags and errno values `unix_dir`
+# needs (`O_NOFOLLOW`, `O_DIRECTORY`, `ELOOP`, `ENOTDIR`), which it passes
+# through safe `OpenOptions::custom_flags`.
 libc = { workspace = true }
-# Single-instance guard: an advisory `flock` on a per-user lock file, plus the
-# uid that names the `/tmp` runtime-dir fallback. rustix's safe wrappers keep
-# `single_instance` free of `unsafe`.
+# The safe wrappers for the file-descriptor calls std has no equivalent of, which
+# is what keeps all three of these modules free of `unsafe`: `flock` for the
+# single-instance guard and the IPC bind lock, `fchmod` for `unix_dir`'s directory
+# repair, and `geteuid`/`getuid` for the ownership checks and the `/tmp`
+# runtime-dir fallback name.
 rustix = { workspace = true }
 # Resolves the macOS Application Support data dir (lock file) and the home dir
 # (LaunchAgent plist).

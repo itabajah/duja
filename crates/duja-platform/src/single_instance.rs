@@ -21,8 +21,17 @@
 //! when the last file description closes *or the process dies*, so a crash never
 //! leaves a stuck lock — the next launch takes over the (still-present) lock file.
 //! The lock lives in the macOS Application Support data dir, else
-//! `$XDG_RUNTIME_DIR/duja/`, else `/tmp/duja-<uid>/`; each directory is created
-//! `0700`. `rustix`'s safe wrappers keep this module free of `unsafe`.
+//! `$XDG_RUNTIME_DIR/duja/`, else `/tmp/duja-<uid>/`. That directory is created
+//! `0700` or else **verified** through the crate's `unix_dir` module, which
+//! refuses one another user owns or can write to; the lock file itself is opened
+//! `O_NOFOLLOW` and checked to be ours. (Named rather than linked: this module
+//! doc compiles on Windows too, where `unix_dir` does not exist, and an
+//! intra-doc link to it fails the `rustdoc -D warnings` lane.) When the directory is refused the guard degrades to
+//! "first" rather than refusing to launch — running is better than not, and the
+//! point of the check is that the lock is never taken inside a directory Duja
+//! cannot vouch for. The cost of degrading is a second instance, which the IPC
+//! socket bind then refuses anyway. `rustix`'s safe wrappers keep this module free
+//! of `unsafe`.
 //!
 //! On any other target the guard is a no-op that always reports "first".
 
@@ -247,7 +256,7 @@ mod imp {
 #[cfg(unix)]
 mod unix {
     use std::fmt;
-    use std::fs::{File, OpenOptions};
+    use std::fs::File;
     use std::path::{Path, PathBuf};
 
     use rustix::fs::{FlockOperation, flock};
@@ -300,20 +309,20 @@ mod unix {
             };
 
             if let Some(parent) = path.parent()
-                && ensure_dir_0700(parent).is_err()
+                && crate::unix_dir::ensure_private_dir(parent).is_err()
             {
-                // Cannot create the lock directory: degrade to "first".
+                // The lock directory is missing and uncreatable, or it exists and
+                // belongs to someone else. Degrade to "first": running is better
+                // than refusing to start, and the point of the check is that the
+                // lock is *not* taken inside a directory Duja cannot vouch for.
+                // The cost of degrading is a second instance, which the socket
+                // bind then refuses anyway.
                 return not_first;
             }
 
             // Opened only to obtain a descriptor to `flock`; contents are never
-            // read or written, so `truncate(false)` leaves any bytes untouched.
-            let Ok(file) = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .open(path)
-            else {
+            // read or written, so the open leaves any bytes untouched.
+            let Ok(file) = crate::unix_dir::open_private_file(path) else {
                 // Cannot open the lock file: degrade to "first".
                 return not_first;
             };
@@ -340,15 +349,6 @@ mod unix {
         pub fn already_running(&self) -> bool {
             self.already_running
         }
-    }
-
-    /// Create `dir` (and parents) if absent, with `0700` permissions.
-    fn ensure_dir_0700(dir: &Path) -> std::io::Result<()> {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
     }
 
     /// The full path to the per-user lock file, or `None` with no home/runtime dir.
@@ -384,9 +384,23 @@ mod unix {
     mod tests {
         use super::*;
 
-        /// A unique per-process lock path under the temp dir.
+        /// A unique per-process lock path, inside a directory of its own.
+        ///
+        /// The nesting is load-bearing, not tidiness. This used to drop the lock
+        /// file straight into `std::env::temp_dir()`, which made that shared
+        /// directory the one `acquire_at` handed to `ensure_private_dir` — and on
+        /// a GitHub ubuntu runner `TMPDIR` is unset, so it was `/tmp`: root-owned,
+        /// refused, and every guard degraded to "first". The test then failed on
+        /// its own second assertion.
+        ///
+        /// Production never has that shape. `lock_path` is always
+        /// `lock_dir()/duja.lock`, and `lock_dir` always resolves a Duja-specific
+        /// leaf (`$XDG_RUNTIME_DIR/duja`, `/tmp/duja-<uid>`, or the macOS
+        /// bundle-id directory). The test now mirrors it.
         fn temp_lock_path(tag: &str) -> PathBuf {
-            std::env::temp_dir().join(format!("duja-si-{}-{tag}.lock", std::process::id()))
+            std::env::temp_dir()
+                .join(format!("duja-si-{}-{tag}", std::process::id()))
+                .join(LOCK_FILE)
         }
 
         #[test]
@@ -429,7 +443,7 @@ mod unix {
                 "the stale lock file is taken over after the owner releases"
             );
             drop(fresh);
-            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
         }
 
         #[test]
