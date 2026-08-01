@@ -6,7 +6,10 @@ PRs closed it out. The blocker was real and had been shipping since the macOS DD
 work began: every Apple Silicon DDC/CI request was malformed, so no external monitor
 on an M-series Mac could be read or driven. `m6-macos` is tagged. **The release is
 deliberately held** — no v0.2.0 until someone has launched `Duja.app` on real
-hardware)._
+hardware. One post-gate item: a long-standing CI flake in `tests/engine.rs` finally
+fired on `main` and is fixed in `#113` — though the first draft of that fix
+mis-diagnosed it, and the review that caught it is written up under
+[After the gate](#after-the-gate--a-ci-flake-and-a-confident-wrong-diagnosis-113))._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -1257,6 +1260,64 @@ carrier, the `mac/mod.rs` token-assembly hoist (a swap there is proven undetecta
 — it leaves the suite green), mixed-DPI flyout placement (whose "needs hardware"
 deferral the gate *disproved* from pinned `dpi` source, so it is now a real
 candidate), and the unix-socket hardening that became live on macOS. All carry rows.
+
+### After the gate — a CI flake, and a confident wrong diagnosis (`#113`)
+
+The push build for `#112` — the docs-only commit that closed this phase — went red
+on `test (windows-latest)`: `worker_panic_does_not_kill_engine` missed a 2 s wait,
+taking 2.850 s. Re-running the identical commit `f96e4bd` turned it green at
+0.069 s. That is the **fourth** time this test has gone red on CI; three of the
+four were re-run unchanged and all three passed. The fourth (run 30504679809,
+2026-07-30, 2.804 s) was never re-run — which is worth stating, because it is the
+only one of the four whose outcome could have contradicted the environmental
+reading, and it went unrecorded until review counted the runs.
+
+What settled it was a test with no panic in it: in the same red job,
+`loop_time_assembly`'s zero-duration single-shot went 0.363 s → **4.308 s** →
+0.777 s on the re-run, while the median test ran at 1.04x its green time. A stall
+that hits an unrelated event-loop test twelvefold is environmental.
+
+The first draft of `#113` said otherwise, and it is worth recording why. It
+diagnosed the failure as the panic runtime symbolizing a backtrace inside the
+worker's `catch_unwind` ahead of the ack — a real cost, correctly located, and
+removed by that PR. But it then asserted `RUST_BACKTRACE=1` was "the single
+environmental difference" between 3,014 passing local runs and the red CI run.
+[`docs/debt.md`](debt.md)'s own row — written by the same author two commits
+earlier — already recorded that **960 of those 3,014 runs had `RUST_BACKTRACE=1`
+and passed**, and that the symbolization measures 30–200 ms against multi-second
+failures. Five green Windows runs paid the same cost at 0.057–0.184 s. The review
+blocked it on exactly that arithmetic.
+
+So the fix shipped as two separable things, which is how the debt row had
+prescribed it all along: `LIVENESS_BUDGET` (10 s) for **every** positive wait in
+`tests/engine.rs` — the half that actually addresses a runner stall — and the
+panic-hook mute as a ~50 ms cleanup that also de-noises the log. The **14**
+negative waits keep their own short literals, since an assertion of absence
+elapses in full every run. The hook keeps each muted panic's thread, message and
+location, because that header is what made the cost measurable in the first place.
+
+The generalisable lesson, and the reason this is in STATUS rather than only in the
+ledger: **a mechanism you can measure is not thereby the cause.** The measurement
+was sound, the location was right, the fix was worth making — and the causal claim
+was off by a factor of ~15–50, refuted by the author's own prior notes. The free
+experiment that settles environment-vs-code was a re-run button, and it was not
+pressed until review demanded it.
+
+The corrected version then failed a second review, and the second lesson is
+narrower but cheaper to act on: **quantifiers were asserted without counting.**
+"the third red run" (four), "the one negative wait" (fourteen), "all 53 positive
+waits" (53 of ~76), "reached from 14 tests" (13 call sites across 10), and a
+`logging.rs` hazard called live when the two tests are in different binaries. Two
+of those a `grep -c` settles outright; the red-run count needed the GitHub API,
+and the binary claim needed the PDB sizes. A sixth, the PDB figure itself, was
+made *less* accurate by a "correction" that silently compared MiB against MB.
+Worth noting how the last one arrived: `grep -c` is what produced "14 tests", by
+counting the function's own definition line — the checking tool used carelessly is
+its own failure mode.
+The counting error was not cosmetic: the omitted red run is the only one of the
+four that was never re-run, so the one data point that could have falsified the
+environmental reading was also the one missing from the record. Both rounds share
+a root — writing the sentence before doing the arithmetic that would check it.
 
 ## P5 gate results
 

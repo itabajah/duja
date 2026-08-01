@@ -272,14 +272,23 @@ mod tests {
     fn panic_hook_leaves_a_crash_record_on_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(CRASH_FILE);
-        // Save the current hook and restore it after, so this test does not leak
-        // its hook into any sibling test sharing the process.
+        // Take the current hook and put it back at the end, so this test does not
+        // leak its own hook into a sibling test sharing the process. `take_hook`
+        // leaves the default installed, which is what `install_panic_hook` then
+        // captures and chains to.
+        //
+        // This used to `set_hook(saved)` immediately (a no-op round trip) and end
+        // with a bare `take_hook()`, which restores the *default* rather than
+        // whatever was there — so the comment promised an isolation the code did
+        // not provide. Still latent: nothing else in this binary installs a hook,
+        // and `tests/engine.rs`, which now does, compiles into a different test
+        // binary (`duja-app::engine` vs `duja-app::bin/duja`) and so a different
+        // process. Fixed because the code should do what its comment says, not
+        // because anything is currently broken by it.
         let saved = std::panic::take_hook();
-        std::panic::set_hook(saved);
         install_panic_hook(Some(path.clone()));
         let result = std::panic::catch_unwind(|| panic!("simulated field crash"));
-        // Restore the default hook.
-        let _ = std::panic::take_hook();
+        std::panic::set_hook(saved);
 
         assert!(result.is_err());
         let contents = fs::read_to_string(&path).expect("crash record must exist");
