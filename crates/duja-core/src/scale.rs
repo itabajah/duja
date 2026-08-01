@@ -1,10 +1,25 @@
 //! Scaling a logical extent onto a device-dependent unit.
 //!
-//! One three-line calculation that two crates need and neither can borrow from
-//! the other: `duja-ui` converts a logical window extent to **physical pixels**
-//! for a winit inner-size request, and `duja-app` converts one to **anchor
-//! units** for tray placement. They had byte-identical copies (`dpi::physical`
-//! and `positioning::anchor_dim`), which is what this module drains.
+//! One three-line calculation two crates need: `duja-ui` converts a logical
+//! window extent to **physical pixels** for a winit inner-size request, and
+//! `duja-app` converts one to **anchor units** for tray placement. They had
+//! copies identical in everything but local names (`dpi::physical` and
+//! `positioning::anchor_dim`), which is what this module drains.
+//!
+//! It lives in `duja-core` because that is the crate *both* depend on. (One
+//! direction would have worked — `duja-app` depends on `duja-ui`, so `physical`
+//! could have been made public and called across — but that points the arrow the
+//! wrong way: a tray-geometry helper has no business living in the UI crate, and
+//! `duja-ui` could not have borrowed in the other direction at all.)
+//!
+//! # A related guard this does *not* unify
+//!
+//! The degenerate-factor guard below (`is_finite() && >= 0.1`) also appears in
+//! `positioning::flyout_height_cap`, in `dpi`'s `Resized` arm, and — canonically,
+//! per ADR-0021 §4 — as `duja_platform::geometry::sane_scale`, which both anchor
+//! factors route through. Those are **not** folded in here: `duja-core` cannot
+//! depend on `duja-platform`, so picking one owner is a design decision rather
+//! than a hoist. `docs/debt.md` records it.
 //!
 //! # This function is unit-agnostic, deliberately
 //!

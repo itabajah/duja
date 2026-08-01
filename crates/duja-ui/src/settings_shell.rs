@@ -633,17 +633,7 @@ fn to_index(index: i32) -> usize {
     usize::try_from(index).unwrap_or(usize::MAX)
 }
 
-/// Clamp and round a Slider's `f32` value into a `0..=100` percent (floor slider
-/// is capped further to the view-model's max).
-fn clamp_pct(value: f32) -> u8 {
-    let clamped = value.clamp(0.0, 100.0).round();
-    // RATIONALE: `clamped` is in 0.0..=100.0 and integral after round(), so the
-    // cast neither truncates a meaningful fraction, loses a sign, nor overflows
-    // u8 — clippy's cast lints cannot see the numeric bounds.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let pct = clamped as u8;
-    pct
-}
+use crate::shell::clamp_pct;
 
 #[cfg(test)]
 mod tests {
@@ -1084,9 +1074,16 @@ mod binding_tests {
     // macOS — left the whole suite green. Every other fixture in the crate passes
     // `None`, so the `Text` was instantiated by no test at all.
     //
-    // Both terms of the guard and the `@tr` interpolation are driven here, through
-    // the real `.slint`. The cap is 62 rather than 50 for the reason the pure tests
-    // use 62: a 50 fixture agrees with the hardcoded string this replaced.
+    // Both terms of the guard are driven here, through the real `.slint`. There is
+    // no `@tr` interpolation left to drive: the P6 gate removed the figure from the
+    // copy, because a percentage beside a slider reads as a slider position and the
+    // cap is a gamma *factor*. `gamma-cap-pct` survives as the gate only, which is
+    // why the assertions below are about presence and about the caption carrying no
+    // digit — a re-interpolation is the regression to catch.
+    //
+    // The cap fixture stays 62 rather than 50 so it cannot coincide with Windows'
+    // real `MIN_ACCEPTED_GAMMA`-derived value, which is the property that let an
+    // earlier hardcoded string pass.
     #[test]
     fn the_gamma_cap_caption_renders_only_where_there_is_a_cap_to_disclose() {
         i_slint_backend_testing::init_no_event_loop();
@@ -1134,6 +1131,17 @@ mod binding_tests {
             "the cap caption must not quote a figure the user will read as a \
              slider position, got {caption:?}"
         );
+        // The prefix the helper matches on is 21 characters; without this, a
+        // caption truncated to "Gamma can only darken." would pass. The
+        // disclosure's whole point is naming what the overlay cannot cover, so
+        // pin that rather than only the lead-in.
+        for owed in ["overlay", "full-screen", "pointer"] {
+            assert!(
+                caption.contains(owed),
+                "the cap caption must still say what the substitute cannot do \
+                 (missing {owed:?}), got {caption:?}"
+            );
+        }
 
         // An uncapped OS (macOS, and every other non-Windows target): the OS accepts
         // the whole range, the overlay substitution never happens, and a caption
