@@ -26,17 +26,33 @@ Verified with `cargo tree --target x86_64-unknown-linux-gnu -i zbus -e normal`:
 ```
 zbus v5.17.0
 └── i-slint-backend-winit v1.17.1
-    ├── duja-ui  (direct dependency)
-    └── i-slint-backend-selector → slint
+    ├── duja-ui v0.1.5 (crates/duja-ui)
+    │   └── duja-app v0.1.5 (crates/duja-app)
+    └── i-slint-backend-selector v1.17.1
+        └── slint v1.17.1
+            ├── duja-app v0.1.5 (crates/duja-app)
+            └── duja-ui v0.1.5 (crates/duja-ui) (*)
 ```
 
 and `-i async-io -e normal`:
 
 ```
 async-io v2.6.0
-├── async-process v2.5.0 → zbus v5.17.0 → i-slint-backend-winit …
+├── async-process v2.5.0
+│   └── zbus v5.17.0
+│       └── i-slint-backend-winit v1.17.1
+│           ├── duja-ui v0.1.5 (crates/duja-ui)
+│           │   └── duja-app v0.1.5 (crates/duja-app)
+│           └── i-slint-backend-selector v1.17.1
+│               └── slint v1.17.1
+│                   ├── duja-app v0.1.5 (crates/duja-app)
+│                   └── duja-ui v0.1.5 (crates/duja-ui) (*)
+├── async-signal v0.2.14
+│   └── async-process v2.5.0 (*)
 └── zbus v5.17.0 (*)
 ```
+
+(Absolute paths shortened to repo-relative; otherwise verbatim.)
 
 So on Linux, **`zbus` 5.17 and the `async-io` executor are already normal
 (non-dev) dependencies of the shipping binary**, pulled by the Slint winit backend
@@ -62,8 +78,18 @@ systems that are not running systemd at all.
   which comes from the kernel uevent netlink socket and needs no D-Bus at all.
 
 **Do not** add a D-Bus dependency for display hot-plug. `NETLINK_KOBJECT_UEVENT`
-is readable with the `libc` already in `duja-platform`, needs no libudev and no
-session bus, and works in every one of the degraded environments above.
+is readable with the `libc` already declared under `duja-platform`'s
+`[target.'cfg(unix)'.dependencies]`, needs no libudev and no session bus, and
+works in every one of the degraded environments above. The kernel registers that
+multicast group `NL_CFG_F_NONROOT_RECV`, so an unprivileged process may listen.
+
+This **reverses a plan of record** rather than merely choosing between options,
+and it is called out here because the old plan is still written down:
+`duja-platform`'s crate docs say the Linux event source is a *"udev `drm`
+monitor"*. That would mean libudev, a C library and a system dependency, to
+receive the same netlink messages `libc` can read directly. The module doc is
+updated in the wave that implements the pump; until then the two disagree and
+this ADR is the newer decision.
 
 ## Consequences
 
@@ -86,7 +112,12 @@ session bus, and works in every one of the degraded environments above.
   `zbus` major it resolves today, and a Slint upgrade that moves `zbus` becomes a
   two-crate change. Worth a line in the release checklist rather than a surprise
   during a bump.
-- **Unverified on hardware.** logind's `SetBrightness` has never been called by
-  this project, and a GitHub runner has no session bus and no backlight device.
-  CI can test the fallback selection and the pure error mapping; the D-Bus calls
+- **Unverified on hardware, including two claims this ADR rests on.** logind's
+  `SetBrightness` has never been called by this project, so *"works unprivileged
+  for the active session"* is taken from its documented contract and not from
+  observation; likewise that the `drm` uevents carry what hot-plug detection needs.
+  Both are third-party claims of the same class ADR-0011 declines to encode, and
+  both are cheap to check on the VM/WSL environment before the code that depends
+  on them ships. A GitHub runner has no session bus and no backlight device, so CI
+  can test the fallback selection and the pure error mapping only; the D-Bus calls
   themselves ship 🧪.

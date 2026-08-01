@@ -30,12 +30,35 @@ The rest of that backend's Linux behaviour is a poor fit independently:
   `libappindicator3` or `libayatana-appindicator3`.
 - Documented Linux limits: `tooltip` is *"Unsupported"*, and *"once a menu is set,
   it cannot be removed"*.
-- `deny.toml` currently carries **8 RUSTSEC advisory ignores**
-  (`RUSTSEC-2024-0370/0412/0413/0415/0416/0418/0419/0420`) for the unmaintained
-  gtk-rs GTK3 bindings family and `proc-macro-error`. The comment there already
-  says they are *"pulled ONLY by tray-icon's linux backend"* and pending this ADR.
-  `gtk`, `gtk-sys`, `gtk3-macros`, `libappindicator` and `libappindicator-sys` are
-  in `Cargo.lock` today.
+### The supply-chain argument for ksni does not exist, and the first draft of this ADR got it backwards
+
+The obvious argument is that `deny.toml`'s **8 RUSTSEC advisory ignores**
+(`RUSTSEC-2024-0370/0412/0413/0415/0416/0418/0419/0420`, the unmaintained gtk-rs
+GTK3 family plus `proc-macro-error`) go away by dropping GTK. That is false, and
+it is worth writing down because the mechanism is not obvious.
+
+**Duja does not depend on `tray-icon` on Linux at all.** `duja-app/Cargo.toml`
+declares it under `cfg(windows)` and `cfg(target_os = "macos")` only, and
+`cargo tree --target x86_64-unknown-linux-gnu -i gtk -e normal` prints *"nothing
+to print"*. There is no Linux tray today; P7 **adds** one. Choosing ksni therefore
+removes nothing.
+
+The GTK family is in the *cargo-deny* graph for an unrelated reason:
+`deny.toml`'s `[graph]` sets `all-features = true` with no `targets` key, so
+cargo-deny evaluates every target, and `tray-icon`'s **default** features
+(`default = ["libxdo", "gtk"]`, where `gtk = ["muda/gtk", "dep:libappindicator"]`)
+declare `libappindicator` for Linux-family targets. `tray-icon` stays for Windows
+and macOS after this decision, so those edges — and the 8 ignores — would survive
+the swap untouched.
+
+The lever that does work is `default-features = false`, and it is available now,
+independent of this ADR. Verified by experiment on this branch and reverted: the
+whole GTK family (`gtk`, `gtk-sys`, `gtk3-macros`, `libappindicator`,
+`libappindicator-sys`, `proc-macro-error`) **leaves `Cargo.lock` entirely**, all
+8 ignores can be deleted with `cargo deny check advisories` still reporting
+`advisories ok`, and the Windows build is unaffected (`clippy --workspace
+--all-targets --all-features -D warnings` clean, 1049/1049 nextest). It lands as
+its own change rather than inside this decision, because it is not one.
 
 `ksni` 0.3.6 implements the freedesktop **StatusNotifierItem** spec directly over
 D-Bus, with no GTK and no C library. Its cost in this workspace is unusually low:
@@ -57,10 +80,13 @@ Two facts about `ksni` that a summary would get wrong, so they are stated here:
 `["async-io", "blocking"]`.
 
 `async-io` rather than `tokio` because `tokio` is **not** in the graph at all
-(`grep -c '^name = "tokio"$' Cargo.lock` → 0) while `async-io`, `async-executor`,
-`async-lock` and `futures-lite` all **are**, pulled by `zbus` for Slint. Selecting
-`async-io` therefore adds exactly two crates to the Linux graph: `ksni` itself and
-`task-local`. Selecting `tokio` would add a whole runtime.
+(`grep -c '^name = "tokio"$' Cargo.lock` → 0) while every crate ksni's `async-io`
+feature names — `async-io`, `async-lock`, `async-executor`, `futures-lite`,
+`futures-channel` — **is** already there, pulled by `zbus` for Slint. The only
+addition is `task-local`, so the Linux graph grows by `ksni` and `task-local`.
+Selecting `tokio` would add a whole runtime instead. (`task-local` 0.1 is not in
+the local registry cache, so its own transitive deps are unverified; "two crates"
+assumes it is a leaf.)
 
 `blocking` so Duja's own code stays synchronous, in keeping with ADR-0005.
 
@@ -71,15 +97,18 @@ would imply a judgement about the crate rather than about the licence.
 Introduce a small tray seam in `duja-app` so `AppState` stops naming a concrete
 backend. It currently holds `tray_icon::TrayIcon`, `tray_icon::menu::Menu` and
 `tray_icon::menu::MenuItem` directly (`bin_support/tray/state.rs`), which is
-already recorded in `docs/debt.md` as a structural constraint — the same one that
-makes `AppState` unbuildable off the Slint main thread. P7 is when it acquires a
-second implementation and therefore has to earn the seam.
+already recorded in `docs/debt.md` as a structural constraint — there the stated
+consequence is that `AppState` cannot be *constructed in a test*, because of the
+Win32 tray constructor and two live Slint shells. P7 is when it acquires a second
+implementation and therefore has to earn the seam.
 
 ## Consequences
 
-- **8 advisory ignores can be deleted** from `deny.toml`, and the GTK3 family
-  leaves `Cargo.lock`. That is the single largest supply-chain improvement
-  available in P7 and it is verifiable in CI rather than asserted.
+- **No supply-chain change, in either direction.** The 8 advisory ignores are
+  neither created nor removed by this decision (see above); they are a `deny.toml`
+  configuration artefact of `tray-icon`'s *default features* on a
+  Windows/macOS-only dependency. What this decision does buy is that Duja never
+  *adds* GTK to the Linux graph, which the alternative would have done.
 - **No new system-library requirements on Linux.** Nothing to `apt install`,
   which matters for a tarball distribution (wave 6).
 - **Two tray implementations to keep behaviourally aligned**, with only one of
@@ -96,8 +125,11 @@ second implementation and therefore has to earn the seam.
   discriminate between the options — but it must be disclosed in the README rather
   than discovered by users. Recorded again in ADR-0011, which faces the same
   GNOME-shaped hole for dimming.
-- **Untested on hardware.** No Linux machine is available (the maintainer's
-  hardware is Windows; see `docs/STATUS.md`), and a headless CI runner has no SNI
-  host, so CI can compile this and exercise the pure parts but cannot show a tray
-  icon appearing. The Linux tray ships as 🧪 in the support matrix, exactly as
-  macOS did, until community confirmation.
+- **Untested on hardware at the time of writing.** The maintainer's hardware is
+  Windows, and a GitHub runner has no StatusNotifierItem host, so CI can compile
+  this and exercise the pure parts but cannot show a tray icon appearing. This is
+  narrower than "no Linux is available": `docs/STATUS.md` §3 plans P7 as
+  *VM-assisted*, and a WSL distribution is being set up, so a Linux **runtime**
+  will exist — what will still be missing is a desktop session with an SNI host,
+  which is what a tray needs. The Linux tray ships as 🧪 in the support matrix,
+  exactly as macOS did, until community confirmation on a real desktop.

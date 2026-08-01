@@ -3,11 +3,14 @@
 - Status: accepted
 - Date: 2026-08-01
 
-> The ADR index listed this as *"pending (P7 spike)"*. **No spike was run**, and
-> one would not have helped: a spike needs a Linux machine and several desktops to
-> be worth anything, and the project has neither. What replaced it is a decision
-> that does not require knowing the answer — probe the session instead of encoding
-> a belief about it — which is the shape a spike would have been used to justify.
+> The ADR index listed this as *"pending (P7 spike)"* and `docs/STATUS.md` §3 says
+> *"GNOME Wayland dimming spike first"*. **No spike was run before this decision**,
+> and that is a deliberate reordering rather than a skipped step: a spike answers
+> "what does compositor X support today", and this ADR's whole point is that Duja
+> should never encode that answer. The spike is still worth running — on the
+> VM/WSL environment STATUS.md §3 anticipates — but as *verification of the probe*,
+> against real compositors, not as an input to the decision. STATUS.md is updated
+> to say so rather than left contradicting this.
 
 ## Context
 
@@ -26,12 +29,14 @@ A name table is the wrong design here for reasons that do not depend on which
 compositor supports what today:
 
 - It is a claim about third-party software that Duja cannot verify and that goes
-  stale silently. This project has already shipped a whole macOS DDC backend where
-  *every request was malformed* and the suite stayed green (`#106`); a hardcoded
-  compatibility table has the same failure signature — confidently wrong, and
-  green.
-- `XDG_CURRENT_DESKTOP` is set by session scripts, forged by nesting, absent under
-  bare `Xwayland`, and lists multiple values. Identity is not capability.
+  stale silently. This project has already shipped a macOS DDC backend whose
+  **Apple Silicon arm** malformed every request while the suite stayed green
+  (`#106`); a hardcoded compatibility table has the same failure signature —
+  confidently wrong, and green.
+- `XDG_CURRENT_DESKTOP` is set by the session, so it is unset wherever no session
+  script set it (TTY launches, bare compositors, containers), inherited unchanged
+  into nested sessions, and colon-separated multi-valued. Identity is not
+  capability.
 - It cannot represent the case that actually matters most in practice: a
   compositor that gains support in a later release. A table would keep refusing.
 
@@ -72,21 +77,29 @@ belief about a desktop.
 
 The pure mapping — environment and registry contents in, capability report out —
 lives in a `#[cfg(any(test, target_os = "linux"))]` module so it is unit-tested on
-**every** CI lane, in the pattern `mac_events`, `mac_geom` and `correlate` already
-follow. That is deliberately the largest testable surface this feature has,
+**every** CI lane. That is the gating `duja-platform`'s `mac_events` and
+`duja-ddc`'s `correlate` use (`#[cfg(any(test, target_os = "macos"))]` and
+`#[cfg(any(windows, test))]` respectively). Where a module has no FFI at all the
+project goes further and compiles it unconditionally — `duja-dimmer`'s `plan` and
+`mac_geom` — which would be better still here if the Wayland types allow it.
+Either way this is deliberately the largest testable surface the feature has,
 because the parts below it (real X11 windows, real `wl_surface`s) cannot run on a
-headless runner at all.
+headless runner as CI is configured.
 
 ## Consequences
 
-- **GNOME Wayland reports "software dimming unavailable" without being named.**
-  Mutter advertises neither `wlr` protocol, so the registry probe produces that
-  answer on its own. If Mutter ever adds them, or a user runs a compositor that
-  already has them, Duja works with no code change and no release.
+- **A session that advertises neither protocol reports "software dimming
+  unavailable" without any compositor being named in Duja's code.** The
+  expectation behind the README's existing GNOME-Wayland note is that Mutter
+  advertises neither — but that expectation is exactly the kind of claim this ADR
+  refuses to encode, so it is recorded here as *believed, unverified, and never
+  relied on*. If it is wrong, or becomes wrong, the probe is already right and no
+  release is needed.
 - **Every combination is representable**, including ones a table would not
-  anticipate: layer-shell without gamma-control (KWin's Wayland session is exactly
-  this shape), gamma without an overlay, and X11 sessions on a compositor whose
-  Wayland session supports neither.
+  anticipate: layer-shell without gamma-control, gamma without an overlay, and X11
+  sessions on a compositor whose Wayland session supports neither. Deliberately
+  stated without naming which compositors are in which state today; that is the
+  spike's job to report, not this ADR's to assert.
 - **Hardware control is unaffected and must be said so in the UI.** A display with
   DDC or a backlight is fully controllable on GNOME Wayland; only the sub-floor
   software layer is missing. The capability report is per-mechanism precisely so
@@ -96,11 +109,17 @@ headless runner at all.
   applies, gated on a plumbed value rather than a hardcoded string. The Linux
   overlay-unavailable case is the same problem and should reuse it rather than
   invent a second convention.
-- **This decides detection, not implementation.** The X11 and Wayland backends are
-  waves 4a and 4b, and each will need its own protocol plumbing; `wlr-layer-shell`
-  and `wlr-gamma-control` are not in `wayland-protocols` proper and the crate
-  choice for them is deferred to that wave, when the code that consumes them
-  exists to judge it.
-- **Untestable end-to-end here.** No Linux hardware, and a headless runner has
-  neither an X server nor a compositor. CI can prove the mapping and the refusal
-  logic; it cannot prove an overlay appears. Ships 🧪 until community confirmation.
+- **This decides detection, not implementation** — but the protocol bindings are
+  not a cost. Both `wlr` protocols live in `wayland-protocols-wlr`, and that crate
+  (0.3.12) plus `wayland-client` (0.31.14) are **already normal, non-dev
+  dependencies of the Linux build**, arriving through
+  `winit → smithay-client-toolkit → i-slint-backend-winit`. The first draft of this
+  ADR deferred "the crate choice" to a later wave; there is nothing to choose. The
+  X11 side is a genuinely open question and stays deferred.
+- **Not testable end-to-end in CI as configured.** A GitHub runner has no X server
+  and no compositor by default, so CI proves the mapping and the refusal logic but
+  not that an overlay appears. That is a scoping decision rather than a hard limit
+  — `Xvfb`, and a headless `weston` or `cage`, are installable on `ubuntu-latest`,
+  and doing so is the obvious way to raise coverage in wave 4 if the pure layer
+  turns out not to catch enough. Ships 🧪 until community confirmation regardless,
+  since a virtual display says nothing about a real desktop.

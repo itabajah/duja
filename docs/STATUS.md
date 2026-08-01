@@ -1439,7 +1439,9 @@ exists, and clicking either opens the releases page.
 
 ### 3. Phases
 - **P6 macOS** (hardware-blind: CI runners + community verification),
-  **P7 Linux** (VM-assisted; GNOME Wayland dimming spike first),
+  **P7 Linux** (VM/WSL-assisted; the GNOME Wayland dimming spike is now
+  verification of ADR-0011's runtime probe rather than an input to it, so it
+  follows the decision instead of preceding it),
   **P8 hardening** → fuzz burn-in, 72 h soak, packaging, size trims, 1.0.
 
 ## Notes & gotchas for whoever continues
