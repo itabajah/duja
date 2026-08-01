@@ -62,6 +62,12 @@ mod win;
 #[cfg(target_os = "macos")]
 mod mac;
 
+// The pure display <-> I2C-service pairing rule the macOS backend applies. It is
+// FFI-free, so — like `correlate` — it is compiled and its tests run on every OS
+// under `test`; outside tests only the macOS backend consumes it.
+#[cfg(any(target_os = "macos", test))]
+mod mac_pairing;
+
 #[cfg(test)]
 mod fake;
 

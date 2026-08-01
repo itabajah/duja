@@ -633,47 +633,60 @@ pub(crate) struct MacDisplay {
 /// # Display ↔ I2C-service matching (the known hard part)
 /// Apple exposes no direct `CGDirectDisplayID` → `IOAVService` link. Duja pairs
 /// external displays to external AV services **positionally**, in
-/// `CGGetOnlineDisplayList` order: the common single-external-display case is
-/// unambiguous, but two or more external displays can be mis-paired because the
-/// AV-service iteration order need not track the CoreGraphics order. The
-/// documented failure mode is "a brightness change lands on the wrong monitor".
-/// MonitorControl solves this by scoring each AV service against every display's
-/// EDID attributes (vendor/product/serial/`Location`); porting that EDID-scored
-/// match is tracked as debt. The Intel path pairs framebuffers the same way.
+/// `CGGetActiveDisplayList` order (via [`active_external_display_ids`]): the
+/// common single-external-display case is unambiguous, but two or more external
+/// displays can be mis-paired because the AV-service iteration order need not
+/// track the CoreGraphics order. The documented failure mode is "a brightness
+/// change lands on the wrong monitor". MonitorControl solves this by scoring each
+/// AV service against every display's EDID attributes
+/// (vendor/product/serial/`Location`); porting that EDID-scored match is tracked
+/// as debt. The Intel path pairs framebuffers the same way.
+///
+/// **`Active`, not `Online`, and the difference bites exactly here.**
+/// `CGDirectDisplay.h`: *"With hardware mirroring, a display may be online but
+/// not necessarily active or drawable."* So on a hardware mirror this backend
+/// does not see the clone at all, while `duja-panel`'s `display_services` backend
+/// — which enumerates `CGGetOnlineDisplayList`, deliberately, to catch a built-in
+/// that is online but not the active drawable — does. The two macOS backends
+/// therefore read **different display lists**, which is why a mirror set can span
+/// them asymmetrically. The surface-token rule in [`duja_core::macos`] is what
+/// makes that safe: it is compared, never dereferenced, so a token naming a
+/// display this list omits is still a correct grouping key.
+///
+/// The *pairing* half is pure and lives in [`crate::mac_pairing`], where it is
+/// tested on every lane; only the FFI that supplies the two lists is here.
 pub(crate) fn enumerate_displays() -> Result<Vec<MacDisplay>, super::DdcError> {
     let ids = active_external_display_ids()?;
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut av = collect_external_av_services();
-    let mut framebuffers = if av.is_empty() {
+    let av = collect_external_av_services();
+    // Build the bus list first, so the pairing below is over one flat sequence
+    // whatever the architecture supplies it.
+    let buses: Vec<MacI2cBus> = if av.is_empty() {
         collect_framebuffers()
+            .into_iter()
+            .map(|framebuffer| MacI2cBus::Intel(FramebufferBus { framebuffer }))
+            .collect()
     } else {
-        Vec::new()
+        av.into_iter()
+            .map(|service| MacI2cBus::AppleSilicon(AvServiceBus { service }))
+            .collect()
     };
 
+    // Pair BEFORE filtering. A display whose EDID we cannot read still owns its
+    // slot; skipping it without spending that slot re-points every display after
+    // it, so monitor #2 gets monitor #1's service and its slider drives the wrong
+    // panel. `pair_positionally` makes that unrepresentable here — see its docs.
     let mut out = Vec::new();
-    for id in ids {
+    for (id, bus) in crate::mac_pairing::pair_positionally(ids, buses) {
+        let Some(bus) = bus else {
+            continue;
+        };
         let Some(edid) = read_edid(id) else {
             continue;
         };
         let bounds = display_bounds(id);
-        let bus = if av.is_empty() {
-            if framebuffers.is_empty() {
-                None
-            } else {
-                Some(MacI2cBus::Intel(FramebufferBus {
-                    framebuffer: framebuffers.remove(0),
-                }))
-            }
-        } else {
-            Some(MacI2cBus::AppleSilicon(AvServiceBus {
-                service: av.remove(0),
-            }))
-        };
-        let Some(bus) = bus else {
-            continue;
-        };
         out.push(MacDisplay {
             mirror: duja_core::macos::MirrorState {
                 display_id: id,
