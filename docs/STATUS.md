@@ -1,11 +1,12 @@
 # Duja — Project Status
 
-_Last updated: 2026-07-31 (P6 wave 2: the macOS backends are wired into the app
-and CLI, the tray anchor contract is settled in ADR-0021, tray construction happens
-inside the running event loop, the tray itself runs on macOS, both gamma captions
-are per-platform, the release pipeline now ships a universal `Duja.app` in a disk
-image, and a macOS built-in panel finally reports its geometry so it can be dimmed
-below its backlight's floor. Remaining for P6: the gate)._
+_Last updated: 2026-08-01 (**the P6 gate has run**. Four adversarial reviews of the
+cumulative `v0.1.5..main` diff returned three APPROVE-WITH-FIXES and one BLOCK; six
+PRs closed it out. The blocker was real and had been shipping since the macOS DDC
+work began: every Apple Silicon DDC/CI request was malformed, so no external monitor
+on an M-series Mac could be read or driven. `m6-macos` is tagged. **The release is
+deliberately held** — no v0.2.0 until someone has launched `Duja.app` on real
+hardware)._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness & display controller in Rust — a no-Electron Twinkle Tray
@@ -32,7 +33,7 @@ display control, automation, and integrations), see
 | **Internal-panel fallback fix** | **`v0.1.3` (Windows)** | ✅ shipped — the built-in panel no longer vanishes on a GPU/OEM-driven backlight |
 | **Dark rebrand + mirror/software-only** | **`v0.1.4` (Windows)** | ✅ shipped — the dark brand identity plus the two laptop-reported issues (#66, #67) |
 | **Sticky software-only fix** | **`v0.1.5` (Windows)** | ✅ shipped — a live monitor no longer sticks as "software-only"; tray Restart. Release verified: 6 assets, SHA256SUMS, minisign, SLSA provenance, `/releases/latest` → v0.1.5 |
-| P6 macOS port | `m6-macos` / `v0.2.0` | 🚧 in progress — wave 1 (backends) landed; wave 2 has landed the whole app assembly: hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021), event-loop-first tray construction (#94), the mirror-surface token split (#98), the OS hooks' macOS half (#99), the macOS gamma sink (#100), the tray itself on macOS (#102), the two per-platform gamma captions (#103), macOS packaging — a universal `Duja.app` + DMG on the release pipeline (#104) — and the built-in panel's geometry, which makes it software-dimmable (#105). Remaining: **the gate** (ADR-0013 keeps the macOS DDC path experimental until ≥3 independent community confirmations per architecture) |
+| P6 macOS port | **`m6-macos`** (v0.2.0 **held**) | ✅ **gate passed, phase closed** — wave 1 (backends), wave 2 the whole app assembly: hardware wiring (#90), the anchor contract + macOS geometry (#91, ADR-0021), event-loop-first tray construction (#94), the mirror-surface token split (#98), the OS hooks' macOS half (#99), the macOS gamma sink (#100), the tray on macOS (#102), the per-platform gamma captions (#103), packaging — universal `Duja.app` + DMG (#104) — and the built-in panel's geometry (#105). Then **the gate** (#106–#111): see [P6 gate results](#p6-gate-results). **No v0.2.0 until a real Mac has launched `Duja.app`** — a deliberate hold, not a blocker; ADR-0013 additionally keeps macOS DDC experimental until ≥3 independent community confirmations per architecture |
 | P7 Linux port | `m7-linux` / `v0.3.0` | pending |
 | P8 Hardening → 1.0 | `m8-hardening` / `v1.0.0` | pending |
 
@@ -49,7 +50,7 @@ end from day one. Distribution is a tag-triggered
 portable zip, and — from `v0.2.0` — a macOS universal disk image, all under one
 `SHA256SUMS`, each with a minisign signature and a build-provenance attestation.
 
-Health: **1,038 tests on the Windows CI lane plus 10 doctests (1,048 in a local `cargo test --workspace --all-features`), green on 3 OSes** — the
+Health: **1,049 tests on the Windows CI lane plus 11 doctests (1,060 in a local `cargo test --workspace --all-features`), green on 3 OSes** — the
 per-OS count differs because the `#![cfg(windows)]` and `#![cfg(unix)]`
 integration suites compile out on the other lanes; clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
@@ -1165,6 +1166,97 @@ install and stay current on:
 - **Not signed.** No Authenticode certificate yet, so SmartScreen warns on first
   run; authenticity is via the checksums + minisign key + provenance. Binary size
   regressed to ~19 MB (P8 trim).
+
+## P6 gate results
+
+Four adversarial reviewers over the cumulative `v0.1.5..main` diff (23 commits, 96
+files, +17,171/−3,555), split as: macOS backends + pure rules; app/tray/platform/
+UI/CLI; packaging/CI/release docs; and a holistic cross-crate + rubric pass.
+**Three returned APPROVE-WITH-FIXES, one BLOCK.** Six PRs closed it out (#106–#111).
+
+### The blocker
+
+**Every Apple Silicon DDC/CI request was malformed** (#106), and had been since the
+macOS DDC work began. `frame_request` emitted a spurious byte, an off-by-one length
+prefix, and the wrong checksum seed on a Get:
+
+    Get VCP 0x10   was  83 02 01 10 AF      correct  82 01 10 FD
+    Set VCP 0x10   was  85 04 03 10 hi lo   correct  84 03 10 hi lo
+
+`0x02` is *VCP Feature Reply*, a display→host op-code. One root cause: the arm was
+transliterated from MonitorControl's `[0x80 | (send.count + 1), UInt8(send.count)] +
+send`, whose `send` **excludes** the DDC op-code — so that second element *is* the
+op-code, and only looks like a length field because a Get sends 1 byte (op `0x01`)
+and a Set sends 3 (op `0x03`).
+
+**Why nothing caught it.** `FakeI2cBus` read the length at index 1 and the body at
+`2..`, documented as true for both framings. That was true only of the *malformed*
+frame, whose spurious second byte happened to equal the body length — so the fake
+decoded the bug into the right answer and every round trip closed. The exact-byte
+"regression corpus" then pinned the broken bytes as the baseline, which made the
+tests worse than absent: a correct fix reds the suite and looks like the regression.
+
+The lesson generalises past this defect, and `debt.md`'s `duja-ddc mac/` row now
+carries it: *"the pure packet codec is fully CI-verified"* was true and worthless.
+Purity buys host-testability, not conformance to a wire someone else defined. Only a
+**primary source** does that — and you need more than one, because they disagree.
+Four macOS DDC implementations were consulted; fastfetch is the most useful (it
+emits both arms from one file), MonitorControl and m1ddc **share an author** and are
+one source rather than two, and `ddc-macos` dissents on the Get checksum.
+
+### The other findings that changed code
+
+- **A stale `Panicked` ack retired the fresh worker** (#107) — **Windows-affecting,
+  shipping today.** It was the only worker-exit ack of three carrying no
+  `generation`, while both siblings gate on one *and* have a regression test. A
+  driver panic racing a replug greyed the healthy replacement and spent one of the
+  two stuck marks that abandon a display for the session.
+- **Gamma was never re-asserted after wake** (#109). ADR-0003 offers gamma "only
+  where verified safe (Windows SDR, macOS **with re-apply-on-wake**, wlroots)"; the
+  macOS sink shipped without it. `engage_phase` diffs against its own record, which
+  cannot observe the OS discarding a ramp — and a gamma-mode display has
+  `overlay_alpha == 0` by construction, so nothing else dimmed it. Not macOS-only:
+  Windows self-healed only *incidentally*, when the event also removed the display.
+
+### The near-regression
+
+**#108 was blocked by its own review, correctly.** The macOS `enumerate_displays`
+skips a display with an unreadable EDID *before* consuming its I2C service, which
+reads as a queue desynchronisation. It is not: an unreadable EDID means a **virtual**
+display (Sidecar/AirPlay/DisplayLink), which has no `DCPAVServiceProxy` and never had
+a slot to spend. The "fix" would have handed a real monitor's service to a display
+that cannot use it and then released it — losing DDC control of that monitor
+entirely. What landed instead is the invariant at the call site plus a debt row
+naming the wrong fix, so it is not attempted a third time.
+
+### Documentation the phase falsified
+
+Six claims (#110), the sharpest being that `sha256sum` — the documented verification
+command in README, `SECURITY.md` and the release checklist — **does not exist on a
+stock macOS**, on the one platform where the binary carries no publisher identity.
+Also: the release gate does not run before the macOS job builds and signs; the
+attestation covers three artifacts, not two; and the support matrix still called the
+macOS tray "planned".
+
+### Rubric
+
+Clean on: typed errors with no `unwrap`/`expect`/`panic` outside tests; every
+`#[allow]` carrying a `// RATIONALE:`; all new `unsafe` behind a `// SAFETY:`;
+`duja-core`/`ipc`/`dujactl` genuinely unsafe-free under `forbid`; no new idle
+wakeups; CHANGELOG/debt/ADR discipline. Two deviations recorded rather than
+papered over: `duja-panel` keeps FFI in its backend modules rather than a `sys`
+submodule (its own long-standing convention, and restructuring untested COM code
+blind is what `debt.md` row 27 warns against), and `duja-platform` established
+`platform` as a second name for the same role.
+
+### Deliberately still open
+
+The remaining macOS items are hardware-blind, and writing blind FFI to close them
+is the trade this project has repeatedly declined: the built-in panel's fallback
+carrier, the `mac/mod.rs` token-assembly hoist (a swap there is proven undetectable
+— it leaves the suite green), mixed-DPI flyout placement (whose "needs hardware"
+deferral the gate *disproved* from pinned `dpi` source, so it is now a real
+candidate), and the unix-socket hardening that became live on macOS. All carry rows.
 
 ## P5 gate results
 
