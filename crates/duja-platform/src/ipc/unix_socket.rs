@@ -471,10 +471,11 @@ pub struct PipeServer {
     /// read. Compared before unlinking so a shutdown cannot delete a *successor's*
     /// socket — see [`unlink_if_ours`].
     socket_identity: Option<(u64, u64)>,
-    /// A spare descriptor on the bound socket, kept open until after the unlink so
-    /// the kernel cannot recycle its inode number. Never accepted on; its whole
-    /// job is to keep [`socket_identity`](Self::socket_identity) meaningful.
-    _keeper: Option<UnixListener>,
+    /// A descriptor that pins the socket's **filesystem inode**, kept open until
+    /// after the unlink so its number cannot be recycled underneath
+    /// [`socket_identity`](Self::socket_identity). `None` where no pin is needed
+    /// or none could be taken — see [`pin_inode`].
+    _pin: Option<std::os::fd::OwnedFd>,
 }
 
 impl PipeServer {
@@ -501,10 +502,9 @@ impl PipeServer {
     {
         let path = PathBuf::from(name);
         let (listener, identity) = bind_listener(&path)?;
-        // A second descriptor on the same socket, held until after the final
-        // unlink. It is what makes `identity` mean anything — see `unlink_if_ours`
-        // for why an inode number alone does not.
-        let keeper = listener.try_clone().ok();
+        // Pin the inode `identity` names, held until after the final unlink. See
+        // `unlink_if_ours` for why an inode number alone does not mean anything.
+        let pin = pin_inode(&path);
         // Defence-in-depth beyond the 0700 parent dir (see module docs).
         set_mode(&path, 0o600).map_err(|e| {
             unlink_if_ours(&path, identity);
@@ -575,7 +575,7 @@ impl PipeServer {
             workers,
             socket_path: path,
             socket_identity: identity,
-            _keeper: keeper,
+            _pin: pin,
         })
     }
 
@@ -740,11 +740,25 @@ fn bind_listener(path: &Path) -> Result<(UnixListener, Option<(u64, u64)>), IpcT
 /// Because the lock covers the caller's plain `bind` as well, the inode found
 /// here was almost always either bound by a fully-started server or left behind by
 /// a dead one. One further case exists and is worth naming rather than denying: a
-/// **live** server whose listen backlog is saturated answers `connect` with
-/// `ECONNREFUSED` on the BSDs, so it would be misread as stale. Reaching that
-/// needs ~128 queued connections from a process of the same uid, which is inside
-/// the trust boundary and therefore self-harm, but "there is no third case" would
-/// be an overstatement.
+/// **live** server whose listen backlog is full. Reaching it needs ~128 queued
+/// connections from a process of the same uid, which is inside the trust boundary
+/// and so is self-harm rather than an attack, but the two platforms then fail
+/// differently and neither is benign:
+///
+/// - On the BSDs `connect` returns `ECONNREFUSED`, so a **live** server is misread
+///   as stale and its socket is unlinked — the exact defect this module exists to
+///   prevent, reached by a route the lock cannot see.
+/// - On Linux `unix_stream_connect` finds the receive queue full and waits, with
+///   no send timeout on a blocking socket, for an `accept` that may never come.
+///   That is the one unbounded wait left in a module that bounds everything else,
+///   and it happens while holding [`BindLock`], so it times every other starter
+///   out at [`LOCK_WAIT`] as well.
+///
+/// The probe predates this change; what is new is that it now runs under the lock,
+/// which widens the second case from "this instance stalls" to "every instance
+/// stalls". Recorded in `docs/debt.md` rather than fixed here: bounding it means a
+/// non-blocking `connect` plus a `poll`, which is a different change from a
+/// locking fix and would be the third mechanism in one PR.
 fn takeover_bind(path: &Path) -> Result<UnixListener, IpcTransportError> {
     if UnixStream::connect(path).is_ok() {
         // A live server accepted the probe: we are the second instance.
@@ -755,6 +769,59 @@ fn takeover_bind(path: &Path) -> Result<UnixListener, IpcTransportError> {
     // Refused (or otherwise unconnectable): the inode is stale. Unlink and rebind.
     std::fs::remove_file(path).map_err(|e| IpcTransportError::Io(e.to_string()))?;
     UnixListener::bind(path).map_err(|e| IpcTransportError::Io(e.to_string()))
+}
+
+/// Take a descriptor that keeps `path`'s inode from being freed, so its number
+/// cannot be handed to somebody else's socket while we still hold it.
+///
+/// # Why `O_PATH`, and why only Linux
+///
+/// The first version of this dup'd the *listening socket* instead. That pins the
+/// inode — a bound `AF_UNIX` socket holds a `dget`/`mntget` on its path, so the
+/// final `iput` (and with it `ext4_free_inode`, which clears the inode bitmap bit
+/// that makes the number reusable) waits for the socket to be released — but it
+/// also keeps the socket **connectable**, and that turned out to cost more than it
+/// bought:
+///
+/// - If both handler threads die, `listener_loop` exits, but the socket stays in
+///   `LISTEN`. `dujactl` then *connects successfully*, blocks for the read timeout
+///   and exits with a server error — where before it got `ECONNREFUSED`,
+///   translated to `NotRunning`, and **fell back to driving the hardware
+///   directly**. That fallback is a documented degradation path, and a fix for a
+///   shutdown race had no business removing it.
+/// - During shutdown the same window makes a concurrent start fail with "another
+///   duja IPC server is already listening", and `duja-app`'s IPC bridge does not
+///   retry: it logs a warning and runs without IPC for that whole process.
+///
+/// `O_PATH` gives a descriptor that references the inode and nothing else — no
+/// socket semantics, no `LISTEN` state, no connectability — so the pin costs
+/// exactly what it should. It is Linux-only, which is also exactly where it is
+/// needed: **ext4 and XFS recycle inode numbers**, while tmpfs allocates from a
+/// monotonic counter (`get_next_ino`) and macOS's APFS assigns object identifiers
+/// monotonically. So `$XDG_RUNTIME_DIR` and macOS are safe without it, and the
+/// `/tmp/duja-<uid>` fallback — the case `docs/debt.md` row 57 calls a routine
+/// cron/ssh/container condition — is the one that needs it.
+///
+/// `None` on failure rather than an error: the caller still has the `(dev, ino)`
+/// comparison, which without the pin is merely very likely to be right instead of
+/// certain. That is the behaviour every release before this one shipped, so
+/// degrading to it is not a regression — but it is a degradation, and it is named
+/// here so nobody reads the guarantee as unconditional.
+#[cfg(target_os = "linux")]
+fn pin_inode(path: &Path) -> Option<std::os::fd::OwnedFd> {
+    rustix::fs::open(
+        path,
+        rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .ok()
+}
+
+/// No pin needed: this target's filesystems do not recycle the numbers
+/// [`socket_identity`] compares. See the Linux variant for the full argument.
+#[cfg(not(target_os = "linux"))]
+fn pin_inode(_path: &Path) -> Option<std::os::fd::OwnedFd> {
+    None
 }
 
 /// `(dev, ino)` of whatever is at `path`, or `None` if it cannot be read.
@@ -783,32 +850,44 @@ fn socket_identity(path: &Path) -> Option<(u64, u64)> {
 ///
 /// # Why an inode *number* is not enough on its own
 ///
-/// `(dev, ino)` only identifies an object while that object exists. **ext4 and XFS
-/// recycle inode numbers**: at step 2 the fd closes and the link count is still 1,
-/// but `Q`'s `remove_file` at step 4 drops it to 0 and frees the inode, and
-/// `ext4_new_inode` then takes the lowest free entry in the parent's block group —
-/// which, in a directory holding two files, is very likely the number `P` just
-/// recorded. `P` would match on a coincidence and delete `Q`'s socket after all.
-/// The `BindLock` does not help: it orders steps 4 and 5, it does not make the
-/// number unique.
+/// `(dev, ino)` only identifies an object while that object exists, and **ext4 and
+/// XFS recycle inode numbers**. In step 1 above `P`'s fd closes while the link
+/// count is still 1; `Q`'s `remove_file` in step 2 drops it to 0, the final `iput`
+/// reaches `ext4_free_inode`, and the number goes back in the block group's inode
+/// bitmap. `ext4_new_inode` then allocates the lowest free bit in that bitmap, so
+/// `Q`'s rebind **can** land on the number `P` recorded, and `P` would match on a
+/// coincidence and delete `Q`'s socket after all. (Not *likely* — the bitmap spans
+/// the whole block group, typically 8192 inodes, not just this directory. The
+/// guard has to be exact regardless.) The [`BindLock`] does not help: it orders
+/// steps 2 and 3, it does not make the number unique.
 ///
-/// This matters precisely where the debt row says it would. tmpfs allocates from a
-/// monotonic counter (`get_next_ino`) and APFS never reuses, so
-/// `$XDG_RUNTIME_DIR` and macOS are immune — but the `/tmp/duja-<uid>` fallback,
-/// the one the row calls "a routine cron/ssh/container condition" on Linux, is
-/// usually ext4.
+/// This matters precisely where `docs/debt.md` row 57 says it would. tmpfs
+/// allocates from a monotonic counter and APFS assigns object ids monotonically,
+/// so `$XDG_RUNTIME_DIR` and macOS are immune — but the `/tmp/duja-<uid>`
+/// fallback, the one the row calls "a routine cron/ssh/container condition" on
+/// Linux, is usually ext4.
 ///
-/// So [`PipeServer`] keeps a second descriptor on the bound socket open until
-/// after this runs. An inode with an open descriptor cannot be freed, so `Q`'s
-/// rebind is *guaranteed* a different number and the comparison is exact rather
-/// than probable. The descriptor does a second job for free: while it is open the
-/// socket is still connectable, so a concurrent `takeover_bind` probe succeeds and
-/// that instance refuses to start rather than unlinking anything — the race cannot
-/// even reach step 4. The cost is that a start racing our shutdown gets "already
-/// listening" for the microseconds this takes, which is a true statement.
+/// So on Linux [`PipeServer`] holds an `O_PATH` descriptor on the socket's inode
+/// until after this runs ([`pin_inode`]). A descriptor referencing an inode keeps
+/// it from being evicted, and `ext4_free_inode` only runs from
+/// `ext4_evict_inode` — so while the pin is held the number cannot return, `Q`'s
+/// rebind is *guaranteed* a different one, and the comparison is exact rather than
+/// probable. Without a pin (a non-Linux target, or an `open` that failed) the
+/// comparison degrades to what shipped before this change: very probably right.
 ///
 /// An unreadable identity (either at bind or now) means the socket is already
 /// gone or unstattable, so there is nothing to unlink and nothing to risk.
+///
+/// # Why unlink at all
+///
+/// This is a lot of machinery for a tidy-up, and the alternative — never unlink,
+/// let the next start take the stale socket over — would be simpler and equally
+/// safe. It is kept because the post-shutdown state is load-bearing for the
+/// client: with the socket gone, `dujactl` gets `NotRunning` and falls back to
+/// driving the hardware directly, which is the behaviour
+/// `connect_to_absent_socket_reports_not_running` pins. A leftover socket would
+/// answer `ECONNREFUSED` and reach the same place today, but only by accident of
+/// how `connect` reports it.
 fn unlink_if_ours(path: &Path, ours: Option<(u64, u64)>) {
     let Some(ours) = ours else { return };
     let Ok(_guard) = BindLock::acquire(path) else {

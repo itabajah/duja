@@ -369,6 +369,26 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
 
+            // Confirm the setup took, or this case proves nothing: a platform that
+            // silently drops `S_ISGID` would leave the directory at exactly 0700,
+            // `verdict` would answer `Accept`, and the assertion below would pass
+            // without any repair having happened. The special-bit cases are
+            // *skipped* rather than failed when that happens, because whether a
+            // non-privileged `chmod` preserves `S_ISGID` is a platform rule about
+            // group membership, not anything Duja controls. The plain modes are
+            // asserted, since every unix applies those verbatim.
+            let applied = mode_of(&dir);
+            if applied != mode {
+                assert_eq!(
+                    mode & SPECIAL_BITS,
+                    0,
+                    "chmod {mode:04o} became {applied:04o}, and only special bits may be refused"
+                );
+                eprintln!("skipping {mode:04o}: this platform stored it as {applied:04o}");
+                let _ = std::fs::remove_dir_all(&dir);
+                continue;
+            }
+
             ensure_private_dir(&dir)
                 .unwrap_or_else(|e| panic!("mode {mode:04o} is ours and repairable: {e}"));
             assert_eq!(
