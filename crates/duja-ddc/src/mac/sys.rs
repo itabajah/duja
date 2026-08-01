@@ -631,15 +631,59 @@ pub(crate) struct MacDisplay {
 /// Enumerate controllable external displays.
 ///
 /// # Display ↔ I2C-service matching (the known hard part)
-/// Apple exposes no direct `CGDirectDisplayID` → `IOAVService` link. Duja pairs
+/// Apple exposes no *public* `CGDirectDisplayID` → `IOAVService` link. Duja pairs
 /// external displays to external AV services **positionally**, in
-/// `CGGetOnlineDisplayList` order: the common single-external-display case is
+/// `CGGetActiveDisplayList` order: the common single-external-display case is
 /// unambiguous, but two or more external displays can be mis-paired because the
 /// AV-service iteration order need not track the CoreGraphics order. The
 /// documented failure mode is "a brightness change lands on the wrong monitor".
 /// MonitorControl solves this by scoring each AV service against every display's
 /// EDID attributes (vendor/product/serial/`Location`); porting that EDID-scored
 /// match is tracked as debt. The Intel path pairs framebuffers the same way.
+///
+/// ## Why skipping an EDID-less display without consuming a service is CORRECT
+///
+/// Load-bearing, and easy to "fix" into a real defect — the P6 gate tried, and
+/// review caught it — so it is written down here.
+///
+/// The loop below `continue`s on an unreadable EDID **before** taking a service
+/// from `av`. That looks like a queue desynchronisation: skip a display, and
+/// every later one appears to inherit the previous one's service.
+///
+/// It is not, because the two lists are filtered on different things and those
+/// filters agree on exactly this population. `read_edid` returns `None` when
+/// `CoreDisplay_DisplayCreateInfoDictionary` yields no dictionary, which is the
+/// signature of a **virtual** display — Sidecar, AirPlay, `DisplayLink`. (m1ddc
+/// guards the same call with *"Skip virtual displays that don't provide info
+/// dictionary"*; MonitorControl reads `kCGDisplayIsVirtualDevice` /
+/// `kCGDisplayIsAirPlay` out of that same dictionary.) A virtual display has no
+/// `DCPAVServiceProxy`, so `collect_external_av_services` never produced an entry
+/// for it and there is no slot of its own to spend. Consuming one would hand a
+/// **real** monitor's service to a display that cannot use it and then release
+/// it, costing DDC control of that monitor entirely.
+///
+/// MonitorControl behaves the same way for the same reason: `getServiceMatches`
+/// scores every pair and leaves an unmatched display with a `nil` service rather
+/// than charging it one.
+///
+/// ## `Active`, not `Online` — and index-identity does not hold in general
+///
+/// `CGDirectDisplay.h`: *"With hardware mirroring, a display may be online but
+/// not necessarily active or drawable."* So on a hardware mirror this backend
+/// does not see the clone at all, while `duja-panel`'s `display_services` backend
+/// — which enumerates `CGGetOnlineDisplayList`, deliberately, to catch a built-in
+/// that is online but not the active drawable — does. The two macOS backends read
+/// **different display lists**, which is why a mirror set can span them
+/// asymmetrically. The surface-token rule in [`duja_core::macos`] is what makes
+/// that safe: it is compared, never dereferenced, so a token naming a display
+/// this list omits is still a correct grouping key.
+///
+/// It is also the second reason the pairing must not be re-expressed as "display
+/// *i* takes service *i*": a mirror clone contributes a service without
+/// contributing an entry to `ids`, so the surplus is not always at the tail. The
+/// same header notes the CoreGraphics order itself is user-visible — *"The first
+/// display returned in the list is the main display (the one with the menu
+/// bar)"* — i.e. reorderable from System Settings.
 pub(crate) fn enumerate_displays() -> Result<Vec<MacDisplay>, super::DdcError> {
     let ids = active_external_display_ids()?;
     if ids.is_empty() {

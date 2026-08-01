@@ -156,9 +156,22 @@ pub fn enumerate() -> Result<Vec<DdcDisplay>, DdcError> {
             edid: raw.edid,
             bounds: raw.bounds,
             cg_display_id: raw.mirror.display_id,
-            // `raw.mirror` was assembled once, at the FFI site that reads both
-            // values, so there is no positional pair to get the wrong way round
-            // here. See `duja_core::macos::MirrorState`.
+            // CAUTION: these two lines are the one place the addressing token and
+            // the surface token are written side by side, and both are `u32`, so
+            // swapping them compiles and lints clean. `MirrorState` protects the
+            // FFI *read* site — the pair is assembled once, where both values are
+            // fetched — but it does not protect this *assignment*, and the P6 gate
+            // measured the gap: the swap leaves the whole suite green, because
+            // this module is `cfg(target_os = "macos")`, has no test module, and
+            // `enumerate()` returns empty on CI's virtualized runners.
+            //
+            // `duja-panel` does not have this hole: its equivalent assembly is the
+            // pure `panel_geometry`, tested on every lane, where the same swap
+            // reds. Hoisting this one the same way is tracked in `docs/debt.md`.
+            //
+            // Swapped, a `MacBook` mirroring to a projector would drive gamma on
+            // the built-in panel — a display this backend deliberately never
+            // enumerates — while the monitor the user is dragging does not move.
             surface_id: duja_core::macos::surface_id(raw.mirror),
             bus: raw.bus,
             sort_key: raw.mirror.display_id,
