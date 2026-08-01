@@ -21,10 +21,16 @@ ignore = [
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; pinned by slint's resvg" },
     { id = "RUSTSEC-2026-0206", reason = "rustybuzz unmaintained; pinned by slint's text shaping (i-slint-common), build-graph-only, not a vulnerability" },
     # unmaintained gtk-rs GTK3 bindings family + proc-macro-error: pulled ONLY
-    # by tray-icon's linux backend (libappindicator). Duja's linux tray backend
-    # is decided at P7 (ADR-0010 evaluates ksni, which drops GTK entirely);
-    # until then these are linux-only, build-graph-only on our CI, and carry no
-    # vulnerability — they are maintenance-status advisories.
+    # by tray-icon's linux backend (libappindicator). They are linux-only,
+    # build-graph-only on our CI, and carry no vulnerability — they are
+    # maintenance-status advisories.
+    #
+    # ADR-0010 is now ACCEPTED and chose ksni, which drops GTK entirely, so all
+    # eight of these are scheduled for deletion. They stay until the tray backend
+    # actually swaps in P7 wave 5, because tray-icon's linux backend is still in
+    # the graph until then — deleting them earlier would fail the gate rather than
+    # tidy it. **This block is the check on that work**: when it can be removed and
+    # `cargo deny check advisories` stays green, the swap is complete.
     "RUSTSEC-2024-0370",
     "RUSTSEC-2024-0412",
     "RUSTSEC-2024-0413",
