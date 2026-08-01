@@ -152,25 +152,27 @@ pub(crate) fn plan_for_platform(
 /// How far down the gamma channel reaches on an OS whose minimum is `min_gamma`,
 /// as a percentage — or `None` when there is nothing to disclose.
 ///
-/// This is the settings window's caption, expressed as a number instead of a
-/// sentence. `None` means the OS accepts every factor the continuum can produce,
-/// so [`reachable_output`]'s substitution is unreachable and a caption about it
-/// would describe a thing that never happens.
+/// This **gates** the settings window's caption. `None` means the OS accepts
+/// every factor the continuum can produce, so [`reachable_output`]'s substitution
+/// is unreachable and a caption about it would describe a thing that never
+/// happens.
 ///
-/// The percentage is the gamma **factor**, i.e. how far the ramp scales the
-/// scanout — so `Some(50)` reads as "gamma dims to at most 50%", which is the
-/// shipped copy.
+/// The percentage is the gamma **factor** — how far the ramp scales the scanout.
 ///
-/// It is deliberately **not** described as a slider position, because it is one
-/// only on a software-only display. [`map_user_level`] maps the sub-floor zone
-/// `0..transition` onto the whole factor range, so `gamma == user_pct / transition`
-/// on a display with a working backlight and `gamma == user_pct / 100` without one.
-/// With the shipped defaults (`hw_floor_pct = 0`, `min_perceived_pct = 25`)
-/// `transition` is 25, so a factor of `0.5` falls at slider 12.5 — the substitution
-/// takes over at slider 12 and below, not at slider 50.
-/// The factor is a fraction of the *floor-level* picture, and the caption's "%"
-/// means the gamma channel's own reach rather than a mark on the slider. Whether
-/// the copy should say so is a separate question — `docs/debt.md` carries it.
+/// **It is not shown to the user, and must not be.** The caption used to
+/// interpolate it ("gamma dims to at most 50%"); the P6 gate retired that,
+/// because a percentage printed beside a slider is read as a slider position and
+/// this one is not. [`map_user_level`] maps the sub-floor zone `0..transition`
+/// onto the whole factor range, so `gamma == user_pct / transition` on a display
+/// with a working backlight and `gamma == user_pct / 100` without one. With the
+/// shipped defaults (`hw_floor_pct = 0`, `min_perceived_pct = 25`) `transition`
+/// is 25, so a factor of `0.5` falls at slider 12.5 — the substitution takes over
+/// at slider 12 and below, not at slider 50. The shipped copy now says only that
+/// gamma "can only darken this display so far".
+///
+/// So the value survives as a **number** rather than a `bool` for one reason: it
+/// distinguishes "no cap" from "a cap worth disclosing", and those are the same
+/// fact. Nothing downstream renders it.
 ///
 /// Robust rather than trusting: `min_gamma` below the floor, or `NaN`, both
 /// answer `None`. Neither is reachable through
@@ -181,7 +183,8 @@ pub(crate) fn plan_for_platform(
 /// itself allows) is a lie rather than a glitch.
 pub(crate) fn gamma_cap_pct(min_gamma: f32) -> Option<u8> {
     // NaN first: `NaN <= x` is false, so without this it would fall through to the
-    // cast, and `NaN as u8` is 0 — a caption claiming gamma dims to at most 0%.
+    // cast, and `NaN as u8` is 0 — which `Some(0)` would then encode as "no cap",
+    // silently suppressing a disclosure the platform does owe.
     if min_gamma.is_nan() || min_gamma <= GAMMA_FLOOR {
         return None;
     }
@@ -707,10 +710,11 @@ mod tests {
     fn a_nonsensical_minimum_disclaims_rather_than_claiming_zero() {
         // Unreachable through `gamma_cap_pct_for_platform` — `duja-dimmer` pins
         // `min_gamma_factor() >= GAMMA_FLOOR` on every lane — but this is the
-        // function that turns a float into a sentence shown to a user, and the
-        // untended failure is a claim ("gamma dims to at most 0%"), not a glitch.
-        // `NaN as u8` is 0, and `NaN <= GAMMA_FLOOR` is false, so without the
-        // explicit NaN arm this is exactly what would be printed.
+        // function that decides whether a user-facing disclosure appears at all,
+        // and the untended failure is silence where a hazard is owed: `NaN as u8`
+        // is 0, `NaN <= GAMMA_FLOOR` is false, so without the explicit NaN arm a
+        // nonsensical minimum yields `Some(0)`, which the Slint guard reads as
+        // "no cap" and suppresses the caption.
         assert_eq!(gamma_cap_pct(f32::NAN), None);
         assert_eq!(gamma_cap_pct(f32::NEG_INFINITY), None);
         // Above 1.0 is not a cap on dimming at all (a factor over 1 brightens),

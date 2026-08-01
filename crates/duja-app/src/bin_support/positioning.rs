@@ -174,19 +174,15 @@ pub(crate) fn anchor_window_size(
 
 /// Scale one logical `f32` dimension into [anchor units](self) (see
 /// [`anchor_window_size`]), clamped to at least one unit.
+///
+/// The arithmetic is [`duja_core::scale::scale_extent`], shared with
+/// `duja-ui`'s `dpi` module. **The unit is not shared**, which is why this
+/// wrapper stays: an anchor unit is physical pixels on Windows and points on
+/// macOS (ADR-0021), where `dpi`'s output is always physical pixels. Calling the
+/// core helper directly at the call sites would erase that distinction at
+/// exactly the layer the ADR exists to keep it explicit.
 fn anchor_dim(logical: f32, logical_to_anchor: f32) -> u32 {
-    let scale = if logical_to_anchor.is_finite() && logical_to_anchor >= 0.1 {
-        logical_to_anchor
-    } else {
-        1.0
-    };
-    let scaled = (logical.max(1.0) * scale).round();
-    // RATIONALE (cast_possible_truncation, cast_sign_loss): `scaled` is finite,
-    // >= 1.0, and a rounded extent well within u32; the guards above rule out
-    // negatives, NaN and infinities.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let out = scaled as u32;
-    out.max(1)
+    duja_core::scale::scale_extent(logical, logical_to_anchor)
 }
 
 /// The top-left corner ([anchor units](self)) that centres a window of `size`

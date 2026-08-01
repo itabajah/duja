@@ -38,6 +38,12 @@
 //!   surface token, `CGRect` → [`dimmer::DisplayBounds`]) that both macOS
 //!   backends must apply identically; FFI-free, so it is compiled and tested on
 //!   every target like the rest of this crate
+//! - [`scale`] — the one logical→device-unit extent calculation `duja-ui` (to
+//!   physical pixels) and `duja-app` (to tray anchor units) both need; unit
+//!   **agnostic** on purpose, because an anchor unit is physical pixels on
+//!   Windows but **points** on macOS (ADR-0021), so the two callers coincide on
+//!   one platform and diverge on the other — folding either unit into the
+//!   signature would blur exactly that
 //! - `testing` (feature `test-support`) — fakes + the controller contract suite
 //!
 //! # Example
@@ -75,6 +81,7 @@ pub mod macos;
 pub mod manager;
 pub mod model;
 pub mod quirks;
+pub mod scale;
 pub mod sync;
 
 /// Deterministic fakes and the reusable controller contract suite.

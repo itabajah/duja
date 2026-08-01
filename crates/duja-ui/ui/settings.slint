@@ -424,15 +424,27 @@ export component SettingsWindow inherits Window {
                                 // point (Windows' anti-lockout rule stops at 50%),
                                 // so Duja substitutes the overlay for the rest of
                                 // the range. The level is identical; the coverage
-                                // is not. Both the figure and whether this appears
-                                // at all come from the app — duja-ui depends on
-                                // neither duja-dimmer nor duja-platform, so it
-                                // cannot read `min_gamma_factor()` itself. A 0 cap
-                                // means the OS accepts the whole range and the
-                                // substitution never happens, so saying it does
-                                // would describe a thing that cannot occur.
+                                // is not. Whether this appears at all comes from
+                                // the app — duja-ui depends on neither duja-dimmer
+                                // nor duja-platform, so it cannot read
+                                // `min_gamma_factor()` itself. A 0 cap means the OS
+                                // accepts the whole range and the substitution
+                                // never happens, so saying it does would describe a
+                                // thing that cannot occur.
+                                //
+                                // `gamma-cap-pct` still GATES the caption but is no
+                                // longer interpolated into it. The figure is the
+                                // gamma FACTOR, and a user reads a percentage next
+                                // to a slider as a slider position: `map_user_level`
+                                // maps the sub-floor zone onto the whole factor
+                                // range, so with shipped defaults a cap of 50 %
+                                // means the substitution happens near slider 12, not
+                                // 50. The number was right and unhelpfully
+                                // misreadable, so it is gone; the plumbing stays,
+                                // because "no cap" and "nothing to disclose" are the
+                                // same fact and a bool could not express it.
                                 if monitor.gamma-available && monitor.gamma-cap-pct > 0: Text {
-                                    text: @tr("Gamma dims to at most {}% on this system; below that Duja uses the overlay, which cannot cover full-screen games or the mouse pointer", monitor.gamma-cap-pct);
+                                    text: @tr("Gamma can only darken this display so far on this system; past that Duja uses the overlay, which cannot cover full-screen games or the mouse pointer");
                                     color: Palette.text-faint;
                                     font-size: 11px;
                                     wrap: word-wrap;

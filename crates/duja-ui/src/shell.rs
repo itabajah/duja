@@ -446,7 +446,18 @@ fn row_to_data(row: &FlyoutRow) -> FlyoutRowData {
 }
 
 /// Clamp and round a Slider's `f32` value into a `0..=100` percent.
-fn clamp_pct(value: f32) -> u8 {
+///
+/// Shared with [`settings_shell`](crate::settings_shell), which had a verbatim
+/// copy until the P6 refactor checkpoint. Both shells read raw `f32` out of the
+/// same Slint `Slider` widget, so this is one boundary conversion with one
+/// contract, not two that happen to agree.
+///
+/// It clamps the **widget's** range only. Any narrower per-field cap is a
+/// view-model concern applied after this returns — `SettingsVm::set_monitor_floor`
+/// caps the floor slider to `MAX_FLOOR_PCT`, for instance — and deliberately does
+/// not live here: a generic slider conversion that knew about one field's ceiling
+/// would acquire a caller it was never designed for.
+pub(crate) fn clamp_pct(value: f32) -> u8 {
     let clamped = value.clamp(0.0, 100.0).round();
     // RATIONALE: `clamped` is in 0.0..=100.0 and integral after round(), so the
     // cast neither truncates a meaningful fraction, loses a sign, nor overflows
