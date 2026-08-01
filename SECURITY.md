@@ -21,9 +21,10 @@ rustls with a 5-second timeout.
 Local attack surface and mitigations:
 
 - **IPC endpoint** (`dujactl` ↔ app): user-only ACLs (named-pipe DACL /
-  0600 unix socket in a 0700 dir), peer-identity verification, anti-squatting
-  flags, length-prefixed frames with a 64 KiB cap enforced before allocation,
-  strict parameter validation, connection and read-timeout limits.
+  0600 unix socket in a 0700 dir whose ownership is verified rather than
+  assumed), peer-identity verification, anti-squatting flags, length-prefixed
+  frames with a 64 KiB cap enforced before allocation, strict parameter
+  validation, connection and read-timeout limits.
 - **Config & quirks files**: typed parsing only, size caps, no user-supplied
   regex, parse failures fall back to embedded defaults: never abort, never
   execute content.
