@@ -39,8 +39,10 @@ uphold:
    > with no gate of its own, so both Apple slices are built, fused, bundled and
    > `codesign`ed — and notarized and stapled when `MACOS_SIGN` is on — before
    > `cargo deny` runs. The *publish* guarantee is intact (`release` needs `macos`
-   > and every publish step is `PUBLISH`-gated), but a tag on a bad commit can
-   > still burn a notarization submission, which is a permanent request to Apple.
+   > and every publish step is `PUBLISH`-gated). What a tag on a bad commit costs
+   > is a full macOS build, and — **once `MACOS_SIGN` is enabled**, which it is
+   > not today, so the notarize and staple steps do not run — a notarization
+   > submission, which is a permanent request to Apple.
    > The gate's clippy and tests also run on `windows-latest` only, so they
    > compile no `cfg(target_os = "macos")` item; `cargo deny` is the exception and
    > does cover the whole graph.

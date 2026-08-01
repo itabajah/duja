@@ -14,8 +14,11 @@ precise about *when*, because it is not "before anything is built": the gate
 steps live in the `release` job, and the `macos` job runs **first** with no gate
 of its own. So both Apple slices are compiled, fused, bundled and `codesign`ed —
 and, on the `MACOS_SIGN` path, submitted to Apple's notary and stapled — before
-`cargo deny` has run. Nothing unverified can reach the Releases page, but a tag on
-a bad commit can still burn a notarization submission.
+`cargo deny` has run. Nothing unverified can reach the Releases page. What a tag
+on a bad commit does cost is a full macOS build, and — **once `MACOS_SIGN` is
+enabled**, which it is not today, so the notarize and staple steps do not run —
+a notarization submission, which is a permanent request to Apple for a build you
+then throw away.
 
 Two further limits worth knowing before trusting a green run: the gate's clippy
 and tests execute on **`windows-latest` only**, so no `cfg(target_os = "macos")`

@@ -15,7 +15,9 @@
 # built, fused, bundled and codesigned (and notarized+stapled when MACOS_SIGN is
 # on) before `cargo deny` runs. Nothing unverified can reach the Releases page —
 # `release` needs `macos`, and every publish step is PUBLISH-gated — but a tag on
-# a bad commit can still burn a notarization submission. The gate also runs on
+# a bad commit wastes a full macOS build -- and, ONCE MACOS_SIGN IS ENABLED (it
+# is unset today, so the notarize/staple steps do not run), a notarization
+# submission, which is a permanent request to Apple. The gate also runs on
 # windows-latest only, so it compiles no cfg(target_os = "macos") item; cargo-deny
 # is the exception, covering the whole graph via deny.toml's all-features.
 #
@@ -368,7 +370,9 @@ jobs:
       #      (or wire OIDC via this job's existing `id-token: write` and drop the
       #      client secret — the more secure option).
       # Only the installer .exe is Authenticode-signable; the portable .zip and
-      # SHA256SUMS are not PE files and stay covered by minisign + provenance.
+      # the macOS .dmg are not PE files. They stay covered by minisign and
+      # provenance; SHA256SUMS is covered by minisign ONLY -- subject-path lists
+      # the three binaries and deliberately excludes it.
       - name: Sign installer (Azure Trusted Signing)
         if: env.PUBLISH == 'true' && vars.AZURE_SIGN == 'true'
         uses: azure/trusted-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
