@@ -247,7 +247,7 @@ mod imp {
 #[cfg(unix)]
 mod unix {
     use std::fmt;
-    use std::fs::{File, OpenOptions};
+    use std::fs::File;
     use std::path::{Path, PathBuf};
 
     use rustix::fs::{FlockOperation, flock};
@@ -300,20 +300,20 @@ mod unix {
             };
 
             if let Some(parent) = path.parent()
-                && ensure_dir_0700(parent).is_err()
+                && crate::unix_dir::ensure_private_dir(parent).is_err()
             {
-                // Cannot create the lock directory: degrade to "first".
+                // The lock directory is missing and uncreatable, or it exists and
+                // belongs to someone else. Degrade to "first": running is better
+                // than refusing to start, and the point of the check is that the
+                // lock is *not* taken inside a directory Duja cannot vouch for.
+                // The cost of degrading is a second instance, which the socket
+                // bind then refuses anyway.
                 return not_first;
             }
 
             // Opened only to obtain a descriptor to `flock`; contents are never
-            // read or written, so `truncate(false)` leaves any bytes untouched.
-            let Ok(file) = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .open(path)
-            else {
+            // read or written, so the open leaves any bytes untouched.
+            let Ok(file) = crate::unix_dir::open_private_file(path) else {
                 // Cannot open the lock file: degrade to "first".
                 return not_first;
             };
@@ -340,15 +340,6 @@ mod unix {
         pub fn already_running(&self) -> bool {
             self.already_running
         }
-    }
-
-    /// Create `dir` (and parents) if absent, with `0700` permissions.
-    fn ensure_dir_0700(dir: &Path) -> std::io::Result<()> {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
     }
 
     /// The full path to the per-user lock file, or `None` with no home/runtime dir.

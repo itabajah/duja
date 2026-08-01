@@ -378,7 +378,106 @@ fn stale_socket_is_taken_over() {
         c.request(&Request::ShowFlyout).expect("served"),
         Response::Ok
     );
+
+    // The takeover ran under its sibling lock. Asserted structurally because the
+    // concurrency test below can only ever be one-sided evidence: this is the
+    // deterministic half, and it fails if the serialisation is ever removed.
+    let lock = PathBuf::from(format!("{}.lock", path.display()));
+    assert!(
+        lock.exists(),
+        "the unlink+rebind sequence must run under {}",
+        lock.display()
+    );
+
     server.shutdown();
+}
+
+#[test]
+fn concurrent_starts_on_a_stale_socket_leave_exactly_one_server() {
+    // The regression for the non-atomic takeover. Probe -> unlink -> bind is three
+    // steps against a shared name: without a lock, several starters each see the
+    // stale inode, each unlink, and each bind. Every one of them then holds a
+    // listener it believes is serving, but only the last inode is at the path, so
+    // the rest are unreachable while reporting success.
+    //
+    // This test is deliberately one-sided evidence. A race regression cannot be
+    // proven absent by a green run - it can only be caught when the interleaving
+    // happens - so it is a barrier plus enough starters to make that likely, and
+    // the deterministic half of the proof is the lock-file assertion above.
+    const STARTERS: usize = 8;
+
+    let path = unique_socket("race");
+    std::fs::create_dir_all(path.parent().unwrap()).expect("mk dir");
+    {
+        let stale = UnixListener::bind(path_str(&path)).expect("bind stale");
+        drop(stale);
+    }
+
+    let gate = Arc::new(std::sync::Barrier::new(STARTERS));
+    let mut starters = Vec::with_capacity(STARTERS);
+    for _ in 0..STARTERS {
+        let path = path.clone();
+        let gate = Arc::clone(&gate);
+        starters.push(std::thread::spawn(move || {
+            gate.wait();
+            PipeServer::serve_named(path.to_str().expect("utf-8"), fake_handler)
+        }));
+    }
+
+    let winners: Vec<PipeServer> = starters
+        .into_iter()
+        .filter_map(|s| s.join().expect("starter panicked").ok())
+        .collect();
+
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one of {STARTERS} concurrent starters may own the socket"
+    );
+
+    // The survivor is the one at the path: a winner nobody can reach is the very
+    // failure this guards against, so success is not enough on its own.
+    let mut client = PipeClient::connect_named(path_str(&path), short()).expect("reach survivor");
+    assert_eq!(
+        client.request(&Request::ShowFlyout).expect("served"),
+        Response::Ok
+    );
+
+    for winner in winners {
+        winner.shutdown();
+    }
+}
+
+#[test]
+fn a_socket_directory_of_ours_that_is_open_to_others_is_tightened() {
+    // A pre-existing directory belonging to us is repaired rather than refused:
+    // `create_dir_all` leaves 0755 under an ordinary umask, and that is exactly
+    // how a caller (including the test above) hands the server a path. Ownership
+    // is what cannot be repaired; mode is.
+    // A directory of its own, not the per-process one `unique_socket` shares: this
+    // test mutates the mode, and under plain `cargo test` (one process, threaded)
+    // a sibling test's server would tighten it back before the assertion, leaving
+    // a green run that proved nothing.
+    let dir = PathBuf::from(format!("/tmp/duja-it-{}-loose", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mk dir");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).expect("loosen");
+    let path = dir.join("loose.sock");
+
+    let server = PipeServer::serve_named(path_str(&path), fake_handler).expect("server up");
+
+    let mode = std::fs::metadata(&dir)
+        .expect("stat dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o700,
+        "a loose socket dir must be tightened, not kept"
+    );
+
+    server.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

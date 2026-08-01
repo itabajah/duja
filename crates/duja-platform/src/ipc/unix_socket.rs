@@ -12,8 +12,13 @@
 //! - The socket path is per-user and lives inside a dedicated directory Duja
 //!   owns: macOS `~/Library/Application Support/duja/ctl.sock`, Linux
 //!   `$XDG_RUNTIME_DIR/duja/ctl.sock` (fallback `/tmp/duja-<uid>/ctl.sock`).
-//! - **The parent directory is the real access barrier**: it is created `0700`,
-//!   so no other user can even traverse into it to reach the socket inode. The
+//!   That directory is **verified, not assumed**: it is created `0700`, or else
+//!   checked to be a real directory (not a symlink), owned by our effective uid,
+//!   with no group or other bits. A directory another local user got there first
+//!   is refused and the server does not start. See [`crate::unix_dir`], which
+//!   holds the rule and the argument for how durable it is.
+//! - **The parent directory is the real access barrier**: at `0700`,
+//!   no other user can even traverse into it to reach the socket inode. The
 //!   socket itself is additionally `chmod 0600` right after `bind`, as
 //!   defence-in-depth. `std`'s [`UnixListener::bind`] couples `bind` + `listen`
 //!   in one call, so there is no seam to `chmod` *between* them without dropping
@@ -33,6 +38,11 @@
 //!   means a live server already owns the name and we refuse to start a second.
 //!   (On Windows the equivalent split is `FILE_FLAG_FIRST_PIPE_INSTANCE` plus the
 //!   named single-instance mutex; here the bound socket *is* the instance token.)
+//!   Because that sequence is three steps against a shared name rather than one
+//!   atomic call, it runs under a sibling `flock` — otherwise two instances
+//!   starting together both unlink and both bind, leaving one of them listening
+//!   on an unreachable inode while believing it is serving. See
+//!   [`takeover_bind`].
 //! - The same limits as the pipe: at most [`MAX_CONNECTIONS`]
 //!   connections are in flight, [`MAX_HANDLER_THREADS`]
 //!   serve at once, and the frame codec caps a single body at 64 KiB **before**
@@ -652,8 +662,44 @@ fn bind_listener(path: &Path) -> Result<UnixListener, IpcTransportError> {
 }
 
 /// The `AddrInUse` path: probe for a live owner, else unlink the stale inode and
-/// rebind.
+/// rebind — under a lock, because that sequence is not atomic.
+///
+/// # The race this closes
+///
+/// Probe → `remove_file` → `bind` is three steps against a shared name, and two
+/// instances starting together interleave them. Both probe the stale inode and
+/// see a refusal; both unlink; both bind. The second `bind` creates a *new*
+/// inode at the same path, so the first instance is left holding a listener no
+/// client can ever reach — it accepts nothing, reports no error, and looks
+/// healthy. Duja's own single-instance guard does not prevent this: it degrades
+/// to "first" whenever its lock cannot be taken, and `dujactl` reaches the socket
+/// by path, not by process.
+///
+/// The fix is to let exactly one instance run the sequence. Every instance takes
+/// the same sibling lock first, and the loser re-runs the whole thing afterwards
+/// — by which point the winner has rebound, so the loser's plain `bind` fails
+/// `AddrInUse`, its probe *succeeds*, and it correctly reports a live server
+/// rather than destroying one.
+///
+/// Note the retry order: the plain `bind` is attempted again **inside** the lock
+/// before anything is unlinked. Skipping that would have the loser unlink the
+/// winner's fresh socket, which is the very defect being fixed, just moved.
+///
+/// Failing to acquire the lock is fatal here rather than a shrug. This function
+/// only runs on the abnormal path, and the step it guards is the destructive one;
+/// an ordinary first start never reaches it, because the plain `bind` in
+/// [`bind_listener`] succeeds and is itself atomic.
 fn takeover_bind(path: &Path) -> Result<UnixListener, IpcTransportError> {
+    let _guard = TakeoverLock::acquire(path)?;
+
+    // The winner may have rebound while we waited: a fresh inode is something to
+    // connect to, never something to unlink.
+    match UnixListener::bind(path) {
+        Ok(listener) => return Ok(listener),
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => {}
+        Err(e) => return Err(IpcTransportError::Io(e.to_string())),
+    }
+
     if UnixStream::connect(path).is_ok() {
         // A live server accepted the probe: we are the second instance.
         return Err(IpcTransportError::Io(
@@ -665,17 +711,59 @@ fn takeover_bind(path: &Path) -> Result<UnixListener, IpcTransportError> {
     UnixListener::bind(path).map_err(|e| IpcTransportError::Io(e.to_string()))
 }
 
-/// Create `path`'s parent directory (recursively) and set it `0700`.
+/// An exclusive advisory lock serialising [`takeover_bind`] across instances.
 ///
-/// The parent is always a directory Duja owns (`.../duja/`), never a shared
-/// system directory, because every resolved path nests the socket under a
-/// dedicated `duja` (or `duja-<uid>`) component.
-fn prepare_socket_dir(path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-        set_mode(parent, 0o700)?;
+/// The lock file is a sibling of the socket inside the same `0700` directory, so
+/// it inherits that directory's access barrier and needs no separate one. It is
+/// deliberately **not** the single-instance lock file: that one is held for the
+/// whole process lifetime, so reusing it would make the first instance's own
+/// takeover deadlock against itself.
+///
+/// Blocking rather than try-lock. The holder does a probe and at most two binds,
+/// so the wait is bounded by a few syscalls, and a try-lock would turn a
+/// microsecond overlap into a spurious "another server is running".
+///
+/// **The lock file is never unlinked**, including on shutdown, and that is load
+/// bearing rather than laziness. `flock` locks an *inode*, not a path: if one
+/// instance held the lock while another unlinked the file and recreated it, the
+/// second would take an uncontended lock on a brand-new inode and both would
+/// believe they had exclusive access — reintroducing the race from one layer
+/// down. An empty `0600` file inside an already-private directory is the cheap
+/// side of that trade.
+struct TakeoverLock {
+    /// Held open for the lifetime of the guard; closing it releases the `flock`.
+    _file: std::fs::File,
+}
+
+impl TakeoverLock {
+    /// Take the exclusive lock guarding `socket`'s takeover sequence.
+    fn acquire(socket: &Path) -> Result<Self, IpcTransportError> {
+        let mut name = socket.as_os_str().to_owned();
+        name.push(".lock");
+        let path = PathBuf::from(name);
+        let file = crate::unix_dir::open_private_file(&path)
+            .map_err(|e| IpcTransportError::Io(format!("cannot open {}: {e}", path.display())))?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+            .map_err(|e| IpcTransportError::Io(format!("cannot lock {}: {e}", path.display())))?;
+        Ok(TakeoverLock { _file: file })
     }
-    Ok(())
+}
+
+/// Prepare `path`'s parent as a private `0700` directory Duja owns.
+///
+/// The parent is always a directory dedicated to Duja (`.../duja/` or
+/// `/tmp/duja-<uid>/`), never a shared system directory, because every resolved
+/// path nests the socket under such a component.
+///
+/// This used to create the directory recursively and `chmod` it, which accepted a
+/// pre-existing directory belonging to anybody; it now refuses one that is not
+/// ours and private. See [`crate::unix_dir`] for the rule and for how durable the
+/// check is.
+fn prepare_socket_dir(path: &Path) -> io::Result<()> {
+    match path.parent() {
+        Some(parent) => crate::unix_dir::ensure_private_dir(parent),
+        None => Ok(()),
+    }
 }
 
 /// Set the permission bits of `path` to `mode`.
