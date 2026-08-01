@@ -11,8 +11,10 @@
 //! `catch_unwind` ahead of the ack a test is waiting for; it is small but it is
 //! pure overhead, and [`mute_simulated_driver_panics`] removes it. The other is
 //! the CI runner itself, which has stalled for seconds at a time on four
-//! separate occasions. The deadlines are therefore sized as liveness guards
-//! rather than latency assertions — see [`LIVENESS_BUDGET`].
+//! separate occasions. Nearly every deadline here is therefore sized as a
+//! liveness guard rather than a latency assertion — see [`LIVENESS_BUDGET`]. The
+//! exceptions are named and explain themselves: [`SHUTDOWN_ASSERTION_BUDGET`],
+//! and the 14 negative waits that assert an absence and so must stay short.
 
 // RATIONALE: integration tests are a separate crate and do not inherit the
 // library's `cfg(test)` lint allows. These tests use unwrap/expect for brevity
