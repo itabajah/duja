@@ -5,6 +5,11 @@
 //! never bare sleeps for correctness — so the suite is deterministic on CI and
 //! flake-free under repetition. Every join is timeout-guarded so a regression
 //! surfaces as a failure, not a hang.
+//!
+//! One cost is not synchronization at all and had to be removed rather than
+//! waited out: the panic runtime's own backtrace symbolization, which lands
+//! inside the engine's `catch_unwind` and ahead of the ack the tests wait on.
+//! See [`mute_simulated_driver_panics`].
 
 // RATIONALE: integration tests are a separate crate and do not inherit the
 // library's `cfg(test)` lint allows. These tests use unwrap/expect for brevity
@@ -12,7 +17,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
@@ -184,6 +189,49 @@ impl BrightnessController for GatedGet {
     }
 }
 
+/// The message prefix shared by every fake in this file that panics on purpose.
+/// [`mute_simulated_driver_panics`] filters on it, so the panic sites and the
+/// filter cannot drift apart.
+const SIMULATED_PANIC: &str = "simulated driver panic";
+
+/// Stop the default panic hook from symbolizing a backtrace for this file's
+/// *deliberate* driver panics.
+///
+/// The engine catches a controller panic and acks it, and the tests below assert
+/// on how quickly that ack becomes a notification. The default hook runs at the
+/// panic site — inside the worker's `catch_unwind`, ahead of the ack — and when
+/// `RUST_BACKTRACE` is set it captures **and symbolizes** a full backtrace
+/// there. On Windows that means dbghelp faulting in this binary's ~30 MB PDB:
+/// unbounded work charged to a bounded wait.
+///
+/// This is why `worker_panic_does_not_kill_engine` blew its 2 s budget on CI run
+/// 30700482072 (a docs-only commit) after 3,014 local runs passed: `ci.yml` sets
+/// `RUST_BACKTRACE=1` for every job, and a bare `cargo nextest run` does not.
+/// The budget was never the bug, and raising it would not have bounded the cost.
+///
+/// Only payloads starting with [`SIMULATED_PANIC`] are dropped; everything else
+/// is forwarded to the previous hook, so a genuine panic — here or in a test
+/// running concurrently — keeps its message and backtrace. Installation is
+/// process-global, hence the `Once`: nextest gives each test its own process,
+/// but plain `cargo test` shares one across threads.
+fn mute_simulated_driver_panics() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let payload = info.payload();
+            let message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+            if message.is_some_and(|m| m.starts_with(SIMULATED_PANIC)) {
+                return;
+            }
+            previous(info);
+        }));
+    });
+}
+
 /// A controller whose `set` panics; `get` succeeds.
 #[derive(Debug)]
 struct Panicky;
@@ -199,7 +247,7 @@ impl BrightnessController for Panicky {
         })
     }
     fn set(&mut self, _feature: Feature, _value: u16) -> Result<(), ControlError> {
-        panic!("simulated driver panic");
+        panic!("{SIMULATED_PANIC}");
     }
 }
 
@@ -984,6 +1032,7 @@ fn stale_get_ack_cannot_clobber_fresh_learn() {
 
 #[test]
 fn worker_panic_does_not_kill_engine() {
+    mute_simulated_driver_panics();
     let id = display_id();
     let (platform_tx, platform_rx) = unbounded::<()>();
     let (calls_tx, _calls_rx) = unbounded();
@@ -1693,7 +1742,7 @@ impl BrightnessController for GatedPanic {
     fn set(&mut self, _feature: Feature, _value: u16) -> Result<(), ControlError> {
         let _ = self.entered.send(());
         let _ = self.release.recv();
-        panic!("simulated driver panic inside set()");
+        panic!("{SIMULATED_PANIC} inside set()");
     }
 }
 
@@ -1755,6 +1804,7 @@ fn stale_panicked_does_not_retire_a_fresh_worker() {
     // the two stuck marks that abandon a display for the session
     // (`MAX_STUCK_RESPAWNS` is 2, gated with `<`: the first mark still permits a
     // respawn, the second abandons). Two such races cost a working display.
+    mute_simulated_driver_panics();
     let id = display_id();
     let (platform_tx, platform_rx) = unbounded::<()>();
     let (writes_tx, writes_rx) = unbounded();
