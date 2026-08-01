@@ -19,15 +19,25 @@ with the phases; keep entries as observable behaviors, not implementation.
 - [ ] HDR toggle mid-session: gamma path disabled, overlay still works, tooltip explains.
 - [ ] Display rotation and clone/extend mode switches survive without stale overlays.
 - [ ] Laptop brightness keys reflect into Duja's slider (WMI events).
+- [ ] **Gamma re-applies after a display event.** The macOS item below is not macOS-only:
+      the coordinator diffs against its own record on every platform, and ADR-0003 says the
+      Windows ramp "is reset by display events". Set a display to `dim_mode = "gamma"`, put
+      the slider in the band where the **ramp** is doing the dimming — with shipped defaults
+      that is roughly **13–24**, because `plan_for_platform` substitutes an overlay below
+      `MIN_ACCEPTED_GAMMA` (0.5), which lands near slider 12 — then sleep/wake, or toggle a
+      second monitor. It must stay dimmed with no slider input. Dragging "low" is the wrong
+      test: below ~12 you are on the overlay path and the check passes without ever
+      exercising a ramp.
 
 ## macOS (community-assisted until hardware access)
 - [ ] Flyout on a Space with a fullscreen app; overlay joins all Spaces.
 - [ ] **Gamma (if enabled) re-applies after wake.** Set a display to `dim_mode = "gamma"`,
-      drag it into the sub-floor zone so the ramp is doing the dimming, then sleep and wake.
-      It must come back dimmed *without* touching the slider. This gate could not pass at
-      all until `#109` — the sink shipped without the re-apply ADR-0003 requires — so a
-      failure here is a real regression, not an untested path. Worth running on **Windows
-      too**: the same coordinator skip applies wherever a display event resets the ramp.
+      put the slider where the *ramp* is doing the dimming, then sleep and wake. It must
+      come back dimmed without touching the slider. Before `#109` a pass here was
+      **incidental** — it happened only when the wake also changed the display set, which
+      made `restore_phase` forget the display so it re-engaged on return; a wake that left
+      the set unchanged did not re-apply at all. So a failure is worth escalating, but an
+      old passing run is not evidence the path was covered.
 - [ ] DDC on Apple Silicon over USB-C (not built-in HDMI on M1/entry-M2 — expected unsupported).
 - [ ] **Built-in panel below the backlight floor**: dragging its slider into the sub-floor zone
       keeps dimming, and the overlay covers the built-in screen **exactly** — no offset, no

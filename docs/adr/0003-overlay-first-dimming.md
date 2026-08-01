@@ -30,8 +30,12 @@ re-apply-on-wake, wlroots), never in HDR.
 > that. It is satisfied as of `#109`: the engine emits
 > `EngineNotification::PlatformWake` on every resume, session unlock and
 > display-configuration change, and the app answers it by invalidating the gamma
-> coordinator and re-planning, so every ramp it believes is live is rewritten
-> once.
+> coordinator and re-planning, so every ramp the fresh plan *asks for* is written
+> once rather than diffed away. (A display the plan no longer asks for is
+> restored by the ordinary phase-2 path, not rewritten.) A rewrite the OS refuses
+> drops the stale record instead of latching it, so the next batch retries — the
+> refusal path matters here because a display just back from sleep is when a ramp
+> write is most likely to fail transiently.
 >
 > The clause reads as macOS-specific and is not. The list above says the Windows
 > ramp *"is reset by display events"*, and the coordinator diffs against its own

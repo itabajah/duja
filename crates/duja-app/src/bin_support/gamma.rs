@@ -349,15 +349,39 @@ impl GammaCoordinator {
     pub(crate) fn engage_phase(&mut self, commands: &[DimCommand], sink: &mut impl GammaSink) {
         // One re-assert pass after `invalidate`: our record of what is live is
         // untrustworthy, so rewrite rather than diff. Cleared unconditionally,
-        // including when the batch is empty — the point is that this pass has
-        // happened, not that it wrote anything.
+        // including on an empty batch — safe not because "the pass happened" but
+        // because `restore_phase` restores and forgets every engaged display an
+        // empty batch omits, so there is nothing stale left to re-assert.
         let rewrite = std::mem::take(&mut self.dirty);
         for cmd in commands {
             let Some(factor) = cmd.gamma else { continue };
             let bits = factor.to_bits();
-            if (rewrite || self.engaged.get(&cmd.id) != Some(&bits)) && sink.engage(&cmd.id, factor)
-            {
+            if !(rewrite || self.engaged.get(&cmd.id) != Some(&bits)) {
+                continue;
+            }
+            if sink.engage(&cmd.id, factor) {
                 self.engaged.insert(cmd.id.clone(), bits);
+            } else if rewrite {
+                // A refusal during the re-assert pass is the one case where a
+                // stale record must GO. `invalidate` declared it untrustworthy,
+                // the rewrite that would have refreshed it just failed, so we now
+                // know nothing about what is live. Keeping it makes the ordinary
+                // diff skip this display on every later batch — ramp never
+                // rewritten, `overlay_alpha` 0, nothing dimming it until the user
+                // moves the slider. That is precisely the defect `invalidate`
+                // exists to fix, reappearing in the window where it matters most:
+                // a display coming back from sleep is exactly when a GDI or
+                // CoreGraphics write is most likely to be transiently refused.
+                //
+                // Dropping it restores the invariant this phase already documents
+                // for a first engage — a refused engage is not recorded, so the
+                // next batch retries, which is the only way a display recovers.
+                //
+                // Deliberately NOT done on an ordinary (non-rewrite) refusal: there
+                // the record describes a ramp we have no reason to doubt is live at
+                // the older factor, and `restore_phase` needs it to take that ramp
+                // down later.
+                self.engaged.remove(&cmd.id);
             }
         }
     }
@@ -1506,6 +1530,39 @@ mod tests {
             sink.restored,
             vec![id("A")],
             "invalidate must not forget WHICH displays hold a live ramp"
+        );
+    }
+
+    #[test]
+    fn a_refusal_during_the_re_assert_is_retried_not_latched() {
+        // Review of the first draft found the fix defeating itself in the window
+        // it targets. `invalidate` forces one rewrite pass; if the sink refuses
+        // during that pass, the STALE record survived, so every later batch
+        // diff-skipped the display and the ramp was never written again. A
+        // display just back from sleep is exactly when a ramp write is most
+        // likely to be transiently refused, so this was the likely path, not an
+        // exotic one.
+        let mut coord = GammaCoordinator::default();
+        let mut sink = FakeSink::default();
+        let batch = [cmd("A", Some(0.6))];
+
+        gamma_only(&mut coord, &batch, &mut sink);
+        assert_eq!(sink.engaged.len(), 1);
+
+        // Resume. The rewrite is attempted and the OS refuses it.
+        coord.invalidate();
+        sink.refuse = true;
+        gamma_only(&mut coord, &batch, &mut sink);
+        assert_eq!(sink.engaged.len(), 2, "the re-assert pass attempts a write");
+
+        // The transient clears. The very next batch must try again rather than
+        // trusting a record whose refresh failed.
+        sink.refuse = false;
+        gamma_only(&mut coord, &batch, &mut sink);
+        assert_eq!(
+            sink.engaged.len(),
+            3,
+            "a refusal during the re-assert must be retried, not latched forever"
         );
     }
 

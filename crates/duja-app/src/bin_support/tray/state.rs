@@ -848,15 +848,33 @@ impl AppState {
     /// Windows needs it too: the same ADR records that its ramp *"is reset by
     /// display events"*.
     ///
-    /// Both halves are load-bearing. [`GammaCoordinator::invalidate`] alone would
-    /// change nothing until something else happened to trigger a batch, and a
-    /// resume that changes no display produces no snapshot — which is exactly the
-    /// case that was broken. So this re-plans as well.
+    /// Both halves are load-bearing. [`gamma::GammaCoordinator::invalidate`]
+    /// alone would change nothing until something else happened to trigger a
+    /// batch, and a resume that changes no display produces no snapshot — which
+    /// is exactly the case that was broken. So this re-plans as well.
     ///
-    /// Cheap and idempotent: it costs one ramp write per gamma-mode display per
-    /// OS event, and does nothing at all when no display is using gamma (the
-    /// overlay path re-applies from the plan regardless).
+    /// The HDR verdict is re-probed first. Toggling Windows HDR raises
+    /// `WM_DISPLAYCHANGE` but usually does **not** change the display set, so
+    /// without this the forced rewrite would push a ramp at a now-HDR display on
+    /// a stale `gamma_allowed` — the one thing ADR-0003 says never to do. This is
+    /// the only apply site that *forces* a write where the ordinary diff would
+    /// have skipped it, which is what makes the stale verdict reachable here and
+    /// inert elsewhere. [`GAMMA_VERDICT_TTL`] throttles an event burst to one
+    /// probe.
+    ///
+    /// **Cost.** One ramp write per gamma-mode display, per platform *event* —
+    /// and one user-visible resume is several events, since `duja-platform` maps
+    /// resume, device-arrival and `WM_DISPLAYCHANGE` onto the same tick and its
+    /// own docs call the stream bursty. Deliberately not debounced: the debounce
+    /// exists to coalesce enumerations, and waiting to re-assert a ramp would
+    /// leave the screen undimmed for the duration.
+    ///
+    /// Not free even with no gamma display: `apply_overlays` re-plans and issues
+    /// the overlay batch, which is a blocking round-trip to the dimmer thread.
+    /// That is the same work a single slider sample already does, so it is small
+    /// — but it is not nothing.
     fn on_platform_wake(&mut self) {
+        self.refresh_gamma_verdict();
         self.gamma.invalidate();
         self.apply_overlays();
     }
