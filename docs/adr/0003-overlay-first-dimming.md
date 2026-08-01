@@ -25,6 +25,22 @@ Per-monitor click-through overlay is the **primary** software dimmer. Gamma is
 an **opt-in** enhancement only where verified safe (Windows SDR, macOS with
 re-apply-on-wake, wlroots), never in HDR.
 
+> **Re-apply-on-wake status.** This clause was written as a precondition and the
+> macOS gamma sink shipped in `#100` without satisfying it; the P6 gate caught
+> that. It is satisfied as of `#109`: the engine emits
+> `EngineNotification::PlatformWake` on every resume, session unlock and
+> display-configuration change, and the app answers it by invalidating the gamma
+> coordinator and re-planning, so every ramp it believes is live is rewritten
+> once.
+>
+> The clause reads as macOS-specific and is not. The list above says the Windows
+> ramp *"is reset by display events"*, and the coordinator diffs against its own
+> record of what it wrote — a record that cannot observe the OS discarding a
+> ramp. Windows self-healed only *incidentally*, when the event also removed the
+> display so `restore_phase` dropped it from tracking; a display that stayed
+> enumerated across the event stayed stale on either OS. The re-assert is
+> therefore cross-platform.
+
 ## Consequences
 
 - Overlay input-transparency is a security property, QA-checked every release.

@@ -22,7 +22,12 @@ with the phases; keep entries as observable behaviors, not implementation.
 
 ## macOS (community-assisted until hardware access)
 - [ ] Flyout on a Space with a fullscreen app; overlay joins all Spaces.
-- [ ] Gamma (if enabled) re-applies after wake.
+- [ ] **Gamma (if enabled) re-applies after wake.** Set a display to `dim_mode = "gamma"`,
+      drag it into the sub-floor zone so the ramp is doing the dimming, then sleep and wake.
+      It must come back dimmed *without* touching the slider. This gate could not pass at
+      all until `#109` — the sink shipped without the re-apply ADR-0003 requires — so a
+      failure here is a real regression, not an untested path. Worth running on **Windows
+      too**: the same coordinator skip applies wherever a display event resets the ramp.
 - [ ] DDC on Apple Silicon over USB-C (not built-in HDMI on M1/entry-M2 — expected unsupported).
 - [ ] **Built-in panel below the backlight floor**: dragging its slider into the sub-floor zone
       keeps dimming, and the overlay covers the built-in screen **exactly** — no offset, no

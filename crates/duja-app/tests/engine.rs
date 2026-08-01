@@ -1698,6 +1698,56 @@ impl BrightnessController for GatedPanic {
 }
 
 #[test]
+fn a_platform_event_announces_itself_before_any_enumeration_settles() {
+    // The wiring half of ADR-0003's re-apply-on-wake precondition. The gamma
+    // coordinator diffs against its own record of what it wrote, so nothing in
+    // it can notice the OS dropping a ramp on resume; the app needs to be TOLD.
+    //
+    // The case that matters is a resume where the display set is unchanged — no
+    // `DisplaysChanged` follows, so this notification is the only signal there
+    // is. Asserting it arrives while the display set is static is therefore the
+    // whole point, not an incidental detail of the fixture.
+    let id = display_id();
+    let (platform_tx, platform_rx) = unbounded::<()>();
+    let (writes_tx, _writes_rx) = unbounded();
+    let (calls_tx, _calls_rx) = unbounded();
+    let state: Displays = Arc::new(Mutex::new(vec![discovered(&id)]));
+
+    let factory: duja_app::ControllerFactory = Box::new(move |_id| {
+        let writes_tx = writes_tx.clone();
+        Box::new(move || Some(Box::new(Recording::new(writes_tx)) as Box<dyn BrightnessController>))
+            as duja_app::ControllerOpener
+    });
+
+    let cfg = EngineConfig {
+        write_min_gap: Duration::from_millis(10),
+        watchdog_timeout: Duration::from_secs(30),
+        // Long enough that the debounced enumeration cannot have fired yet when
+        // the assertion below runs: the notification must not wait on it.
+        displaychange_debounce: Duration::from_millis(400),
+        level_poll_interval: Duration::from_millis(50),
+    };
+    let (engine, notes) = Engine::spawn(
+        cfg,
+        enumerator(state.clone(), calls_tx),
+        factory,
+        platform_rx,
+    );
+
+    // The OS reports a resume. Nothing about the displays changed.
+    platform_tx.send(()).unwrap();
+
+    assert!(
+        wait_note(&notes, Duration::from_secs(2), |n| {
+            matches!(n, EngineNotification::PlatformWake)
+        }),
+        "a platform event must announce itself so gamma can be re-asserted"
+    );
+
+    within(Duration::from_secs(2), move || engine.shutdown());
+}
+
+#[test]
 fn stale_panicked_does_not_retire_a_fresh_worker() {
     // E-C (generation), the third arm. `OpenFailed` and `SoftwareFallback` both
     // ignore an ack from an already-replaced worker; `Panicked` did not, so a

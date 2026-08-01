@@ -836,7 +836,29 @@ impl AppState {
             EngineNotification::DisplayUnresponsive(id) => self.on_member_responsive(&id, false),
             EngineNotification::DisplayResponsive(id) => self.on_member_responsive(&id, true),
             EngineNotification::LevelRead { id, hw_pct } => self.on_level_read(&id, hw_pct),
+            EngineNotification::PlatformWake => self.on_platform_wake(),
         }
+    }
+
+    /// Re-assert every gamma ramp after an OS event that may have dropped them.
+    ///
+    /// ADR-0003 makes re-apply-on-wake a **precondition** for offering gamma at
+    /// all on macOS (*"opt-in … only where verified safe (Windows SDR, macOS with
+    /// re-apply-on-wake, wlroots)"*), and the macOS gamma sink shipped without it.
+    /// Windows needs it too: the same ADR records that its ramp *"is reset by
+    /// display events"*.
+    ///
+    /// Both halves are load-bearing. [`GammaCoordinator::invalidate`] alone would
+    /// change nothing until something else happened to trigger a batch, and a
+    /// resume that changes no display produces no snapshot — which is exactly the
+    /// case that was broken. So this re-plans as well.
+    ///
+    /// Cheap and idempotent: it costs one ramp write per gamma-mode display per
+    /// OS event, and does nothing at all when no display is using gamma (the
+    /// overlay path re-applies from the plan regardless).
+    fn on_platform_wake(&mut self) {
+        self.gamma.invalidate();
+        self.apply_overlays();
     }
 
     /// Reflect an externally-observed hardware level onto the perceptual slider.

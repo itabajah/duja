@@ -199,6 +199,7 @@ fn format_notification(notification: &EngineNotification) -> String {
         EngineNotification::LevelRead { id, hw_pct } => {
             format!("level-read: {}={hw_pct}%", id.as_str())
         }
+        EngineNotification::PlatformWake => "platform-wake: re-asserting gamma".to_owned(),
     }
 }
 

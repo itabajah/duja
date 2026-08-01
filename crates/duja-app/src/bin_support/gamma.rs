@@ -295,9 +295,41 @@ pub(crate) struct GammaCoordinator {
     /// make the coordinator claim a ramp the OS rejected, suppress the retry that
     /// could recover it, and later issue a restore for a ramp that was never set.
     engaged: BTreeMap<StableDisplayId, u32>,
+    /// Set by [`invalidate`](Self::invalidate) when the OS may have thrown our
+    /// ramps away; cleared by the next [`engage_phase`](Self::engage_phase),
+    /// which rewrites every requested factor instead of diffing.
+    ///
+    /// Deliberately **not** a flag that clears the [`engaged`](Self::engaged)
+    /// map: membership is what [`restore_phase`](Self::restore_phase) needs to
+    /// know which displays still hold a live ramp to take down.
+    dirty: bool,
 }
 
 impl GammaCoordinator {
+    /// Declare that the OS may have reset every gamma ramp behind our back, so
+    /// the next batch must **rewrite** rather than diff.
+    ///
+    /// [`engage_phase`](Self::engage_phase) is a diff against this coordinator's
+    /// own record of what it wrote. Nothing in that record can observe the OS
+    /// dropping a ramp — and ADR-0003 says both platforms do: macOS
+    /// `CGSetDisplayTransferByTable` *"resets on wake"*, and the Windows ramp
+    /// *"is reset by display events"*. Without this, a display whose factor is
+    /// unchanged across a resume is skipped forever, and because a gamma-mode
+    /// display has `overlay_alpha == 0` by construction there is nothing else
+    /// dimming it: the screen comes back undimmed and only a slider move
+    /// recovers it.
+    ///
+    /// Windows self-heals *incidentally* — a display that leaves the batch
+    /// entirely is dropped from `engaged` by `restore_phase` and re-engages on
+    /// its return — but only when the event also removed the display. One that
+    /// stays enumerated across the event stays stale on either OS.
+    ///
+    /// Idempotent, and one pass: re-asserting on every batch would write a ramp
+    /// per display per slider sample.
+    pub(crate) fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
     /// Phase 1 of a batch: engage every ramp the batch asks for.
     ///
     /// Engages every command carrying a gamma factor (only when newly present or
@@ -315,10 +347,16 @@ impl GammaCoordinator {
     /// Runs **before** the overlay diff so the two dims briefly overlap rather than
     /// briefly vanish — see the [module docs](self).
     pub(crate) fn engage_phase(&mut self, commands: &[DimCommand], sink: &mut impl GammaSink) {
+        // One re-assert pass after `invalidate`: our record of what is live is
+        // untrustworthy, so rewrite rather than diff. Cleared unconditionally,
+        // including when the batch is empty — the point is that this pass has
+        // happened, not that it wrote anything.
+        let rewrite = std::mem::take(&mut self.dirty);
         for cmd in commands {
             let Some(factor) = cmd.gamma else { continue };
             let bits = factor.to_bits();
-            if self.engaged.get(&cmd.id) != Some(&bits) && sink.engage(&cmd.id, factor) {
+            if (rewrite || self.engaged.get(&cmd.id) != Some(&bits)) && sink.engage(&cmd.id, factor)
+            {
                 self.engaged.insert(cmd.id.clone(), bits);
             }
         }
@@ -508,6 +546,12 @@ mod platform {
             overlays: Option<&mut dyn Dimmer>,
         ) -> Result<(), DimmerError> {
             apply_dimming_batch(commands, &mut self.coord, &mut self.sink, overlays)
+        }
+
+        /// Declare that the OS may have reset every ramp, so the next batch
+        /// rewrites instead of diffing. See [`GammaCoordinator::invalidate`].
+        pub(crate) fn invalidate(&mut self) {
+            self.coord.invalidate();
         }
 
         /// Restore every engaged display and clear the crash marker, returning
@@ -928,6 +972,16 @@ mod platform {
             overlays: Option<&mut dyn Dimmer>,
         ) -> Result<(), DimmerError> {
             apply_dimming_batch(commands, &mut self.coord, &mut self.sink, overlays)
+        }
+
+        /// Declare that the OS may have reset every ramp, so the next batch
+        /// rewrites instead of diffing. See [`GammaCoordinator::invalidate`].
+        ///
+        /// This is the macOS half of ADR-0003's re-apply-on-wake precondition —
+        /// the one the ADR names explicitly, since `CGSetDisplayTransferByTable`
+        /// resets on wake.
+        pub(crate) fn invalidate(&mut self) {
+            self.coord.invalidate();
         }
 
         /// Reset every display to its `ColorSync` profile and forget what was engaged.
@@ -1371,6 +1425,88 @@ mod tests {
         // this with a whole-guard restore instead).
         gamma_only(&mut coord, &[], &mut sink);
         assert!(sink.restored.is_empty());
+    }
+
+    // --- The OS can drop a ramp under us; `invalidate` is how we recover ----
+
+    #[test]
+    fn an_unchanged_factor_is_re_engaged_after_invalidate() {
+        // The defect this exists for. `engage_phase` is a diff against the
+        // coordinator's own record of what it wrote, and nothing in that record
+        // can notice the OS throwing the ramp away — which ADR-0003 says both
+        // platforms do (macOS "resets on wake", Windows "is reset by display
+        // events"). After a resume the batch carries the SAME factor, the record
+        // still matches, the write is skipped, and the display sits undimmed
+        // with `overlay_alpha == 0` because gamma mode is by construction not
+        // using the overlay. Only moving the slider recovered it.
+        let mut coord = GammaCoordinator::default();
+        let mut sink = FakeSink::default();
+        let batch = [cmd("A", Some(0.6))];
+
+        gamma_only(&mut coord, &batch, &mut sink);
+        assert_eq!(sink.engaged.len(), 1, "first batch engages");
+
+        // Same batch again with no invalidation: correctly skipped.
+        gamma_only(&mut coord, &batch, &mut sink);
+        assert_eq!(
+            sink.engaged.len(),
+            1,
+            "an unchanged factor is not rewritten"
+        );
+
+        // The OS reset our ramps. Say so, and the identical batch must rewrite.
+        coord.invalidate();
+        gamma_only(&mut coord, &batch, &mut sink);
+        assert_eq!(
+            sink.engaged.len(),
+            2,
+            "after invalidate the same factor must be written again"
+        );
+    }
+
+    #[test]
+    fn invalidate_forces_exactly_one_re_assert_pass() {
+        // Not a mode: one pass. Otherwise every subsequent batch would rewrite
+        // every ramp, and the skip that makes a slider drag cheap is gone.
+        let mut coord = GammaCoordinator::default();
+        let mut sink = FakeSink::default();
+        let batch = [cmd("A", Some(0.6))];
+
+        gamma_only(&mut coord, &batch, &mut sink);
+        coord.invalidate();
+        gamma_only(&mut coord, &batch, &mut sink);
+        gamma_only(&mut coord, &batch, &mut sink);
+        assert_eq!(
+            sink.engaged.len(),
+            2,
+            "the pass after invalidate re-engages; the one after that does not"
+        );
+    }
+
+    #[test]
+    fn invalidate_keeps_membership_so_a_dropped_ramp_is_still_restored() {
+        // NON-REGRESSION GUARD: this passes with `invalidate` neutered too, so it
+        // is not evidence the fix works — the other two tests are. It pins the
+        // property the fix must not BREAK, which is the whole reason this is a
+        // `dirty` flag and not a `forget_all`.
+        //
+        // Why this is `invalidate` and not `forget_all`. Forgetting the SET would
+        // also re-engage, but it loses who was engaged — so a display that leaves
+        // gamma across the same resume (HDR toggled on while asleep, say) would
+        // never be restored, stranding a ramp Windows keeps until logoff.
+        let mut coord = GammaCoordinator::default();
+        let mut sink = FakeSink::default();
+        gamma_only(&mut coord, &[cmd("A", Some(0.6))], &mut sink);
+
+        coord.invalidate();
+        // A now wants the overlay instead: it must be restored, not silently
+        // dropped from tracking.
+        gamma_only(&mut coord, &[cmd("A", None)], &mut sink);
+        assert_eq!(
+            sink.restored,
+            vec![id("A")],
+            "invalidate must not forget WHICH displays hold a live ramp"
+        );
     }
 
     // --- A refused engage must not be recorded as engaged -------------------
