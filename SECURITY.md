@@ -65,7 +65,8 @@ turn on Authenticode / Azure Trusted Signing later) is in
 ### Verifying a release
 
 ```sh
-sha256sum -c SHA256SUMS
+sha256sum -c SHA256SUMS          # Linux
+shasum -a 256 -c SHA256SUMS      # macOS (sha256sum is GNU coreutils, not preinstalled)
 minisign -Vm SHA256SUMS -P <DUJA_MINISIGN_PUBLIC_KEY>
 ```
 
@@ -82,7 +83,7 @@ So the verify command is:
 minisign -Vm SHA256SUMS -P RWSeL0en/zyHopbYOTmC4nwO4pLW0WN6awWsuhwoUZnSM+D0zukOl0UK
 ```
 
-You can also verify the build-provenance attestation on either binary (the
-installer `.exe` or the portable `.zip`) with
+You can also verify the build-provenance attestation on any of the three
+artifacts (the installer `.exe`, the portable `.zip`, or the macOS `.dmg`) with
 `gh attestation verify <file> --repo itabajah/duja`. (`SHA256SUMS` and the
 `.minisig` files are not attested; they are covered by minisign above.)
