@@ -86,7 +86,9 @@ do:
    `zwlr_gamma_control_manager_v1` are present, independently of each other.
 3. On X11, record whether the connection succeeded and whether the RandR extension
    answered.
-4. Report each of overlay and gamma as available or not, with the reason.
+4. Report each of overlay and gamma as available or not, with the reason —
+   overlay for the session, **gamma per output**, because that is the grain the
+   protocol grants and refuses it at.
 5. **Gamma only: downgrade the report if the bind is refused.** A
    `zwlr_gamma_control_v1::failed` for an output moves that output's gamma from
    available to unavailable, with the reason, and that has to reach the same
@@ -122,9 +124,9 @@ error on two of them. The interface is therefore plain data: interface names as
 `&str`, environment variables as `Option<&str>`, and — for step 5 — an output
 identifier plus a refusal reason, capability out. Naming that last input here is
 the point: it is what keeps the downgrade a rule this module owns and tests,
-rather than a special case bolted on beside it where no lane would see it. Both precedents
-already obey this without saying so (`mac_events` takes a raw `u32` reconfigure
-flag, not a `CGDisplayChangeSummaryFlags`), which is why it is written down here
+rather than a special case bolted on beside it where no lane would see it. Both
+precedents already obey this without saying so (`mac_events` takes a raw `u32`
+reconfigure flag, not a `CGDisplayChangeSummaryFlags`), which is why it is here
 rather than rediscovered.
 
 ## Consequences

@@ -1,15 +1,22 @@
 # Architecture Decision Records
 
-MADR-lite format. An accepted ADR's **decision** is changed by superseding, never
-by editing.
+MADR-lite format. An accepted ADR's **decision statement** is changed by
+superseding, never by rewriting.
 
-Its Context and Consequences do get amended in place, and deliberately: a status
-block recording that a precondition has since been met (ADR-0003 carries one from
-`#109`), a forward pointer to the later ADR that settled a question this one left
-open, a correction to a claim that turned out to be false. Rewriting a decision in
-place is what destroys the record; leaving a document that is knowably wrong is not
-better. When the *decision* moves, the row below gains an annotation naming the ADR
-that moved it — see 0001 and 0005 — and the original text stays.
+Everything around it is amended in place, and deliberately: a status block
+recording that a precondition has since been met (ADR-0003 carries one from
+`#109`, sitting under its Decision heading precisely so nobody reads the decision
+without it), a forward pointer to the later ADR that settled a question this one
+left open, a correction to a claim that turned out to be false. Rewriting a
+decision in place is what destroys the record; leaving a document knowably wrong
+is not better than fixing it.
+
+Whenever a later ADR changes an accepted one's standing — superseding its
+decision, retiring one of its consequences, or qualifying a claim it rests on —
+the row below gains an annotation naming that ADR, and the original text stays.
+Rows 0001 and 0005 carry two different flavours of this: 0010 **retired** a
+consequence of 0001, while 0022 only **qualified** 0005's title and explicitly
+leaves its decision standing.
 
 | # | Title | Status |
 |---|---|---|

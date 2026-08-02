@@ -31,7 +31,7 @@ The rest of that backend's Linux behaviour is a poor fit independently:
 - Documented Linux limits: `tooltip` is *"Unsupported"*, and *"once a menu is set,
   it cannot be removed"*.
 
-### The supply-chain argument for ksni does not exist, and the first draft of this ADR got it backwards
+### The supply-chain argument for ksni does not exist, and the first draft got it backwards
 
 The obvious argument is that `deny.toml`'s **8 RUSTSEC advisory ignores**
 (`RUSTSEC-2024-0370/0412/0413/0415/0416/0418/0419/0420`, the unmaintained gtk-rs
@@ -157,8 +157,9 @@ implementation and therefore has to earn the seam.
   `secondary_activate(x, y)` and `scroll(delta, orientation)`, with the
   coordinates documented as *"in screen coordinates and is to be considered an
   hint to the item where to show eventual windows"* (the upstream grammar slip
-  kept, because it is inside quotation marks). That is left-click-opens-the-flyout **and** an anchor
-  to place it at, which is the whole interaction ADR-0001 wrote off. Whether a
+  kept, because it is inside quotation marks). That is
+  left-click-opens-the-flyout **and** an anchor to place it at, which is the whole
+  interaction ADR-0001 wrote off. Whether a
   given SNI host actually sends them is the host's business and unverified here;
   the point is that the API no longer forecloses it.
 - **Two tray implementations to keep behaviourally aligned**, with only one of
