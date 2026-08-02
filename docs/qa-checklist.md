@@ -63,8 +63,6 @@ with the phases; keep entries as observable behaviors, not implementation.
            a correct implementation the day Mutter shipped either protocol. `dujactl doctor`
            prints which protocols the session offered, so these are checkable without guessing
            which desktop is which. -->
-
-
 - [ ] Missing i2c permissions: the app degrades gracefully (hardware control unavailable, no
       crash, software dimming still works). `dujactl doctor` reports the displays it can see
       and nothing about permissions — there is no permission/module/platform diagnostic in

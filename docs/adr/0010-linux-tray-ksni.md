@@ -139,17 +139,25 @@ implementation and therefore has to earn the seam.
   `"zbus::Connection executor"`. This is still materially better than the
   alternative — neither thread owns a UI event loop, so no widget is bound to one
   and nothing has to be marshalled back onto it, which was the actual objection —
-  but "Duja's code stays synchronous" describes Duja's code, not the process. The
-  zbus thread is not even new: ADR-0022 shows that connection already exists in
-  the Linux build via Slint. The ksni one is.
+  but "Duja's code stays synchronous" describes Duja's code, not the process.
+  Exactly **one** thread is added, and not for the reason a first reading
+  suggests: `ksni` builds its *own* session connection rather than reusing
+  Slint's, and gets away without a second zbus thread only because it passes
+  `.internal_executor(false)` (`service.rs`, commented *"avoid extra thread when
+  async-io enabled"*) and drives that connection on its own executor instead.
+  zbus spawns one `"zbus::Connection executor"` thread per `Connection` by
+  default, so had ksni used the plain builder this would be two. That makes the
+  count a property of ksni's implementation, not of zbus — worth re-checking on a
+  ksni upgrade rather than assuming.
 - **This retires ADR-0001's recorded Linux UX divergence**, which is why that
   ADR's index row is annotated rather than left to contradict this one. ADR-0001
   concluded *"tray-icon … emits no tray mouse events — Linux UX is driven from the
   context menu"*, and designed around it. That is a property of `tray-icon`'s GTK
   backend, not of Linux: `ksni`'s `Tray` trait defines `activate(x, y)`,
   `secondary_activate(x, y)` and `scroll(delta, orientation)`, with the
-  coordinates documented as *"in screen coordinates … a hint to the item where to
-  show eventual windows"*. That is left-click-opens-the-flyout **and** an anchor
+  coordinates documented as *"in screen coordinates and is to be considered an
+  hint to the item where to show eventual windows"* (the upstream grammar slip
+  kept, because it is inside quotation marks). That is left-click-opens-the-flyout **and** an anchor
   to place it at, which is the whole interaction ADR-0001 wrote off. Whether a
   given SNI host actually sends them is the host's business and unverified here;
   the point is that the API no longer forecloses it.

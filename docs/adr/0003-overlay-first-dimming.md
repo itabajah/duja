@@ -51,8 +51,12 @@ re-apply-on-wake, wlroots), never in HDR.
 - Windows gamma use requires the crash-marker + `duja --restore` restitution
   path before it ships (P4).
 - GNOME Wayland (no third-party overlay or gamma path): software dimming is
-  capability-gated off. ADR-0011 settled *how*: the gate is a runtime probe of the
-  Wayland registry, not a compositor name, so no session is refused by assumption.
+  capability-gated off. ADR-0011 settled *how*: the gate is a runtime capability
+  probe, not a compositor name, so no session is refused by assumption. For the
+  overlay the probe is registry presence; for **gamma** presence is necessary and
+  not sufficient, because `wlr-gamma-control` can refuse after advertising the
+  global, so that arm is only settled once `get_gamma_control` has
+  been taken without a refusal.
 
 ## P1 spike verification (2026-07-07, branch `spike/overlay`, Windows 11)
 

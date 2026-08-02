@@ -1450,7 +1450,7 @@ written down here rather than left implicit:
 | wave | scope |
 |---|---|
 | 0 | unix IPC + lock-directory hardening (shared with macOS) — `#114` |
-| 1 | the reserved Linux ADRs: 0010 tray, 0011 dimming, 0022 D-Bus |
+| 1 | the two ADRs reserved for P7 (0010 tray, 0011 dimming), plus 0022, which those two forced |
 | 2 | DRM/sysfs enumeration + EDID identity, `/dev/i2c` bus, backlight (logind primary, sysfs fallback) |
 | 3 | event pump (`NETLINK_KOBJECT_UEVENT` direct, no libudev) + autostart, desktop, geometry |
 | 4 | software dimming: X11 overlay + XRandR gamma, Wayland layer-shell + `wlr-gamma-control`, and the ADR-0011 capability probe |

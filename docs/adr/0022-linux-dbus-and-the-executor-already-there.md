@@ -69,17 +69,24 @@ that ADR-0001 and ADR-0009 selected. `async-executor`, `async-lock` and
 **Use `zbus` for all three, with `default-features = false` and its `async-io`
 executor**, matching what Slint already selected so the graph gains no second
 runtime. `i-slint-backend-winit` declares it as
-`default-features = false, features = ["async-io"]`, so this is the same selection
-and not merely the same executor family. Duja's own code stays synchronous and
-thread-based per ADR-0005, calling through `zbus`'s blocking API.
+`default-features = false, features = ["async-io"]`, so this is the same *executor*
+selection and not merely the same executor family. Duja's own code stays
+synchronous and thread-based per ADR-0005, calling through `zbus`'s blocking API.
 
-Spelled out, because the feature is **not** called what it is called in `ksni`:
+Spelled out, because there is a trap here that a manifest will not catch:
 `features = ["async-io", "blocking-api"]`. zbus 5.17's blocking wrappers are gated
-on `blocking-api`; there is no `blocking` feature (`ksni` has one, and writing that
-here would fail to compile). This pair is byte-identical to zbus's current default
-set, so `default-features = false` buys no reduction today — it is there to pin the
-choice explicitly, so a future upstream default that adds `tokio` cannot bring a
-second runtime in silently, which is the exact failure this ADR exists to prevent.
+on **`blocking-api`**. zbus *also* has a feature literally named `blocking` — the
+implicit feature of its optional `blocking` crate dependency, which `async-io`
+already turns on transitively — so writing `features = ["blocking"]` resolves
+cleanly, adds nothing, and quietly leaves `zbus::blocking` out of the build. The
+mistake surfaces at the first call site, not in `cargo`. (`ksni`'s feature of the
+same name is a different thing again: there it *is* the blocking wrapper. Two
+crates in this one decision spell it differently, which is why it is written down.)
+
+`["async-io", "blocking-api"]` is byte-identical to zbus's current default set, so
+`default-features = false` buys no reduction today — it is there to pin the choice
+explicitly, so a future upstream default that adds `tokio` cannot bring a second
+runtime in silently, which is the exact failure this ADR exists to prevent.
 
 **Both logind users degrade rather than fail.** D-Bus absence is a normal
 condition, not an error: containers, minimal window managers, `ssh` sessions, and

@@ -1,6 +1,15 @@
 # Architecture Decision Records
 
-MADR-lite format. Accepted ADRs are changed by superseding, not editing.
+MADR-lite format. An accepted ADR's **decision** is changed by superseding, never
+by editing.
+
+Its Context and Consequences do get amended in place, and deliberately: a status
+block recording that a precondition has since been met (ADR-0003 carries one from
+`#109`), a forward pointer to the later ADR that settled a question this one left
+open, a correction to a claim that turned out to be false. Rewriting a decision in
+place is what destroys the record; leaving a document that is knowably wrong is not
+better. When the *decision* moves, the row below gains an annotation naming the ADR
+that moved it — see 0001 and 0005 — and the original text stays.
 
 | # | Title | Status |
 |---|---|---|

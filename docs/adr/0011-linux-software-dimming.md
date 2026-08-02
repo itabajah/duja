@@ -60,10 +60,11 @@ at connect time, for free.
 **Registry presence is not the whole answer for gamma, and the design must not
 pretend it is.** `wlr-gamma-control-unstable-v1` describes itself as a protocol
 "for a **privileged** client", allows at most one gamma control per output with
-**exclusive** access, and defines a `failed` event that arrives *after* a
-successful bind for, among other reasons, "the output doesn't support gamma
-tables", "setting the gamma tables failed", and "another client already has
-exclusive gamma control for this output". So a session running `wlsunset` or
+**exclusive** access, and defines — on the per-output `zwlr_gamma_control_v1`
+that `get_gamma_control` returns, not on the manager global a client binds from
+the registry — a `failed` event whose listed reasons include "the output doesn't
+support gamma tables", "setting the gamma tables failed", and "another client
+already has exclusive gamma control for this output". So a session running `wlsunset` or
 `gammastep` advertises the global and still refuses Duja — which is not a corner
 case, it is the commonest reason a Wayland user would have that protocol at all.
 Presence is therefore **necessary and not sufficient** for gamma: the honest
@@ -75,8 +76,9 @@ presence is the answer.
 
 **Detect by capability, never by compositor identity.**
 
-`duja-dimmer`'s Linux backend resolves, at startup and on session change, a
-`LinuxSurface` describing what this session can actually do:
+`duja-dimmer`'s Linux backend resolves, at startup, on session change, and on a
+refused gamma bind, a `LinuxSurface` describing what this session can actually
+do:
 
 1. Choose the transport from `WAYLAND_DISPLAY` / `DISPLAY`, preferring Wayland
    when both are present, and treating a failed connect as "not that one".
@@ -89,10 +91,10 @@ presence is the answer.
    `zwlr_gamma_control_v1::failed` for an output moves that output's gamma from
    available to unavailable, with the reason, and that has to reach the same
    capability report step 4 produced — so the report is a value that can change
-   after startup, not one settled once. Duja already refuses a gamma write and
-   keeps its record honest rather than latching it (`#109`); this is the same
-   rule one layer lower, and building the report as write-once would make it
-   unimplementable.
+   after startup, not one settled once. This is the same rule one layer lower
+   than two Duja already applies: `#96` substitutes an overlay when a gamma ramp
+   is refused, and `#109` drops a refused record rather than latching it.
+   Building the report as write-once would make this unimplementable.
 
 Session-type and compositor strings are read **for the diagnostic and the log
 line only** — never as an input to the availability decision. `dujactl doctor`
@@ -117,7 +119,10 @@ type.** Those crates are Linux-target dependencies, and the Windows and macOS
 lanes compile this module under `cfg(test)`, where they do not exist — a single
 `zwlr_layer_shell_v1` in a signature turns "tested on every lane" into a build
 error on two of them. The interface is therefore plain data: interface names as
-`&str`, environment variables as `Option<&str>`, capability out. Both precedents
+`&str`, environment variables as `Option<&str>`, and — for step 5 — an output
+identifier plus a refusal reason, capability out. Naming that last input here is
+the point: it is what keeps the downgrade a rule this module owns and tests,
+rather than a special case bolted on beside it where no lane would see it. Both precedents
 already obey this without saying so (`mac_events` takes a raw `u32` reconfigure
 flag, not a `CGDisplayChangeSummaryFlags`), which is why it is written down here
 rather than rediscovered.
