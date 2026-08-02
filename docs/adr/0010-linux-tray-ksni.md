@@ -131,24 +131,27 @@ implementation and therefore has to earn the seam.
   *adds* GTK to the Linux graph, which the alternative would have done.
 - **No new system-library requirements on Linux.** Nothing to `apt install`,
   which matters for a tarball distribution (wave 6).
-- **Two background threads Duja does not create and does not name.** The GTK loop
-  was an argument *against* `tray-icon`, so the honest accounting is that the
-  chosen option is not thread-free either: `ksni`'s `async-io` arm spawns a
+- **One background thread is added, and Duja neither creates nor names it.** The
+  GTK loop was an argument *against* `tray-icon`, so the honest accounting is that
+  the chosen option is not thread-free either: `ksni`'s `async-io` arm spawns a
   detached, unnamed thread to tick its `async_executor::Executor`
-  (`compat.rs`'s `kick_driver`), and `zbus` runs its own, named
-  `"zbus::Connection executor"`. This is still materially better than the
-  alternative — neither thread owns a UI event loop, so no widget is bound to one
-  and nothing has to be marshalled back onto it, which was the actual objection —
-  but "Duja's code stays synchronous" describes Duja's code, not the process.
-  Exactly **one** thread is added, and not for the reason a first reading
-  suggests: `ksni` builds its *own* session connection rather than reusing
-  Slint's, and gets away without a second zbus thread only because it passes
-  `.internal_executor(false)` (`service.rs`, commented *"avoid extra thread when
-  async-io enabled"*) and drives that connection on its own executor instead.
-  zbus spawns one `"zbus::Connection executor"` thread per `Connection` by
-  default, so had ksni used the plain builder this would be two. That makes the
-  count a property of ksni's implementation, not of zbus — worth re-checking on a
-  ksni upgrade rather than assuming.
+  (`compat.rs`'s `kick_driver`). "Duja's code stays synchronous" describes Duja's
+  code, not the process.
+
+  It is one rather than two only by ksni's own care, which is worth writing down
+  because it is not a property of the design. `ksni` builds its **own** session
+  connection rather than reusing Slint's, and zbus spawns a named
+  `"zbus::Connection executor"` thread per `Connection` by default — so the second
+  thread is avoided solely because ksni passes `.internal_executor(false)`
+  (`service.rs`, commented *"avoid extra thread when async-io enabled"*) and
+  drives that connection on its own executor instead. Re-check it on a ksni
+  upgrade rather than assuming.
+
+  It is still materially better than the alternative, and for the reason the
+  objection was actually about: neither thread owns a UI event loop, so no widget
+  is bound to one and nothing has to be marshalled back onto it. The process ends
+  up with two D-Bus-ish threads either way — Slint's zbus executor is already
+  there before P7 starts (ADR-0022) — and P7 contributes exactly one of them.
 - **This retires ADR-0001's recorded Linux UX divergence**, which is why that
   ADR's index row is annotated rather than left to contradict this one. ADR-0001
   concluded *"tray-icon … emits no tray mouse events — Linux UX is driven from the
@@ -159,7 +162,9 @@ implementation and therefore has to earn the seam.
   hint to the item where to show eventual windows"* (the upstream grammar slip
   kept, because it is inside quotation marks). That is
   left-click-opens-the-flyout **and** an anchor to place it at, which is the whole
-  interaction ADR-0001 wrote off. Whether a
+  interaction ADR-0001 wrote off — and it matters more on Linux than it would
+  anywhere else, because Wayland gives a client no global cursor position, so an
+  activation coordinate is the only anchor a flyout there can have. Whether a
   given SNI host actually sends them is the host's business and unverified here;
   the point is that the API no longer forecloses it.
 - **Two tray implementations to keep behaviourally aligned**, with only one of
