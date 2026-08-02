@@ -4,7 +4,7 @@ MADR-lite format. Accepted ADRs are changed by superseding, not editing.
 
 | # | Title | Status |
 |---|---|---|
-| [0001](0001-ui-toolkit-slint.md) | UI toolkit: Slint + tray-icon (no webview) | accepted, spike-verified |
+| [0001](0001-ui-toolkit-slint.md) | UI toolkit: Slint + tray-icon (no webview) | accepted, spike-verified (its Linux tray consequence superseded by [0010](0010-linux-tray-ksni.md)) |
 | [0002](0002-own-windows-ddc-backend.md) | DDC backend: own dxva2 implementation on Windows | accepted |
 | [0003](0003-overlay-first-dimming.md) | Software dimming: overlay primary, gamma opt-in | accepted, spike-verified |
 | [0004](0004-stable-edid-identity.md) | Display identity: stable EDID-derived IDs | accepted |

@@ -1444,6 +1444,20 @@ exists, and clicking either opens the releases page.
   follows the decision instead of preceding it),
   **P8 hardening** → fuzz burn-in, 72 h soak, packaging, size trims, 1.0.
 
+**P7 waves.** The ADRs and commit messages refer to these by number, so they are
+written down here rather than left implicit:
+
+| wave | scope |
+|---|---|
+| 0 | unix IPC + lock-directory hardening (shared with macOS) — `#114` |
+| 1 | the reserved Linux ADRs: 0010 tray, 0011 dimming, 0022 D-Bus |
+| 2 | DRM/sysfs enumeration + EDID identity, `/dev/i2c` bus, backlight (logind primary, sysfs fallback) |
+| 3 | event pump (`NETLINK_KOBJECT_UEVENT` direct, no libudev) + autostart, desktop, geometry |
+| 4 | software dimming: X11 overlay + XRandR gamma, Wayland layer-shell + `wlr-gamma-control`, and the ADR-0011 capability probe |
+| 5 | un-gate the tray (ksni as the third arm) + `dujactl doctor`'s Linux diagnostic |
+| 6 | `xtask dist --target linux`, the release job, and the docs |
+| 7 | phase gate, adversarial review, tag `m7-linux` |
+
 ## Notes & gotchas for whoever continues
 
 - **Environment**: Rust pinned 1.96.1 (MSRV 1.94), MSVC, edition 2024.

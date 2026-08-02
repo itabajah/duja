@@ -29,8 +29,12 @@ ignore = [
     #
     # They arrive through `tray-icon`'s DEFAULT features — `default = ["libxdo",
     # "gtk"]`, where `gtk = ["muda/gtk", "dep:libappindicator"]` — and reach this
-    # gate only because `[graph] all-features = true` above has no `targets` key,
-    # so cargo-deny evaluates every target. Duja itself declares `tray-icon` under
+    # gate only because `[graph]` above has no `targets` key, so cargo-deny
+    # evaluates every target. NOT because of `all-features = true`: these are
+    # *default* features, so they are on with or without it (measured — deleting
+    # the eight below with `all-features = false` still fails). Contrast the
+    # `i-slint-renderer-skia` exception further down, which genuinely is an
+    # all-features artefact. Duja itself declares `tray-icon` under
     # `cfg(windows)` and `cfg(target_os = "macos")` ONLY: there is no GTK in the
     # Linux build graph at all (`cargo tree --target x86_64-unknown-linux-gnu -i
     # gtk -e normal` prints "nothing to print").

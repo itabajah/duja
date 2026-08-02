@@ -120,8 +120,12 @@ implemented". For macOS, the answer to "can I install it" is still no.
 On macOS `dujactl` lives inside `Duja.app/Contents/MacOS/`, so it is not on
 `PATH` without a symlink.
 ² Will require the `i2c-dev` module and a udev rule; the Linux DDC
-backend is not written yet, so nothing checks for them today. ³ GNOME Wayland exposes no
-third-party overlay/gamma path; hardware control still works.
+backend is not written yet, so nothing checks for them today. ³ Software dimming on
+Wayland needs the `wlr-layer-shell` and `wlr-gamma-control` protocols. Duja asks the
+session which of them it offers and reports per session rather than by desktop name
+(ADR-0011), so this is not a list of supported compositors. GNOME's Mutter is widely
+reported to offer neither, and where that holds software dimming reports itself
+unavailable; hardware control works either way.
 
 ## Build from source
 

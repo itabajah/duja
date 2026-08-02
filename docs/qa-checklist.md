@@ -52,8 +52,19 @@ with the phases; keep entries as observable behaviors, not implementation.
       documented group rule) — confirm it is not left stuck dark or double-dimmed.
 
 ## Linux
-- [ ] X11 (KDE/GNOME) and KDE Wayland: tray menu, overlay, backlight.
-- [ ] GNOME Wayland: software dimming correctly reports unavailable; hardware paths work.
+- [ ] X11 session: tray menu, overlay, backlight.
+- [ ] Wayland session that **advertises** `zwlr_layer_shell_v1`: the overlay appears and dims.
+- [ ] Wayland session that advertises **neither** wlr protocol: software dimming reports itself
+      unavailable *with the reason*, and hardware paths still work.
+- [ ] Wayland session advertising `zwlr_gamma_control_manager_v1` while another client
+      (`wlsunset`, `gammastep`) already holds it: the bind is refused and the report flips to
+      unavailable rather than claiming a gamma path Duja does not have.
+      <!-- Written by capability, not by compositor name, per ADR-0011: a name table would fail
+           a correct implementation the day Mutter shipped either protocol. `dujactl doctor`
+           prints which protocols the session offered, so these are checkable without guessing
+           which desktop is which. -->
+
+
 - [ ] Missing i2c permissions: the app degrades gracefully (hardware control unavailable, no
       crash, software dimming still works). `dujactl doctor` reports the displays it can see
       and nothing about permissions — there is no permission/module/platform diagnostic in

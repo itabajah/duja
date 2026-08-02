@@ -3,8 +3,9 @@
 - Status: accepted
 - Date: 2026-08-01
 
-> The ADR index listed this as *"pending (P7 spike)"* and `docs/STATUS.md` §3 says
-> *"GNOME Wayland dimming spike first"*. **No spike was run before this decision**,
+> The ADR index listed this as *"pending (P7 spike)"* and `docs/STATUS.md` §3 said,
+> before this change, *"GNOME Wayland dimming spike first"*.
+> **No spike was run before this decision**,
 > and that is a deliberate reordering rather than a skipped step: a spike answers
 > "what does compositor X support today", and this ADR's whole point is that Duja
 > should never encode that answer. The spike is still worth running — on the
@@ -22,8 +23,10 @@ independently.
 
 The shape of the problem, as the plan and README have carried it since P0, is that
 **GNOME under Wayland offers no third-party path to either mechanism** while
-hardware control (DDC/CI, backlight) still works. That framing is right but it
-invites the wrong implementation: a table of compositor names.
+hardware control (DDC/CI, backlight) still works. That framing is widely reported
+and is what those documents carry; this ADR neither confirms it nor rests on it.
+What matters here is that it invites the wrong implementation: a table of
+compositor names.
 
 A name table is the wrong design here for reasons that do not depend on which
 compositor supports what today:
@@ -47,12 +50,26 @@ The capabilities Duja actually needs are directly observable at runtime:
   query succeed".
 - **Wayland** — the overlay needs `zwlr_layer_shell_v1`, and the gamma path needs
   `zwlr_gamma_control_manager_v1`. Both are **advertised in the `wl_registry`
-  globals**, which every client enumerates at connect time. Availability is "is
-  this interface in the registry".
+  globals**, which every client enumerates at connect time, so a compositor that
+  does not implement one cannot be mistaken for one that does.
 
-That last point is what makes the decision easy: the Wayland protocol is designed
-so a client asks what the compositor offers, and the answer is authoritative,
-per-session, and free.
+That is what makes the decision easy: the Wayland protocol is designed so a client
+asks what the compositor offers rather than guessing, and it answers per session,
+at connect time, for free.
+
+**Registry presence is not the whole answer for gamma, and the design must not
+pretend it is.** `wlr-gamma-control-unstable-v1` describes itself as a protocol
+"for a **privileged** client", allows at most one gamma control per output with
+**exclusive** access, and defines a `failed` event that arrives *after* a
+successful bind for, among other reasons, "the output doesn't support gamma
+tables", "setting the gamma tables failed", and "another client already has
+exclusive gamma control for this output". So a session running `wlsunset` or
+`gammastep` advertises the global and still refuses Duja — which is not a corner
+case, it is the commonest reason a Wayland user would have that protocol at all.
+Presence is therefore **necessary and not sufficient** for gamma: the honest
+capability is only known once `get_gamma_control` has been taken without a
+`failed` reply. Layer-shell carries no equivalent wording; for the overlay,
+presence is the answer.
 
 ## Decision
 
@@ -68,6 +85,14 @@ per-session, and free.
 3. On X11, record whether the connection succeeded and whether the RandR extension
    answered.
 4. Report each of overlay and gamma as available or not, with the reason.
+5. **Gamma only: downgrade the report if the bind is refused.** A
+   `zwlr_gamma_control_v1::failed` for an output moves that output's gamma from
+   available to unavailable, with the reason, and that has to reach the same
+   capability report step 4 produced — so the report is a value that can change
+   after startup, not one settled once. Duja already refuses a gamma write and
+   keeps its record honest rather than latching it (`#109`); this is the same
+   rule one layer lower, and building the report as write-once would make it
+   unimplementable.
 
 Session-type and compositor strings are read **for the diagnostic and the log
 line only** — never as an input to the availability decision. `dujactl doctor`
@@ -85,6 +110,17 @@ project goes further and compiles it unconditionally — `duja-dimmer`'s `plan` 
 Either way this is deliberately the largest testable surface the feature has,
 because the parts below it (real X11 windows, real `wl_surface`s) cannot run on a
 headless runner as CI is configured.
+
+**That claim carries a constraint, and it is the constraint that makes or breaks
+it: the pure module may not name a `wayland-client` or `wayland-protocols-wlr`
+type.** Those crates are Linux-target dependencies, and the Windows and macOS
+lanes compile this module under `cfg(test)`, where they do not exist — a single
+`zwlr_layer_shell_v1` in a signature turns "tested on every lane" into a build
+error on two of them. The interface is therefore plain data: interface names as
+`&str`, environment variables as `Option<&str>`, capability out. Both precedents
+already obey this without saying so (`mac_events` takes a raw `u32` reconfigure
+flag, not a `CGDisplayChangeSummaryFlags`), which is why it is written down here
+rather than rediscovered.
 
 ## Consequences
 
