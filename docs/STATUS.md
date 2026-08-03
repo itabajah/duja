@@ -1520,15 +1520,75 @@ a display event costs one connection rather than two. The rule is pure — the
 outputs are an argument — so it runs on all three lanes; only the enumeration
 itself is Linux-only.
 
-**Geometry without a surface is still geometry without a surface.** Linux's
-`PlatformDimmer` is `StubDimmer` until the overlay lands, so the planner now
-produces overlay commands that are recorded and discarded. The visible result is
-unchanged — the continuum still stops at the hardware floor — with one exception
-worth knowing about: surface tokens also switch **mirror grouping** on, and the
-group rule pins a software-only group's hardware members to maximum on the
-premise that one shared overlay does the dimming. That premise is false until the
-overlay exists. `debt.md` carries it, with why withholding the token instead
-would be worse.
+**The X11 overlay is the surface that rectangle was for.** One
+override-redirect, depth-32 window per dimmed display, filled with premultiplied
+black at the planner's alpha, on a dedicated thread that owns every window — the
+same shape as the Windows backend, diffing through the same pure `plan` kernel.
+
+Three of its decisions are arithmetic rather than windowing, and all three fail
+*invisibly*, so they live in a pure module tested on every lane. **Which visual**:
+a depth-24 visual is what a naive `create_window` inherits from the root, and it
+has no alpha channel, so the overlay would be created, mapped, and opaque. **Where the alpha
+goes**: it is the *top* byte of the pixel and the colour bytes must be zero;
+anywhere else and the overlay is invisible or a coloured wash. (The first draft
+justified this as premultiplied-versus-straight alpha, and its review pointed out
+that black is `(0, 0, 0)` in both, so no premultiplication mistake is possible
+here — `linux_caps` already said so.) **Whether the rectangle fits**: X11 geometry is
+16-bit, and doing that conversion with `as` would wrap a monitor past 32767
+pixels onto a display nobody asked to dim.
+
+A second thread holds `XFixesSelectSelectionInput` on `_NET_WM_CM_S<n>`, tears
+every overlay down the moment the owner goes to `None`, and **latches** — which
+is the `refuse_gamma` analogue `#121`'s review asked for, both halves of it. The
+first draft had only the teardown, and its review pointed out that the very next
+slider sample would then map fresh windows onto a session that could no longer
+blend them: the same black screen, one frame later. The overlay also sets
+`_NET_WM_BYPASS_COMPOSITOR = 2` against fullscreen unredirection, which is the
+only standard lever there is and is recorded as a mitigation rather than a
+settlement, because a compositor evaluates unredirection against the window it is
+considering and picom unredirects the whole screen.
+
+**X has no always-on-top**, which the same review caught. `CreateWindow` places a
+window above its siblings and every top-level is a sibling of an
+override-redirect overlay, so raising once at map time means the first window the
+user opens sits *undimmed* on top of the dimming. The watcher selects
+`SubstructureNotify` on the root and the worker re-raises anything that is not
+its own — coalescing the burst a dragged window produces, and damped to one raise
+per 100 ms so that trading raises with another always-on-top client is a visible
+flicker rather than two pegged CPUs. No X client can do better than bound that;
+`debt.md` says so rather than pretending otherwise.
+
+**A crashed compositor is not a disowned one**, which round two caught and which
+would have defeated the whole guard. `XFixesSelectionNotify` fills its `owner`
+field from the selection record, and for the *crash* subtypes
+(`SelectionWindowDestroy`, `SelectionClientClose`) that record still names the
+window that just died — so the owner is non-zero and a check for `NONE` reads it
+as "a restart that already has a new manager". `picom` segfaulting would have
+left every overlay up and unredirected: solid black, exactly the release-blocker
+case. The watcher now ignores the field and re-asks the server, which costs one
+round trip on a rare event and is right under any reading of who fills it.
+
+**Every request that could trap a user is checked**, not merely queued. An x11rb
+void request returns a cookie meaning "sent"; a protocol error arrives later, on
+the event queue. So a failed input-region call would have read as success and
+left a mapped, full-screen window that swallows every click — with the flyout you
+would use to turn it off underneath it. Window creation and the input region take
+a round trip each; the property writes and the map do not, because neither can
+trap anybody.
+
+Input passes through by the **`XFixes` empty input region** — SHAPE's own
+`ShapeInput` could express the same thing, so this is the mechanism chosen rather
+than the only one available — and the backend refuses to start where the
+extension is absent rather than mapping a window that would swallow every click. It refuses on a
+server with no ARGB visual for the same reason, and reports `Unsupported` — not a
+fault — where there is no compositing manager or no display server at all.
+
+**`PlatformDimmer` is not a type alias on Linux**, unlike the other two
+platforms. Which mechanism exists is a property of the session rather than the
+build, so `LinuxDimmer` picks when it starts. A Wayland session reports
+`Unsupported` until its layer-shell backend lands, which is the one place the
+`#122` mirror-pin consequence still bites; `debt.md` carries it, now narrowed
+from Linux to Wayland.
 
 **Wave 4 landed ADR-0011's capability probe first, on purpose.** The rule that
 decides what a Linux session can dim is pure — environment and Wayland registry

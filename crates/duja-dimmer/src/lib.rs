@@ -23,17 +23,28 @@
 //!   (`dispatch_async`); the windows live in a main-thread store. See the `mac`
 //!   module docs for the observable-contract difference (non-blocking vs the
 //!   Windows blocking `apply`) and the running-run-loop requirement.
+//! - On Linux, `LinuxDimmer` picks a backend at **runtime** rather than at build
+//!   time, because Linux has no single windowing system: an X11 session gets
+//!   `X11Dimmer`, which owns a thread like the Windows one and holds an
+//!   override-redirect ARGB window per display, plus a second thread watching the
+//!   compositing-manager selection. A session with no overlay mechanism reports
+//!   `Unsupported` and the app disables software dimming with hardware control
+//!   intact.
 //! - On other Unix targets, `StubDimmer` records-and-succeeds so higher layers
-//!   can run their logic unchanged (documented no-op; the Linux backend lands
-//!   in P7).
+//!   can run their logic unchanged (documented no-op).
 //!
 //! # Security invariant
 //!
 //! Overlays must **never** intercept input. On Windows every overlay carries
 //! `WS_EX_TRANSPARENT | WS_EX_NOACTIVATE` and answers `WM_NCHITTEST` with
-//! `HTTRANSPARENT`; on macOS every overlay sets `ignoresMouseEvents = true`.
+//! `HTTRANSPARENT`; on macOS every overlay sets `ignoresMouseEvents = true`; on
+//! X11 every overlay's `XFixes` **input region is empty**, so the server routes
+//! every event to what is beneath. SHAPE's `ShapeInput` expresses the same thing,
+//! so `XFixes` is the mechanism this uses rather than the only one there is — and
+//! the backend refuses to start without it rather than mapping a window that
+//! would swallow every click.
 //! Fullscreen-exclusive apps and the OS secure/login screens are documented
-//! known-limits on both platforms (an overlay cannot cover them).
+//! known-limits on all three (an overlay cannot cover them).
 //!
 //! # Crash safety
 //!
@@ -43,7 +54,9 @@
 //! `restore_all`. macOS is different: the window server restores each process's
 //! gamma automatically when the process exits, so the macOS backend needs **no**
 //! marker machinery and its `restore_all` is a single
-//! `CGDisplayRestoreColorSyncSettings` call.
+//! `CGDisplayRestoreColorSyncSettings` call. X11 overlay windows are owned by the
+//! connection and the server destroys them when it closes, so they need no marker
+//! either.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
@@ -69,6 +82,13 @@ pub mod linux_caps;
 // fallback, ambiguity refused) are tested on all three lanes.
 pub mod linux_outputs;
 
+// The three decisions an X11 overlay window makes that are arithmetic rather than
+// windowing: which visual it needs, what pixel it is filled with, and whether its
+// rectangle fits X11's 16-bit geometry at all. Unconditional and `x11rb`-free for
+// the same reason as its two neighbours — each of them fails invisibly, so each
+// belongs where every lane can test it.
+pub mod linux_overlay;
+
 // The only thing in this crate that talks to a Linux display server: it connects,
 // reads two booleans and a list of interface names, and hands them to
 // `linux_caps` as plain data. Nothing it does can run in CI, which is exactly why
@@ -77,7 +97,7 @@ pub mod linux_outputs;
 mod linux;
 
 #[cfg(target_os = "linux")]
-pub use linux::{enumerate_outputs, probe_session};
+pub use linux::{LinuxDimmer, X11Dimmer, enumerate_outputs, probe_session};
 
 // Re-export the cross-platform vocabulary so callers can depend on this crate
 // alone for the dimming surface.
@@ -121,8 +141,17 @@ pub type PlatformDimmer = WindowsDimmer;
 #[cfg(target_os = "macos")]
 pub type PlatformDimmer = MacDimmer;
 
-/// The concrete [`Dimmer`] for the current platform (non-Windows/macOS stub).
-#[cfg(not(any(windows, target_os = "macos")))]
+/// The concrete [`Dimmer`] for a Linux session.
+///
+/// Not a type alias to one backend, unlike the other two platforms: Linux has no
+/// single windowing system, so which mechanism is available is a property of the
+/// session rather than of the build. [`LinuxDimmer`] picks when it starts.
+#[cfg(target_os = "linux")]
+pub type PlatformDimmer = LinuxDimmer;
+
+/// The concrete [`Dimmer`] for a Unix target that is neither macOS nor Linux
+/// (the documented no-op stub).
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub type PlatformDimmer = StubDimmer;
 
 /// The lowest gamma factor **this platform's OS** will actually accept.
