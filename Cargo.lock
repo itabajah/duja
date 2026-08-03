@@ -1199,8 +1199,10 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
  "rustix 1.1.4",
+ "tempfile",
  "thiserror 2.0.19",
  "windows 0.62.2",
+ "zbus",
 ]
 
 [[package]]

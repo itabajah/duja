@@ -46,7 +46,7 @@ use super::wiring::resolved_hotkey_rows;
 use super::{
     Action, FLYOUT_LOGICAL_WIDTH, FLYOUT_MARGIN, FLYOUT_MAX_LOGICAL_HEIGHT,
     FLYOUT_MIN_LOGICAL_HEIGHT, SETTINGS_LOGICAL_HEIGHT, SETTINGS_LOGICAL_WIDTH, geometry, icon,
-    open_url, os_dark_theme, spawn_relaunch, unix_now,
+    open_url, spawn_relaunch, unix_now,
 };
 
 /// The main-thread application state driven by every event source.
@@ -719,7 +719,10 @@ impl AppState {
     /// live Slint shells, so it cannot be built off the Slint main thread — not an
     /// oversight to be fixed by adding one.
     fn refresh_system_theme(&mut self) {
-        let theme = settings::ui_theme(self.config.general.theme, os_dark_theme());
+        let theme = settings::ui_theme(
+            self.config.general.theme,
+            super::os_theme_if_needed(self.config.general.theme),
+        );
         self.vm.borrow_mut().set_theme(theme);
     }
 
@@ -728,7 +731,10 @@ impl AppState {
     /// window renders the identical light/dark palette rather than a fixed one.
     fn resolved_dark(&self) -> bool {
         matches!(
-            settings::ui_theme(self.config.general.theme, os_dark_theme()),
+            settings::ui_theme(
+                self.config.general.theme,
+                super::os_theme_if_needed(self.config.general.theme),
+            ),
             duja_ui::Theme::Dark
         )
     }

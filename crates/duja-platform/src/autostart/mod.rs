@@ -46,13 +46,25 @@ mod plist;
 #[cfg(any(test, target_os = "macos"))]
 mod mac_location;
 
+#[cfg(target_os = "linux")]
+mod linux;
+
+// Pure rendering of the XDG autostart `.desktop` entry, on the same terms as
+// `plist`: compiled on Linux, where `linux` uses it, and under `cfg(test)` on
+// every host so the file's contents are asserted without a real `$HOME`.
+#[cfg(any(test, target_os = "linux"))]
+mod xdg_entry;
+
 #[cfg(windows)]
 pub use win::{WindowsAutostart, system};
 
 #[cfg(target_os = "macos")]
 pub use mac::{MacAutostart, system};
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+pub use linux::{LinuxAutostart, system};
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub use stub::{StubAutostart, system};
 
 /// Launch-at-login registration.
@@ -175,7 +187,7 @@ impl Autostart for FakeAutostart {
     }
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod stub {
     use super::{Autostart, AutostartError};
 

@@ -126,7 +126,15 @@ directories = "6"
 # Unix single-instance lock + uid lookup (duja-platform, P6 macOS / P7 Linux):
 # rustix's safe wrappers give an advisory `flock` and `getuid` without any
 # `unsafe` in the single-instance module. `fs` = flock; `process` = getuid.
-rustix = { version = "1", features = ["fs", "process"] }
+#
+# `net`, `event` and `pipe` are P7: they are what lets the Linux event pump read
+# the kernel's `NETLINK_KOBJECT_UEVENT` socket with **no `unsafe` at all** —
+# `net` for the netlink socket and its address type, `event` for the `poll` that
+# waits on it, `pipe` for the self-pipe that wakes that poll at shutdown. Doing
+# it through `libc` instead would have meant a hand-rolled `sockaddr_nl` and four
+# unsafe blocks in a crate that currently has none outside its Windows and macOS
+# `sys` modules.
+rustix = { version = "1", features = ["fs", "process", "net", "event", "pipe"] }
 # Linux D-Bus (duja-panel's logind backlight writer, P7). The version is pinned
 # to what `i-slint-backend-winit` already resolves and `async-io` matches its
 # executor selection, so the Linux graph gains no second async runtime — see
