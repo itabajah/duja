@@ -35,9 +35,12 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --docu
 
 ## Architecture
 
-Decisions are recorded as ADRs in [docs/adr/](docs/adr/). Read 0001–0005 before
-proposing structural changes; propose changes as a new ADR, not an edit to an
-accepted one. Refactor debt goes to [docs/debt.md](docs/debt.md) and is drained
+Decisions are recorded as ADRs in [docs/adr/](docs/adr/). Read 0001 to 0005
+before proposing structural changes. To change what an accepted ADR **decided**,
+write a new ADR that supersedes it; never rewrite the old decision. Correcting a
+false claim, or adding a pointer to the ADR that later settled something, is an
+edit in place, and [docs/adr/README.md](docs/adr/README.md) sets out the
+difference. Refactor debt goes to [docs/debt.md](docs/debt.md) and is drained
 at each phase checkpoint.
 
 ## Reporting monitors

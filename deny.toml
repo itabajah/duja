@@ -6,9 +6,13 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-# All four ignores below are transitively pinned by slint 1.17.1 (via winit /
-# resvg / image); none is reachable from untrusted input in Duja. Revisit on
+# None of the ignores below is reachable from untrusted input in Duja. Revisit on
 # every Slint upgrade (P8 hardening re-audits this list).
+#
+# They are NOT all from Slint: the first five are transitively pinned by slint
+# 1.17.1 (via winit / resvg / image), and the eight in the second block come from
+# `tray-icon`. The "all four ignores below are transitively pinned by slint" this
+# replaces was written when there were four and quietly went stale twice.
 ignore = [
     # quick-xml DoS advisories: quick-xml sits under wayland-scanner, a
     # build-time proc-macro parsing the wayland protocol XML bundled in the
@@ -20,11 +24,29 @@ ignore = [
     "RUSTSEC-2024-0436",
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; pinned by slint's resvg" },
     { id = "RUSTSEC-2026-0206", reason = "rustybuzz unmaintained; pinned by slint's text shaping (i-slint-common), build-graph-only, not a vulnerability" },
-    # unmaintained gtk-rs GTK3 bindings family + proc-macro-error: pulled ONLY
-    # by tray-icon's linux backend (libappindicator). Duja's linux tray backend
-    # is decided at P7 (ADR-0010 evaluates ksni, which drops GTK entirely);
-    # until then these are linux-only, build-graph-only on our CI, and carry no
-    # vulnerability — they are maintenance-status advisories.
+    # Unmaintained gtk-rs GTK3 bindings family + proc-macro-error. Maintenance
+    # advisories, not vulnerabilities, and nothing here is in a shipped binary.
+    #
+    # They arrive through `tray-icon`'s DEFAULT features — `default = ["libxdo",
+    # "gtk"]`, where `gtk = ["muda/gtk", "dep:libappindicator"]` — and reach this
+    # gate only because `[graph]` above has no `targets` key, so cargo-deny
+    # evaluates every target. NOT because of `all-features = true`: these are
+    # *default* features, so they are on with or without it (measured — deleting
+    # the eight below with `all-features = false` still fails). Contrast the
+    # `i-slint-renderer-skia` exception further down, which genuinely is an
+    # all-features artefact. Duja itself declares `tray-icon` under
+    # `cfg(windows)` and `cfg(target_os = "macos")` ONLY: there is no GTK in the
+    # Linux build graph at all (`cargo tree --target x86_64-unknown-linux-gnu -i
+    # gtk -e normal` prints "nothing to print").
+    #
+    # So these do NOT go away by choosing a non-GTK Linux tray (ADR-0010 picks
+    # ksni, and an earlier draft of this comment claimed exactly that — wrongly;
+    # tray-icon stays for Windows and macOS, and so do these edges). What removes
+    # them is `tray-icon = { default-features = false }`, which is unrelated to the
+    # tray decision. Measured on 2026-08-01: the whole family leaves Cargo.lock,
+    # all eight entries below can be deleted with `cargo deny check advisories`
+    # still green, Windows clippy is clean and 1049/1049 tests pass. Landing as its
+    # own change.
     "RUSTSEC-2024-0370",
     "RUSTSEC-2024-0412",
     "RUSTSEC-2024-0413",

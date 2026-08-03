@@ -1,20 +1,36 @@
 # Architecture Decision Records
 
-MADR-lite format. Accepted ADRs are changed by superseding, not editing.
+MADR-lite format. An accepted ADR's **decision statement** is changed by
+superseding, never by rewriting.
+
+Everything around it is amended in place, and deliberately: a status block
+recording that a precondition has since been met (ADR-0003 carries one from
+`#109`, sitting under its Decision heading precisely so nobody reads the decision
+without it), a forward pointer to the later ADR that settled a question this one
+left open, a correction to a claim that turned out to be false. Rewriting a
+decision in place is what destroys the record; leaving a document knowably wrong
+is not better than fixing it.
+
+Whenever a later ADR changes an accepted one's standing — superseding its
+decision, retiring one of its consequences, or qualifying a claim it rests on —
+the row below gains an annotation naming that ADR, and the original text stays.
+Rows 0001 and 0005 carry two different flavours of this: 0010 **retired** a
+consequence of 0001, while 0022 only **qualified** 0005's title and explicitly
+leaves its decision standing.
 
 | # | Title | Status |
 |---|---|---|
-| [0001](0001-ui-toolkit-slint.md) | UI toolkit: Slint + tray-icon (no webview) | accepted, spike-verified |
+| [0001](0001-ui-toolkit-slint.md) | UI toolkit: Slint + tray-icon (no webview) | accepted, spike-verified (its Linux tray consequence superseded by [0010](0010-linux-tray-ksni.md)) |
 | [0002](0002-own-windows-ddc-backend.md) | DDC backend: own dxva2 implementation on Windows | accepted |
 | [0003](0003-overlay-first-dimming.md) | Software dimming: overlay primary, gamma opt-in | accepted, spike-verified |
 | [0004](0004-stable-edid-identity.md) | Display identity: stable EDID-derived IDs | accepted |
-| [0005](0005-threads-not-tokio.md) | Concurrency: std threads + channels, no async runtime | accepted |
+| [0005](0005-threads-not-tokio.md) | Concurrency: std threads + channels, no async runtime | accepted (title qualified on Linux by [0022](0022-linux-dbus-and-the-executor-already-there.md)) |
 | [0006](0006-ipc-transport-and-protocol.md) | IPC transport & protocol | accepted |
 | [0007](0007-config-schema-and-migrations.md) | Config schema, migrations, and persistence | accepted |
 | [0008](0008-licensing.md) | Licensing (MIT OR Apache-2.0; Slint royalty-free) | accepted |
 | [0009](0009-software-renderer-default.md) | Slint renderer: software renderer default | accepted |
-| 0010 | Linux tray: tray-icon vs ksni | pending (P7) |
-| 0011 | GNOME Wayland dimming strategy | pending (P7 spike) |
+| [0010](0010-linux-tray-ksni.md) | Linux tray: ksni, not tray-icon | accepted |
+| [0011](0011-linux-software-dimming.md) | Linux software dimming: probe the compositor, never assume it | accepted |
 | [0012](0012-binary-size-budget-variance.md) | Binary-size budget raised 12 → 16 MB | accepted |
 | [0013](0013-macos-ddc-wrap-vs-vendor.md) | macOS DDC/CI: own thin backend (don't wrap ddc-macos) | accepted |
 | [0014](0014-perceptual-continuum-v2.md) | Perceptual brightness continuum (v2) | accepted |
@@ -25,6 +41,7 @@ MADR-lite format. Accepted ADRs are changed by superseding, not editing.
 | [0019](0019-version-ladder-and-release-trains.md) | Version ladder & release trains (v0.1.x Windows, v0.2 macOS, v0.3 Linux, v1.0) | accepted |
 | [0020](0020-release-integrity-and-signing-readiness.md) | Release integrity & signing readiness (no injection, gated publish, hermetic, Azure-ready) | accepted |
 | [0021](0021-tray-anchor-coordinate-contract.md) | Tray-anchor coordinate contract (y-down normalized, unit named, two derived factors) | accepted |
+| [0022](0022-linux-dbus-and-the-executor-already-there.md) | Linux D-Bus: zbus, and the async executor already in the build | accepted |
 
 Spike evidence lives on branches `spike/eventloop`, `spike/ddc`,
 `spike/overlay` (code is not merged; findings are).
