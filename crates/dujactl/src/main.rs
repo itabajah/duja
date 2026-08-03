@@ -22,6 +22,14 @@ mod backend;
 mod cli;
 mod fmt;
 mod ipc;
+
+// The Linux half of `doctor`. Compiled on Linux, where `run` gathers it, and
+// under `cfg(test)` on every host so the whole report is asserted on all three
+// lanes — which matters because the machine that would exercise it for real is
+// the one this project does not have.
+#[cfg(any(test, target_os = "linux"))]
+mod linux_report;
+
 mod run;
 
 use cli::Command;

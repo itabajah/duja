@@ -20,5 +20,12 @@ duja-platform.workspace = true
 duja-ddc.workspace = true
 duja-panel.workspace = true
 
+# `doctor`'s Linux section reports whether software dimming is available and why
+# (ADR-0011). Linux-only, because the probe it calls is: on the other two
+# platforms `doctor` has nothing of the kind to say, and pulling the dimmer into
+# the CLI everywhere would add a dependency for one target's diagnostic.
+[target.'cfg(target_os = "linux")'.dependencies]
+duja-dimmer.workspace = true
+
 [lints]
 workspace = true
