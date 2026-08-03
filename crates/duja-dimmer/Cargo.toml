@@ -30,6 +30,15 @@ windows = { version = "0.62", default-features = false, features = [
     "Win32_System_LibraryLoader",
 ] }
 
+# -- Linux capability probe (P7 wave 4) --------------------------------------
+# ADR-0011: ask the session what it offers, never who it is. Both crates are
+# already in the Linux graph through winit (x11rb via softbuffer, wayland-client
+# via smithay-client-toolkit), so this declares no new package — see the
+# workspace manifest.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { workspace = true }
+wayland-client = { workspace = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS overlay backend: click-through NSWindow overlays marshalled onto the main
 # queue via dispatch2; opt-in gamma via Core Graphics; EDR guard via NSScreen.

@@ -1484,6 +1484,27 @@ the planner plans no overlay and the continuum stops at the hardware floor. Wave
 connector name, which X11 RandR and Wayland `xdg_output` spell identically on
 the modern stack (`debt.md` records the two drivers where they do not).
 
+**Wave 4 landed ADR-0011's capability probe first, on purpose.** The rule that
+decides what a Linux session can dim is pure — environment and Wayland registry
+contents in, a per-mechanism report out — and it is the largest surface this
+feature has that any test can falsify: real X11 windows and real `wl_surface`s
+cannot run on a headless runner at all. It names no `wayland-client` type, which
+is the constraint that lets it compile and run on the Windows and macOS lanes too
+rather than only on ubuntu.
+
+Two things it gets right that a compositor-name table could not represent:
+layer-shell without gamma-control (the common wlroots configuration) still dims,
+because ADR-0003 makes the overlay primary; and gamma is **necessary-not-sufficient**
+on registry presence, because `wlr-gamma-control` grants one client exclusive
+access per output and refuses the bind afterwards — so a session running
+`wlsunset` advertises the protocol and still says no. The report is therefore a
+value that can be downgraded after startup, which is the same rule `#96` and
+`#109` established one layer up.
+
+No compositor is named anywhere in it, and a test asserts that: every reason
+string is checked for the absence of `gnome`, `kde`, `mutter`, `kwin`, `sway` and
+`plasma`. The X11 and Wayland surfaces themselves are the rest of the wave.
+
 **Wave 3 gave Linux a real event pump, an autostart entry and a browser.** Display
 hot-plug comes from the kernel's `NETLINK_KOBJECT_UEVENT` socket directly, with no
 libudev: that is a C library and a system dependency, to receive the same messages
