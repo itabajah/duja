@@ -46,8 +46,18 @@ features = [
 core-graphics = { version = "0.25", default-features = false, features = ["link"] }
 libc = "0.2"
 
+# Linux internal-panel backend. Reading is plain `std::fs` over
+# `/sys/class/backlight`; `zbus` is only for the *write*, through logind's
+# `SetBrightness`, which works for the active session where a direct sysfs write
+# needs a udev rule the distribution may not ship (ADR-0022). Taken from the
+# workspace so the version and feature selection stay identical to the one
+# `i-slint-backend-winit` already resolves.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { workspace = true }
+
 [dev-dependencies]
 duja-core = { workspace = true, features = ["test-support"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

@@ -23,11 +23,13 @@
 //! instance is the expected state, not a failure. Only a genuine backend fault
 //! on a machine that *does* have a panel surfaces as [`PanelError`].
 //!
-//! This crate has a Windows backend (`wmi`) and a macOS backend
-//! (`display_services`); on any other target [`enumerate`] is a no-op returning
-//! an empty list, so the workspace still builds and tests everywhere. The pure
-//! adapter logic — the transport seam, the float/level and identity mapping — is
-//! platform-independent and exercised by the controller contract on every OS.
+//! This crate has a Windows backend (`wmi`), a macOS backend
+//! (`display_services`) and a Linux one (`linux`, over `/sys/class/backlight`
+//! with logind as the write channel); on any other target [`enumerate`] is a
+//! no-op returning an empty list, so the workspace still builds and tests
+//! everywhere. The pure adapter logic — the transport seam, the float/level and
+//! identity mapping — is platform-independent and exercised by the controller
+//! contract on every OS.
 //!
 //! # Geometry, for dimming below the backlight's floor
 //!
@@ -47,6 +49,20 @@ mod display_services;
 mod error;
 mod transport;
 
+// Pure, root-injected reading of `/sys/class/backlight` and the raw↔percent
+// conversion built on it. Compiled on Linux, where the backend uses it, and
+// under `cfg(test)` on every host so its rules run on all three CI lanes — the
+// gating `duja-platform`'s `mac_events` and `duja-ddc`'s `correlate` established.
+#[cfg(any(test, target_os = "linux"))]
+mod backlight;
+
+// The Linux backend. Gated the same way, and deliberately: the join between the
+// backlight tree and the DRM connector tree is pure and belongs on every lane,
+// while the two submodules that write (logind over D-Bus, and the transport that
+// drives it) are `cfg(target_os = "linux")` inside it.
+#[cfg(any(test, target_os = "linux"))]
+mod linux;
+
 #[cfg(windows)]
 pub mod wmi;
 
@@ -56,6 +72,9 @@ pub use transport::{PanelBrightness, PanelTransport};
 
 #[cfg(target_os = "macos")]
 pub use display_services::{DisplayServicesApi, DisplayServicesTransport, RealDisplayServices};
+
+#[cfg(target_os = "linux")]
+pub use linux::LinuxPanelTransport;
 
 use duja_core::dimmer::DisplayBounds;
 use duja_core::id::StableDisplayId;
@@ -75,6 +94,10 @@ use duja_core::id::StableDisplayId;
 ///   rectangle is not a position and an overlay drawn from it would dim nothing.
 ///   See `display_services`' `panel_geometry` for the two arms and why neither is
 ///   a threshold.
+/// - **Linux** — always absent. Sysfs knows the panel exists and how to drive it,
+///   not where the desktop puts it: that is the display server's answer, and a
+///   Linux session may have no display server at all. The rectangle arrives from
+///   the X11/Wayland side, joined on the DRM connector name.
 /// - **Windows** — always absent. WMI's `WmiMonitorBrightnessMethods` exposes no
 ///   monitor rectangle and no GDI device for the panel it controls, so there is
 ///   nothing honest to put here; a Windows laptop panel that needs software
@@ -162,10 +185,13 @@ impl PanelGeometry {
 pub struct PanelDisplay {
     id: StableDisplayId,
     name: String,
-    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos", target_os = "linux")),
+        allow(dead_code)
+    )]
     // RATIONALE: `instance_name` keys the transport in `open()`, which only
-    // exists on Windows and macOS; on other targets the field is retained for a
-    // uniform public type but is unused.
+    // exists on Windows, macOS and Linux; on other targets the field is retained
+    // for a uniform public type but is unused.
     instance_name: String,
     geometry: Option<PanelGeometry>,
 }
@@ -185,7 +211,8 @@ impl PanelDisplay {
     }
 
     /// The OS handle that identifies this panel: the WMI `InstanceName` on
-    /// Windows, the decimal `CGDirectDisplayID` on macOS.
+    /// Windows, the decimal `CGDirectDisplayID` on macOS, the
+    /// `/sys/class/backlight` device name on Linux.
     #[must_use]
     pub fn instance_name(&self) -> &str {
         &self.instance_name
@@ -216,6 +243,19 @@ impl PanelDisplay {
     pub fn open(&self) -> Result<PanelController<wmi::WmiTransport>, PanelError> {
         let transport = wmi::WmiTransport::open(self.instance_name.clone())?;
         Ok(PanelController::new(transport))
+    }
+
+    /// Open a brightness controller bound to this panel.
+    ///
+    /// Re-scans `/sys/class/backlight` for the device this panel was enumerated
+    /// from, so the controller starts from the level the hardware is at now
+    /// rather than the one captured at enumeration.
+    ///
+    /// # Errors
+    /// [`PanelError::Disconnected`] if that device is no longer present.
+    #[cfg(target_os = "linux")]
+    pub fn open(&self) -> Result<PanelController<LinuxPanelTransport>, PanelError> {
+        linux::open(&self.instance_name)
     }
 
     /// Open a brightness controller bound to this panel.
@@ -274,13 +314,27 @@ pub fn enumerate() -> Result<Vec<PanelDisplay>, PanelError> {
 
 /// Enumerate the internal panels that expose brightness control.
 ///
-/// On targets without a panel backend (non-Windows, non-macOS) this is a no-op,
-/// so the list is always empty. See the Windows and macOS variants for the real
+/// Returns `Ok(vec![])` on a machine with no backlight device (every desktop),
+/// and on a laptop whose internal DRM connector publishes no EDID — there the
+/// backlight is real but has no identity to file it under, and Duja reports
+/// nothing rather than inventing one. See the `linux` module docs.
+///
+/// # Errors
+/// Never errors: every absence is modelled as an empty list.
+#[cfg(target_os = "linux")]
+pub fn enumerate() -> Result<Vec<PanelDisplay>, PanelError> {
+    Ok(linux::enumerate())
+}
+
+/// Enumerate the internal panels that expose brightness control.
+///
+/// On targets without a panel backend (not Windows, macOS or Linux) this is a
+/// no-op, so the list is always empty. See the other variants for the real
 /// behaviour.
 ///
 /// # Errors
 /// Never errors on these targets.
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub fn enumerate() -> Result<Vec<PanelDisplay>, PanelError> {
     Ok(Vec::new())
 }
@@ -302,13 +356,14 @@ mod tests {
 
     #[test]
     fn enumerate_on_this_machine_does_not_error() {
-        // Enumerate must return Ok and never panic on any machine. On Windows and
-        // macOS a host *with* an internal panel legitimately returns a non-empty
-        // list, so we assert only success there; a virtualized macOS CI runner
-        // may or may not report a builtin display, which is exactly why this
-        // asserts Ok, not emptiness (see the P6 brief).
+        // Enumerate must return Ok and never panic on any machine. On Windows,
+        // macOS and Linux a host *with* an internal panel legitimately returns a
+        // non-empty list, so we assert only success there; a virtualized macOS CI
+        // runner may or may not report a builtin display, and an `ubuntu-latest`
+        // runner has no backlight but a developer laptop does, which is exactly
+        // why this asserts Ok, not emptiness (see the P6 brief).
         let panels = enumerate().expect("enumerate must not error on this machine");
-        #[cfg(not(any(windows, target_os = "macos")))]
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         assert!(panels.is_empty());
         let _ = panels;
     }

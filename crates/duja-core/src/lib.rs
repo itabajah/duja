@@ -6,11 +6,14 @@
 //! platform-independent. OS backends implement the traits defined here; the UI
 //! consumes the models defined here.
 //!
-//! [`macos`] is the one module named after a platform, and it does not break that
-//! rule: it holds arithmetic over values CoreGraphics reports, not calls into it,
-//! and it is compiled and tested on every target. It lives here because **two**
-//! backend crates must apply those rules identically and neither may depend on
-//! the other — see its own docs.
+//! [`macos`] and [`linux`] are the two modules named after platforms, and they do
+//! not break that rule. [`macos`] holds arithmetic over values CoreGraphics
+//! reports, not calls into it. [`linux`] reads files, which on that platform *is*
+//! the display API, through a root path the caller injects (`/` in production, a
+//! temporary directory in tests) — so it is still no OS API, no `unsafe`, and no
+//! platform gate. Both are compiled and tested on every target, and both live
+//! here for the same reason: **two** backend crates must apply their rules
+//! identically and neither may depend on the other. See their own docs.
 //!
 //! # Module map
 //!
@@ -38,6 +41,10 @@
 //!   surface token, `CGRect` → [`dimmer::DisplayBounds`]) that both macOS
 //!   backends must apply identically; FFI-free, so it is compiled and tested on
 //!   every target like the rest of this crate
+//! - [`linux`] — the DRM connector scan both Linux backends need: `duja-ddc` to
+//!   find external monitors and their I2C adapters, `duja-panel` to give the
+//!   built-in panel the only identity it can have (a backlight device has no
+//!   EDID). Root-injected, so it is compiled and tested on every target too
 //! - [`scale`] — the one logical→device-unit extent calculation `duja-ui` (to
 //!   physical pixels) and `duja-app` (to tray anchor units) both need; unit
 //!   **agnostic** on purpose, because an anchor unit is physical pixels on
@@ -77,6 +84,7 @@ pub mod debounce;
 pub mod dimmer;
 pub mod id;
 pub mod input_source;
+pub mod linux;
 pub mod macos;
 pub mod manager;
 pub mod model;

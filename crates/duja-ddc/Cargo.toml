@@ -28,6 +28,16 @@ core-foundation-sys = { workspace = true }
 core-graphics = { workspace = true }
 io-kit-sys = { workspace = true }
 
+# Linux DDC/CI backend: exactly one call, the `I2C_SLAVE` ioctl that binds an
+# open `/dev/i2c-<N>` to the display's slave address. Everything else on that
+# path is safe `std::fs` (the connector scan is `duja_core::linux::drm`, which
+# takes an injected root and has no OS dependency at all), so this is the whole
+# reason the crate needs `libc` on Linux. `rustix` would not remove the `unsafe`:
+# its ioctl API is unsafe too, and would need an `Ioctl` impl for a call that
+# passes its argument by value.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 duja-core = { workspace = true, features = ["test-support"] }
 proptest = { workspace = true }

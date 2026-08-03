@@ -1458,6 +1458,32 @@ written down here rather than left implicit:
 | 6 | `xtask dist --target linux`, the release job, and the docs |
 | 7 | phase gate, adversarial review, tag `m7-linux` |
 
+**Wave 2 shipped the two Linux hardware backends.** External monitors come from
+the DRM connector tree (`/sys/class/drm/card<N>-<TYPE>-<INDEX>`: `status`, `edid`,
+and the `ddc` symlink's `i2c-dev/i2c-<N>` child, which is what proves
+`/dev/i2c-<N>` exists rather than merely naming an adapter), driven over
+`/dev/i2c` with one `I2C_SLAVE` ioctl and the **existing** cross-platform DDC/CI
+codec in its Intel framing — `i2c-dev` carries the slave address out of band
+exactly as `IOI2CSendRequest` does, so not a byte of protocol was written. The
+built-in panel comes from `/sys/class/backlight`, written through logind's
+`SetBrightness` with a direct sysfs write as the fallback (ADR-0022), and takes
+its identity from the internal DRM connector's EDID because a backlight device
+has none.
+
+The scan itself lives in **`duja_core::linux::drm`**, beside `duja_core::macos`
+and for the same reason: `duja-ddc` needs it for external monitors, `duja-panel`
+needs it for the panel's identity, and neither crate may depend on the other. It
+takes an injected filesystem root, so its rules are unit-tested on all three CI
+lanes rather than on the one machine that has a `/sys`. What is genuinely
+Linux-only is one ioctl and one D-Bus call.
+
+**Not yet possible on Linux: software dimming.** Both backends report no
+geometry, honestly — sysfs does not know where the desktop puts a monitor — so
+the planner plans no overlay and the continuum stops at the hardware floor. Wave
+4 supplies the rectangle from the display server and joins it on the DRM
+connector name, which X11 RandR and Wayland `xdg_output` spell identically on
+the modern stack (`debt.md` records the two drivers where they do not).
+
 ## Notes & gotchas for whoever continues
 
 - **Environment**: Rust pinned 1.96.1 (MSRV 1.94), MSVC, edition 2024.

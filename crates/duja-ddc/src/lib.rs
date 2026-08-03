@@ -18,7 +18,7 @@
 //! `win` module), which discovers the attached external monitors (identity from
 //! EDID, quirks from the embedded database) and hands back a `DdcDisplay` per
 //! monitor that can be turned into a thread-owned controller. macOS exposes the
-//! same shape from a `mac` module (see below).
+//! same shape from a `mac` module, and Linux from a `linux` module (see below).
 //!
 //! - [`ddcci`] — the cross-platform DDC/CI wire codec (packet framing,
 //!   checksums, reply parsing) plus the [`ddcci::I2cBus`] seam and the
@@ -38,10 +38,27 @@
 //! and Intel), per plan §P6. The pure protocol codec ([`ddcci`]) *is* fully
 //! verified in CI; only the hardware I/O is unproven.
 //!
+//! # Linux backend (experimental)
+//! The `linux` module implements the same surface over the DRM connector tree in
+//! sysfs and `/dev/i2c-*`. It reuses the [`ddcci`] codec unchanged, in its
+//! [`ddcci::DdcWire::Intel`] framing, because `i2c-dev` carries the slave address
+//! out of band exactly as Intel macOS's `IOI2CSendRequest` does. The connector
+//! scan itself is [`duja_core::linux::drm`], which takes an injected filesystem
+//! root and is therefore unit-tested on **every** lane; only the ioctl is
+//! Linux-only, and Duja has no Linux machine, so the I/O half is unverified and
+//! `enumerate` returns an empty list in CI.
+//!
+//! One shape difference from the other two backends, and it is deliberate: a
+//! Linux `DdcDisplay` has **no bounds**. Sysfs knows a monitor exists and how to
+//! reach it, not where the desktop puts it — that is the display server's answer,
+//! and there may be no display server. The connector name carries forward as the
+//! join key instead.
+//!
 //! # Safety policy
-//! All FFI is confined to the platform `sys` modules (`win::sys`, `mac::sys`),
-//! where every `unsafe` block carries a `// SAFETY:` justification; the rest of
-//! the crate — including the entire [`ddcci`] codec — is safe.
+//! All FFI is confined to the platform `sys` modules (`win::sys`, `mac::sys`,
+//! `linux::sys`), where every `unsafe` block carries a `// SAFETY:`
+//! justification; the rest of the crate — including the entire [`ddcci`] codec —
+//! is safe.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
@@ -62,6 +79,9 @@ mod win;
 #[cfg(target_os = "macos")]
 mod mac;
 
+#[cfg(target_os = "linux")]
+mod linux;
+
 #[cfg(test)]
 mod fake;
 
@@ -78,6 +98,9 @@ pub use win::{DdcDisplay, DdcError, Dxva2Transport, enumerate};
 
 #[cfg(target_os = "macos")]
 pub use mac::{DdcDisplay, DdcError, enumerate};
+
+#[cfg(target_os = "linux")]
+pub use linux::{DdcDisplay, DdcError, enumerate};
 
 /// The crate version, as compiled in.
 #[must_use]

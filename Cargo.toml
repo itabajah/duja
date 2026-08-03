@@ -118,6 +118,25 @@ directories = "6"
 # rustix's safe wrappers give an advisory `flock` and `getuid` without any
 # `unsafe` in the single-instance module. `fs` = flock; `process` = getuid.
 rustix = { version = "1", features = ["fs", "process"] }
+# Linux D-Bus (duja-panel's logind backlight writer, P7). The version is pinned
+# to what `i-slint-backend-winit` already resolves and `async-io` matches its
+# executor selection, so the Linux graph gains no second async runtime — see
+# ADR-0022, which is the decision this line implements. The feature sets are not
+# identical: Slint has no use for `blocking-api` and withholds it.
+#
+# `blocking-api` is what gates zbus's synchronous wrappers. Do NOT write
+# `blocking` here: zbus has a feature of that name too — the implicit feature of
+# its optional `blocking` crate dependency, already on via `async-io` — so the
+# manifest would resolve cleanly and simply omit `zbus::blocking`, and the
+# mistake would surface at the first call site instead. (`ksni`'s feature of the
+# same name IS the blocking wrapper. Two crates, one word, two meanings.)
+#
+# `default-features = false` pins both choices explicitly so a future upstream
+# default cannot bring `tokio` in silently.
+zbus = { version = "5.17", default-features = false, features = [
+    "async-io",
+    "blocking-api",
+] }
 # NOTE: `core-foundation-sys` (declared above in the duja-ddc block) is also the
 # macOS event pump's run-loop plumbing (duja-platform's dedicated CFRunLoop
 # thread); the CoreGraphics display-reconfiguration and IOKit system-power
