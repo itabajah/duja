@@ -61,6 +61,16 @@ mod mac_geom;
 // X11 windows and real `wl_surface`s cannot run on a headless runner.
 pub mod linux_caps;
 
+// The only thing in this crate that talks to a Linux display server: it connects,
+// reads two booleans and a list of interface names, and hands them to
+// `linux_caps` as plain data. Nothing it does can run in CI, which is exactly why
+// it is this small.
+#[cfg(target_os = "linux")]
+mod linux;
+
+#[cfg(target_os = "linux")]
+pub use linux::probe_session;
+
 // Re-export the cross-platform vocabulary so callers can depend on this crate
 // alone for the dimming surface.
 pub use duja_core::dimmer::{

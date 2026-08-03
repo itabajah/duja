@@ -1157,7 +1157,9 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "proptest",
  "tracing",
+ "wayland-client",
  "windows 0.62.2",
+ "x11rb",
 ]
 
 [[package]]
