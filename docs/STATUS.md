@@ -1520,6 +1520,16 @@ a display event costs one connection rather than two. The rule is pure — the
 outputs are an argument — so it runs on all three lanes; only the enumeration
 itself is Linux-only.
 
+**Geometry without a surface is still geometry without a surface.** Linux's
+`PlatformDimmer` is `StubDimmer` until the overlay lands, so the planner now
+produces overlay commands that are recorded and discarded. The visible result is
+unchanged — the continuum still stops at the hardware floor — with one exception
+worth knowing about: surface tokens also switch **mirror grouping** on, and the
+group rule pins a software-only group's hardware members to maximum on the
+premise that one shared overlay does the dimming. That premise is false until the
+overlay exists. `debt.md` carries it, with why withholding the token instead
+would be worse.
+
 **Wave 4 landed ADR-0011's capability probe first, on purpose.** The rule that
 decides what a Linux session can dim is pure — environment and Wayland registry
 contents in, a per-mechanism report out — and it is the largest surface this
