@@ -32,6 +32,29 @@
 //! is not a corner case, it is the commonest reason a user would have that
 //! protocol at all. So the gamma arm is settled in two steps and the report is a
 //! value that can change after startup, not one settled once.
+//!
+//! # On X11 a connection is not the whole answer for the overlay either
+//!
+//! ADR-0011 as first written said an X11 overlay needs no extension and "a
+//! successful connection is the whole requirement". That was wrong, and wrong in
+//! the direction that breaks a screen rather than the direction that refuses one.
+//!
+//! X11 has no per-window translucency of its own. An ARGB32 window's alpha
+//! channel means nothing to the X server, which copies the window's contents to
+//! the screen as they are; the channel is honoured only by a **compositing
+//! manager** reading the window's off-screen pixmap and blending it. Duja's
+//! overlay is premultiplied black, so its colour bytes are zero at *every* alpha
+//! — 10% and 90% are the same pixels, and the difference between them lives
+//! entirely in a byte only a compositor reads. Map that window with no compositor
+//! running and the screen goes **solid black** at the first hint of dimming, with
+//! Duja's own UI behind it and the only exit a keyboard the user cannot see.
+//!
+//! So the X11 overlay arm asks a second question: does a compositing manager own
+//! the `_NET_WM_CM_S<n>` selection. That is the EWMH convention every compositor
+//! follows to announce itself, and it is a live answer — a user who kills
+//! `picom` mid-session stops being able to dim in software, which is exactly the
+//! truth to report. It is also the same shape as the gamma arm: a capability that
+//! presence alone cannot settle.
 
 use std::fmt;
 
@@ -69,6 +92,12 @@ pub enum Unavailable {
         /// The extension name, e.g. `RANDR`.
         extension: &'static str,
     },
+    /// X11 only: no compositing manager owns `_NET_WM_CM_S<n>`, so the X server
+    /// would draw the overlay's alpha channel as opaque black.
+    ///
+    /// Not a Wayland state. A Wayland compositor *is* the compositing manager, so
+    /// there is no session in which layer-shell exists and blending does not.
+    NoCompositor,
     /// The protocol is advertised and the bind was **refused** — another client
     /// holds it exclusively, or the output does not support gamma tables.
     ///
@@ -88,6 +117,12 @@ impl fmt::Display for Unavailable {
             }
             Unavailable::ExtensionAbsent { extension } => {
                 write!(f, "the X server does not offer the {extension} extension")
+            }
+            Unavailable::NoCompositor => {
+                write!(
+                    f,
+                    "no compositing manager is running, so X11 cannot blend a translucent window"
+                )
             }
             Unavailable::Refused => {
                 write!(
@@ -140,6 +175,15 @@ pub const GAMMA_CONTROL: &str = "zwlr_gamma_control_manager_v1";
 /// The X extension a gamma ramp needs.
 pub const RANDR: &str = "RANDR";
 
+/// The selection a compositing manager owns to announce itself, less the screen
+/// number the caller appends.
+///
+/// EWMH names it `_NET_WM_CM_Sn` for screen `n`; on the overwhelmingly common
+/// single-screen session that is `_NET_WM_CM_S0`, but the number is the *X screen*
+/// (a separate root window, as in `DISPLAY=:0.1`), not a monitor, so it must come
+/// from the connection rather than be hard-coded.
+pub const COMPOSITOR_SELECTION_PREFIX: &str = "_NET_WM_CM_S";
+
 /// The environment variables that name a display server.
 ///
 /// Borrowed rather than owned so the caller can pass what `std::env::var` gave it
@@ -163,6 +207,9 @@ pub struct Probe<'a> {
     /// Whether the X server answered for the `RandR` extension. Ignored on
     /// Wayland.
     pub randr: bool,
+    /// Whether a compositing manager owns `_NET_WM_CM_S<n>`. Ignored on Wayland,
+    /// where the compositor is the display server.
+    pub compositor: bool,
 }
 
 /// Choose the transport this session is on.
@@ -218,9 +265,16 @@ pub fn resolve(env: SessionEnv<'_>, probe: &Probe<'_>) -> SurfaceCaps {
         },
         Transport::X11 => SurfaceCaps {
             transport,
-            // An override-redirect, input-transparent window needs no extension;
-            // a successful connection is the whole requirement.
-            overlay: Capability::Available,
+            // An override-redirect, input-transparent window needs no extension,
+            // but it does need someone to blend it: X11 itself ignores an alpha
+            // channel, and Duja's overlay is premultiplied black, so without a
+            // compositing manager every alpha renders as opaque black and the
+            // screen goes dark. See the module docs.
+            overlay: if probe.compositor {
+                Capability::Available
+            } else {
+                Capability::Unavailable(Unavailable::NoCompositor)
+            },
             gamma: if probe.randr {
                 Capability::Available
             } else {
@@ -286,6 +340,17 @@ mod tests {
             connected: true,
             globals,
             randr: true,
+            compositor: true,
+        }
+    }
+
+    /// An X11 probe with both extras present; individual tests knock one out.
+    fn x11_probe(randr: bool, compositor: bool) -> Probe<'static> {
+        Probe {
+            connected: true,
+            globals: &[],
+            randr,
+            compositor,
         }
     }
 
@@ -341,6 +406,7 @@ mod tests {
             connected: false,
             globals: &[],
             randr: false,
+            compositor: false,
         };
         let caps = resolve(env(Some("wayland-0"), None), &probe);
 
@@ -437,36 +503,93 @@ mod tests {
         assert!(!text.to_ascii_lowercase().contains("gnome"), "{text}");
     }
 
-    /// X11 needs no extension for the overlay — an override-redirect,
-    /// input-transparent window is core X — but `RandR` for gamma.
+    /// The two X11 arms answer to different questions: the overlay to a
+    /// compositing manager, gamma to `RandR`. Neither implies the other.
     #[test]
-    fn x11_separates_the_core_overlay_from_the_randr_gamma() {
-        let with_randr = resolve(
-            env(None, Some(":0")),
-            &Probe {
-                connected: true,
-                globals: &[],
-                randr: true,
-            },
-        );
-        assert_eq!(with_randr.overlay, Capability::Available);
-        assert_eq!(with_randr.gamma, Capability::Available);
+    fn x11_separates_the_composited_overlay_from_the_randr_gamma() {
+        let both = resolve(env(None, Some(":0")), &x11_probe(true, true));
+        assert_eq!(both.overlay, Capability::Available);
+        assert_eq!(both.gamma, Capability::Available);
 
-        let without = resolve(
-            env(None, Some(":0")),
-            &Probe {
-                connected: true,
-                globals: &[],
-                randr: false,
-            },
-        );
-        assert_eq!(without.overlay, Capability::Available);
+        let no_randr = resolve(env(None, Some(":0")), &x11_probe(false, true));
+        assert_eq!(no_randr.overlay, Capability::Available);
         assert_eq!(
-            without.gamma,
+            no_randr.gamma,
             Capability::Unavailable(Unavailable::ExtensionAbsent { extension: RANDR })
         );
         // An X session with no RandR can still dim; only the ramp is gone.
-        assert!(without.any_dimming());
+        assert!(no_randr.any_dimming());
+    }
+
+    /// The defect this rule exists for. X11 does not blend an alpha channel;
+    /// a compositing manager does. Duja's overlay is premultiplied black, so
+    /// with no compositor every alpha renders identically — as opaque black
+    /// over the whole monitor, with no visible way back.
+    ///
+    /// Reporting the overlay as available there would not degrade the feature,
+    /// it would black out the screen the first time the user dragged a slider
+    /// past the hardware floor.
+    #[test]
+    fn x11_without_a_compositing_manager_refuses_the_overlay() {
+        let caps = resolve(env(None, Some(":0")), &x11_probe(true, false));
+
+        assert_eq!(
+            caps.overlay,
+            Capability::Unavailable(Unavailable::NoCompositor)
+        );
+        // RandR is unaffected: a bare X session with no compositor can still
+        // drive a gamma ramp, and that is then the only software dimming it has.
+        assert_eq!(caps.gamma, Capability::Available);
+        assert!(caps.any_dimming());
+    }
+
+    /// A bare X session with neither: no compositor and no `RandR`. Both arms
+    /// unavailable, each with its own reason, and no software dimming at all.
+    #[test]
+    fn x11_with_neither_has_no_software_dimming_and_says_why() {
+        let caps = resolve(env(None, Some(":0")), &x11_probe(false, false));
+
+        assert_eq!(
+            caps.overlay,
+            Capability::Unavailable(Unavailable::NoCompositor)
+        );
+        assert_eq!(
+            caps.gamma,
+            Capability::Unavailable(Unavailable::ExtensionAbsent { extension: RANDR })
+        );
+        assert!(!caps.any_dimming());
+    }
+
+    /// `NoCompositor` is an X11 answer. A Wayland compositor *is* the compositing
+    /// manager, so the flag must not be able to refuse a layer-shell session —
+    /// otherwise a stray `false` from a probe that never asked the question would
+    /// disable the overlay on the platform where it always works.
+    #[test]
+    fn the_compositor_flag_never_reaches_the_wayland_arm() {
+        let caps = resolve(
+            env(Some("wayland-0"), None),
+            &Probe {
+                connected: true,
+                globals: &[LAYER_SHELL],
+                randr: false,
+                compositor: false,
+            },
+        );
+
+        assert_eq!(caps.overlay, Capability::Available);
+    }
+
+    /// The reason is printed by `dujactl doctor`, so it has to say what to do
+    /// about it without naming a compositor (ADR-0011).
+    #[test]
+    fn the_no_compositor_reason_explains_itself() {
+        let text = Unavailable::NoCompositor.to_string();
+
+        assert!(text.contains("compositing manager"), "{text}");
+        assert!(text.contains("blend"), "{text}");
+        for name in ["picom", "xcompmgr", "compton", "mutter", "kwin"] {
+            assert!(!text.to_ascii_lowercase().contains(name), "{text}");
+        }
     }
 
     /// ADR-0011 step 5. A session running `wlsunset` advertises

@@ -46,8 +46,9 @@ compositor supports what today:
 The capabilities Duja actually needs are directly observable at runtime:
 
 - **X11** — an override-redirect, input-transparent window (the overlay) and
-  XRandR's per-CRTC gamma. Availability is "did the X connection and the extension
-  query succeed".
+  XRandR's per-CRTC gamma. The gamma answer is "did the extension query succeed".
+  The overlay answer is *not* just "did the connection succeed" — see the
+  amendment below.
 - **Wayland** — the overlay needs `zwlr_layer_shell_v1`, and the gamma path needs
   `zwlr_gamma_control_manager_v1`. Both are **advertised in the `wl_registry`
   globals**, which every client enumerates at connect time, so a compositor that
@@ -84,8 +85,9 @@ do:
    when both are present, and treating a failed connect as "not that one".
 2. On Wayland, bind the registry and record whether `zwlr_layer_shell_v1` and
    `zwlr_gamma_control_manager_v1` are present, independently of each other.
-3. On X11, record whether the connection succeeded and whether the RandR extension
-   answered.
+3. On X11, record whether the connection succeeded, whether the RandR extension
+   answered, and whether a compositing manager owns `_NET_WM_CM_S<n>` (amendment
+   below).
 4. Report each of overlay and gamma as available or not, with the reason —
    overlay for the session, **gamma per output**, because that is the grain the
    protocol grants and refuses it at.
@@ -128,6 +130,48 @@ rather than a special case bolted on beside it where no lane would see it. Both
 precedents already obey this without saying so (`mac_events` takes a raw `u32`
 reconfigure flag, not a `CGDisplayChangeSummaryFlags`), which is why it is here
 rather than rediscovered.
+
+## Amendment, 2026-08-03: on X11 the overlay needs a compositing manager
+
+The Context above said an X11 overlay "needs no extension" and that a successful
+connection was the whole requirement. **That was wrong**, and wrong in the
+direction that breaks a screen rather than the direction that refuses one. It was
+found while building the surface this ADR describes, before any of it shipped.
+
+X11 has no per-window translucency. An ARGB32 window's alpha channel means nothing
+to the X server, which copies the window's contents to the screen as they are; the
+channel is honoured only by a **compositing manager** reading the window's
+off-screen pixmap and blending it. Duja's overlay is premultiplied black, so its
+colour bytes are zero at *every* alpha: 10% and 90% are the same pixels, and the
+entire difference between them lives in a byte only a compositor reads. Map that
+window on a bare X session and the screen goes **solid black** the first time the
+user drags a slider below the hardware floor, with Duja's own UI behind it and the
+only exit a keyboard the user can no longer see.
+
+So the X11 overlay arm asks a second question: does a compositing manager own the
+`_NET_WM_CM_S<n>` selection, which is the EWMH convention every compositing manager
+follows to announce itself. `n` is the X screen from the connection, not a monitor,
+and not hard-coded.
+
+Three things about this are worth stating, because they are why it fits the ADR
+rather than sitting beside it:
+
+- **It is still capability, not identity.** The question is "is something blending
+  windows on this screen", answered by the X server about the live session. No
+  compositor is named, and one installed later starts working with no release.
+- **It is the same shape as the gamma arm.** Both are capabilities that presence
+  alone cannot settle, and both can change after startup: a user who kills `picom`
+  mid-session stops being able to dim in software, exactly as a user who starts
+  `wlsunset` stops being able to set gamma. The report was already required to be
+  a value that can move; this is a second reason it must be.
+- **It only refuses the overlay.** A bare X session with RandR keeps its gamma
+  ramp, which is then the only software dimming it has, and hardware control is
+  untouched. `dujactl doctor` prints the reason, and the flyout discloses it
+  through the `#103` caption shape the consequences below already name.
+
+`Unavailable::NoCompositor` is an X11-only state and the rule's Wayland arm never
+consults the flag: a Wayland compositor *is* the compositing manager, so there is
+no session in which layer-shell exists and blending does not.
 
 ## Consequences
 

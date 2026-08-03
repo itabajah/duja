@@ -1505,6 +1505,20 @@ No compositor is named anywhere in it, and a test asserts that: every reason
 string is checked for the absence of `gnome`, `kde`, `mutter`, `kwin`, `sway` and
 `plasma`. The X11 and Wayland surfaces themselves are the rest of the wave.
 
+**Then building the surface found a defect in the rule, and it was the dangerous
+kind.** ADR-0011 as first written said an X11 overlay needs no extension and that
+a successful connection was the whole requirement. X11 has no per-window
+translucency: the server copies a window's contents to the screen and ignores the
+alpha channel, which only a **compositing manager** reads and blends. Duja's
+overlay is premultiplied black, so its colour bytes are zero at every alpha — 10%
+and 90% are the same pixels — and on a bare X session the first drag below the
+hardware floor would have turned the monitor solid black with no visible way back.
+The overlay arm now also asks whether a compositing manager owns
+`_NET_WM_CM_S<n>`, which keeps it a capability question about the live session
+rather than an identity one, and leaves the RandR gamma ramp available on exactly
+the sessions that have no compositor. The ADR carries the amendment and the QA
+checklist runs that case **before** the happy path.
+
 **Wave 3 gave Linux a real event pump, an autostart entry and a browser.** Display
 hot-plug comes from the kernel's `NETLINK_KOBJECT_UEVENT` socket directly, with no
 libudev: that is a C library and a system dependency, to receive the same messages

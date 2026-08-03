@@ -52,7 +52,21 @@ with the phases; keep entries as observable behaviors, not implementation.
       documented group rule) — confirm it is not left stuck dark or double-dimmed.
 
 ## Linux
-- [ ] X11 session: tray menu, overlay, backlight.
+- [ ] X11 session **with** a compositing manager running: tray menu, overlay, backlight.
+- [ ] X11 session with **no** compositing manager (kill `picom`/`xcompmgr`, or use a
+      bare window manager): dragging a slider below the hardware floor must **not**
+      black the screen out. Software overlay dimming reports itself unavailable
+      naming the compositing manager as the reason, gamma still works if RandR is
+      there, and hardware control is untouched.
+      <!-- X ignores a window's alpha channel; only a compositing manager blends it.
+           Duja's overlay is premultiplied black, so with no compositor every alpha
+           renders as opaque black over the whole monitor. This is the one Linux
+           check whose failure mode is unrecoverable-looking rather than merely
+           broken, so run it before the happy path, not after. -->
+- [ ] Start a compositing manager **while Duja is running** on an X11 session that
+      had none: the overlay must become available without a restart. ADR-0011
+      requires the report to be re-resolved on session change rather than settled
+      once, and this is the direction a capability table could never represent.
 - [ ] Wayland session that **advertises** `zwlr_layer_shell_v1`: the overlay appears and dims.
 - [ ] Wayland session that advertises **neither** wlr protocol: software dimming reports itself
       unavailable *with the reason*, and hardware paths still work.

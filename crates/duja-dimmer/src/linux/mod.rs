@@ -42,17 +42,23 @@ pub fn probe_session() -> SurfaceCaps {
                     connected,
                     globals: &borrowed,
                     randr: false,
+                    // Not asked, and not consulted: a Wayland compositor *is* the
+                    // compositing manager, so the rule's Wayland arm ignores this
+                    // field. `false` is the honest value for a question that was
+                    // never put to a server.
+                    compositor: false,
                 },
             )
         }
         Transport::X11 => {
-            let (connected, randr) = x11::probe();
+            let (connected, randr, compositor) = x11::probe();
             resolve(
                 env,
                 &Probe {
                     connected,
                     globals: &[],
                     randr,
+                    compositor,
                 },
             )
         }
