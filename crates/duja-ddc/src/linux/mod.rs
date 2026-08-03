@@ -159,3 +159,55 @@ pub fn enumerate() -> Result<Vec<DdcDisplay>, DdcError> {
     }
     Ok(displays)
 }
+
+/// One connector's DDC/CI reachability, for `dujactl doctor`.
+///
+/// [`enumerate`] deliberately discards this: a connector it cannot open is not a
+/// monitor, and returning half-open displays would put unusable rows in the tray.
+/// But on Linux "no monitors" is usually a **configuration** the user can fix and
+/// cannot see, so the reasons have to reach a diagnostic even though they must
+/// not reach the display list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectorDiagnosis {
+    /// The DRM connector name, `card<N>-` prefix stripped.
+    pub connector: String,
+    /// Whether this is a built-in panel, which DDC/CI cannot reach at all.
+    pub is_internal: bool,
+    /// The I2C adapter behind it, or why there is none.
+    pub i2c: Result<u32, drm::NoI2c>,
+    /// `None` when the bus opened; the OS error text otherwise.
+    ///
+    /// Only attempted for an external connector with an adapter — the two cases
+    /// where an open is meaningful. It **is** attempted, rather than inferred
+    /// from the node's mode bits, because permission is not the only reason an
+    /// open fails and a diagnostic that guesses is worse than one that tries.
+    pub open_error: Option<String>,
+}
+
+/// Report every connected connector and whether its DDC/CI channel is reachable.
+///
+/// Opens each candidate bus and closes it immediately; no display is driven and
+/// no DDC/CI request is sent, so this costs no I2C traffic and cannot disturb a
+/// monitor.
+///
+/// # Errors
+/// [`DdcError::Sysfs`] on the same condition [`enumerate`] reports it: the DRM
+/// tree exists and cannot be read.
+pub fn diagnose() -> Result<Vec<ConnectorDiagnosis>, DdcError> {
+    let connectors = drm::scan(Path::new(SYSFS_ROOT)).map_err(DdcError::Sysfs)?;
+    Ok(connectors
+        .into_iter()
+        .map(|connector| {
+            let open_error = match (connector.is_internal, connector.i2c) {
+                (false, Ok(index)) => LinuxI2cBus::open(index).err().map(|e| e.to_string()),
+                _ => None,
+            };
+            ConnectorDiagnosis {
+                connector: connector.name,
+                is_internal: connector.is_internal,
+                i2c: connector.i2c,
+                open_error,
+            }
+        })
+        .collect())
+}

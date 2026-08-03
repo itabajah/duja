@@ -100,7 +100,12 @@ pub use win::{DdcDisplay, DdcError, Dxva2Transport, enumerate};
 pub use mac::{DdcDisplay, DdcError, enumerate};
 
 #[cfg(target_os = "linux")]
-pub use linux::{DdcDisplay, DdcError, enumerate};
+pub use linux::{ConnectorDiagnosis, DdcDisplay, DdcError, diagnose, enumerate};
+
+/// Why a connected DRM connector has no DDC/CI bus, re-exported so `dujactl`'s
+/// diagnostic can name the reason without depending on `duja-core` for it.
+#[cfg(target_os = "linux")]
+pub use duja_core::linux::drm::NoI2c;
 
 /// The crate version, as compiled in.
 #[must_use]

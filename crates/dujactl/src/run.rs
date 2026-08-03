@@ -293,7 +293,90 @@ pub fn doctor(report: bool) -> u8 {
     for line in doctor_lines(report, reachable, &displays, &probe_display) {
         println!("{line}");
     }
+    #[cfg(target_os = "linux")]
+    {
+        // Printed after the display blocks rather than folded into
+        // `doctor_lines`: the Linux section explains an *absence*, so it has to
+        // still appear when there are no displays at all — which is the case it
+        // exists for, and the case `doctor_lines` returns early on.
+        let report = linux::gather();
+        for line in crate::linux_report::summary(&report) {
+            println!("{line}");
+        }
+        for line in crate::linux_report::lines(&report) {
+            println!("{line}");
+        }
+    }
     EXIT_OK
+}
+
+/// Gathering the Linux diagnostic. The only impure part; every decision about
+/// what the answers mean lives in the pure `linux_report` module, which is why
+/// that module's tests run on all three lanes.
+#[cfg(target_os = "linux")]
+mod linux {
+    use crate::linux_report::{ConnectorRow, DimmingRow, I2cState, LinuxReport};
+
+    /// Read every connector's DDC/CI reachability and the session's
+    /// software-dimming capability.
+    pub(super) fn gather() -> LinuxReport {
+        LinuxReport {
+            // An unreadable DRM tree is reported as "no connectors", which the
+            // renderer already has a line for. It is not worth a second error
+            // path here: `enumerate` has already surfaced the same failure to
+            // the caller as an empty display list.
+            connectors: duja_ddc::diagnose()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|d| ConnectorRow {
+                    name: d.connector,
+                    state: state_of(d.is_internal, d.i2c, d.open_error),
+                })
+                .collect(),
+            dimming: dimming(),
+        }
+    }
+
+    /// Fold a diagnosis into the one state the report prints.
+    fn state_of(
+        is_internal: bool,
+        i2c: Result<u32, duja_ddc::NoI2c>,
+        open_error: Option<String>,
+    ) -> I2cState {
+        // Checked before the adapter, because a built-in panel with an adapter is
+        // still a panel: DDC/CI does not reach one, so reporting its bus would
+        // invite a user to wonder why it does not work.
+        if is_internal {
+            return I2cState::BuiltInPanel;
+        }
+        match (i2c, open_error) {
+            (Ok(bus), None) => I2cState::Usable(bus),
+            (Ok(bus), Some(err)) => I2cState::Unopenable(bus, err),
+            (Err(duja_ddc::NoI2c::NoDdcLink), _) => I2cState::NoAdapter,
+            (Err(duja_ddc::NoI2c::NoI2cDev), _) => I2cState::NoI2cDev,
+        }
+    }
+
+    /// The software-dimming capability, from `duja-dimmer`'s ADR-0011 probe.
+    fn dimming() -> DimmingRow {
+        use duja_dimmer::linux_caps::{Capability, Transport};
+
+        let caps = duja_dimmer::probe_session();
+        let reason = |capability: &Capability| match capability {
+            Capability::Available => None,
+            Capability::Unavailable(why) => Some(why.to_string()),
+        };
+        DimmingRow {
+            transport: match caps.transport {
+                Transport::Wayland => "wayland",
+                Transport::X11 => "x11",
+                Transport::None => "none",
+            }
+            .to_owned(),
+            overlay: reason(&caps.overlay),
+            gamma: reason(&caps.gamma),
+        }
+    }
 }
 
 /// Assemble every line [`doctor`] prints.

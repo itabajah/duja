@@ -1224,6 +1224,7 @@ version = "0.1.5"
 dependencies = [
  "duja-core",
  "duja-ddc",
+ "duja-dimmer",
  "duja-ipc",
  "duja-panel",
  "duja-platform",

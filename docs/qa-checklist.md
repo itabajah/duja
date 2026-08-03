@@ -64,7 +64,10 @@ with the phases; keep entries as observable behaviors, not implementation.
            prints which protocols the session offered, so these are checkable without guessing
            which desktop is which. -->
 - [ ] Missing i2c permissions: the app degrades gracefully (hardware control unavailable, no
-      crash, software dimming still works). `dujactl doctor` reports the displays it can see
-      and nothing about permissions — there is no permission/module/platform diagnostic in
-      `dujactl` at all, so this item is *not* a check that it "names the fix". Land that
-      diagnostic with the P7 Linux backend (see [debt.md](debt.md)) and tighten this line then.
+      crash, software dimming still works) **and `dujactl doctor` names the fix**. Its Linux
+      section lists every DRM connector with why its DDC/CI channel is or is not reachable, and
+      the remedy where there is one: `modprobe i2c-dev` for a missing module, and *install
+      `i2c-tools` then join the group* for permissions — not "join the `i2c` group", because on
+      a stock system that group does not exist until a package creates it.
+- [ ] `i2c-dev` not loaded at all: `doctor` says so per connector rather than reporting zero
+      monitors with no explanation.
