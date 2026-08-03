@@ -39,8 +39,8 @@
 //! fallback was added for.
 //!
 //! So the passes run strongest-evidence-first: name **and** EDID agreeing, then
-//! EDID alone, and a bare name only where no EDID could have checked it. See
-//! [`join`].
+//! EDID alone, and a bare name only where the server published no EDID to check
+//! it with. See [`join`].
 //!
 //! # Ambiguity refuses; it does not guess
 //!
@@ -136,9 +136,9 @@ pub enum Matched {
     /// outputs its own way — a real configuration, not a fault, but the one
     /// worth knowing about when a display does not appear where it should.
     ByEdid,
-    /// The names were equal and **no EDID could have checked it**, because one
-    /// side published none. Every Wayland placement is this, since Wayland has
-    /// no protocol for an EDID.
+    /// The names were equal and **the server published no EDID to check it
+    /// with**. Every Wayland placement is this, since Wayland has no protocol
+    /// for an EDID, as is every X11 one on a driver with no `EDID` property.
     ByName,
 }
 
@@ -166,13 +166,23 @@ pub struct Placement {
 /// overlay in. Unplaced is the honest answer and the one the rest of the pipeline
 /// already handles.
 ///
+/// Dropping them early also **destroys evidence**, and that is worth saying out
+/// loud because it weakens the refusal promise below in one case. Two identical
+/// monitors with one disabled leave a single claimant, so a connector carrying
+/// that EDID is placed on the enabled one rather than refused. That is right when
+/// the connector is the enabled twin and wrong when it is the disabled one, which
+/// is reachable if the disabled twin is the only one of the pair with a DDC link.
+/// Keeping disabled outputs in the pool purely to contest matches would cost
+/// every ordinary disabled-monitor session its placement, which is the far more
+/// common case, so the trade is deliberate rather than overlooked.
+///
 /// # Three passes, strongest evidence first
 ///
 /// 1. **Name and EDID agree.** Self-checking, and therefore the only evidence
 ///    that cannot be a coincidence of naming.
 /// 2. **EDID alone**, for the connectors pass 1 could not settle.
-/// 3. **Name alone**, and only where an EDID could not have checked it because
-///    one side published none.
+/// 3. **Name alone**, and only where the **server** published no EDID to check
+///    it with.
 ///
 /// A bare name match is deliberately *not* taken while both sides published an
 /// EDID that disagrees, and this ordering is the whole reason the fallback
@@ -210,7 +220,7 @@ pub fn join(connectors: &[Connector<'_>], outputs: &[ServerOutput]) -> Vec<Optio
         &mut placements,
         &mut pool,
         Matched::ByName,
-        |connector, output| output.name == connector.name && !comparable(connector, output),
+        |connector, output| output.name == connector.name && !output_has_edid(output),
     );
 
     placements
@@ -227,13 +237,26 @@ fn edids_agree(connector: &Connector<'_>, output: &ServerOutput) -> bool {
     }
 }
 
-/// Whether an EDID comparison was even possible for this pair.
+/// Whether the **server** published a base block for this output.
 ///
-/// The distinction pass 3 turns on: a name match with nothing to check it
-/// against is the best evidence available, and a name match with an EDID that
-/// **contradicts** it is not evidence at all.
-fn comparable(connector: &Connector<'_>, output: &ServerOutput) -> bool {
-    base_block(connector.edid).is_some() && output.edid.as_deref().and_then(base_block).is_some()
+/// The distinction pass 3 turns on, and it asks about the server side only. A
+/// name match with nothing to check it against is the best evidence available; a
+/// name match the server could have checked and did not corroborate is not
+/// evidence at all — it reached pass 3 precisely because passes 1 and 2 found the
+/// EDIDs disagreeing or absent from sysfs.
+///
+/// Asking "could *either* side have checked it" would be the wrong question, and
+/// wrong in the direction this module exists to avoid. A connector whose own EDID
+/// came back short cannot corroborate anything, but that says nothing about
+/// whether the server's name is trustworthy — and on the NVIDIA offset-by-one
+/// namespace it is not. Taking the name there would place the overlay on the
+/// neighbouring monitor and stamp it "matched by name", which is the exact defect
+/// the pass order was rewritten to close. Duja's own callers never reach it
+/// (`duja_core::linux::drm::scan` drops a connector whose EDID is shorter than a
+/// base block), but this function is public and must not depend on an invariant
+/// enforced two crates away.
+fn output_has_edid(output: &ServerOutput) -> bool {
+    output.edid.as_deref().and_then(base_block).is_some()
 }
 
 /// Claim every pair that `matches` relates **mutually uniquely**, then record it.
@@ -730,6 +753,42 @@ mod tests {
                 .first()
                 .is_some_and(Option::is_none)
         );
+    }
+
+    /// The narrower form of the same trap, on the side it is easy to get wrong.
+    /// sysfs came up short, so nothing can corroborate the name — but the
+    /// *server* published an EDID, and it says this is a different monitor.
+    /// Asking "could either side have checked it" would take the name here and
+    /// place the overlay on the neighbour; asking about the server alone refuses.
+    #[test]
+    fn a_short_connector_edid_does_not_license_a_bare_name_match() {
+        let unreadable = vec![0_u8; 64];
+        let connectors = [Connector {
+            name: "DP-1",
+            edid: &unreadable,
+        }];
+        let outputs = [output("DP-1", "crtc-neighbour", Some(edid(99)))];
+
+        assert!(
+            join(&connectors, &outputs)
+                .first()
+                .is_some_and(Option::is_none)
+        );
+    }
+
+    /// The same short EDID **is** placed when the server published nothing
+    /// either: the name is then the only evidence there is, which is the Wayland
+    /// case and not a hazard.
+    #[test]
+    fn a_short_connector_edid_still_joins_a_server_with_no_edid() {
+        let unreadable = vec![0_u8; 64];
+        let connectors = [Connector {
+            name: "DP-1",
+            edid: &unreadable,
+        }];
+        let outputs = [at("DP-1", "crtc-0", 0, 1920)];
+
+        assert_eq!(only(join(&connectors, &outputs)).by, Matched::ByName);
     }
 
     /// A connector sysfs could not read a full base block for has nothing to

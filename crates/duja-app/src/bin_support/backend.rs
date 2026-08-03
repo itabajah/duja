@@ -1229,27 +1229,42 @@ mod tests {
             assert!(panels.first().is_some_and(|f| f.geometry.is_none()));
         }
 
-        /// Nothing to place is not an error, and must not clear a geometry a
-        /// backend already reported. On Linux neither backend reports one, but
-        /// this function must not be the thing that decides that.
+        /// This function **adds** a geometry and never clears one. The entry
+        /// below has a key, so it reaches the assignment loop, and that key
+        /// matches nothing, so it takes the miss branch — which is the branch
+        /// that used to overwrite with `None`. A keyless entry would not test it:
+        /// the empty-keys early return means neither loop ever runs.
         #[test]
-        fn a_geometry_already_reported_survives_when_there_are_no_keys() {
+        fn a_miss_does_not_clear_a_geometry_a_backend_reported() {
             let mut monitors = vec![FoundDdc {
                 geometry: Some(DdcGeometry {
                     bounds: DisplayBounds::new(5, 6, 7, 8),
                     gamma_token: "already".to_owned(),
                     surface_token: "already".to_owned(),
                 }),
-                ..ddc("A", None)
+                ..ddc("A", Some("DP-1"))
             }];
             let mut panels: Vec<FoundPanel> = Vec::new();
 
-            place_from_outputs(&mut monitors, &mut panels, &[output("DP-1", "crtc-0", 0)]);
+            // Nothing named DP-1, so the connector reaches the loop and misses.
+            place_from_outputs(&mut monitors, &mut panels, &[output("DP-9", "crtc-0", 0)]);
 
             assert_eq!(
                 ddc_geometry(monitors.first()).map(|g| g.bounds),
                 Some(DisplayBounds::new(5, 6, 7, 8))
             );
+        }
+
+        /// Nothing to place at all returns before either loop, and changes
+        /// nothing.
+        #[test]
+        fn no_keys_at_all_is_not_an_error() {
+            let mut monitors = vec![ddc("A", None)];
+            let mut panels: Vec<FoundPanel> = Vec::new();
+
+            place_from_outputs(&mut monitors, &mut panels, &[output("DP-1", "crtc-0", 0)]);
+
+            assert!(ddc_geometry(monitors.first()).is_none());
         }
     }
 }

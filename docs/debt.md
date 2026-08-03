@@ -222,10 +222,12 @@ the pump does not hand that fact out. Re-file it if it bites.
 
 Drained at P7 wave 4 (2026-08-03): a Linux display finally has a rectangle, so
 the two rows that were waiting for the display server are closed. Connectors are
-joined to X11 `RandR` outputs or Wayland `wl_output`s **by name first and EDID
-second**, which is the fallback the name row was opened to demand: the NVIDIA
-proprietary driver's own indexing and the legacy `xf86-video-intel` DDX's
-hyphen-less names both defeat string equality, and neither defeats the EDID.
+joined to X11 `RandR` outputs or Wayland `wl_output`s **by name and EDID
+together, then EDID alone, then a bare name only where the server published no
+EDID to check it with**. The EDID is the fallback the name row was opened to
+demand: the NVIDIA proprietary driver's own indexing and the legacy
+`xf86-video-intel` DDX's hyphen-less names both defeat string equality, and
+neither defeats the EDID.
 A name match that a present EDID contradicts is **not** taken: the NVIDIA
 namespaces overlap and are offset by one, so a name equality there names the
 neighbouring monitor, and trusting it would place two of three displays on the

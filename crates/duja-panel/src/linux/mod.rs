@@ -103,9 +103,13 @@ pub struct PanelConnector {
 /// The connector behind the panel `enumerate` would list, or `None` if it
 /// would list none.
 ///
-/// The two answers come from one body, so they cannot disagree: a caller can
-/// never be handed a connector for a panel that is not in the list, nor a panel
-/// with no way to place it.
+/// The two answers come from one body, so a *single* call cannot produce a
+/// connector for a panel it did not also report, nor a panel with no way to
+/// place it. It is not a guarantee across two calls: a caller that invokes
+/// `enumerate` and then this walks `/sys` twice, and a backlight device that
+/// appeared in between would be visible to the second and not the first. Nothing
+/// harmful follows — the join simply fails for a panel that is not in the list —
+/// but the invariant is per call, not per pair.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn panel_connector() -> Option<PanelConnector> {

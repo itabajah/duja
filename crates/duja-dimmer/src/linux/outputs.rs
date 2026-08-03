@@ -83,13 +83,18 @@ fn x11() -> Vec<ServerOutput> {
         return Vec::new();
     };
 
-    // `only_if_exists` = true: `EDID` is interned by the driver that publishes
-    // the property, so its absence means no output has one and there is nothing
-    // to ask for. `EDID_DATA` is what pre-RandR-1.2 drivers called it, and this
-    // property exists precisely to rescue the legacy stacks, so it is worth the
-    // one extra round trip when the modern name is absent. `x11rb::NONE` from
-    // both reads as "no driver publishes one" and every output then reports
-    // `edid: None`, which the join treats as name-or-nothing.
+    // `only_if_exists` = true, so a server where nothing has ever created the
+    // atom answers `NONE` and every output reports `edid: None` — which the join
+    // treats as name-or-nothing. `EDID_DATA` is what pre-RandR-1.2 drivers called
+    // it, and rescuing the legacy stacks is what this property is *for*, so it is
+    // worth one extra round trip when the modern name is absent.
+    //
+    // Two things this is not: it is not proof a driver publishes the property
+    // (any client can intern an atom, so `EDID` existing says only that something
+    // asked about it), and it is not per output — a server offering `EDID_DATA`
+    // alone is only reached when no `EDID` atom exists at all. Both failure
+    // directions cost the *fallback* and nothing else, which is why one
+    // connection-wide lookup is the right shape.
     let edid_atom = intern(&connection, b"EDID")
         .unwrap_or_else(|| intern(&connection, b"EDID_DATA").unwrap_or(x11rb::NONE));
 
