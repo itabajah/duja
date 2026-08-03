@@ -38,9 +38,11 @@
 //! Overlays must **never** intercept input. On Windows every overlay carries
 //! `WS_EX_TRANSPARENT | WS_EX_NOACTIVATE` and answers `WM_NCHITTEST` with
 //! `HTTRANSPARENT`; on macOS every overlay sets `ignoresMouseEvents = true`; on
-//! X11 every overlay's `XFixes` **input region is empty**, which is the only
-//! mechanism X offers and is why the backend refuses to start without that
-//! extension rather than mapping a window that would swallow every click.
+//! X11 every overlay's `XFixes` **input region is empty**, so the server routes
+//! every event to what is beneath. SHAPE's `ShapeInput` expresses the same thing,
+//! so `XFixes` is the mechanism this uses rather than the only one there is — and
+//! the backend refuses to start without it rather than mapping a window that
+//! would swallow every click.
 //! Fullscreen-exclusive apps and the OS secure/login screens are documented
 //! known-limits on all three (an overlay cannot cover them).
 //!

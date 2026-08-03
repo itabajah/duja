@@ -21,6 +21,80 @@
 
 use duja_core::dimmer::DisplayBounds;
 
+use crate::plan::OverlayOp;
+
+/// The `XFixes` major version that introduced `SetWindowShapeRegion`, which is
+/// the whole click-through mechanism on X11.
+///
+/// Here rather than beside its one caller for the same reason as
+/// [`BYPASS_COMPOSITOR_NEVER`]: it is a bare constant whose failure is invisible
+/// in both directions — too high refuses sessions that would have worked, too low
+/// admits a server that cannot set an input region, and that one is a window that
+/// swallows every click.
+pub const XFIXES_INPUT_SHAPE_VERSION: u32 = 2;
+
+/// What an overlay op should do, and what the backend should then record.
+///
+/// The distinction is the whole point. The backend keeps a record of what is on
+/// screen, and [`crate::plan`] diffs against it — so an op that is *skipped*
+/// must not be recorded, and an op that does something *other* than what it says
+/// must be recorded as that other thing. Getting either wrong leaves the record
+/// describing a window that does not exist, after which the planner never emits
+/// `Create` for that display again and it cannot be dimmed for the rest of the
+/// session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recorded {
+    /// Do nothing, record nothing.
+    Nothing,
+    /// Do the op, record it as given.
+    AsPlanned,
+    /// Destroy this display's window instead, and record **that** — because
+    /// either there is no window to act on, or the op would put one somewhere
+    /// X11 cannot express.
+    ///
+    /// Recording a `Destroy` rather than nothing is what makes the diverged case
+    /// *recover*: it drops the stale entry, so the next plan emits a fresh
+    /// `Create`. Recording nothing would leave the entry in place and re-plan
+    /// the same impossible op forever.
+    DestroyInstead,
+}
+
+/// Decide what one op does, given whether the backend has a window for it.
+///
+/// Pure, so the rule that keeps the record honest is tested on every lane —
+/// unlike the windowing it drives, which no lane can run.
+#[must_use]
+pub fn plan_record(op: &OverlayOp, has_window: bool) -> Recorded {
+    match op {
+        // A rectangle X11 cannot describe. Skipping is right — the alternative is
+        // a wrapped window covering a display the user did not dim — and there is
+        // no window yet, so there is nothing to record either way.
+        OverlayOp::Create { bounds, .. } => {
+            if x11_rect(*bounds).is_some() {
+                Recorded::AsPlanned
+            } else {
+                Recorded::Nothing
+            }
+        }
+        // Moved somewhere unexpressible, or moved when there is nothing to move.
+        OverlayOp::MoveResize { bounds, .. } => {
+            if has_window && x11_rect(*bounds).is_some() {
+                Recorded::AsPlanned
+            } else {
+                Recorded::DestroyInstead
+            }
+        }
+        OverlayOp::SetAlpha { .. } => {
+            if has_window {
+                Recorded::AsPlanned
+            } else {
+                Recorded::DestroyInstead
+            }
+        }
+        OverlayOp::Destroy { .. } => Recorded::AsPlanned,
+    }
+}
+
 /// `_NET_WM_BYPASS_COMPOSITOR`'s "never bypass" value.
 ///
 /// Every compositing manager unredirects a fullscreen window as a performance
@@ -150,9 +224,13 @@ pub fn x11_rect(bounds: DisplayBounds) -> Option<(i16, i16, u16, u16)> {
     let y = i16::try_from(bounds.y).ok()?;
     let width = u16::try_from(bounds.width).ok()?;
     let height = u16::try_from(bounds.height).ok()?;
-    // The far edge has to land inside the protocol's range too: a monitor that
-    // starts at 30000 and is 4000 wide cannot be described, and truncating it
-    // would leave part of the screen undimmed with no indication why.
+    // The far edge is refused too, and this one is a choice rather than a
+    // protocol limit: `CreateWindow` takes an `INT16` origin and a `CARD16` size
+    // independently and says nothing about their sum. But an overlay whose far
+    // edge is past 32767 sits in a region the server's own `BoxRec` (`short x2`)
+    // cannot describe, so what it covers stops being predictable. Refusing gives
+    // an undimmed monitor; allowing it gives a partly-dimmed one with nothing to
+    // explain the seam.
     let right = i32::from(x).checked_add(i32::from(width))?;
     let bottom = i32::from(y).checked_add(i32::from(height))?;
     i16::try_from(right).ok()?;
@@ -163,6 +241,7 @@ pub fn x11_rect(bounds: DisplayBounds) -> Option<(i16, i16, u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use duja_core::id::StableDisplayId;
 
     fn argb(id: u32) -> VisualCandidate {
         VisualCandidate {
@@ -320,5 +399,144 @@ mod tests {
     #[test]
     fn bypass_compositor_is_the_never_value() {
         assert_eq!(BYPASS_COMPOSITOR_NEVER, 2);
+    }
+
+    /// `SetWindowShapeRegion` arrived in `XFixes` 2.0, and it is the entire
+    /// click-through mechanism. Too high refuses sessions that would have worked;
+    /// too low admits a server that cannot set an input region, which is a window
+    /// that swallows every click.
+    #[test]
+    fn the_input_shape_needs_xfixes_two() {
+        assert_eq!(XFIXES_INPUT_SHAPE_VERSION, 2);
+    }
+
+    // --- what each op does to the record -------------------------------------
+
+    fn id(serial: &str) -> StableDisplayId {
+        StableDisplayId::from_parts("DEL", 0xA131, Some(serial)).unwrap()
+    }
+
+    fn ordinary() -> DisplayBounds {
+        DisplayBounds::new(0, 0, 1920, 1080)
+    }
+
+    fn unexpressible() -> DisplayBounds {
+        DisplayBounds::new(40_000, 0, 1920, 1080)
+    }
+
+    #[test]
+    fn an_ordinary_op_is_done_and_recorded_as_given() {
+        let has = true;
+        assert_eq!(
+            plan_record(
+                &OverlayOp::Create {
+                    id: id("a"),
+                    bounds: ordinary(),
+                    alpha: 128
+                },
+                false
+            ),
+            Recorded::AsPlanned
+        );
+        assert_eq!(
+            plan_record(
+                &OverlayOp::MoveResize {
+                    id: id("a"),
+                    bounds: ordinary()
+                },
+                has
+            ),
+            Recorded::AsPlanned
+        );
+        assert_eq!(
+            plan_record(
+                &OverlayOp::SetAlpha {
+                    id: id("a"),
+                    alpha: 64
+                },
+                has
+            ),
+            Recorded::AsPlanned
+        );
+        assert_eq!(
+            plan_record(&OverlayOp::Destroy { id: id("a") }, has),
+            Recorded::AsPlanned
+        );
+    }
+
+    /// A create the backend cannot perform must leave **no** entry. Recording it
+    /// would make the planner believe a window exists, and it never emits
+    /// `Create` for a display it thinks is already covered — so that display
+    /// could not be dimmed again for the rest of the session, even after it moved
+    /// back into range.
+    #[test]
+    fn a_create_that_cannot_be_placed_records_nothing() {
+        assert_eq!(
+            plan_record(
+                &OverlayOp::Create {
+                    id: id("a"),
+                    bounds: unexpressible(),
+                    alpha: 128
+                },
+                false
+            ),
+            Recorded::Nothing
+        );
+    }
+
+    /// **The recovery case, and the one that is easy to get backwards.** When the
+    /// record and the screen have diverged — an entry with no window — doing
+    /// nothing and recording nothing leaves the entry in place, so the next plan
+    /// emits the same impossible op, forever. Recording a `Destroy` drops the
+    /// entry, and the plan after that emits a fresh `Create`.
+    #[test]
+    fn an_op_on_a_missing_window_records_a_destroy_so_the_next_plan_recreates() {
+        assert_eq!(
+            plan_record(
+                &OverlayOp::MoveResize {
+                    id: id("a"),
+                    bounds: ordinary()
+                },
+                false
+            ),
+            Recorded::DestroyInstead
+        );
+        assert_eq!(
+            plan_record(
+                &OverlayOp::SetAlpha {
+                    id: id("a"),
+                    alpha: 64
+                },
+                false
+            ),
+            Recorded::DestroyInstead
+        );
+    }
+
+    /// A window moved somewhere X11 cannot express goes away, and the record says
+    /// so. Keeping it would leave an overlay at the old rectangle covering a
+    /// display the user has moved on from.
+    #[test]
+    fn a_move_to_an_unexpressible_rectangle_destroys_instead() {
+        assert_eq!(
+            plan_record(
+                &OverlayOp::MoveResize {
+                    id: id("a"),
+                    bounds: unexpressible()
+                },
+                true
+            ),
+            Recorded::DestroyInstead
+        );
+    }
+
+    /// A destroy is always itself, including for a display with no window: the
+    /// backend's destroy is a no-op there, and recording it drops any stale entry.
+    #[test]
+    fn a_destroy_is_always_recorded_even_with_no_window() {
+        assert_eq!(
+            plan_record(&OverlayOp::Destroy { id: id("a") }, false),
+            Recorded::AsPlanned
+        );
     }
 }

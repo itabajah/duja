@@ -1207,6 +1207,15 @@ impl AppState {
     /// destroy it to completion before the ramp engaged and flash the screen bright.
     ///
     /// [`gamma::apply_dimming_batch`]: crate::bin_support::gamma::apply_dimming_batch
+    /// # A permanently unavailable backend is retired, not retried
+    ///
+    /// [`DimmerError::Unsupported`](duja_core::dimmer::DimmerError::Unsupported) means the backend has decided it can no
+    /// longer dim *at all* — the X11 one latches it when the compositing manager
+    /// dies, because mapping a fresh window onto a session that cannot blend it
+    /// would paint the screen black. That never un-latches, so the dimmer is
+    /// dropped rather than asked again: this runs once per slider sample, and a
+    /// condition that will never change must not produce a warning per sample.
+    /// One line, then software dimming is off and hardware control carries on.
     fn apply_overlays(&mut self) {
         let commands = self.plan_commands();
         let overlays = self
@@ -1214,7 +1223,11 @@ impl AppState {
             .as_mut()
             .map(|dimmer| dimmer as &mut dyn duja_core::dimmer::Dimmer);
         if let Err(e) = self.gamma.apply_batch(&commands, overlays) {
-            warn!(error = %e, "overlay apply failed");
+            let retire = retires_dimmer(&e);
+            warn!(error = %e, retire, "overlay apply failed");
+            if retire {
+                self.dimmer = None;
+            }
         }
     }
 
@@ -1337,8 +1350,47 @@ impl AppState {
     }
 }
 
+/// Whether a failed overlay apply means the backend will never work again.
+///
+/// [`DimmerError::Unsupported`](duja_core::dimmer::DimmerError::Unsupported) is the backend saying it *cannot* dim, not that
+/// it failed to: the X11 one latches it when the compositing manager dies,
+/// because from then on a mapped overlay would be an opaque black rectangle
+/// rather than a dim one. Nothing un-latches that, so the dimmer is dropped.
+///
+/// The other two are deliberately **not** retiring, and that is the whole reason
+/// this is a function rather than an inline `matches!`. `Os` is one call that
+/// failed and `Backend` is a worker that missed its reply budget; both are
+/// transient, and treating either as terminal would turn a single hiccup during a
+/// drag into software dimming disabled for the rest of the session.
+const fn retires_dimmer(error: &duja_core::dimmer::DimmerError) -> bool {
+    matches!(error, duja_core::dimmer::DimmerError::Unsupported)
+}
+
 #[cfg(test)]
 mod tests {
+    use duja_core::dimmer::DimmerError;
+
+    use super::retires_dimmer;
+
+    /// The X11 backend latches `Unsupported` when its compositing manager dies,
+    /// and nothing un-latches it. Asking again would warn once per slider sample
+    /// forever for a condition that cannot change.
+    #[test]
+    fn an_unsupported_backend_is_retired() {
+        assert!(retires_dimmer(&DimmerError::Unsupported));
+    }
+
+    /// The direction that matters more. A single failed X call or one missed
+    /// reply budget during a drag must not disable software dimming for the rest
+    /// of the session — which is exactly what retiring on these would do.
+    #[test]
+    fn a_transient_failure_keeps_the_backend() {
+        assert!(!retires_dimmer(&DimmerError::Os(
+            "one call failed".to_owned()
+        )));
+        assert!(!retires_dimmer(&DimmerError::Backend));
+    }
+
     /// The app-level apply rule for merged clone groups (#66): the exact
     /// composition `set_user_level` performs on a group — group continuum →
     /// `map_user_level` → `fan_out_hardware`. `AppState` cannot be built off a live

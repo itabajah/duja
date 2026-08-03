@@ -62,7 +62,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver as MpscReceiver, SyncSender, sync_channel};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use tracing::warn;
@@ -81,8 +81,8 @@ use duja_core::dimmer::{DimCommand, Dimmer, DimmerError};
 use duja_core::id::StableDisplayId;
 
 use crate::linux_overlay::{
-    ARGB_DEPTH, BYPASS_COMPOSITOR_NEVER, VisualCandidate, choose_argb_visual, premultiplied_black,
-    x11_rect,
+    ARGB_DEPTH, BYPASS_COMPOSITOR_NEVER, Recorded, VisualCandidate, XFIXES_INPUT_SHAPE_VERSION,
+    choose_argb_visual, plan_record, premultiplied_black, x11_rect,
 };
 use crate::plan::{OverlayEntry, OverlayOp, apply_ops, plan_transition};
 
@@ -92,6 +92,13 @@ use crate::plan::{OverlayEntry, OverlayOp, apply_ops, plan_transition};
 /// a worker wedged in an X round trip against an unresponsive server must not
 /// freeze it. A late reply lands on a dropped receiver and is discarded.
 const REPLY_BUDGET: Duration = Duration::from_secs(2);
+
+/// The shortest gap between two re-raises.
+///
+/// Long enough that a raise-war cannot spin a CPU, short enough that a user
+/// opening a window never sees the overlay lag behind it. The exact value is not
+/// load-bearing: anything in the tens of milliseconds does both jobs.
+const RAISE_DAMPING: Duration = Duration::from_millis(100);
 
 /// A command for the overlay worker.
 enum Command {
@@ -134,25 +141,38 @@ pub struct X11Dimmer {
     watcher: Option<JoinHandle<()>>,
 }
 
+/// The window and message type that mean "stop watching".
+///
+/// Copied into the watcher so it can tell Duja's own wake from any other client
+/// message that happens to reach this connection.
+#[derive(Clone, Copy)]
+struct Wake {
+    window: Window,
+    atom: xproto::Atom,
+}
+
 /// What it takes to wake a thread blocked in `wait_for_event`.
 ///
 /// X11 has no "interrupt this connection" call. The portable way is to make an
-/// event happen: send one to a window we own. The watcher recognises it and
-/// returns.
+/// event happen: send one to a window we own, of a type only we send.
 struct Waker {
     connection: Arc<RustConnection>,
-    window: Window,
+    wake: Wake,
 }
 
 impl Waker {
     /// Deliver the wake event. Best effort: a connection already broken is a
     /// watcher already returning.
     fn wake(&self) {
-        let event =
-            xproto::ClientMessageEvent::new(32, self.window, AtomEnum::NONE, [0_u32, 0, 0, 0, 0]);
-        let _ = self
-            .connection
-            .send_event(false, self.window, EventMask::STRUCTURE_NOTIFY, event);
+        let event = xproto::ClientMessageEvent::new(
+            32,
+            self.wake.window,
+            self.wake.atom,
+            [0_u32, 0, 0, 0, 0],
+        );
+        let _ =
+            self.connection
+                .send_event(false, self.wake.window, EventMask::STRUCTURE_NOTIFY, event);
         let _ = self.connection.flush();
     }
 }
@@ -236,6 +256,10 @@ impl X11Dimmer {
 
         let atoms = Atoms::intern(&connection)?;
         let waker_window = create_waker_window(&connection, root)?;
+        let wake = Wake {
+            window: waker_window,
+            atom: atoms.wake,
+        };
 
         // One colormap for every overlay: they all use the same visual on the same
         // root. A per-window one would have to be freed explicitly - a colormap
@@ -246,21 +270,28 @@ impl X11Dimmer {
 
         // Ask for owner changes on the compositor selection *before* the watcher
         // starts, so a manager that dies during startup is not missed.
-        connection
-            .xfixes_select_selection_input(
-                waker_window,
-                compositor_selection,
-                xfixes::SelectionEventMask::SET_SELECTION_OWNER
-                    | xfixes::SelectionEventMask::SELECTION_WINDOW_DESTROY
-                    | xfixes::SelectionEventMask::SELECTION_CLIENT_CLOSE,
-            )
-            .map_err(|e| DimmerError::Os(format!("cannot watch the compositor selection: {e}")))?;
+        // Checked, not merely queued. If this request fails the watcher receives
+        // no selection events ever, the compositor-loss guard is silently absent,
+        // and the failure mode is precisely the black screen it exists to
+        // prevent - which makes it more dangerous than window creation, which is
+        // also checked.
+        checked(connection.xfixes_select_selection_input(
+            waker_window,
+            compositor_selection,
+            xfixes::SelectionEventMask::SET_SELECTION_OWNER
+                | xfixes::SelectionEventMask::SELECTION_WINDOW_DESTROY
+                | xfixes::SelectionEventMask::SELECTION_CLIENT_CLOSE,
+        ))
+        .map_err(|e| DimmerError::Os(format!("cannot watch the compositor selection: {e}")))?;
         // And for anything being mapped or restacked on the root. X has no
         // always-on-top: `CreateWindow` puts a new window above its siblings, and
         // every top-level is a sibling of an override-redirect overlay. Without
         // this the desktop dims and the first window the user opens sits undimmed
         // on top of it.
-        request(connection.change_window_attributes(
+        // Checked for the same reason: without it no restack is ever reported and
+        // the overlay silently stops being on top - the desktop dims and the first
+        // window the user opens sits undimmed over it.
+        checked(connection.change_window_attributes(
             root,
             &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY),
         ))?;
@@ -282,6 +313,7 @@ impl X11Dimmer {
                     atoms,
                     windows: Vec::new(),
                     current: Vec::new(),
+                    last_raise: None,
                     lost: false,
                 };
                 state.run(&rx);
@@ -292,15 +324,14 @@ impl X11Dimmer {
         let watcher_tx = tx.clone();
         let watcher = std::thread::Builder::new()
             .name("duja-dimmer-x11-watch".to_owned())
-            .spawn(move || watch_compositor(&watcher_connection, &watcher_tx))
+            .spawn(move || {
+                watch_compositor(&watcher_connection, &watcher_tx, compositor_selection, wake);
+            })
             .map_err(|e| DimmerError::Os(format!("failed to spawn the watcher thread: {e}")))?;
 
         Ok(X11Dimmer {
             tx,
-            waker: Waker {
-                connection,
-                window: waker_window,
-            },
+            waker: Waker { connection, wake },
             worker: Some(worker),
             watcher: Some(watcher),
         })
@@ -376,6 +407,9 @@ struct Atoms {
     bypass_compositor: xproto::Atom,
     window_type: xproto::Atom,
     window_type_notification: xproto::Atom,
+    /// A private message type, so the watcher's shutdown wake cannot be confused
+    /// with a client message from anyone else.
+    wake: xproto::Atom,
 }
 
 impl Atoms {
@@ -387,6 +421,7 @@ impl Atoms {
             window_type: intern_always(connection, "_NET_WM_WINDOW_TYPE").ok_or_else(missing)?,
             window_type_notification: intern_always(connection, "_NET_WM_WINDOW_TYPE_NOTIFICATION")
                 .ok_or_else(missing)?,
+            wake: intern_always(connection, "_DUJA_OVERLAY_WAKE").ok_or_else(missing)?,
         })
     }
 }
@@ -410,6 +445,8 @@ struct Worker {
     atoms: Atoms,
     windows: Vec<Overlay>,
     current: Vec<OverlayEntry>,
+    /// When the overlays were last raised, for damping. See [`Worker::raise_above`].
+    last_raise: Option<Instant>,
     /// Latched once the compositing manager goes away.
     ///
     /// Tearing the overlays down is only half the answer: without this the very
@@ -444,7 +481,7 @@ impl Worker {
                     self.lost = true;
                     let _ = self.destroy_all();
                 }
-                Command::Restacked(window) => self.raise_above(window),
+                Command::Restacked(window) => self.raise_above(window, rx),
                 Command::Stop => {
                     let _ = self.destroy_all();
                     return;
@@ -474,68 +511,73 @@ impl Worker {
     /// Run the planner's ops, stopping at the first failure.
     ///
     /// Returns the ops that genuinely took effect, which is what the caller folds
-    /// into its record of the screen.
+    /// into its record of the screen. **What each op does, and what it records,
+    /// is decided by [`plan_record`]** — a pure rule tested on every lane, because
+    /// getting it wrong is how a display becomes permanently undimmable and no
+    /// test of the windowing itself can run.
     fn execute(&mut self, ops: &[OverlayOp]) -> (Vec<OverlayOp>, Result<(), DimmerError>) {
         let mut applied: Vec<OverlayOp> = Vec::new();
         for op in ops {
-            // `Ok(None)` means the op was skipped: nothing changed on screen, so
-            // nothing may be recorded either. Each arm says for itself what it
-            // did, because for one of them that is not the op it was given.
-            let outcome: Result<Option<OverlayOp>, DimmerError> = match op {
-                OverlayOp::Create { id, bounds, alpha } => match x11_rect(*bounds) {
-                    // A rectangle X11 cannot describe. Skipping is right — the
-                    // alternative is a wrapped window covering a display the user
-                    // did not dim (see `linux_overlay::x11_rect`) — and it must
-                    // NOT be recorded, or the planner never emits `Create` for
-                    // that display again and it stays undimmable for the session
-                    // even after it moves back into range.
-                    None => Ok(None),
-                    Some(rect) => self
-                        .create(id.clone(), rect, *alpha)
-                        .map(|()| Some(op.clone())),
-                },
-                OverlayOp::MoveResize { id, bounds } => match x11_rect(*bounds) {
-                    Some((x, y, width, height)) => match self.find(id) {
-                        // No window to move: the record and the screen have
-                        // already diverged. Recording nothing drops the entry, so
-                        // the next plan re-creates it.
-                        None => Ok(None),
-                        Some(overlay) => {
-                            let config = xproto::ConfigureWindowAux::new()
-                                .x(i32::from(x))
-                                .y(i32::from(y))
-                                .width(u32::from(width))
-                                .height(u32::from(height))
-                                .stack_mode(StackMode::ABOVE);
-                            // The input region is in window coordinates and stays
-                            // empty across a resize, so it needs no rebuilding.
-                            request(self.connection.configure_window(overlay.window, &config))
-                                .map(|_| Some(op.clone()))
-                        }
-                    },
-                    // Moved somewhere X11 cannot express. The window goes, and
-                    // what is recorded is the **destroy** rather than the move,
-                    // so the record says what the screen says.
-                    None => self
+            let id = op_id(op);
+            let outcome: Result<Option<OverlayOp>, DimmerError> =
+                match plan_record(op, self.find(id).is_some()) {
+                    Recorded::Nothing => Ok(None),
+                    // Either there is no window to act on, or the op would put one
+                    // where X11 cannot express it. Destroying is a no-op in the
+                    // first case; recording the destroy is what drops the stale
+                    // entry so the next plan emits a fresh `Create`.
+                    Recorded::DestroyInstead => self
                         .destroy(id)
                         .map(|()| Some(OverlayOp::Destroy { id: id.clone() })),
-                },
-                OverlayOp::SetAlpha { id, alpha } => match self.find(id) {
-                    None => Ok(None),
-                    Some(overlay) => {
-                        let window = overlay.window;
-                        self.repaint(window, *alpha).map(|()| Some(op.clone()))
-                    }
-                },
-                OverlayOp::Destroy { id } => self.destroy(id).map(|()| Some(op.clone())),
-            };
+                    Recorded::AsPlanned => self.perform(op).map(|()| Some(op.clone())),
+                };
             match outcome {
                 Ok(Some(done)) => applied.push(done),
                 Ok(None) => {}
-                Err(e) => return (applied, Err(e)),
+                Err(e) => return (applied, flush(&self.connection).and(Err(e))),
             }
         }
         (applied, flush(&self.connection))
+    }
+
+    /// Do exactly what an op says, having already been told it is doable.
+    ///
+    /// Every lookup here is infallible by construction: [`plan_record`] answered
+    /// `AsPlanned`, which for the two arms that need a window means there is one
+    /// and for the two that need a rectangle means it converts. A `None` would be
+    /// a bug in that rule rather than a state to handle, so it is treated as a
+    /// no-op rather than given a second, divergent policy.
+    fn perform(&mut self, op: &OverlayOp) -> Result<(), DimmerError> {
+        match op {
+            OverlayOp::Create { id, bounds, alpha } => match x11_rect(*bounds) {
+                Some(rect) => self.create(id.clone(), rect, *alpha),
+                None => Ok(()),
+            },
+            OverlayOp::MoveResize { id, bounds } => {
+                let (Some((x, y, width, height)), Some(overlay)) =
+                    (x11_rect(*bounds), self.find(id))
+                else {
+                    return Ok(());
+                };
+                let config = xproto::ConfigureWindowAux::new()
+                    .x(i32::from(x))
+                    .y(i32::from(y))
+                    .width(u32::from(width))
+                    .height(u32::from(height))
+                    .stack_mode(StackMode::ABOVE);
+                // The input region is in window coordinates and stays empty
+                // across a resize, so it needs no rebuilding.
+                request(self.connection.configure_window(overlay.window, &config)).map(|_| ())
+            }
+            OverlayOp::SetAlpha { id, alpha } => {
+                let Some(overlay) = self.find(id) else {
+                    return Ok(());
+                };
+                let window = overlay.window;
+                self.repaint(window, *alpha)
+            }
+            OverlayOp::Destroy { id } => self.destroy(id),
+        }
     }
 
     fn find(&self, id: &StableDisplayId) -> Option<&Overlay> {
@@ -550,13 +592,65 @@ impl Worker {
     /// user opens sits *undimmed* on top of it, which reads as the feature simply
     /// not working.
     ///
-    /// `window` is what moved. Ignoring our own windows is what keeps two Duja
-    /// overlays from restacking each other forever; a raise-war with another
-    /// always-on-top client is still possible and is a documented limit.
-    fn raise_above(&self, window: Window) {
-        if self.windows.iter().any(|o| o.window == window) {
+    /// Two things bound the work, and both matter because the trigger is an event
+    /// stream Duja does not control:
+    ///
+    /// - **Coalescing.** A window being dragged emits a `ConfigureNotify` per
+    ///   motion sample. Every pending restack is drained first, because only the
+    ///   last one has any effect and each costs one request per overlay plus a
+    ///   flush.
+    /// - **Damping.** Raising is itself a restack, so any other client that also
+    ///   re-raises on root restacks — a second OSD, an on-screen keyboard, a
+    ///   magnifier — would trade raises with Duja as fast as the server can
+    ///   deliver them: two pegged CPUs and a flickering screen. [`RAISE_DAMPING`]
+    ///   turns that unbounded loop into a bounded, visible flicker. It cannot
+    ///   *fix* a raise-war, which no X client can; it stops one from becoming a
+    ///   spin.
+    ///
+    /// Duja's own windows are skipped outright, so it never fights itself.
+    fn raise_above(&mut self, window: Window, rx: &Receiver<Command>) {
+        let mut latest = window;
+        // Drain the rest of the burst. Anything that is not a restack is put back
+        // by being handled here, which only `Stop` and `CompositorLost` could be
+        // — and both are better served immediately than after a raise.
+        while let Ok(pending) = rx.try_recv() {
+            match pending {
+                Command::Restacked(next) => latest = next,
+                Command::CompositorLost => {
+                    self.lost = true;
+                    let _ = self.destroy_all();
+                    return;
+                }
+                Command::Stop => {
+                    let _ = self.destroy_all();
+                    return;
+                }
+                // An `Apply`/`Clear` in the burst is a caller waiting on a reply.
+                // Serve it, and let the raise fall out: the apply restacks
+                // everything it touches anyway.
+                Command::Apply(commands, reply) => {
+                    let result = self.apply(&commands);
+                    let _ = reply.send(result);
+                    return;
+                }
+                Command::Clear(reply) => {
+                    let result = self.destroy_all();
+                    let _ = reply.send(result);
+                    return;
+                }
+            }
+        }
+        if self.windows.iter().any(|o| o.window == latest) {
             return;
         }
+        let now = Instant::now();
+        if self
+            .last_raise
+            .is_some_and(|last| now.duration_since(last) < RAISE_DAMPING)
+        {
+            return;
+        }
+        self.last_raise = Some(now);
         let above = xproto::ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
         for overlay in &self.windows {
             let _ = self.connection.configure_window(overlay.window, &above);
@@ -577,11 +671,10 @@ impl Worker {
     /// full-screen, override-redirect window that **swallows every click**, with
     /// the flyout you would use to turn it off underneath it.
     ///
-    /// So each step up to and including the input region is `check`ed, which
-    /// costs a round trip and runs once per display per dim session. The two
-    /// property writes and the map are not: a failed property is a hint the
-    /// compositor does not get, and a failed map is a window that is simply not
-    /// there, neither of which can trap the user.
+    /// So window creation, both input-region calls and the map are `check`ed —
+    /// four round trips, once per display per dim session. The two property
+    /// writes are not: a failed property is a hint the compositor does not get,
+    /// which costs a mitigation rather than the feature.
     fn create(
         &mut self,
         id: StableDisplayId,
@@ -623,21 +716,34 @@ impl Worker {
         // ADR-0003's security invariant: an empty input region means the server
         // routes every pointer and key event to whatever is underneath.
         let region = request(self.connection.generate_id())?;
-        if let Err(e) = checked(self.connection.xfixes_create_region(region, &[])).and_then(|()| {
+        if let Err(e) = checked(self.connection.xfixes_create_region(region, &[])) {
+            // The region was never created, so destroying it would be a second,
+            // misleading error for one real failure. The window exists and is
+            // still unmapped; the colormap is shared and outlives every window,
+            // so it is not freed here.
+            let _ = self.connection.destroy_window(window);
+            let _ = self.connection.flush();
+            return Err(e);
+        }
+        if let Err(e) =
             checked(
                 self.connection
                     .xfixes_set_window_shape_region(window, SK::INPUT, 0, 0, region),
             )
-        }) {
-            // The window exists and is still unmapped. Destroy it rather than
-            // leave an input-stealing rectangle one `map_window` away. The
-            // colormap is shared and outlives every window, so it is not freed
-            // here.
+        {
+            // Destroy it rather than leave an input-stealing rectangle one
+            // `map_window` away.
             let _ = self.connection.xfixes_destroy_region(region);
             let _ = self.connection.destroy_window(window);
             let _ = self.connection.flush();
             return Err(e);
         }
+
+        // Registered here, before anything that could fail again: from this point
+        // the window is click-through and safe, and `destroy`/`destroy_all` own
+        // its cleanup. Pushing it at the end instead would leak the window and the
+        // region on any later failure, since neither list would know about them.
+        self.windows.push(Overlay { id, window, region });
 
         // Ask no compositing manager to unredirect this window. See
         // `linux_overlay::BYPASS_COMPOSITOR_NEVER` for what that does and does
@@ -660,13 +766,17 @@ impl Worker {
             &[self.atoms.window_type_notification],
         ))?;
 
-        request(self.connection.map_window(window))?;
+        // Checked too, and for a reason the first draft got wrong: a failed map is
+        // not merely "a window that is not there". `create` returning `Ok` records
+        // a `Create`, so the record would claim an overlay that is unmapped and
+        // invisible - and the planner never emits `Create` for a display it thinks
+        // is already covered, leaving it undimmable for the session.
+        checked(self.connection.map_window(window))?;
         request(self.connection.configure_window(
             window,
             &xproto::ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
         ))?;
-
-        self.windows.push(Overlay { id, window, region });
+        self.last_raise = Some(Instant::now());
         Ok(())
     }
 
@@ -723,20 +833,34 @@ impl Worker {
 /// this connection's worker has latched, so recovering means a fresh backend —
 /// and nothing re-runs `spawn` today, because the app starts its dimmer once.
 /// `docs/debt.md` carries that.
-fn watch_compositor(connection: &RustConnection, tx: &Sender<Command>) {
+fn watch_compositor(
+    connection: &RustConnection,
+    tx: &Sender<Command>,
+    selection: xproto::Atom,
+    wake: Wake,
+) {
     loop {
         let Ok(event) = connection.wait_for_event() else {
             return;
         };
         let outcome = match event {
-            Event::XfixesSelectionNotify(notify) => {
-                // Owner `NONE` is the manager going away. An owner *change* to a
-                // live window is a restart that already has a new manager, and
-                // the overlays are fine.
-                if notify.owner == x11rb::NONE {
-                    tx.send(Command::CompositorLost)
-                } else {
+            Event::XfixesSelectionNotify(_) => {
+                // **Do not read `notify.owner`.** It is only meaningful for the
+                // orderly-disown subtype: when a compositing manager *crashes* the
+                // server reports `SelectionWindowDestroy` / `SelectionClientClose`
+                // and fills `owner` with the id of the window that just died,
+                // because the callback runs before the selection record is
+                // cleared. Treating a non-zero owner as "a restart that already
+                // has a new manager" would miss exactly the case this watcher
+                // exists for - a crashed compositor, overlays left up and
+                // unredirected, every dimmed monitor solid black.
+                //
+                // So re-ask the server. One round trip on a rare event, and it
+                // cannot be wrong under either reading of who fills that field.
+                if owned(connection, selection) {
                     Ok(())
+                } else {
+                    tx.send(Command::CompositorLost)
                 }
             }
             // Something appeared or moved in the stacking order. The worker
@@ -751,8 +875,16 @@ fn watch_compositor(connection: &RustConnection, tx: &Sender<Command>) {
                 warn!(?error, "the X server refused an overlay request");
                 Ok(())
             }
-            // The shutdown wake.
-            Event::ClientMessage(_) => return,
+            // The shutdown wake, and only that. Returning on *any* client
+            // message would let a stray one from another client silently kill
+            // this thread, taking the compositor guard and the re-raising with
+            // it and leaving `shutdown` none the wiser.
+            Event::ClientMessage(notify) => {
+                if notify.window == wake.window && notify.type_ == wake.atom {
+                    return;
+                }
+                Ok(())
+            }
             _ => Ok(()),
         };
         // The worker is gone, so there is nobody left to tell.
@@ -837,9 +969,15 @@ fn owned(connection: &RustConnection, selection: xproto::Atom) -> bool {
         .is_some_and(|reply| reply.owner != x11rb::NONE)
 }
 
-/// The `XFixes` major version that introduced `SetWindowShapeRegion`, which is the
-/// whole click-through mechanism.
-const XFIXES_INPUT_SHAPE_VERSION: u32 = 2;
+/// Which display an op targets. Every variant carries one.
+fn op_id(op: &OverlayOp) -> &StableDisplayId {
+    match op {
+        OverlayOp::Create { id, .. }
+        | OverlayOp::MoveResize { id, .. }
+        | OverlayOp::SetAlpha { id, .. }
+        | OverlayOp::Destroy { id } => id,
+    }
+}
 
 /// Turn an x11rb request result into a [`DimmerError`].
 ///
