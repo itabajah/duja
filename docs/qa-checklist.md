@@ -92,22 +92,35 @@ with the phases; keep entries as observable behaviors, not implementation.
       every root restack, and two clients doing that can fight.
 - [ ] **`duja --restore` on X11 clears a ramp Duja did not set.** Run `xgamma -gamma .5`
       (or leave `redshift`/`gammastep` running), then `duja --restore`: the screen must
-      return to normal and the report must name each CRTC by its connector (`DP-1
-      (CRTC 63)`), one line per CRTC that is driving something. This is the whole of
-      Linux's gamma crash recovery today — there is no marker and no automatic
-      recovery until the tray lands, so if this does not work a user who ever hits a
-      stuck ramp has nothing.
+      return to normal and the command must report `restored identity gamma on N
+      CRTC(s)` and exit 0. **N counts CRTCs, not monitors**, and on a multi-head GPU it
+      is legitimately larger than the number of screens: the walk deliberately includes
+      CRTCs driving nothing, because a gamma table survives its CRTC being disabled.
+      Individual CRTCs are named (`DP-1 (CRTC 63)`, or `CRTC-3` for an idle one) only
+      on the failure lines. This is the whole of Linux's gamma crash recovery today —
+      there is no marker and no automatic recovery until the tray lands — so if this
+      does not work, a user who ever hits a stuck ramp has nothing.
+- [ ] **`sudo duja --restore` does not lie.** sudo drops `XAUTHORITY`, so the X
+      connection fails. The command must print the reason on a `failed:` line and exit
+      **non-zero**, never "nothing to restore" with exit 0. Same check for `DISPLAY`
+      pointed at a server that is not running. This is the one failure mode a user with
+      a dark screen will actually hit, because sudo is what people try first.
 - [ ] **`duja --restore` on a Wayland session refuses rather than lying.** It must
-      print "nothing to restore", **not** a count of displays. `DISPLAY` is set to
-      Xwayland on almost every Wayland session, and every XRandR gamma request there
-      succeeds against virtual CRTCs that are not on the path to any monitor — so a
-      report claiming it reset two displays would be describing a write that changed
-      nothing on screen.
+      print "nothing to restore" and exit 0, **not** a count. `DISPLAY` is set to
+      Xwayland on almost every Wayland session, and Duja must refuse on two independent
+      grounds: the environment (`WAYLAND_DISPLAY` is set) and the server itself (the
+      `XWAYLAND` extension is present). Check the second in isolation by clearing
+      `WAYLAND_DISPLAY` from the environment and leaving `DISPLAY` set — a `systemd
+      --user` unit or an `ssh` login is the real-world shape — and confirm it still
+      refuses. If it reports restoring CRTCs there, the protocol check is not working
+      and every gamma write in the session is going somewhere the user cannot see.
 - [ ] **`--restore` flattens a running colour-temperature tool's tint**, and that is
       the documented behaviour rather than a bug: one LUT per CRTC, last writer wins,
-      and Duja keeps no baseline yet (`docs/debt.md`). Check that the tool recovers on
-      its next update rather than staying flat, and that Duja did not leave the screen
-      darker than it found it.
+      and Duja keeps no baseline yet (`docs/debt.md`). Check that Duja did not leave the
+      screen darker than it found it. `redshift`/`gammastep`/Night Light rewrite on a
+      timer and recover on their own; a **calibration** curve (`colord`, `xcalib`,
+      `dispwin`) is loaded once at login and does **not** come back until the next
+      login, so verify the tint loss and re-run the loader rather than waiting.
 - [ ] Wayland session that **advertises** `zwlr_layer_shell_v1`: the overlay appears and dims.
 - [ ] Wayland session that advertises **neither** wlr protocol: software dimming reports itself
       unavailable *with the reason*, and hardware paths still work.

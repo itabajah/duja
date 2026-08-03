@@ -1590,6 +1590,19 @@ build, so `LinuxDimmer` picks when it starts. A Wayland session reports
 `#122` mirror-pin consequence still bites; `debt.md` carries it, now narrowed
 from Linux to Wayland.
 
+**A Wayland session is refused twice, and the second gate is the one that
+counts.** The environment check (`WAYLAND_DISPLAY` is set ⇒ not X11) is cheap and
+skips the connect, but this crate had already written down that it misfires:
+`Transport::X11`'s own docs name "a systemd user unit, a sanitised environment",
+and `sudo`, `ssh -X` and a `tmux` server older than the session are the same
+shape. A misfire is not a visible error — it is a ramp written to an Xwayland
+CRTC, an `Ok(())`, and a screen that never changed. So the server is asked too,
+with the `XWAYLAND` extension query X.Org added for exactly this: *"Only Xwayland
+initializes this extension. Thus, if the extension is present, the X server is
+Xwayland."* One round trip on connect, and it does not depend on the one thing
+this project cannot check without a Wayland session — whether Xwayland accepts a
+gamma write or refuses it.
+
 **The sub-floor gamma channel is `RandR`'s per-CRTC table**, and the CRTC is also
 the surface token wave 4 already stamps on every placed display, so the app's
 gamma sink can address a ramp without a second enumeration. Two outputs on one

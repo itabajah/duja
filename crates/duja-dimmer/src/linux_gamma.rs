@@ -74,30 +74,39 @@ const RAMP_MAX: f64 = 65_535.0;
 
 /// Why this session has no `XRandR` gamma channel, or `None` when it has one.
 ///
-/// # The Wayland arm is the whole point of this function
+/// # This is the cheap half of the Xwayland gate, and it is not the reliable one
 ///
 /// "No display server" is the boring answer. The answer that matters is
 /// **Wayland**, because on a Wayland session `DISPLAY` is almost always set — to
-/// Xwayland — and the gamma path below then runs against the wrong server. What
-/// is certain is the half that makes it dangerous: `x11rb::connect` connects,
+/// Xwayland — and the gamma path then runs against the wrong server. What is
+/// certain is the half that makes it dangerous: `x11rb::connect` connects,
 /// `RandR` is present, and Xwayland does not own the outputs. It renders into a
 /// `wl_surface`, so whatever it does with a CRTC gamma table, that table is not
 /// on the path to any monitor.
 ///
-/// What this project has **not** verified is whether Xwayland accepts the write
-/// or refuses it — that turns on the gamma size it reports for its virtual CRTCs,
-/// which needs a Wayland session to read and Duja has none. Both branches are
-/// possible and only one of them is quiet: a refusal surfaces as an error the
-/// caller can act on, while an acceptance is an `Ok(())` behind a screen that
-/// never changed, and Duja would then record a ramp as live and later "restore"
-/// it. Gating on the transport costs nothing and does not depend on which branch
-/// is real; gating on "can I reach an X server" would be correct only in the
-/// branch nobody has checked.
+/// This function decides that from the **environment**, and the environment is a
+/// heuristic this crate has already written down as fallible:
+/// [`Transport::X11`]'s own documentation names the misfire — "a systemd user
+/// unit, a sanitised environment" — a Wayland session that reaches the X11 arm
+/// because `WAYLAND_DISPLAY` never made it into the process. `ssh` with
+/// `DISPLAY` exported, `sudo`, and a `tmux` server older than the session are the
+/// same shape. So this must not be the only gate, and it is not: `linux::gamma`
+/// asks the server itself, with the `XWAYLAND` extension query X.Org added for
+/// exactly this purpose (*"Only Xwayland initializes this extension. Thus, if the
+/// extension is present, the X server is Xwayland"*). That check is authoritative
+/// and costs one round trip on connect; this one costs two `getenv`s and skips
+/// the connect entirely, which is why both exist.
 ///
-/// So the refusal is by **transport**, decided by [`crate::linux_caps::transport`]
-/// from the environment, and not by whether an X connection can be opened. A
-/// Wayland session's gamma channel is `wlr-gamma-control` (or the compositor's own
-/// night-light), which is a different backend and a later wave.
+/// What neither of them depends on is the thing this project cannot verify:
+/// whether Xwayland *accepts* a gamma write or refuses it, which turns on the
+/// gamma size it reports for its virtual CRTCs and needs a Wayland session to
+/// read. Both branches are possible and only one is quiet — a refusal surfaces as
+/// an error the caller can act on, while an acceptance is an `Ok(())` behind a
+/// screen that never changed, and Duja would then record a ramp as live and later
+/// "restore" it. Refusing before the write is correct under either branch.
+///
+/// A Wayland session's gamma channel is `wlr-gamma-control` (or the compositor's
+/// own night-light), which is a different backend and a later wave.
 #[must_use]
 pub const fn xrandr_refusal(transport: Transport) -> Option<&'static str> {
     match transport {
@@ -139,11 +148,10 @@ pub const fn xrandr_refusal(transport: Transport) -> Option<&'static str> {
 ///
 /// Nothing calls this yet, and that is stated rather than left to be discovered.
 /// It is here, beside the backend, because this crate is also what *stamps* the
-/// token (`linux::outputs`), so the two halves of that contract are one file
-/// apart and one test away — rather than the parse being written from scratch in
-/// another crate, months later, with nothing pinning it. Its shape is the macOS
-/// sink's `display_id_from_token`, which is the fourth bullet above: the two
-/// tokens are both decimal integers, so only the platform gate keeps them apart.
+/// token — and the two halves are now the same pair of functions rather than two
+/// prose descriptions of one format. Its shape is the macOS sink's
+/// `display_id_from_token`, which is the fourth bullet above: the two tokens are
+/// both decimal integers, so only the platform gate keeps them apart.
 #[must_use]
 pub fn crtc_from_token(token: &str) -> Option<u32> {
     match token.parse::<u32>() {
@@ -151,6 +159,26 @@ pub fn crtc_from_token(token: &str) -> Option<u32> {
         Ok(0) | Err(_) => None,
         Ok(crtc) => Some(crtc),
     }
+}
+
+/// Stamp an `XRandR` CRTC id as a display-surface token.
+///
+/// The inverse of [`crtc_from_token`], and it exists as a function rather than an
+/// inlined `to_string` because the review of this module found how quietly the
+/// pair can drift apart. `linux::outputs` is what stamps the real token; **every
+/// fixture in this crate and in `duja-app` writes it as `"crtc-63"`**, a shape
+/// [`crtc_from_token`] rejects outright. A perfectly reasonable tidy-up making
+/// the production stamp match what every test says a token looks like would have
+/// made the gamma channel refuse *every* display, silently, with a fully green
+/// suite — because nothing joined the two ends.
+///
+/// Now something does: one function each way, and `crtc_token_round_trips`
+/// between them. The fixtures stay as they are, deliberately — they exercise the
+/// join, which treats the token as opaque, and their being a *different* shape is
+/// what makes the round-trip test the only thing holding the format.
+#[must_use]
+pub fn crtc_token(crtc: u32) -> String {
+    crtc.to_string()
 }
 
 /// Build the gamma table that scales output brightness by `factor`, for a CRTC
@@ -284,9 +312,26 @@ mod tests {
     }
 
     #[test]
-    fn a_crtc_token_round_trips() {
+    fn a_crtc_token_parses() {
         assert_eq!(crtc_from_token("63"), Some(63));
         assert_eq!(crtc_from_token("1"), Some(1));
+    }
+
+    /// The only thing holding the token format across the two crates that use it.
+    ///
+    /// Reds the tidy-up the review of this module identified as reachable and
+    /// silent: making the stamp `format!("crtc-{crtc}")`, to match what every
+    /// fixture in `linux_outputs` and `backend` writes, would leave the whole
+    /// suite green while the gamma channel refused every display on Linux.
+    #[test]
+    fn crtc_token_round_trips() {
+        for crtc in [1u32, 63, 4096, u32::MAX] {
+            assert_eq!(
+                crtc_from_token(&crtc_token(crtc)),
+                Some(crtc),
+                "CRTC {crtc} does not survive its own token"
+            );
+        }
     }
 
     /// Every token shape that must fail closed rather than address a CRTC.
@@ -312,8 +357,14 @@ mod tests {
     }
 
     /// A 256-entry identity table must be exactly the Windows one: entry `i` is
-    /// `i * 257`, because `65535 / 255` is 257 with no remainder. Pins the two
-    /// platforms' ramp arithmetic against each other rather than against itself.
+    /// `i * 257`, because `65535 / 255` is 257 with no remainder.
+    ///
+    /// The literal is deliberate and so is its limit. It pins this ramp against
+    /// the constant the Windows ramp is *documented* to produce, which is the
+    /// figure `MIN_ACCEPTED_GAMMA`'s whole derivation rests on — not against
+    /// `win::gamma::gamma_ramp` itself, which does not compile on the lanes this
+    /// test runs on. So a change to the Windows ramp would not red this; a change
+    /// to *this* ramp that broke the correspondence would.
     #[test]
     fn a_256_entry_identity_matches_the_windows_ramp() {
         let table = identity_ramp(256).expect("256 is a legal size");

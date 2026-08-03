@@ -11,8 +11,13 @@
 //!
 //! So the verdict lives here, unconditionally, and is tested on all three CI
 //! lanes; the probes stay in `win::hdr`, `mac::edr` and `linux::gamma`, each of
-//! which re-exports these two names so its own module surface is unchanged. This
-//! was two byte-identical copies before Linux would have made it three.
+//! which imports what it needs. This was two byte-identical copies before Linux
+//! would have made it three.
+//!
+//! The **crate**'s surface is unchanged — the root exports these names for every
+//! target instead of once per backend — but the per-platform modules' is not:
+//! `win::hdr::GammaSupport` and its macOS twin are gone, and the two `mod.rs`
+//! re-export lists shrank to match. Nothing outside this crate could name them.
 
 /// Whether a display can safely use the gamma dimming path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

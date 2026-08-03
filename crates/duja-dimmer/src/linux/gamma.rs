@@ -49,7 +49,7 @@
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use tracing::debug;
-use x11rb::connection::Connection as _;
+use x11rb::connection::{Connection as _, RequestConnection as _};
 use x11rb::errors::{ConnectionError, ReplyError};
 use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::Window;
@@ -118,6 +118,16 @@ impl GammaDisplay {
 /// [`xrandr_refusal`]), if the connection failed, if the CRTC reports a table
 /// length nothing can be built for, or if the server rejected the write. The
 /// caller falls back to overlay dimming.
+///
+/// **`Err` does not prove the ramp is not live.** The write is confirmed with a
+/// round trip, so a connection that dies between the server applying the table
+/// and the confirmation arriving reports a failure for a table that **is** on the
+/// screen — and an X11 ramp is server state, so it stays there after this client
+/// is gone. Narrow (`XKillClient`, a client resource limit, an `ssh -X` tunnel
+/// dropping) and deliberately in this direction: the coordinator above does not
+/// record a refused engage, so it retries, which recovers a ramp that never
+/// landed and rewrites one that did. The residue is a ramp nothing restores if the
+/// process then exits, which is the same gap the missing crash guard leaves.
 pub fn set_gamma(display: &GammaDisplay, factor: f32) -> Result<(), DimmerError> {
     write_table(display, |size| ramp(factor, size))
 }
@@ -147,7 +157,8 @@ fn write_table(
     display: &GammaDisplay,
     build: impl FnOnce(u16) -> Option<Vec<u16>>,
 ) -> Result<(), DimmerError> {
-    with_session(|connection, _root| {
+    with_session(|session| {
+        let connection = &session.connection;
         let size = connection
             .randr_get_crtc_gamma_size(display.crtc)
             .map_err(|e| Fault::connection("RandR GetCrtcGammaSize", &e))?
@@ -181,52 +192,89 @@ fn write_table(
     })
 }
 
-/// Enumerate the CRTCs currently driving something, each labelled by the
+/// Enumerate the CRTCs currently **driving** something, each labelled by the
 /// connectors on it.
 ///
-/// Returns an empty vector (never an error) when this session has no `XRandR` gamma
-/// channel or the connection failed — the graceful-degradation contract the other
-/// two platforms' enumerations keep.
+/// This is the *addressing* surface: what Duja could dim, and what a caller may
+/// map a display onto. A CRTC driving no output is skipped, because it shows
+/// nothing. [`restore_all`] deliberately uses a different, wider walk — see
+/// `restorable_crtcs` (private; a rescue must reach a CRTC that is currently
+/// showing nothing, because its table survives being disabled).
 ///
-/// A CRTC driving **no** output is skipped. That is the disabled CRTC every
-/// multi-head GPU has spare: it shows nothing, so there is nothing on it to dim
-/// and nothing to restore, and including it would inflate `duja --restore`'s
-/// count past the number of monitors the user can see.
-///
-/// # Where that skip has a boundary
-///
-/// A CRTC keeps its table while it is disabled, so a ramp Duja engaged on a
-/// monitor that was then **unplugged** is skipped by a restore run while it is
-/// away, and comes back with the monitor. The window is narrow — it needs the
-/// unplug to happen between the engage and the restore, and the next restore
-/// after the replug catches it — but it is a window, and the alternative trades
-/// it for a report that names CRTCs the user has no monitor for. Named here
-/// rather than fixed, because the fix that closes it properly is the per-CRTC
-/// baseline the module docs describe, which knows what Duja actually touched
-/// instead of sweeping everything.
+/// Returns an empty vector (never an error) when this session has no `XRandR`
+/// gamma channel or the connection failed — the graceful-degradation contract the
+/// other two platforms' enumerations keep. A caller that needs to tell those two
+/// apart (`--restore` does, since one is "nothing to do" and the other is "the
+/// rescue could not run") must go through [`restore_all`], which reports the
+/// failure instead of swallowing it.
 #[must_use]
 pub fn enumerate_gamma_displays() -> Vec<GammaDisplay> {
-    match with_session(collect_crtcs) {
+    match with_session(|session| collect_crtcs(session, Walk::Driving)) {
         Ok(displays) => displays,
         Err(e) => {
-            debug!(error = %e, "no `XRandR` gamma displays");
+            debug!(error = %e, "no XRandR gamma displays");
             Vec::new()
         }
     }
 }
 
-/// The body of [`enumerate_gamma_displays`], inside a session.
+/// Which CRTCs a walk should return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Walk {
+    /// Only CRTCs with at least one output attached: what can be dimmed.
+    Driving,
+    /// Every CRTC with a writable gamma table, attached or not: what can hold a
+    /// stale ramp. See [`restorable_crtcs`].
+    Restorable,
+}
+
+/// Every CRTC with a writable gamma table, whether or not it is driving an
+/// output — the walk a **rescue** needs.
 ///
-/// Only the first request can report a [`Fault`]: a failure there is how a dead
-/// cached connection is detected, and returning it is what drops the connection
-/// so the next call reconnects. Per-CRTC failures `continue` instead — one CRTC
-/// the server will not describe must not cost the others their restore.
-fn collect_crtcs(connection: &RustConnection, root: Window) -> Result<Vec<GammaDisplay>, Fault> {
+/// The wider walk is not tidiness, it is the module's headline property applied
+/// consistently: an X11 gamma table is server state that survives its CRTC being
+/// disabled, and the driver reloads it on the next modeset. So a CRTC with no
+/// outputs is not "nothing to restore", it is "a ramp nobody can currently see".
+///
+/// The first draft of this module used the driving-only walk for both jobs, and
+/// its review found the case that breaks: Duja dims an external monitor and
+/// crashes, the user unplugs it (or closes the lid), and `duja --restore` then
+/// reports a clean rescue while silently skipping the CRTC that still holds the
+/// dark ramp — which comes back with the monitor, after the user has been told
+/// the rescue worked. Telling someone their screen is fixed when it is not is
+/// worse than a count that includes idle hardware, and the count is honest about
+/// that: a restore report on Linux is measured in CRTCs, not displays, and an
+/// idle one is named `CRTC-3` because it has no connector to name it by.
+fn restorable_crtcs() -> Result<Vec<GammaDisplay>, DimmerError> {
+    with_session(|session| collect_crtcs(session, Walk::Restorable))
+}
+
+/// The body of both walks, inside a session.
+///
+/// A failure of the **screen-resources** request is returned as a [`Fault`]: that
+/// is how a dead cached connection is detected, and returning it is what drops
+/// the connection so the next call reconnects.
+///
+/// Per-CRTC failures are treated by kind rather than uniformly swallowed. A
+/// protocol error (a CRTC that has gone away mid-walk) skips that CRTC, because
+/// one CRTC the server will not describe must not cost the others their restore.
+/// A **connection** error is returned, because after the socket dies every
+/// remaining CRTC would fail the same way and the walk would otherwise finish
+/// `Ok` with a short list and put the dead connection back — deferring the
+/// reconnect by a call and reporting a rescue that did nothing.
+fn collect_crtcs(session: &Session, walk: Walk) -> Result<Vec<GammaDisplay>, Fault> {
+    let connection = &session.connection;
+    if !session.screen_resources_current {
+        return Err(Fault::refused(format!(
+            "this X server's RandR is older than {}.{}, so its CRTCs cannot be listed              (writing a ramp to a known CRTC still works: those requests are RandR 1.2)",
+            RANDR_SCREEN_RESOURCES_CURRENT.0, RANDR_SCREEN_RESOURCES_CURRENT.1
+        )));
+    }
     // `GetScreenResourcesCurrent` reads the server's cached view; the plain
     // `GetScreenResources` re-probes every output over DDC, which costs on the
     // order of a second per connector on some drivers.
     let resources = connection
-        .randr_get_screen_resources_current(root)
+        .randr_get_screen_resources_current(session.root)
         .map_err(|e| Fault::connection("RandR GetScreenResourcesCurrent", &e))?
         .reply()
         .map_err(|e| Fault::reply("RandR GetScreenResourcesCurrent", &e))?;
@@ -234,33 +282,38 @@ fn collect_crtcs(connection: &RustConnection, root: Window) -> Result<Vec<GammaD
     let timestamp = resources.config_timestamp;
     let mut displays = Vec::new();
     for crtc in resources.crtcs {
-        let Some(size) = connection
+        let size = match connection
             .randr_get_crtc_gamma_size(crtc)
-            .ok()
-            .and_then(|cookie| cookie.reply().ok())
-            .map(|reply| reply.size)
-        else {
-            continue;
+            .map_err(|e| Fault::connection("RandR GetCrtcGammaSize", &e))?
+            .reply()
+        {
+            Ok(reply) => reply.size,
+            Err(e) => {
+                let fault = Fault::reply("RandR GetCrtcGammaSize", &e);
+                if fault.connection_lost {
+                    return Err(fault);
+                }
+                continue;
+            }
         };
         if !(MIN_RAMP_SIZE..=MAX_RAMP_SIZE).contains(&size) {
             continue;
         }
-        let Some(info) = connection
+        // A non-`Success` status leaves every other field of the reply undefined
+        // per the protocol — `InvalidConfigTime` is what a hot-plug racing this
+        // walk looks like — so `outputs` must not be read from it. An info the
+        // server will not give up costs the CRTC its label, and on the restorable
+        // walk that is all it costs: the ramp is still written.
+        let info = connection
             .randr_get_crtc_info(crtc, timestamp)
             .ok()
             .and_then(|cookie| cookie.reply().ok())
-            // A non-`Success` status leaves every other field of the reply
-            // undefined per the protocol — `InvalidConfigTime` is what a hot-plug
-            // racing this walk looks like — so `outputs` must not be read from it.
-            .filter(|info| info.status == randr::SetConfig::SUCCESS)
-        else {
-            continue;
-        };
-        if info.outputs.is_empty() {
+            .filter(|info| info.status == randr::SetConfig::SUCCESS);
+        let outputs = info.map(|info| info.outputs).unwrap_or_default();
+        if walk == Walk::Driving && outputs.is_empty() {
             continue;
         }
-        let names = info
-            .outputs
+        let names = outputs
             .iter()
             .filter_map(|output| output_name(connection, *output, timestamp))
             .collect::<Vec<_>>();
@@ -290,20 +343,55 @@ fn output_name(
     Some(String::from_utf8_lossy(&info.name).into_owned())
 }
 
-/// Best-effort restore of identity gamma on every CRTC that is driving something.
+/// The `failed` row name used when the rescue could not run at all, as opposed to
+/// a named CRTC that would not take a ramp.
+const CHANNEL_ROW: &str = "XRandR gamma channel";
+
+/// Best-effort restore of identity gamma on every CRTC with a writable table.
 ///
 /// Drives both `duja --restore` and, once the tray exists on Linux, recovery from
-/// a dirty exit. Never fails as a whole: it reports which displays it reset and
-/// which it could not.
+/// a dirty exit. Never fails as a whole: it reports which CRTCs it reset and which
+/// it could not.
 ///
 /// Its blast radius is every CRTC in the session, not only the ones Duja engaged —
 /// the same width as the macOS restore and wider than the Windows one. That is
 /// what makes it a rescue for a ramp any process left behind, and also what makes
 /// it flatten a running `gammastep`'s tint (module docs).
+///
+/// # An empty clean report means "nothing to restore", and only that
+///
+/// This is the distinction the review of this module found missing, and it
+/// matters because this is the **only** rescue Linux has. A caller reads an empty
+/// clean report as "there was nothing here", so it must never also mean "the
+/// rescue could not run":
+///
+/// - A session with no `XRandR` gamma channel — Wayland, or no display server —
+///   returns an empty **clean** report. There is genuinely nothing to reset.
+/// - Anything else that stops the walk — no `XAUTHORITY` (which is what `sudo
+///   duja --restore` looks like, and it is the first thing a user with a dark
+///   screen will try), a dead server, `RandR` missing or older than the
+///   enumeration needs — is reported as a **failure**, with the reason, so the
+///   command says so and exits non-zero.
+///
+/// Before this, every one of those collapsed into `Vec::new()` behind a `debug!`
+/// that is off by default, and `duja --restore` told a user staring at a dark
+/// screen that there was nothing to restore, then exited 0.
 #[must_use]
 pub fn restore_all() -> RestoreReport {
     let mut report = RestoreReport::default();
-    for display in enumerate_gamma_displays() {
+    // A transport refusal is not a failure: there is no channel here to rescue,
+    // which is exactly what an empty clean report says.
+    if xrandr_refusal(session_transport()).is_some() {
+        return report;
+    }
+    let crtcs = match restorable_crtcs() {
+        Ok(crtcs) => crtcs,
+        Err(e) => {
+            report.failed.push((CHANNEL_ROW.to_owned(), e.to_string()));
+            return report;
+        }
+    };
+    for display in crtcs {
         match restore_identity(&display) {
             Ok(()) => report.restored.push(display.name().to_owned()),
             Err(e) => report
@@ -361,11 +449,19 @@ struct Fault {
 }
 
 impl Fault {
-    /// A failure to even queue the request: the connection is gone.
+    /// A failure to even queue the request.
+    ///
+    /// Only an `IoError` means the socket is gone. The other `ConnectionError`
+    /// variants — an extension this build asked for and the server does not have,
+    /// a request too large to encode, a reply this client could not parse, an
+    /// allocation failure — all describe *this request* over a connection that is
+    /// still perfectly usable, and throwing it away for one of them buys a
+    /// needless connect, `.Xauthority` read and setup handshake on the next call,
+    /// on the UI thread mid-drag.
     fn connection(context: &str, error: &ConnectionError) -> Self {
         Fault {
             message: format!("{context} failed: {error}"),
-            connection_lost: true,
+            connection_lost: matches!(error, ConnectionError::IoError(_)),
         }
     }
 
@@ -388,11 +484,16 @@ impl Fault {
     }
 }
 
-/// The X connection every gamma call shares, and the root its `RandR` requests
-/// are addressed to.
+/// The X connection every gamma call shares, the root its `RandR` requests are
+/// addressed to, and what the server said it can do.
 struct Session {
     connection: RustConnection,
     root: Window,
+    /// Whether the negotiated `RandR` is at least 1.3, which is what
+    /// `GetScreenResourcesCurrent` needs. The gamma requests themselves are 1.2,
+    /// so a 1.2 server can still be **written** to; only the walk is unavailable,
+    /// and it says so rather than answering an empty list forever.
+    screen_resources_current: bool,
 }
 
 /// The process-wide gamma connection, opened on first use.
@@ -404,8 +505,16 @@ struct Session {
 /// *not* reused — it lives on its own worker thread and is not reachable from
 /// here — and a second client connection costs one file descriptor.
 ///
-/// Nothing selects for events on it, so its event queue stays empty and cannot
-/// grow behind an owner that never polls it.
+/// # It is drained, because "nothing selects events on it" is not enough
+///
+/// The first draft of this comment claimed the event queue stays empty because
+/// this connection selects no events. That is false, and its review named the
+/// counter-example: X11 `MappingNotify` is sent to **every** client and there is
+/// no event mask that expresses disinterest in it, so every keyboard remap,
+/// `setxkbmap`, or USB-keyboard hotplug pushes an entry into x11rb's `pending_events`,
+/// which is an unbounded `VecDeque` drained only by a caller that polls. Tens of
+/// bytes a time and this process may run for weeks, so [`with_session`] polls the
+/// queue dry after every call rather than asserting an impossibility.
 static SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
 
 /// Run `f` against the shared connection, opening it if needed.
@@ -415,9 +524,7 @@ static SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
 /// call reconnects. That is what lets the gamma channel survive an X server
 /// restart, a session switch, or a `SIGHUP`ed display manager instead of failing
 /// identically forever.
-fn with_session<T>(
-    f: impl FnOnce(&RustConnection, Window) -> Result<T, Fault>,
-) -> Result<T, DimmerError> {
+fn with_session<T>(f: impl FnOnce(&Session) -> Result<T, Fault>) -> Result<T, DimmerError> {
     // The transport gate comes first, before anything opens a socket: on a
     // Wayland session `DISPLAY` points at Xwayland and every request below would
     // succeed against CRTCs that are not on the path to any monitor.
@@ -434,7 +541,13 @@ fn with_session<T>(
         Some(session) => session,
         None => open()?,
     };
-    match f(&session.connection, session.root) {
+    let outcome = f(&session);
+    // Unsolicited events land here whether or not anything was selected (see
+    // `SESSION`), and nothing else will ever read them. Errors are ignored on
+    // purpose: a connection that cannot be polled is one whose real failure the
+    // call above has already reported, and losing a drain is not worth masking it.
+    while matches!(session.connection.poll_for_event(), Ok(Some(_))) {}
+    match outcome {
         Ok(value) => {
             *guard = Some(session);
             Ok(value)
@@ -448,7 +561,21 @@ fn with_session<T>(
     }
 }
 
-/// Open the gamma connection and negotiate `RandR`.
+/// The extension X.Org added so a client can tell Xwayland from an X server that
+/// owns real outputs.
+///
+/// `xwaylandproto`: *"The XWAYLAND extension allows clients to reliably identify
+/// whether an X server is Xwayland. Only Xwayland initializes this extension.
+/// Thus, if the extension is present, the X server is Xwayland. Clients should
+/// not need the protocol detailed in this document, a `QueryExtension` or
+/// `ListExtensions` request is sufficient."* Presence is the whole answer, so no
+/// request from the extension itself is ever issued.
+const XWAYLAND_EXTENSION: &str = "XWAYLAND";
+
+/// The `RandR` version `GetScreenResourcesCurrent` was added in.
+const RANDR_SCREEN_RESOURCES_CURRENT: (u32, u32) = (1, 3);
+
+/// Open the gamma connection, refuse Xwayland, and negotiate `RandR`.
 fn open() -> Result<Session, DimmerError> {
     let (connection, screen) =
         x11rb::connect(None).map_err(|e| DimmerError::Os(format!("X11 connect failed: {e}")))?;
@@ -458,17 +585,48 @@ fn open() -> Result<Session, DimmerError> {
         .get(screen)
         .map(|screen| screen.root)
         .ok_or_else(|| DimmerError::Os(format!("X11 screen {screen} has no root window")))?;
+
+    // The authoritative half of the Xwayland gate. `with_session` has already
+    // asked the *environment*, which is cheap and skips this connect entirely —
+    // but `Transport::X11`'s own documentation records that the environment
+    // misfires (a systemd user unit, a sanitised environment, `sudo`, `ssh` with
+    // `DISPLAY` exported, a `tmux` server older than the session), and a misfire
+    // here is not a visible error: it is a ramp written to a virtual CRTC, an
+    // `Ok(())`, and a screen that never changed. So the server is asked too, by
+    // the query X.Org added for exactly this purpose.
+    if connection
+        .extension_information(XWAYLAND_EXTENSION)
+        .map_err(|e| DimmerError::Os(format!("X11 QueryExtension failed: {e}")))?
+        .is_some()
+    {
+        return Err(DimmerError::Os(
+            "this X server is Xwayland: an XRandR ramp would land on a virtual \
+             CRTC that is not on the path to any monitor"
+                .to_owned(),
+        ));
+    }
+
     // Negotiate the extension version before issuing any of its requests; the
-    // protocol leaves a client's behaviour undefined otherwise. The gamma
-    // requests themselves are `RandR` 1.2, but `GetScreenResourcesCurrent` —
-    // which the enumeration needs, and which is the only alternative to
-    // re-probing every connector over DDC — is 1.3.
-    connection
-        .randr_query_version(1, 3)
-        .map_err(|e| DimmerError::Os(format!("RandR QueryVersion failed: {e}")))?
+    // protocol leaves a client's behaviour undefined otherwise. `QueryVersion`
+    // answers with the lower of what the client asked for and what the server
+    // has, so the reply has to be *read* rather than merely awaited: a server
+    // that tops out at 1.2 accepts every gamma request (they are all 1.2) and
+    // refuses `GetScreenResourcesCurrent` (1.3), which would otherwise be an
+    // enumeration that answers empty forever on a session whose writes work.
+    let version = connection
+        .randr_query_version(
+            RANDR_SCREEN_RESOURCES_CURRENT.0,
+            RANDR_SCREEN_RESOURCES_CURRENT.1,
+        )
+        .map_err(|e| DimmerError::Os(format!("this X server has no RandR extension: {e}")))?
         .reply()
-        .map_err(|e| DimmerError::Os(format!("this X server has no RandR extension: {e}")))?;
-    Ok(Session { connection, root })
+        .map_err(|e| DimmerError::Os(format!("RandR QueryVersion failed: {e}")))?;
+    Ok(Session {
+        connection,
+        root,
+        screen_resources_current: (version.major_version, version.minor_version)
+            >= RANDR_SCREEN_RESOURCES_CURRENT,
+    })
 }
 
 #[cfg(test)]

@@ -65,8 +65,8 @@
 //! works as a one-shot command. So Linux sits with Windows on crash safety and
 //! needs the same guard — which it does not have yet, deliberately, because
 //! nothing on Linux engages a ramp until the tray does. `restore_all` and
-//! `duja --restore` are the manual rescue in the meantime; see the `linux::gamma`
-//! module docs and `docs/debt.md`.
+//! `duja --restore` are the manual rescue in the meantime; see
+//! `src/linux/gamma.rs` and `docs/debt.md`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
