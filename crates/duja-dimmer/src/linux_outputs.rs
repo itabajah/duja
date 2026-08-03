@@ -27,21 +27,43 @@
 //! that this wave owed it a fallback. This is the fallback: **the EDID**, which
 //! both sides can read and neither invents.
 //!
+//! # A name match is not trusted over an EDID that contradicts it
+//!
+//! The NVIDIA case is worse than "the names do not match", and getting this
+//! backwards is how a fallback becomes a hazard. That driver indexes from zero
+//! where DRM indexes from one, so the two namespaces **overlap and are offset by
+//! one**: sysfs `DP-1` and the server's `DP-1` are *adjacent monitors*, not the
+//! same one and not unrelated. A rule that took every name match first would
+//! place two of three displays on their neighbour's screen and stamp the result
+//! "matched by name" — a silent wrong answer, in the exact configuration the
+//! fallback was added for.
+//!
+//! So the passes run strongest-evidence-first: name **and** EDID agreeing, then
+//! EDID alone, and a bare name only where no EDID could have checked it. See
+//! [`join`].
+//!
 //! # Ambiguity refuses; it does not guess
 //!
 //! Two identical monitors with no serial number in their EDID are byte-identical
 //! to both sides. A join that picked one anyway would place an overlay on the
 //! wrong screen, which is a silent wrong answer rather than a visible missing
-//! one. So a match is taken only when it is **unique among the outputs not
-//! already claimed**, and an ambiguous connector stays unplaced — hardware
-//! control intact, software dimming off, which is exactly the state Linux was
-//! already in before this module existed.
+//! one. So a pair is claimed only when the match is unique **in both
+//! directions** — this connector matches no other output, and no other connector
+//! matches this output — and anything else stays unplaced: hardware control
+//! intact, software dimming off, which is exactly the state Linux was already in
+//! before this module existed.
 //!
-//! Claiming is one-to-one for the same reason: an output that one connector
-//! matched by name is out of the pool before the EDID pass runs, so a second
-//! connector cannot be given the same rectangle. That also makes the mixed case
-//! work — one monitor named consistently and one renamed by the driver resolve to
-//! one placement each, by different evidence.
+//! Both directions, because only checking one is half a rule and the missing half
+//! is reachable. Two identical monitors with one of them **disabled** in display
+//! settings leave a single output that both connectors match equally well; a
+//! multi-GPU machine produces two connectors both called `DP-1` once the
+//! `card<N>-` prefix is stripped. In each case a one-sided rule hands the output
+//! to whichever connector the loop reached first and calls it evidence.
+//!
+//! Claiming is still one-to-one across passes: an output settled by pass 1 is out
+//! of the pool before pass 2 runs. That is what makes the mixed case work — one
+//! monitor named consistently and one renamed by the driver resolve to one
+//! placement each, by different evidence.
 //!
 //! # It names no display-server type
 //!
@@ -103,17 +125,21 @@ pub struct Connector<'a> {
 
 /// What evidence placed a connector.
 ///
-/// Carried rather than discarded because the two mean different things to a
-/// person reading a log: a name match is the modern stack working as designed,
-/// and an EDID match is the driver naming outputs its own way — which is a real
-/// configuration, not a fault, but the one worth knowing about when a display
-/// does not appear where it should.
+/// Carried rather than discarded because the three mean different things to a
+/// person reading a log, and because they are ordered by how much they prove.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Matched {
-    /// The connector name and the output name were equal.
-    ByName,
-    /// The names differed and the EDID base blocks were equal.
+    /// The names were equal **and** the EDID base blocks agreed. The modern
+    /// stack working as designed, and the only evidence that is self-checking.
+    ByNameAndEdid,
+    /// The names differed and the EDID base blocks agreed. The driver names
+    /// outputs its own way — a real configuration, not a fault, but the one
+    /// worth knowing about when a display does not appear where it should.
     ByEdid,
+    /// The names were equal and **no EDID could have checked it**, because one
+    /// side published none. Every Wayland placement is this, since Wayland has
+    /// no protocol for an EDID.
+    ByName,
 }
 
 /// Where one connector was placed, and on what evidence.
@@ -140,11 +166,22 @@ pub struct Placement {
 /// overlay in. Unplaced is the honest answer and the one the rest of the pipeline
 /// already handles.
 ///
-/// Name matches are taken first, across all connectors, before any EDID match is
-/// considered. That ordering is what makes the mixed case resolve: on a machine
-/// where the driver renames only some outputs, the ones it names consistently
-/// claim their outputs first and leave a smaller, less ambiguous pool for the
-/// rest.
+/// # Three passes, strongest evidence first
+///
+/// 1. **Name and EDID agree.** Self-checking, and therefore the only evidence
+///    that cannot be a coincidence of naming.
+/// 2. **EDID alone**, for the connectors pass 1 could not settle.
+/// 3. **Name alone**, and only where an EDID could not have checked it because
+///    one side published none.
+///
+/// A bare name match is deliberately *not* taken while both sides published an
+/// EDID that disagrees, and this ordering is the whole reason the fallback
+/// works at all. The NVIDIA proprietary driver — the case this fallback exists
+/// for — indexes outputs from zero where DRM indexes from one, so the two
+/// namespaces do not merely differ, they **overlap and are offset by one**.
+/// sysfs `DP-1` and the server's `DP-1` are then adjacent monitors. A name-first
+/// rule places two of three displays on their neighbour's screen and stamps the
+/// result "matched by name"; running the EDID first places all three correctly.
 #[must_use]
 pub fn join(connectors: &[Connector<'_>], outputs: &[ServerOutput]) -> Vec<Option<Placement>> {
     let mut pool: Vec<Option<&ServerOutput>> = outputs
@@ -152,29 +189,117 @@ pub fn join(connectors: &[Connector<'_>], outputs: &[ServerOutput]) -> Vec<Optio
         .filter(|output| !output.bounds.is_empty())
         .map(Some)
         .collect();
+    let mut placements: Vec<Option<Placement>> = connectors.iter().map(|_| None).collect();
 
-    let mut placements: Vec<Option<Placement>> = connectors
-        .iter()
-        .map(|connector| {
-            claim_unique(&mut pool, |output| output.name == connector.name)
-                .map(|output| place(output, Matched::ByName))
-        })
-        .collect();
-
-    for (slot, connector) in placements.iter_mut().zip(connectors) {
-        if slot.is_some() {
-            continue;
-        }
-        let Some(wanted) = base_block(connector.edid) else {
-            continue;
-        };
-        *slot = claim_unique(&mut pool, |output| {
-            output.edid.as_deref().and_then(base_block) == Some(wanted)
-        })
-        .map(|output| place(output, Matched::ByEdid));
-    }
+    resolve(
+        connectors,
+        &mut placements,
+        &mut pool,
+        Matched::ByNameAndEdid,
+        |connector, output| output.name == connector.name && edids_agree(connector, output),
+    );
+    resolve(
+        connectors,
+        &mut placements,
+        &mut pool,
+        Matched::ByEdid,
+        edids_agree,
+    );
+    resolve(
+        connectors,
+        &mut placements,
+        &mut pool,
+        Matched::ByName,
+        |connector, output| output.name == connector.name && !comparable(connector, output),
+    );
 
     placements
+}
+
+/// Whether both sides published a base block and the two are equal.
+fn edids_agree(connector: &Connector<'_>, output: &ServerOutput) -> bool {
+    match (
+        base_block(connector.edid),
+        output.edid.as_deref().and_then(base_block),
+    ) {
+        (Some(from_sysfs), Some(from_server)) => from_sysfs == from_server,
+        _ => false,
+    }
+}
+
+/// Whether an EDID comparison was even possible for this pair.
+///
+/// The distinction pass 3 turns on: a name match with nothing to check it
+/// against is the best evidence available, and a name match with an EDID that
+/// **contradicts** it is not evidence at all.
+fn comparable(connector: &Connector<'_>, output: &ServerOutput) -> bool {
+    base_block(connector.edid).is_some() && output.edid.as_deref().and_then(base_block).is_some()
+}
+
+/// Claim every pair that `matches` relates **mutually uniquely**, then record it.
+///
+/// Mutual is the load-bearing word. Refusing only when one connector matches
+/// several outputs is half a rule: the other half — several connectors matching
+/// one output — is just as ambiguous and, left unchecked, is resolved by
+/// whichever connector the loop reached first. That is reachable and not
+/// exotic. Two identical monitors with no serial number, one of them disabled in
+/// display settings, leaves a single output that both connectors match equally
+/// well; a one-sided rule hands it to the first and calls it evidence. So does a
+/// multi-GPU machine, where `card0-DP-1` and `card1-DP-1` both arrive here as
+/// `DP-1` once the prefix is stripped.
+///
+/// Every decision is made against **one snapshot** of the state and applied
+/// afterwards, so the result does not depend on the order connectors are visited
+/// in. Two decisions can never want the same output: whichever connector came
+/// second would have seen the first contesting it and refused.
+fn resolve(
+    connectors: &[Connector<'_>],
+    placements: &mut [Option<Placement>],
+    pool: &mut [Option<&ServerOutput>],
+    by: Matched,
+    matches: impl Fn(&Connector<'_>, &ServerOutput) -> bool,
+) {
+    let open: Vec<bool> = placements.iter().map(Option::is_none).collect();
+    let wants = |connector: &Connector<'_>| -> Option<usize> {
+        let mut only = None;
+        for (index, slot) in pool.iter().enumerate() {
+            if slot.is_some_and(|output| matches(connector, output)) {
+                if only.is_some() {
+                    return None;
+                }
+                only = Some(index);
+            }
+        }
+        only
+    };
+
+    let mut decided: Vec<(usize, usize)> = Vec::new();
+    for (index, connector) in connectors.iter().enumerate() {
+        if !open.get(index).copied().unwrap_or(false) {
+            continue;
+        }
+        let Some(target) = wants(connector) else {
+            continue;
+        };
+        let Some(output) = pool.get(target).copied().flatten() else {
+            continue;
+        };
+        let contested = connectors.iter().enumerate().any(|(other, rival)| {
+            other != index && open.get(other).copied().unwrap_or(false) && matches(rival, output)
+        });
+        if !contested {
+            decided.push((index, target));
+        }
+    }
+
+    for (index, target) in decided {
+        let Some(output) = pool.get_mut(target).and_then(Option::take) else {
+            continue;
+        };
+        if let Some(slot) = placements.get_mut(index) {
+            *slot = Some(place(output, by));
+        }
+    }
 }
 
 /// The first [`EDID_BASE_BLOCK`] bytes, or `None` if there are not that many.
@@ -184,27 +309,6 @@ pub fn join(connectors: &[Connector<'_>], outputs: &[ServerOutput]) -> Vec<Optio
 /// monitor.
 fn base_block(edid: &[u8]) -> Option<&[u8]> {
     edid.get(..EDID_BASE_BLOCK)
-}
-
-/// Take the one unclaimed output satisfying `matches`, leaving the pool without
-/// it.
-///
-/// `None` when nothing matches **and** when more than one thing does. Those are
-/// different situations with the same correct answer: neither licenses a guess.
-fn claim_unique<'a>(
-    pool: &mut [Option<&'a ServerOutput>],
-    mut matches: impl FnMut(&ServerOutput) -> bool,
-) -> Option<&'a ServerOutput> {
-    let mut found: Option<usize> = None;
-    for (index, slot) in pool.iter().enumerate() {
-        if slot.is_some_and(&mut matches) {
-            if found.is_some() {
-                return None;
-            }
-            found = Some(index);
-        }
-    }
-    pool.get_mut(found?).and_then(Option::take)
 }
 
 /// Build a placement from a matched output.
@@ -262,9 +366,34 @@ mod tests {
     }
 
     /// The modern stack: sysfs and the display server spell the connector the
-    /// same way, and that is the whole join.
+    /// same way **and** the EDIDs agree, which is the only self-checking
+    /// evidence there is.
     #[test]
-    fn equal_names_place_the_connector() {
+    fn an_agreeing_name_and_edid_place_the_connector() {
+        let sink = edid(1);
+        let connectors = [Connector {
+            name: "DP-1",
+            edid: &sink,
+        }];
+        let outputs = [ServerOutput {
+            name: "DP-1".to_owned(),
+            edid: Some(sink.clone()),
+            bounds: DisplayBounds::new(1920, 0, 2560, 1080),
+            token: "crtc-63".to_owned(),
+        }];
+
+        let placed = only(join(&connectors, &outputs));
+
+        assert_eq!(placed.bounds, DisplayBounds::new(1920, 0, 2560, 1080));
+        assert_eq!(placed.token, "crtc-63");
+        assert_eq!(placed.by, Matched::ByNameAndEdid);
+    }
+
+    /// A server that publishes no EDID — every Wayland compositor, and an X
+    /// driver with no `EDID` property — leaves the name as the only evidence,
+    /// and it is then the best evidence available rather than an unchecked one.
+    #[test]
+    fn a_name_alone_places_the_connector_when_nothing_could_check_it() {
         let sink = edid(1);
         let connectors = [Connector {
             name: "DP-1",
@@ -274,9 +403,153 @@ mod tests {
 
         let placed = only(join(&connectors, &outputs));
 
-        assert_eq!(placed.bounds, DisplayBounds::new(1920, 0, 2560, 1080));
         assert_eq!(placed.token, "crtc-63");
         assert_eq!(placed.by, Matched::ByName);
+    }
+
+    /// **The defect this rule's ordering exists for, and the reason a name is
+    /// not taken first.** The NVIDIA proprietary driver indexes outputs from
+    /// zero where DRM indexes from one, so the namespaces overlap and are offset
+    /// by one: the server's `DP-1` is sysfs's `DP-2`. A name-first join placed
+    /// two of these three on their neighbour's screen and stamped the result
+    /// "matched by name"; the third was left unplaced because the name pass had
+    /// already consumed the output its EDID wanted.
+    #[test]
+    fn an_offset_by_one_namespace_places_every_display_correctly() {
+        let (first, second, third) = (edid(11), edid(22), edid(33));
+        let connectors = [
+            Connector {
+                name: "DP-1",
+                edid: &first,
+            },
+            Connector {
+                name: "DP-2",
+                edid: &second,
+            },
+            Connector {
+                name: "DP-3",
+                edid: &third,
+            },
+        ];
+        let outputs = [
+            output("DP-0", "crtc-a", Some(first.clone())),
+            output("DP-1", "crtc-b", Some(second.clone())),
+            output("DP-2", "crtc-c", Some(third.clone())),
+        ];
+
+        let placements = join(&connectors, &outputs);
+
+        for (index, expected) in ["crtc-a", "crtc-b", "crtc-c"].into_iter().enumerate() {
+            let placed = nth(&placements, index).expect("every display is placed");
+            assert_eq!(placed.token, expected, "connector {index}");
+            assert_eq!(placed.by, Matched::ByEdid, "connector {index}");
+        }
+    }
+
+    /// The same trap with two displays: the server renames one port onto
+    /// another's sysfs name. Taking the name would put the overlay on the wrong
+    /// screen; taking the EDID first places both.
+    #[test]
+    fn a_name_that_belongs_to_a_different_monitor_is_not_trusted() {
+        let (mine, theirs) = (edid(44), edid(55));
+        let connectors = [
+            Connector {
+                name: "DP-1",
+                edid: &mine,
+            },
+            Connector {
+                name: "DP-2",
+                edid: &theirs,
+            },
+        ];
+        // The server calls `mine` DP-2 and `theirs` DP-1 — every name is a lie,
+        // and every name still matches something.
+        let outputs = [
+            output("DP-2", "crtc-mine", Some(mine.clone())),
+            output("DP-1", "crtc-theirs", Some(theirs.clone())),
+        ];
+
+        let placements = join(&connectors, &outputs);
+
+        assert_eq!(
+            nth(&placements, 0).map(|p| p.token.clone()),
+            Some("crtc-mine".to_owned())
+        );
+        assert_eq!(
+            nth(&placements, 1).map(|p| p.token.clone()),
+            Some("crtc-theirs".to_owned())
+        );
+    }
+
+    /// A name match whose EDID contradicts it, with no correct output anywhere,
+    /// stays unplaced. The name is not evidence once something better has
+    /// disagreed with it, and an overlay on the wrong screen is worse than none.
+    #[test]
+    fn a_contradicted_name_places_nothing_rather_than_the_wrong_thing() {
+        let mine = edid(66);
+        let connectors = [Connector {
+            name: "DP-1",
+            edid: &mine,
+        }];
+        let outputs = [output("DP-1", "crtc-someone-else", Some(edid(77)))];
+
+        assert!(
+            join(&connectors, &outputs)
+                .first()
+                .is_some_and(Option::is_none)
+        );
+    }
+
+    /// Half a rule is not the rule. Two identical monitors with **one disabled**
+    /// leave a single output that both connectors match equally well — there is
+    /// no evidence distinguishing them, and a check that only refuses when one
+    /// connector matches several outputs would hand it to whichever came first.
+    #[test]
+    fn two_connectors_wanting_one_output_are_both_refused() {
+        let twin = edid(88);
+        let connectors = [
+            Connector {
+                name: "DP-1",
+                edid: &twin,
+            },
+            Connector {
+                name: "DP-2",
+                edid: &twin,
+            },
+        ];
+        // Only one of the twins is enabled, so only one output is in the pool.
+        let outputs = [output("DP-9", "crtc-only", Some(twin.clone()))];
+
+        let placements = join(&connectors, &outputs);
+
+        assert!(nth(&placements, 0).is_none(), "{placements:?}");
+        assert!(nth(&placements, 1).is_none(), "{placements:?}");
+    }
+
+    /// The same shape reached without twin monitors: a multi-GPU machine, where
+    /// `card0-DP-1` and `card1-DP-1` both arrive here as `DP-1` once the prefix
+    /// is stripped. Their EDIDs differ, so pass 1 settles neither by name, and
+    /// pass 3 must not settle it by name either.
+    #[test]
+    fn two_cards_with_the_same_connector_name_do_not_race() {
+        let (left, right) = (edid(90), edid(91));
+        let connectors = [
+            Connector {
+                name: "DP-1",
+                edid: &left,
+            },
+            Connector {
+                name: "DP-1",
+                edid: &right,
+            },
+        ];
+        // The server publishes no EDID, so nothing can tell the two apart.
+        let outputs = [at("DP-1", "crtc-0", 0, 1920)];
+
+        let placements = join(&connectors, &outputs);
+
+        assert!(nth(&placements, 0).is_none(), "{placements:?}");
+        assert!(nth(&placements, 1).is_none(), "{placements:?}");
     }
 
     /// The fallback wave 2 said it was owed. The NVIDIA proprietary driver
@@ -356,7 +629,7 @@ mod tests {
         assert_eq!(first.token, "crtc-a");
 
         let second = nth(&placements, 1).expect("DP-2 matches by name");
-        assert_eq!(second.by, Matched::ByName);
+        assert_eq!(second.by, Matched::ByNameAndEdid);
         assert_eq!(second.token, "crtc-b");
     }
 
@@ -381,7 +654,10 @@ mod tests {
 
         let placements = join(&connectors, &outputs);
 
-        assert_eq!(nth(&placements, 0).map(|p| p.by), Some(Matched::ByName));
+        assert_eq!(
+            nth(&placements, 0).map(|p| p.by),
+            Some(Matched::ByNameAndEdid)
+        );
         assert!(nth(&placements, 1).is_none(), "{placements:?}");
     }
 

@@ -513,32 +513,40 @@ fn place_from_outputs(
         return;
     }
     let placements = duja_dimmer::linux_outputs::join(&keys, outputs);
-    drop(keys);
 
     let mut placed = placements.into_iter();
     for found in ddc.iter_mut() {
         if found.key.is_none() {
             continue;
         }
-        // One token does both jobs on Linux, as on Windows and unlike macOS: on
-        // X11 it is the CRTC id, and two outputs on one CRTC share a framebuffer
-        // *and* a gamma table, so the mirror-group key and the gamma address are
-        // the same thing. On Wayland it is the output name, and there is no
-        // mirroring for the two to disagree about.
-        found.geometry = placed.next().flatten().map(|p| DdcGeometry {
-            bounds: p.bounds,
-            gamma_token: p.token.clone(),
-            surface_token: p.token,
-        });
+        // Assigned only on a match, never cleared on a miss: a backend that did
+        // report a geometry keeps it, and this function stays the thing that
+        // *adds* one. On Linux no backend reports one, so the distinction is
+        // dormant — but it should not be this code that decides that.
+        //
+        // One token does both jobs, as on Windows and unlike macOS: on X11 it is
+        // the CRTC id, and two outputs on one CRTC share a framebuffer *and* a
+        // gamma table, so the mirror-group key and the gamma address are the same
+        // thing. On Wayland it is the output name.
+        if let Some(place) = placed.next().flatten() {
+            found.geometry = Some(DdcGeometry {
+                bounds: place.bounds,
+                gamma_token: place.token.clone(),
+                surface_token: place.token,
+            });
+        }
     }
     for found in panel.iter_mut() {
         if found.key.is_none() {
             continue;
         }
-        found.geometry = placed
-            .next()
-            .flatten()
-            .map(|p| PanelGeometry::new(p.bounds, p.token.clone(), p.token));
+        if let Some(place) = placed.next().flatten() {
+            found.geometry = Some(PanelGeometry::new(
+                place.bounds,
+                place.token.clone(),
+                place.token,
+            ));
+        }
     }
 }
 
@@ -577,23 +585,32 @@ fn discover_ddc() -> Vec<FoundDdc> {
 /// row stamped `hardware_range: true` that no opener can serve would claim control
 /// Duja does not have.
 fn discover_panel() -> Vec<FoundPanel> {
-    match duja_panel::enumerate() {
-        Ok(panels) => panels
-            .into_iter()
-            .map(|p| FoundPanel {
-                display: DiscoveredDisplay {
-                    id: p.id().clone(),
-                    kind: DisplayKind::InternalPanel,
-                    name: Some(p.name().to_owned()),
-                    capabilities: hardware_brightness_caps(),
-                },
-                geometry: p.geometry().cloned(),
-                #[cfg(any(test, target_os = "linux"))]
-                key: panel_join_key(),
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    }
+    let Ok(panels) = duja_panel::enumerate() else {
+        return Vec::new();
+    };
+    // Resolved once, outside the map: on Linux it is a full `/sys/class/backlight`
+    // plus `/sys/class/drm` scan, and a machine has one panel — re-deriving it per
+    // entry would repeat work `enumerate` has just done.
+    #[cfg(any(test, target_os = "linux"))]
+    let key = panel_join_key();
+
+    panels
+        .into_iter()
+        .map(|p| FoundPanel {
+            display: DiscoveredDisplay {
+                id: p.id().clone(),
+                kind: DisplayKind::InternalPanel,
+                name: Some(p.name().to_owned()),
+                capabilities: hardware_brightness_caps(),
+            },
+            geometry: p.geometry().cloned(),
+            #[cfg(any(test, target_os = "linux"))]
+            key: key.as_ref().map(|k| LinuxJoinKey {
+                name: k.name.clone(),
+                edid: k.edid.clone(),
+            }),
+        })
+        .collect()
 }
 
 /// The built-in panel's join key on Linux, and nothing anywhere else.

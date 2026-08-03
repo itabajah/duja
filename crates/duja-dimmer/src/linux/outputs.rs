@@ -46,8 +46,7 @@ pub fn enumerate_outputs() -> Vec<ServerOutput> {
 /// The `RandR` output list: name, EDID, CRTC rectangle, CRTC id.
 fn x11() -> Vec<ServerOutput> {
     use x11rb::connection::Connection as _;
-    use x11rb::protocol::randr::ConnectionExt as _;
-    use x11rb::protocol::xproto::ConnectionExt as _;
+    use x11rb::protocol::randr::{self, ConnectionExt as _};
 
     let Ok((connection, screen)) = x11rb::connect(None) else {
         return Vec::new();
@@ -55,6 +54,22 @@ fn x11() -> Vec<ServerOutput> {
     let Some(root) = connection.setup().roots.get(screen).map(|s| s.root) else {
         return Vec::new();
     };
+
+    // Negotiate the extension version before issuing any of its requests. The
+    // protocol leaves a client's behaviour undefined otherwise, and every other
+    // client (libXrandr, GTK, `xrandr`, winit) does it. 1.3 is what
+    // `GetScreenResourcesCurrent` needs; the rest of this function is 1.2. The
+    // capability probe in `super::x11` deliberately does *not* negotiate, and
+    // that is not an inconsistency: it only asks whether the extension exists
+    // and issues no RandR request at all.
+    if connection
+        .randr_query_version(1, 3)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .is_none()
+    {
+        return Vec::new();
+    }
 
     // `GetScreenResourcesCurrent` reads the server's cached view. The plain
     // `GetScreenResources` re-probes every output over DDC, which takes on the
@@ -70,13 +85,13 @@ fn x11() -> Vec<ServerOutput> {
 
     // `only_if_exists` = true: `EDID` is interned by the driver that publishes
     // the property, so its absence means no output has one and there is nothing
-    // to ask for. `x11rb::NONE` reads as "no such atom" and every output then
-    // reports `edid: None`, which the join treats as name-or-nothing.
-    let edid_atom = connection
-        .intern_atom(true, b"EDID")
-        .ok()
-        .and_then(|cookie| cookie.reply().ok())
-        .map_or(x11rb::NONE, |reply| reply.atom);
+    // to ask for. `EDID_DATA` is what pre-RandR-1.2 drivers called it, and this
+    // property exists precisely to rescue the legacy stacks, so it is worth the
+    // one extra round trip when the modern name is absent. `x11rb::NONE` from
+    // both reads as "no driver publishes one" and every output then reports
+    // `edid: None`, which the join treats as name-or-nothing.
+    let edid_atom = intern(&connection, b"EDID")
+        .unwrap_or_else(|| intern(&connection, b"EDID_DATA").unwrap_or(x11rb::NONE));
 
     let timestamp = resources.config_timestamp;
     let mut outputs = Vec::new();
@@ -88,6 +103,14 @@ fn x11() -> Vec<ServerOutput> {
         else {
             continue;
         };
+        // A non-`Success` status leaves every other field in the reply
+        // undefined per the protocol — `InvalidConfigTime` for a timestamp the
+        // server has moved past, which is what a hot-plug racing this walk looks
+        // like. Current X servers always answer `Success`, so this is a latent
+        // guard rather than a live one, and it costs a comparison.
+        if info.status != randr::SetConfig::SUCCESS {
+            continue;
+        }
         // A CRTC of NONE is an output with no rectangle: disconnected, or
         // connected and left disabled in the desktop's display settings. Either
         // way there is nothing to cover, and `crate::linux_outputs::join` would
@@ -99,6 +122,7 @@ fn x11() -> Vec<ServerOutput> {
             .randr_get_crtc_info(info.crtc, timestamp)
             .ok()
             .and_then(|cookie| cookie.reply().ok())
+            .filter(|crtc| crtc.status == randr::SetConfig::SUCCESS)
         else {
             continue;
         };
@@ -121,6 +145,18 @@ fn x11() -> Vec<ServerOutput> {
         });
     }
     outputs
+}
+
+/// Look up an existing atom, or `None` if nothing has ever created it.
+fn intern(connection: &impl x11rb::connection::Connection, name: &[u8]) -> Option<u32> {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+
+    connection
+        .intern_atom(true, name)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| reply.atom)
+        .filter(|atom| *atom != x11rb::NONE)
 }
 
 /// The `EDID` output property, if the driver publishes one for this output.
@@ -156,7 +192,12 @@ fn read_edid(
         .ok()?
         .reply()
         .ok()?;
-    if reply.data.is_empty() {
+    // `data` is sized `num_items * format/8`, so at format 32 it would be four
+    // bytes per item in the host's order rather than the EDID's bytes. Every X
+    // driver publishes this at format 8; anything else is not an EDID this can
+    // compare, and a wrong-format blob could only ever fail to match — but
+    // saying so is better than relying on that.
+    if reply.format != 8 || reply.data.is_empty() {
         None
     } else {
         Some(reply.data)
@@ -172,6 +213,7 @@ fn read_edid(
 /// which is the honest answer rather than one guessed from `make`/`model`.
 fn wayland() -> Vec<ServerOutput> {
     use wayland_client::Connection;
+    use wayland_client::Proxy as _;
     use wayland_client::globals::registry_queue_init;
     use wayland_client::protocol::wl_output::WlOutput;
     use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
@@ -212,26 +254,22 @@ fn wayland() -> Vec<ServerOutput> {
         }
     }
 
-    // Two round trips: the first drains the `wl_output` and `xdg_output` bursts
-    // the requests above provoked, the second covers a compositor that defers
-    // either `done` past the first. A `wl_display.sync` is answered only after
-    // everything queued before it, so this cannot spin.
-    for _ in 0..2 {
-        if queue.roundtrip(&mut collector).is_err() {
-            break;
-        }
+    // One round trip is enough by construction: `wl_display.sync` is answered
+    // only after every request queued before it and every event those requests
+    // generated, so the whole `wl_output`/`xdg_output` burst is delivered before
+    // it returns. There is no `done` handshake to wait on and nothing here can
+    // spin.
+    if queue.roundtrip(&mut collector).is_err() {
+        return Vec::new();
     }
 
     collector.finish()
 }
 
-/// The `wl_output` version that added the `name` event carrying the connector
-/// name. Binding above what the compositor advertises is a protocol error, so
-/// this is a ceiling rather than a requirement.
-#[cfg(target_os = "linux")]
+/// The `wl_output` version that added the `name` event. Binding above what the
+/// compositor advertises is a protocol error, so this is a ceiling rather than a
+/// requirement, and `xdg_output`'s own `name` covers the compositors below it.
 const WL_OUTPUT_NAME_VERSION: u32 = 4;
-
-use wayland_client::Proxy as _;
 
 /// One `wl_output` and everything the compositor has said about it so far.
 struct Collected {
@@ -272,10 +310,14 @@ impl Collector {
                 let (x, y) = entry.position?;
                 let (width, height) = entry.size?;
                 Some(ServerOutput {
-                    // The connector name is both the join key and the address:
-                    // `zwlr_gamma_control_manager_v1` takes a `wl_output`, and
-                    // Wayland has no mirroring for a framebuffer token to differ
-                    // from an output token. See `ServerOutput::token`.
+                    // The output name is both the join key and the address:
+                    // `zwlr_gamma_control_manager_v1` and `zwlr_layer_shell_v1`
+                    // are both per-`wl_output`, so per-output is the granularity
+                    // Wayland grants. It is NOT a mirror-set key — a compositor
+                    // that mirrors gives the two outputs the same logical
+                    // rectangle and different names, so token equality will not
+                    // fire and the group logic will not collapse them.
+                    // `docs/debt.md` carries that.
                     token: name.clone(),
                     name,
                     edid: None,
@@ -373,6 +415,19 @@ impl
             return;
         };
         match event {
+            // `xdg_output` has carried a name since **version 2**, and the
+            // protocol requires compositors to keep sending it even though it is
+            // marked deprecated in favour of `wl_output.name`. Without this arm a
+            // compositor that advertises `wl_output` v3 and `xdg_output` v2 —
+            // wlroots and Mutter both did until fairly recently, so anything on
+            // an older LTS — hands over a full logical rectangle with no name to
+            // join it by, and every output is dropped for want of data that
+            // arrived. `wl_output`'s name wins when both come, hence the guard.
+            Event::Name { name } => {
+                if entry.name.is_none() {
+                    entry.name = Some(name);
+                }
+            }
             Event::LogicalPosition { x, y } => entry.position = Some((x, y)),
             Event::LogicalSize { width, height } => {
                 // The protocol types these `i32` and a negative one is not a

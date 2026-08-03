@@ -102,7 +102,11 @@ use duja_core::id::StableDisplayId;
 /// - **Linux** — always absent. Sysfs knows the panel exists and how to drive it,
 ///   not where the desktop puts it: that is the display server's answer, and a
 ///   Linux session may have no display server at all. The rectangle arrives from
-///   the X11/Wayland side, joined on the DRM connector name.
+///   the X11/Wayland side, joined on the DRM connector name with the EDID as the
+///   fallback; `panel_connector` hands the caller both keys, and
+///   `duja_dimmer::linux_outputs` owns the rule. The bounds that come back are
+///   **not one unit** across Linux — X11 screen pixels, Wayland logical
+///   coordinates — as [`DisplayBounds`] records.
 /// - **Windows** — always absent. WMI's `WmiMonitorBrightnessMethods` exposes no
 ///   monitor rectangle and no GDI device for the panel it controls, so there is
 ///   nothing honest to put here; a Windows laptop panel that needs software

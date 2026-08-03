@@ -12,12 +12,14 @@
 //! Sysfs knows which monitors exist and how to talk to them; it does not know
 //! where the desktop puts them, because on Linux that is the display server's
 //! answer and there may not be one. The [`connector`](DdcDisplay::connector)
-//! name is the join key that supplies it later: on the modern stack (the
-//! modesetting DDX, DRM-backed Wayland compositors) X11 `RandR` output names and
-//! Wayland `xdg_output` names are the same `DP-1` / `HDMI-A-2` strings sysfs
-//! uses, minus the `card<N>-` prefix [`duja_core::linux::drm`] already strips.
-//! Not universally — that module records the two drivers it is reported not to
-//! hold for, and why wave 4 owes the join a fallback.
+//! name is the join key that supplies it: on the modern stack (the modesetting
+//! DDX, DRM-backed Wayland compositors) X11 `RandR` output names and Wayland
+//! `wl_output` names are the same `DP-1` / `HDMI-A-2` strings sysfs uses, minus
+//! the `card<N>-` prefix [`duja_core::linux::drm`] already strips. Not
+//! universally — that module records the two drivers it is reported not to hold
+//! for — which is why [`edid`](DdcDisplay::edid) is carried beside it as the
+//! fallback `duja_dimmer::linux_outputs` joins on when a name disagrees or
+//! cannot be trusted.
 //!
 //! # Hardware-unverified
 //!
