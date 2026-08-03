@@ -36,6 +36,9 @@ windows = { version = "0.62", default-features = false, features = [
 # via smithay-client-toolkit), so this declares no new package — see the
 # workspace manifest.
 [target.'cfg(target_os = "linux")'.dependencies]
+# The X11 overlay backend owns a dedicated thread, exactly as the Windows one
+# does, and takes its commands over the same channel type.
+crossbeam-channel = { workspace = true }
 x11rb = { workspace = true }
 wayland-client = { workspace = true }
 wayland-protocols = { workspace = true }

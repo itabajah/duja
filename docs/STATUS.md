@@ -1520,15 +1520,41 @@ a display event costs one connection rather than two. The rule is pure — the
 outputs are an argument — so it runs on all three lanes; only the enumeration
 itself is Linux-only.
 
-**Geometry without a surface is still geometry without a surface.** Linux's
-`PlatformDimmer` is `StubDimmer` until the overlay lands, so the planner now
-produces overlay commands that are recorded and discarded. The visible result is
-unchanged — the continuum still stops at the hardware floor — with one exception
-worth knowing about: surface tokens also switch **mirror grouping** on, and the
-group rule pins a software-only group's hardware members to maximum on the
-premise that one shared overlay does the dimming. That premise is false until the
-overlay exists. `debt.md` carries it, with why withholding the token instead
-would be worse.
+**The X11 overlay is the surface that rectangle was for.** One
+override-redirect, depth-32 window per dimmed display, filled with premultiplied
+black at the planner's alpha, on a dedicated thread that owns every window — the
+same shape as the Windows backend, diffing through the same pure `plan` kernel.
+
+Three of its decisions are arithmetic rather than windowing, and all three fail
+*invisibly*, so they live in a pure module tested on every lane. **Which visual**:
+a depth-24 visual is what a naive `create_window` inherits from the root, and it
+has no alpha channel, so the overlay would be created, mapped, and opaque. **What
+pixel**: the alpha is the top byte of a premultiplied value, and an
+un-premultiplied one would ask the compositor to blend *white* — brightening
+where the user asked to dim. **Whether the rectangle fits**: X11 geometry is
+16-bit, and doing that conversion with `as` would wrap a monitor past 32767
+pixels onto a display nobody asked to dim.
+
+The two hazards `#121`'s review predicted are closed by the window itself. It
+carries `_NET_WM_BYPASS_COMPOSITOR = 2`, so no compositing manager unredirects it
+for a fullscreen app; and a second thread holds `XFixesSelectSelectionInput` on
+`_NET_WM_CM_S<n>` and tears every overlay down the moment the owner goes to
+`None` — the analogue of `refuse_gamma` that the debt row asked for. Losing the
+dimming when `picom` dies is a visible, recoverable degradation; keeping it is a
+screen the user cannot see to fix.
+
+Input passes through by the **`XFixes` empty input region**, which is the only
+mechanism X offers, so the backend refuses to start where the extension is absent
+rather than mapping a window that would swallow every click. It refuses on a
+server with no ARGB visual for the same reason, and reports `Unsupported` — not a
+fault — where there is no compositing manager or no display server at all.
+
+**`PlatformDimmer` is not a type alias on Linux**, unlike the other two
+platforms. Which mechanism exists is a property of the session rather than the
+build, so `LinuxDimmer` picks when it starts. A Wayland session reports
+`Unsupported` until its layer-shell backend lands, which is the one place the
+`#122` mirror-pin consequence still bites; `debt.md` carries it, now narrowed
+from Linux to Wayland.
 
 **Wave 4 landed ADR-0011's capability probe first, on purpose.** The rule that
 decides what a Linux session can dim is pure — environment and Wayland registry

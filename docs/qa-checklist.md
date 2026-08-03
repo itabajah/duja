@@ -65,16 +65,20 @@ with the phases; keep entries as observable behaviors, not implementation.
            unrecoverable-looking rather than merely broken, so run it before the
            happy path, not after. -->
 - [ ] **Kill the compositing manager while Duja is dimming in software** on X11.
-      The overlay must come down, not turn into a black screen. ADR-0011's
-      amendment makes this the overlay's own responsibility (watch
-      `_NET_WM_CM_S<n>` and tear down on an owner change); until that lands the
-      capability is a startup answer only, and `docs/debt.md` carries it. Failing
-      this before the overlay wave ships is expected; failing it after is a release
-      blocker.
+      Every overlay must come down within a moment, leaving the screen at its
+      hardware brightness. It must **not** turn into a black rectangle. This is a
+      release blocker: it is the one Linux failure a user cannot see well enough to
+      recover from.
 - [ ] **Fullscreen app while dimming** on X11: a compositing manager may unredirect
       a fullscreen window, which produces the same black screen with a compositor
-      running. The overlay is meant to carry `_NET_WM_BYPASS_COMPOSITOR = 2` to
-      forbid that; check a fullscreen video and a fullscreen game.
+      running. The overlay carries `_NET_WM_BYPASS_COMPOSITOR = 2` to forbid that;
+      check a fullscreen video and a fullscreen game, in at least one compositor
+      with `unredir-if-possible` (or its equivalent) explicitly enabled.
+- [ ] **Click, type and drag through a dimmed X11 region.** The overlay's `XFixes`
+      input region is empty, so every event must reach what is underneath. This is
+      the ADR-0003 security property, and on X11 it is also the failure mode with
+      no in-app workaround: an overlay that swallows input cannot be dismissed
+      from the flyout it is covering.
 - [ ] Start a compositing manager **while Duja is running** on an X11 session that
       had none: the overlay becomes available without a restart. Same mechanism as
       the kill case above and the same debt row; this is the direction a capability

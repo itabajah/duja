@@ -142,7 +142,7 @@ rustix = { version = "1", features = ["fs", "process", "net", "event", "pipe"] }
 # generated protocol code and no crate. ADR-0011 is the decision they implement,
 # and its point is that these are used to *ask* the session what it offers, never
 # to identify it.
-x11rb = { version = "0.13", features = ["randr"] }
+x11rb = { version = "0.13", features = ["randr", "xfixes", "shape"] }
 wayland-client = "0.31"
 # `zxdg_output_manager_v1`, which is the only way to ask a Wayland compositor where
 # an output sits in *logical* coordinates. `wl_output` reports the mode in physical
