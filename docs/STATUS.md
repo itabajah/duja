@@ -1590,6 +1590,46 @@ build, so `LinuxDimmer` picks when it starts. A Wayland session reports
 `#122` mirror-pin consequence still bites; `debt.md` carries it, now narrowed
 from Linux to Wayland.
 
+**The sub-floor gamma channel is `RandR`'s per-CRTC table**, and the CRTC is also
+the surface token wave 4 already stamps on every placed display, so the app's
+gamma sink can address a ramp without a second enumeration. Two outputs on one
+CRTC are an X11 mirror and share both a framebuffer and a gamma table, so the
+CRTC is the granularity the hardware actually has.
+
+**A Wayland session is refused by transport, not by whether a connection opens** —
+which is the decision the whole module is built around. `DISPLAY` points at
+Xwayland on almost every Wayland session, so every step of the XRandR gamma path
+*succeeds* there: it connects, `RandR` is present, `GetCrtcGammaSize` answers, and
+`SetCrtcGamma` writes a table into a virtual CRTC that is not on the path to any
+monitor. A gate that asked "can I reach an X server" would have produced an
+`Ok(())` behind a screen that never changed, and the coordinator above would then
+record a live ramp, never retry, and never plan the overlay that would have dimmed
+the display instead. The refusal reads the environment, exactly as ADR-0011's
+capability rule does.
+
+**Linux sits with Windows on crash safety, not with macOS**, and this is where it
+is owed something. The X server holds each CRTC's table as server state and does
+not reset it when the writing client disconnects — which is precisely why `xgamma`
+works as a one-shot command that exits. So a crash mid-dim leaves a dark screen
+with nothing running to undo it, and the marker-plus-guard machinery Windows
+carries is genuinely needed here. It is deliberately **not** built yet: nothing on
+Linux engages a ramp until the tray does (the sink the tray owns is the only
+engage path), so a guard now would have no caller and its tests would pin a
+lifecycle nothing drives. `duja --restore` is the manual rescue and is un-gated
+for Linux in the same PR; `debt.md` carries the guard as owed to the ksni wave,
+together with the baseline-composition that would stop a restore flattening a
+running `gammastep`'s tint.
+
+**The HDR verdict is now one module rather than three.** Each platform probes its
+own way — DXGI's colour space, `NSScreen`'s EDR headroom, and on Linux the
+transport, because there is no query to make — but what the answer *means* is the
+same everywhere and carries the safety rule that an uncertain probe reads as "no
+gamma". That was two byte-identical copies before Linux would have made it three.
+X11 answers `Some(false)`: the X protocol has no HDR path, so an X11 desktop is
+SDR and its CRTC LUT is the SDR pipeline's. Wayland answers `Unknown`, which is
+where Linux HDR actually happens and where there is no XRandR channel to use it
+with anyway.
+
 **Wave 4 landed ADR-0011's capability probe first, on purpose.** The rule that
 decides what a Linux session can dim is pure — environment and Wayland registry
 contents in, a per-mechanism report out — and it is the largest surface this

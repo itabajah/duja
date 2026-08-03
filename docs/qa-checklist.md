@@ -90,6 +90,24 @@ with the phases; keep entries as observable behaviors, not implementation.
       for flicker against another always-on-top client (a second OSD, an on-screen
       keyboard, a presentation tool): X has no always-on-top, so Duja re-raises on
       every root restack, and two clients doing that can fight.
+- [ ] **`duja --restore` on X11 clears a ramp Duja did not set.** Run `xgamma -gamma .5`
+      (or leave `redshift`/`gammastep` running), then `duja --restore`: the screen must
+      return to normal and the report must name each CRTC by its connector (`DP-1
+      (CRTC 63)`), one line per CRTC that is driving something. This is the whole of
+      Linux's gamma crash recovery today — there is no marker and no automatic
+      recovery until the tray lands, so if this does not work a user who ever hits a
+      stuck ramp has nothing.
+- [ ] **`duja --restore` on a Wayland session refuses rather than lying.** It must
+      print "nothing to restore", **not** a count of displays. `DISPLAY` is set to
+      Xwayland on almost every Wayland session, and every XRandR gamma request there
+      succeeds against virtual CRTCs that are not on the path to any monitor — so a
+      report claiming it reset two displays would be describing a write that changed
+      nothing on screen.
+- [ ] **`--restore` flattens a running colour-temperature tool's tint**, and that is
+      the documented behaviour rather than a bug: one LUT per CRTC, last writer wins,
+      and Duja keeps no baseline yet (`docs/debt.md`). Check that the tool recovers on
+      its next update rather than staying flat, and that Duja did not leave the screen
+      darker than it found it.
 - [ ] Wayland session that **advertises** `zwlr_layer_shell_v1`: the overlay appears and dims.
 - [ ] Wayland session that advertises **neither** wlr protocol: software dimming reports itself
       unavailable *with the reason*, and hardware paths still work.

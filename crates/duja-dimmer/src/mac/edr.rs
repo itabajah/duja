@@ -16,39 +16,12 @@
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSScreen;
 
-/// Whether a display can safely use the gamma dimming path. Mirrors the Windows
-/// enum exactly so cross-platform callers share one type shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GammaSupport {
-    /// Gamma is safe here (SDR display, probe succeeded).
-    Supported,
-    /// The display can present HDR/EDR; gamma must not be used (force overlay).
-    UnsupportedHdr,
-    /// The probe could not determine HDR state; the caller should default to
-    /// overlay dimming (the safe choice).
-    Unknown,
-}
-
-impl GammaSupport {
-    /// Whether the gamma path may be used. Only [`Supported`](Self::Supported)
-    /// returns `true`; [`Unknown`](Self::Unknown) is treated as "no".
-    #[must_use]
-    pub fn allows_gamma(self) -> bool {
-        matches!(self, GammaSupport::Supported)
-    }
-}
-
-/// Map the raw HDR probe (`Some(true)` = HDR-capable, `Some(false)` = SDR,
-/// `None` = unknown) to a [`GammaSupport`]. Pure, so it is unit-tested directly.
-/// Identical to the Windows mapper for cross-platform symmetry.
-#[must_use]
-pub fn gamma_support_from_hdr(hdr_active: Option<bool>) -> GammaSupport {
-    match hdr_active {
-        Some(true) => GammaSupport::UnsupportedHdr,
-        Some(false) => GammaSupport::Supported,
-        None => GammaSupport::Unknown,
-    }
-}
+// The verdict this probe feeds is the same on every platform — only the probe
+// itself is per-platform — so it lives in one unconditional module and is tested
+// on all three CI lanes rather than once per backend. It was byte-identical to
+// the Windows copy before Linux would have made it three. See
+// `crate::gamma_support`.
+use crate::gamma_support::{GammaSupport, gamma_support_from_hdr};
 
 /// Whether any attached display can present HDR/EDR content.
 ///
@@ -89,26 +62,9 @@ pub fn display_supports_gamma() -> GammaSupport {
 mod tests {
     use super::*;
 
-    #[test]
-    fn hdr_maps_to_unsupported() {
-        assert_eq!(
-            gamma_support_from_hdr(Some(true)),
-            GammaSupport::UnsupportedHdr
-        );
-        assert!(!gamma_support_from_hdr(Some(true)).allows_gamma());
-    }
-
-    #[test]
-    fn sdr_maps_to_supported() {
-        assert_eq!(gamma_support_from_hdr(Some(false)), GammaSupport::Supported);
-        assert!(gamma_support_from_hdr(Some(false)).allows_gamma());
-    }
-
-    #[test]
-    fn unknown_defaults_to_no_gamma() {
-        assert_eq!(gamma_support_from_hdr(None), GammaSupport::Unknown);
-        assert!(!gamma_support_from_hdr(None).allows_gamma());
-    }
+    // The `gamma_support_from_hdr` mapping is pinned in `crate::gamma_support`,
+    // where it now lives; what is macOS-specific — and all this module still owns
+    // — is the `NSScreen` EDR probe and its off-main-thread refusal.
 
     #[test]
     fn probe_runs_without_panicking() {

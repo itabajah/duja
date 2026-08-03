@@ -1,20 +1,31 @@
-//! Gathering the evidence ADR-0011's capability rule decides on.
+//! Everything in this crate that talks to a Linux display server.
 //!
-//! [`crate::linux_caps`] is the rule and this is the only thing that talks to a
-//! display server. The split is the ADR's: the rule is pure, runs on every CI
-//! lane, and names no `wayland-client` or `x11rb` type; this module connects,
-//! reads two booleans and a list of interface names, and hands them over as
-//! plain data.
+//! The split is ADR-0011's, and it is the same one in every submodule here: the
+//! rules are pure, run on every CI lane, and name no `wayland-client` or `x11rb`
+//! type; these modules connect, fetch what a rule cannot fetch for itself, and
+//! carry the answer back to the wire.
+//!
+//! | pure rule | evidence / effect |
+//! |---|---|
+//! | [`crate::linux_caps`] | [`x11`], [`wayland`] — two booleans and a list of interface names |
+//! | [`crate::linux_outputs`] | [`outputs`] — each output's name, EDID and rectangle |
+//! | [`crate::linux_overlay`] | [`overlay`] — the override-redirect ARGB windows |
+//! | [`crate::linux_gamma`] | [`gamma`] — the `RandR` CRTC transfer tables |
 //!
 //! Nothing here can run in CI — a GitHub runner has no X server and no
-//! compositor — which is precisely why it is this small. Every decision the
-//! feature makes is on the other side of the boundary.
+//! compositor — which is precisely why each of these is as small as it is. Every
+//! decision the feature makes is on the other side of the boundary.
 
+mod gamma;
 mod outputs;
 mod overlay;
 mod wayland;
 mod x11;
 
+pub use gamma::{
+    GammaDisplay, display_supports_gamma, enumerate_gamma_displays, is_hdr_active, restore_all,
+    restore_identity, set_gamma,
+};
 pub use outputs::enumerate_outputs;
 pub use overlay::X11Dimmer;
 

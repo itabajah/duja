@@ -60,10 +60,8 @@ use duja_core::id::StableDisplayId;
 
 use crate::plan::{OverlayEntry, OverlayOp, apply_ops, plan_transition};
 
-pub use edr::{GammaSupport, display_supports_gamma, gamma_support_from_hdr, is_hdr_active};
-pub use gamma::{
-    GammaDisplay, RestoreReport, enumerate_gamma_displays, restore_all, restore_identity, set_gamma,
-};
+pub use edr::{display_supports_gamma, is_hdr_active};
+pub use gamma::{GammaDisplay, enumerate_gamma_displays, restore_all, restore_identity, set_gamma};
 
 /// Source of unique per-instance ids so several `MacDimmer`s never share the
 /// one main-thread window store.

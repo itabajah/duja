@@ -137,9 +137,13 @@ On **X11** the overlay additionally needs a compositing manager to be running,
 because X itself does not blend a window's alpha channel: it draws the window's
 colours at full strength and lets the compositor do the blending. On a bare window
 manager with no `picom` or equivalent, Duja reports overlay dimming as unavailable
-and uses the XRandR gamma ramp instead, which is then the only software dimming
+and falls back to the XRandR gamma ramp, which is then the only software dimming
 that session has. Hardware control is unaffected. `dujactl doctor` prints which of
 these your session actually offers, so you never have to guess.
+The gamma fallback is opt-in per display and reaches the screen only on X11: on a
+Wayland session the `DISPLAY` variable points at Xwayland, where an XRandR ramp is
+accepted and changes nothing, so Duja refuses it rather than reporting a dim that
+did not happen.
 
 ## Build from source
 

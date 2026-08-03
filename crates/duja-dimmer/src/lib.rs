@@ -29,7 +29,9 @@
 //!   override-redirect ARGB window per display, plus a second thread watching the
 //!   compositing-manager selection. A session with no overlay mechanism reports
 //!   `Unsupported` and the app disables software dimming with hardware control
-//!   intact.
+//!   intact. The opt-in gamma channel is `RandR`'s per-CRTC transfer table, and
+//!   it is refused outright on a Wayland session rather than written to Xwayland,
+//!   where it would be accepted and change nothing.
 //! - On other Unix targets, `StubDimmer` records-and-succeeds so higher layers
 //!   can run their logic unchanged (documented no-op).
 //!
@@ -54,9 +56,17 @@
 //! `restore_all`. macOS is different: the window server restores each process's
 //! gamma automatically when the process exits, so the macOS backend needs **no**
 //! marker machinery and its `restore_all` is a single
-//! `CGDisplayRestoreColorSyncSettings` call. X11 overlay windows are owned by the
-//! connection and the server destroys them when it closes, so they need no marker
-//! either.
+//! `CGDisplayRestoreColorSyncSettings` call.
+//!
+//! Linux splits the two. X11 overlay windows are owned by the connection and the
+//! server destroys them when it closes, so they need no marker. An X11 **gamma
+//! ramp** is the opposite: the server holds each CRTC's table and does not reset
+//! it when the client that wrote it disconnects, which is exactly why `xgamma`
+//! works as a one-shot command. So Linux sits with Windows on crash safety and
+//! needs the same guard — which it does not have yet, deliberately, because
+//! nothing on Linux engages a ramp until the tray does. `restore_all` and
+//! `duja --restore` are the manual rescue in the meantime; see the `linux::gamma`
+//! module docs and `docs/debt.md`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
@@ -89,15 +99,30 @@ pub mod linux_outputs;
 // belongs where every lane can test it.
 pub mod linux_overlay;
 
-// The only thing in this crate that talks to a Linux display server: it connects,
-// reads two booleans and a list of interface names, and hands them to
-// `linux_caps` as plain data. Nothing it does can run in CI, which is exactly why
-// it is this small.
+// The four decisions an XRandR gamma ramp makes that are arithmetic rather than
+// X11: whether the session has a gamma channel at all, which CRTC a token names,
+// the table itself, and whether a ramp means anything here. Unconditional and
+// `x11rb`-free for the same reason as its three neighbours.
+pub mod linux_gamma;
+
+// Everything in this crate that talks to a Linux display server. Nothing it does
+// can run in CI, which is exactly why each of its modules is this small.
 #[cfg(target_os = "linux")]
 mod linux;
 
 #[cfg(target_os = "linux")]
-pub use linux::{LinuxDimmer, X11Dimmer, enumerate_outputs, probe_session};
+pub use linux::{
+    GammaDisplay, LinuxDimmer, X11Dimmer, display_supports_gamma, enumerate_gamma_displays,
+    enumerate_outputs, is_hdr_active, probe_session, restore_all, restore_identity, set_gamma,
+};
+
+// The gamma path's cross-platform vocabulary: the HDR verdict and its safety rule,
+// and the shape of a restore pass's report. Unconditional — the rule is the same
+// everywhere and only the probe behind it is per-platform — so it is tested on all
+// three CI lanes rather than once per backend.
+mod gamma_support;
+
+pub use gamma_support::{GammaSupport, RestoreReport, gamma_support_from_hdr};
 
 // Re-export the cross-platform vocabulary so callers can depend on this crate
 // alone for the dimming surface.
@@ -110,9 +135,9 @@ mod win;
 
 #[cfg(windows)]
 pub use win::{
-    GammaDisplay, GammaRamp, GammaSupport, RestoreReport, ScreenStateGuard, WindowsDimmer,
-    clear_marker, display_supports_gamma, enumerate_gamma_displays, gamma_support_from_hdr,
-    is_hdr_active, mark_dirty, marker_present, restore_all, restore_identity, set_gamma,
+    GammaDisplay, GammaRamp, ScreenStateGuard, WindowsDimmer, clear_marker, display_supports_gamma,
+    enumerate_gamma_displays, is_hdr_active, mark_dirty, marker_present, restore_all,
+    restore_identity, set_gamma,
 };
 
 #[cfg(target_os = "macos")]
@@ -120,9 +145,8 @@ mod mac;
 
 #[cfg(target_os = "macos")]
 pub use mac::{
-    GammaDisplay, GammaSupport, MacDimmer, RestoreReport, display_supports_gamma,
-    enumerate_gamma_displays, gamma_support_from_hdr, is_hdr_active, restore_all, restore_identity,
-    set_gamma,
+    GammaDisplay, MacDimmer, display_supports_gamma, enumerate_gamma_displays, is_hdr_active,
+    restore_all, restore_identity, set_gamma,
 };
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -193,6 +217,12 @@ pub fn min_gamma_factor() -> f32 {
 ///   that is safe on macOS and not on Windows is crash behaviour, not validation:
 ///   the window server restores a process's transfer tables when it exits, so a
 ///   crashed ramp self-heals.)
+/// - **Linux**: `RandR`'s `SetCrtcGamma` validates nothing either — a table of
+///   zeroes is a legal request, which is how `xgamma -gamma 0` blacks a screen —
+///   so [`GAMMA_FLOOR`] is the only floor there is and it is genuinely reachable.
+///   Note this is **not** the macOS situation: an X11 ramp *does* outlive the
+///   process that set it (see the crate docs), so the absence of an OS clamp is
+///   not paired with an OS safety net. `clamp_gamma` is load-bearing here.
 /// - **Other targets**: there is no gamma backend at all, so the value is inert.
 #[cfg(not(windows))]
 #[must_use]
