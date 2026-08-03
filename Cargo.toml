@@ -105,7 +105,16 @@ i-slint-backend-winit = "1.17.1"
 i-slint-backend-testing = "1.17.1"
 # Tray icon (duja-app, P4): the tray + menu on the Slint main thread. Version
 # pinned to the P1 `spike/eventloop` recipe (tray-icon 0.24.1 + slint 1.17.1).
-tray-icon = "0.24.1"
+#
+# `default-features = false` drops `libxdo` and `gtk`, which are the Linux
+# backend's and which Duja has never been able to use: this dependency is
+# declared under `cfg(windows)` and `cfg(target_os = "macos")` only, and P7's
+# Linux tray is `ksni` (ADR-0010). They were still reaching the supply-chain gate,
+# because `deny.toml`'s `[graph]` has no `targets` key and so evaluates every
+# target — which is why eight RUSTSEC ignores for the unmaintained gtk-rs GTK3
+# family lived there. Turning the defaults off removes the whole family from
+# `Cargo.lock` and the ignores with it.
+tray-icon = { version = "0.24.1", default-features = false }
 # Global hotkeys (duja-app, P5): system-wide accelerators registered on the
 # Slint main thread. Version pinned to the P1 `spike/eventloop` recipe
 # (global-hotkey 0.8.0 proven cohabiting with slint + tray-icon, zero idle
