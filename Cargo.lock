@@ -1195,6 +1195,7 @@ dependencies = [
  "core-graphics 0.25.0",
  "duja-core",
  "io-kit-sys",
+ "libc",
  "proptest",
  "thiserror 2.0.19",
  "windows 0.62.2",
@@ -1235,8 +1236,10 @@ dependencies = [
  "core-graphics 0.25.0",
  "duja-core",
  "libc",
+ "tempfile",
  "thiserror 2.0.19",
  "windows 0.58.0",
+ "zbus",
 ]
 
 [[package]]

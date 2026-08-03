@@ -34,6 +34,23 @@ pub enum PanelError {
     /// WMI returned data that did not match the expected shape.
     #[error("WMI returned malformed data: {0}")]
     Malformed(&'static str),
+    /// A Linux backlight operation failed. `context` names the failing step;
+    /// `detail` carries the path and the OS error, because a machine can have
+    /// several backlight devices and "write failed" without one is not
+    /// actionable.
+    ///
+    /// The overwhelmingly common instance is `EACCES` on
+    /// `/sys/class/backlight/<dev>/brightness` where logind is also unavailable:
+    /// the panel is real and readable but nothing may drive it. That is why this
+    /// is a distinct variant rather than a `Malformed` or a `Disconnected` — the
+    /// panel is neither.
+    #[error("backlight failure in {context}: {detail}")]
+    Backlight {
+        /// The step that failed (e.g. `"write brightness"`).
+        context: &'static str,
+        /// The path involved and the underlying error.
+        detail: String,
+    },
     /// A macOS `DisplayServices` call failed. `context` names the failing
     /// symbol; `code` is the raw non-zero return value for diagnosis.
     #[error("DisplayServices failure in {context}: {code}")]

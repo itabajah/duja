@@ -197,11 +197,21 @@ pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<DisplayGeom>) {
     let ddc: Vec<(DiscoveredDisplay, DisplayGeom)> = discover_ddc()
         .into_iter()
         .map(|found| {
+            // All three or none of them: see `DdcGeometry` for why a display that
+            // cannot be placed must not keep its surface token either.
+            let (bounds, gamma_token, surface_token) = match found.geometry {
+                Some(geometry) => (
+                    Some(geometry.bounds),
+                    Some(geometry.gamma_token),
+                    Some(geometry.surface_token),
+                ),
+                None => (None, None, None),
+            };
             let geom = DisplayGeom {
                 id: found.display.id.as_str().to_owned(),
-                bounds: Some(found.bounds),
-                gamma_token: Some(found.gamma_token),
-                surface_token: Some(found.surface_token),
+                bounds,
+                gamma_token,
+                surface_token,
             };
             (found.display, geom)
         })
@@ -272,14 +282,33 @@ fn merge_displays(
     out
 }
 
-/// One display found by the DDC backend: its metadata plus the geometry
-/// [`discover_all`] folds into a [`DisplayGeom`].
+/// One display found by the DDC backend: its metadata plus whatever geometry the
+/// backend could report, which [`discover_all`] folds into a [`DisplayGeom`].
 ///
-/// Named fields rather than a tuple because two of them are same-typed platform
-/// tokens whose meanings are not interchangeable — see [`DisplayGeom`]. On Windows
-/// they are deliberately the same string.
+/// `geometry` is `None` on a backend that cannot say where a display is — Linux,
+/// where sysfs names the monitor and its I2C bus but knows nothing about the
+/// desktop, and a session may have no display server at all. That is the same
+/// "this backend cannot say" contract `duja_panel::PanelGeometry` documents, and
+/// it means exactly what it does there: plan no software dimming for this
+/// display, rather than plan it at the origin.
 struct FoundDdc {
     display: DiscoveredDisplay,
+    geometry: Option<DdcGeometry>,
+}
+
+/// Where a DDC display sits, and the two tokens the software-dimming channels
+/// address it by.
+///
+/// The three travel together, in one `Option`, on purpose: a display whose bounds
+/// are unknown must not keep its surface token either, or it can still anchor a
+/// mirror group it is no longer able to place — and a group anchors on its lowest
+/// id, so it would take the *other* members' overlays down with it. See
+/// [`DisplayGeom`], which carries the same rule for panels.
+///
+/// Named fields rather than a tuple because two of them are same-typed platform
+/// tokens whose meanings are not interchangeable. On Windows they are deliberately
+/// the same string.
+struct DdcGeometry {
     bounds: DisplayBounds,
     gamma_token: String,
     surface_token: String,
@@ -309,12 +338,15 @@ fn discover_ddc() -> Vec<FoundDdc> {
                 };
                 FoundDdc {
                     display,
-                    bounds: d.bounds,
-                    // One GDI device name does both jobs on Windows: it addresses
-                    // the display AND names the framebuffer every mirrored panel
-                    // shares. See `DisplayGeom` for why macOS cannot do the same.
-                    gamma_token: d.gdi_device.clone(),
-                    surface_token: d.gdi_device,
+                    geometry: Some(DdcGeometry {
+                        bounds: d.bounds,
+                        // One GDI device name does both jobs on Windows: it
+                        // addresses the display AND names the framebuffer every
+                        // mirrored panel shares. See `DisplayGeom` for why macOS
+                        // cannot do the same.
+                        gamma_token: d.gdi_device.clone(),
+                        surface_token: d.gdi_device,
+                    }),
                 }
             })
             .collect(),
@@ -355,9 +387,11 @@ fn discover_ddc() -> Vec<FoundDdc> {
                 };
                 FoundDdc {
                     display,
-                    bounds: d.bounds,
-                    gamma_token: d.cg_display_id.to_string(),
-                    surface_token: d.surface_id.to_string(),
+                    geometry: Some(DdcGeometry {
+                        bounds: d.bounds,
+                        gamma_token: d.cg_display_id.to_string(),
+                        surface_token: d.surface_id.to_string(),
+                    }),
                 }
             })
             .collect(),
@@ -365,9 +399,43 @@ fn discover_ddc() -> Vec<FoundDdc> {
     }
 }
 
-/// No DDC backend on this target: `duja-ddc` exposes `enumerate` only on Windows
-/// and macOS, so there is nothing to enumerate (Linux lands in P7).
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+fn discover_ddc() -> Vec<FoundDdc> {
+    // Two differences from the other two arms, both consequences of what sysfs
+    // does and does not know:
+    //
+    // 1. The kind is ALWAYS `ExternalDdc`. The Linux backend skips internal
+    //    connectors at enumeration, because DDC/CI cannot reach an eDP panel at
+    //    all — there is no channel to open. So, as on macOS, there is no
+    //    internal-DDC fallback carrier, and a Linux laptop panel comes from
+    //    `duja-panel`'s backlight or not at all. Unlike macOS that is a property
+    //    of the wire rather than a filtering choice.
+    // 2. `geometry` is ALWAYS `None`. Sysfs answers "which monitors exist and how
+    //    do I talk to them", never "where are they" — that belongs to X11 or
+    //    Wayland, joined to this list on the connector name, and a Linux session
+    //    may have no display server at all. Until that arrives a Linux display is
+    //    hardware-controllable and not software-dimmable, which the planner reads
+    //    straight off the absent geometry.
+    match duja_ddc::enumerate() {
+        Ok(displays) => displays
+            .into_iter()
+            .map(|d| FoundDdc {
+                display: DiscoveredDisplay {
+                    id: d.id.clone(),
+                    kind: DisplayKind::ExternalDdc,
+                    name: d.name.clone(),
+                    capabilities: hardware_brightness_caps(),
+                },
+                geometry: None,
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// No DDC backend on this target: `duja-ddc` exposes `enumerate` only on Windows,
+/// macOS and Linux, so there is nothing to enumerate.
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn discover_ddc() -> Vec<FoundDdc> {
     Vec::new()
 }
@@ -437,8 +505,9 @@ fn panel_geom(display: &DiscoveredDisplay, geometry: Option<&PanelGeometry>) -> 
 /// on every call so a hot-plugged display always gets a freshly-opened handle.
 ///
 /// **The panel backend is tried before DDC** — WMI on Windows, `DisplayServices`
-/// on macOS. A panel the native backlight API can control must be driven through
-/// it, not over DDC-on-eDP; and because `duja_ddc::enumerate` also surfaces
+/// on macOS, the `/sys/class/backlight` device on Linux. A panel the native
+/// backlight API can control must be driven through it, not over DDC-on-eDP;
+/// and because `duja_ddc::enumerate` also surfaces
 /// internal panels on Windows, a DDC-first order could wrongly open a DDC handle
 /// for a WMI-owned panel. An external monitor is never in the panel list (WMI
 /// lists only `WmiMonitorBrightness` internal panels; `DisplayServices` only
@@ -453,12 +522,13 @@ pub(crate) fn open_controller(id: &StableDisplayId) -> Option<Box<dyn Brightness
     open_panel(id).or_else(|| open_ddc(id))
 }
 
-/// Open the DDC display matching `id`. One definition for both DDC platforms: the
-/// `duja-ddc` surface (`enumerate` → `DdcDisplay { id, .. }` → `into_controller`)
-/// and its handle-release-on-drop discipline are identical on Windows and macOS,
-/// and both controllers implement `BrightnessController`, so this body is shared
-/// rather than copied per platform.
-#[cfg(any(windows, target_os = "macos"))]
+/// Open the DDC display matching `id`. One definition for all three DDC
+/// platforms: the `duja-ddc` surface (`enumerate` → `DdcDisplay { id, .. }` →
+/// `into_controller`) and its release-on-drop discipline are identical on
+/// Windows, macOS and Linux — a physical-monitor handle, an I2C service, and a
+/// `/dev/i2c-*` descriptor respectively — and all three controllers implement
+/// `BrightnessController`, so this body is shared rather than copied per platform.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn open_ddc(id: &StableDisplayId) -> Option<Box<dyn BrightnessController>> {
     let displays = duja_ddc::enumerate().ok()?;
     let candidates: Vec<&str> = displays.iter().map(|d| d.id.as_str()).collect();
@@ -469,8 +539,8 @@ fn open_ddc(id: &StableDisplayId) -> Option<Box<dyn BrightnessController>> {
     Some(Box::new(matched.into_controller()))
 }
 
-/// No DDC backend on this target, so nothing can be opened (Linux lands in P7).
-#[cfg(not(any(windows, target_os = "macos")))]
+/// No DDC backend on this target, so nothing can be opened.
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn open_ddc(_id: &StableDisplayId) -> Option<Box<dyn BrightnessController>> {
     None
 }
@@ -483,12 +553,12 @@ fn open_panel(id: &StableDisplayId) -> Option<Box<dyn BrightnessController>> {
     open_panel_controller(&matched)
 }
 
-/// Open a controller for one enumerated panel. One definition for both panel
-/// platforms: `PanelDisplay::open` exists on Windows and macOS with the same
-/// signature shape (`Result<PanelController<_>, PanelError>`), and
-/// `PanelController` is generic over its transport, so the WMI and
-/// `DisplayServices` controllers box identically.
-#[cfg(any(windows, target_os = "macos"))]
+/// Open a controller for one enumerated panel. One definition for all three panel
+/// platforms: `PanelDisplay::open` exists on Windows, macOS and Linux with the
+/// same signature shape (`Result<PanelController<_>, PanelError>`), and
+/// `PanelController` is generic over its transport, so the WMI, `DisplayServices`
+/// and backlight controllers box identically.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn open_panel_controller(
     panel: &duja_panel::PanelDisplay,
 ) -> Option<Box<dyn BrightnessController>> {
@@ -499,8 +569,8 @@ fn open_panel_controller(
 }
 
 /// No panel backend on this target: `duja-panel` enumerates nothing there, so
-/// this is unreachable in practice (Linux lands in P7).
-#[cfg(not(any(windows, target_os = "macos")))]
+/// this is unreachable in practice.
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn open_panel_controller(
     _panel: &duja_panel::PanelDisplay,
 ) -> Option<Box<dyn BrightnessController>> {

@@ -102,11 +102,12 @@ The public key and full instructions live in [SECURITY.md](SECURITY.md).
 
 | Capability | Windows | macOS | Linux |
 |---|---|---|---|
-| External DDC/CI | ✅ | 🧪 experimental¹ | ⏳ planned (X11/Wayland²) |
-| Internal panel | ✅ | 🧪 | ⏳ |
+| External DDC/CI | ✅ | 🧪 experimental¹ | 🧪 experimental² |
+| Internal panel | ✅ | 🧪 | 🧪 |
 | Overlay dimming | ✅ | 🧪 | ⏳ (probed per session³) |
 | Tray + flyout | ✅ | 🧪 | ⏳ |
-| Hotkeys, input switch, `dujactl` | ✅ | 🧪 | ⏳ |
+| Hotkeys, input switch | ✅ | 🧪 | ⏳ |
+| `dujactl` | ✅ | 🧪 | 🧪 |
 
 ✅ shipping · 🧪 written and CI-tested, **never run on real hardware** · ⏳ not written
 
@@ -119,8 +120,12 @@ implemented". For macOS, the answer to "can I install it" is still no.
 ¹ Apple-Silicon DDC uses private APIs (same approach as MonitorControl / Lunar).
 On macOS `dujactl` lives inside `Duja.app/Contents/MacOS/`, so it is not on
 `PATH` without a symlink.
-² Will require the `i2c-dev` module and a udev rule; the Linux DDC
-backend is not written yet, so nothing checks for them today. ³ Software dimming on
+² Linux DDC/CI needs the `i2c-dev` kernel module loaded and read/write access to
+`/dev/i2c-*`. That module ships no udev rule, so on a stock system those nodes are
+root-only and no `i2c` group exists: installing `i2c-tools` (or `ddcutil`) adds the
+rule and the group together, and you then join it. Without both steps external
+monitors do not appear at all; the built-in panel is unaffected.
+³ Software dimming on
 Wayland needs the `wlr-layer-shell` and `wlr-gamma-control` protocols. Duja asks the
 session which of them it offers, and for gamma whether it can actually take it: a
 compositor can advertise that one and still refuse, for instance when `wlsunset`

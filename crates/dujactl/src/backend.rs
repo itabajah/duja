@@ -224,22 +224,25 @@ fn ddc_is_internal(d: &duja_ddc::DdcDisplay) -> bool {
     d.is_internal
 }
 
-/// Whether this DDC display is a laptop's embedded panel. macOS arm: always
-/// `false` — that backend filters built-ins out at enumeration
-/// (`CGDisplayIsBuiltin`) and its `DdcDisplay` carries no such field, so every
-/// entry it yields is an external monitor.
-#[cfg(target_os = "macos")]
+/// Whether this DDC display is a laptop's embedded panel. macOS and Linux arm:
+/// always `false`, and for the same *shape* of reason though not the same one.
+/// macOS filters built-ins out at enumeration (`CGDisplayIsBuiltin`); Linux skips
+/// internal DRM connectors because DDC/CI cannot reach an eDP panel at all, so
+/// there is no channel to open even where the driver publishes an adapter.
+/// Neither backend's `DdcDisplay` carries such a field, so every entry either
+/// yields is an external monitor.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn ddc_is_internal(_d: &duja_ddc::DdcDisplay) -> bool {
     false
 }
 
-/// Enumerate the DDC backend's displays. One body for both DDC platforms — the
-/// only divergence the backends' field difference forces is confined to
+/// Enumerate the DDC backend's displays. One body for all three DDC platforms —
+/// the only divergence the backends' field difference forces is confined to
 /// [`ddc_is_internal`], and the classification itself to [`map_ddc_display`]. Each
 /// `DdcDisplay` is dropped at the end of the closure, releasing its OS handle
 /// promptly: a physical-monitor `HANDLE` on Windows, an I2C service handle on
-/// macOS.
-#[cfg(any(windows, target_os = "macos"))]
+/// macOS, a `/dev/i2c-*` descriptor on Linux.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn discover_ddc() -> Vec<CtlDisplay> {
     match duja_ddc::enumerate() {
         Ok(displays) => displays
@@ -250,9 +253,9 @@ fn discover_ddc() -> Vec<CtlDisplay> {
     }
 }
 
-/// No DDC backend on this target: `duja-ddc` exposes `enumerate` only on Windows
-/// and macOS (Linux lands in P7).
-#[cfg(not(any(windows, target_os = "macos")))]
+/// No DDC backend on this target: `duja-ddc` exposes `enumerate` only on Windows,
+/// macOS and Linux.
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn discover_ddc() -> Vec<CtlDisplay> {
     Vec::new()
 }
@@ -278,8 +281,9 @@ fn discover_panel() -> Vec<CtlDisplay> {
 /// `id`, or `None` if no present display matches.
 ///
 /// **The panel backend is tried before DDC** — WMI on Windows, `DisplayServices`
-/// on macOS — mirroring the app's `open_controller`. A panel the native backlight
-/// API can drive must be driven through it, not over DDC-on-eDP: on Windows
+/// on macOS, the `/sys/class/backlight` device on Linux — mirroring the app's
+/// `open_controller`. A panel the native backlight API can drive must be driven
+/// through it, not over DDC-on-eDP: on Windows
 /// `duja_ddc::enumerate` also surfaces the built-in panel, so a DDC-first order
 /// would open a DDC handle for a panel WMI owns and write VCP `0x10` at an
 /// embedded display that mostly ignores it. An external monitor is never in the
@@ -287,16 +291,17 @@ fn discover_panel() -> Vec<CtlDisplay> {
 /// `DisplayServices` only built-in ones), so [`open_panel`] returns `None` for it
 /// and it falls through to [`open_ddc`]. A fallback internal panel the native
 /// backend cannot see likewise falls through and is re-matched by id there. On
-/// macOS the two lists cannot overlap at all (see [`merge_displays`]), so the
-/// order there just means "built-in panel first, external monitors second".
+/// macOS and Linux the two lists cannot overlap at all (see [`merge_displays`]),
+/// so the order there just means "built-in panel first, external monitors
+/// second".
 pub fn open(id: &str) -> Option<Box<dyn BrightnessController>> {
     open_panel(id).or_else(|| open_ddc(id))
 }
 
-/// Open the DDC display matching `id`. Shared by both DDC platforms: the
+/// Open the DDC display matching `id`. Shared by all three DDC platforms: the
 /// `enumerate` → `into_controller` surface and the drop-releases-the-handle
-/// discipline are identical on Windows and macOS.
-#[cfg(any(windows, target_os = "macos"))]
+/// discipline are identical on Windows, macOS and Linux.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn open_ddc(id: &str) -> Option<Box<dyn BrightnessController>> {
     let displays = duja_ddc::enumerate().ok()?;
     let candidates: Vec<&str> = displays.iter().map(|d| d.id.as_str()).collect();
@@ -305,8 +310,8 @@ fn open_ddc(id: &str) -> Option<Box<dyn BrightnessController>> {
     Some(Box::new(matched.into_controller()))
 }
 
-/// No DDC backend on this target, so nothing can be opened (Linux lands in P7).
-#[cfg(not(any(windows, target_os = "macos")))]
+/// No DDC backend on this target, so nothing can be opened.
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn open_ddc(_id: &str) -> Option<Box<dyn BrightnessController>> {
     None
 }
@@ -321,11 +326,12 @@ fn open_panel(id: &str) -> Option<Box<dyn BrightnessController>> {
     open_panel_controller(&matched)
 }
 
-/// Open a controller for one enumerated panel. Shared by both panel platforms:
-/// `PanelDisplay::open` exists on Windows (WMI) and macOS (`DisplayServices`) with
-/// the same signature shape, and `PanelController` is generic over its transport,
-/// so both box identically.
-#[cfg(any(windows, target_os = "macos"))]
+/// Open a controller for one enumerated panel. Shared by all three panel
+/// platforms: `PanelDisplay::open` exists on Windows (WMI), macOS
+/// (`DisplayServices`) and Linux (the backlight device) with the same signature
+/// shape, and `PanelController` is generic over its transport, so all three box
+/// identically.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn open_panel_controller(
     panel: &duja_panel::PanelDisplay,
 ) -> Option<Box<dyn BrightnessController>> {
@@ -336,8 +342,8 @@ fn open_panel_controller(
 }
 
 /// No panel backend on this target: `duja-panel` enumerates nothing there, so
-/// this is unreachable in practice (Linux lands in P7).
-#[cfg(not(any(windows, target_os = "macos")))]
+/// this is unreachable in practice.
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn open_panel_controller(
     _panel: &duja_panel::PanelDisplay,
 ) -> Option<Box<dyn BrightnessController>> {
