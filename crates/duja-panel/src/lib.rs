@@ -76,6 +76,11 @@ pub use display_services::{DisplayServicesApi, DisplayServicesTransport, RealDis
 #[cfg(target_os = "linux")]
 pub use linux::LinuxPanelTransport;
 
+/// The DRM connector behind the built-in panel, for the caller that joins this
+/// backend's panel to a display server's rectangle. See [`linux::PanelConnector`].
+#[cfg(target_os = "linux")]
+pub use linux::{PanelConnector, panel_connector};
+
 use duja_core::dimmer::DisplayBounds;
 use duja_core::id::StableDisplayId;
 

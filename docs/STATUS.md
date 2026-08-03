@@ -1477,12 +1477,35 @@ takes an injected filesystem root, so its rules are unit-tested on all three CI
 lanes rather than on the one machine that has a `/sys`. What is genuinely
 Linux-only is one ioctl and one D-Bus call.
 
-**Not yet possible on Linux: software dimming.** Both backends report no
-geometry, honestly — sysfs does not know where the desktop puts a monitor — so
-the planner plans no overlay and the continuum stops at the hardware floor. Wave
-4 supplies the rectangle from the display server and joins it on the DRM
-connector name, which X11 RandR and Wayland `xdg_output` spell identically on
-the modern stack (`debt.md` records the two drivers where they do not).
+**Wave 2 left both backends reporting no geometry**, honestly — sysfs does not
+know where the desktop puts a monitor — so the planner planned no overlay and the
+continuum stopped at the hardware floor. **Wave 4 supplies the rectangle.** The
+display server enumerates its outputs (X11 `RandR` output plus CRTC rectangle;
+Wayland `wl_output` name plus `xdg_output` logical geometry) and every connector
+is joined to one of them.
+
+The join is **by name first and EDID second**, and the second half is the point.
+Wave 2 recorded that connector-name equality holds for the modesetting DDX and
+DRM-backed Wayland compositors and is reported not to hold for the NVIDIA
+proprietary X11 driver (its own indexing: `DP-0`) or the legacy
+`xf86-video-intel` DDX (`eDP1`, no hyphen) — and that wave 4 owed it a fallback.
+The EDID is that fallback: both sides read it off the same monitor and neither
+invents it. Only the base block is compared, because sysfs publishes the whole
+blob and an X11 driver may publish only the first 128 bytes.
+
+**Ambiguity refuses rather than guesses.** Two identical monitors with no serial
+number are byte-identical to both sides, so neither is placed: an overlay on the
+wrong screen is a silent wrong answer, where an unplaced display is the state
+Linux was already in. Claiming is one-to-one, which also makes the mixed case
+work — one monitor named consistently claims its output by name and leaves its
+twin unambiguous. Wayland publishes no EDID at all (there is no protocol for it),
+so a Wayland output joins by name or not at all.
+
+Both lists are joined **together, from one enumeration**: the monitors and the
+built-in panel draw from one pool, so they cannot be handed the same output, and
+a display event costs one connection rather than two. The rule is pure — the
+outputs are an argument — so it runs on all three lanes; only the enumeration
+itself is Linux-only.
 
 **Wave 4 landed ADR-0011's capability probe first, on purpose.** The rule that
 decides what a Linux session can dim is pure — environment and Wayland registry

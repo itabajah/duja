@@ -1158,6 +1158,7 @@ dependencies = [
  "proptest",
  "tracing",
  "wayland-client",
+ "wayland-protocols",
  "windows 0.62.2",
  "x11rb",
 ]

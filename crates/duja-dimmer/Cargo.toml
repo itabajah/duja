@@ -38,6 +38,7 @@ windows = { version = "0.62", default-features = false, features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { workspace = true }
 wayland-client = { workspace = true }
+wayland-protocols = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS overlay backend: click-through NSWindow overlays marshalled onto the main
