@@ -46,8 +46,9 @@ compositor supports what today:
 The capabilities Duja actually needs are directly observable at runtime:
 
 - **X11** — an override-redirect, input-transparent window (the overlay) and
-  XRandR's per-CRTC gamma. Availability is "did the X connection and the extension
-  query succeed".
+  XRandR's per-CRTC gamma. The gamma answer is "did the extension query succeed".
+  The overlay answer is *not* just "did the connection succeed" — see the
+  amendment below.
 - **Wayland** — the overlay needs `zwlr_layer_shell_v1`, and the gamma path needs
   `zwlr_gamma_control_manager_v1`. Both are **advertised in the `wl_registry`
   globals**, which every client enumerates at connect time, so a compositor that
@@ -84,8 +85,9 @@ do:
    when both are present, and treating a failed connect as "not that one".
 2. On Wayland, bind the registry and record whether `zwlr_layer_shell_v1` and
    `zwlr_gamma_control_manager_v1` are present, independently of each other.
-3. On X11, record whether the connection succeeded and whether the RandR extension
-   answered.
+3. On X11, record whether the connection succeeded, whether the RandR extension
+   answered, and whether a compositing manager owns `_NET_WM_CM_S<n>` (amendment
+   below).
 4. Report each of overlay and gamma as available or not, with the reason —
    overlay for the session, **gamma per output**, because that is the grain the
    protocol grants and refuses it at.
@@ -128,6 +130,77 @@ rather than a special case bolted on beside it where no lane would see it. Both
 precedents already obey this without saying so (`mac_events` takes a raw `u32`
 reconfigure flag, not a `CGDisplayChangeSummaryFlags`), which is why it is here
 rather than rediscovered.
+
+## Amendment, 2026-08-03: on X11 the overlay needs a compositing manager
+
+The Context above said an X11 overlay "needs no extension" and that a successful
+connection was the whole requirement. **That was wrong**, and wrong in the
+direction that breaks a screen rather than the direction that refuses one. It was
+found while building the surface this ADR describes, before any of it shipped.
+
+X11 has no per-window translucency. An ARGB32 window's alpha channel means nothing
+to the X server: it draws the window's **colour bytes, at full coverage, whatever
+they are**. The channel is honoured only by a **compositing manager**, which
+redirects the window to an off-screen pixmap and blends that. Duja's overlay is
+filled black, so on a bare X session every alpha from 1% to 100% paints the same
+thing: a black rectangle over the whole monitor, the first time the user drags a
+slider below the hardware floor, with Duja's own UI behind it and the only exit a
+keyboard they can no longer see. (Premultiplied or straight alpha makes no
+difference — black is `(0, 0, 0)` either way — and a lighter fill would give an
+opaque grey screen, which is not an improvement.)
+
+Nothing else in X rescues it. `_NET_WM_WINDOW_OPACITY` is a hint *for* a
+compositing manager and inert without one. XRender can blend, but not against
+what is behind a window that is already mapped. Compositing the screen directly
+means becoming the compositing manager, which a brightness slider must not do.
+Only an XShape stipple dims without one, and that is screen-door transparency: a
+rectangle list the size of the screen, quantised levels, and a visible pattern.
+
+So the X11 overlay arm asks a second question: does a compositing manager own the
+`_NET_WM_CM_S<n>` selection. Every compositing manager takes it — the
+window-manager spec requires it, which is why `gdk_screen_is_composited` and Qt's
+`isCompositingManagerRunning` ask exactly this — and the answer cannot go stale,
+because the X server clears a selection when its owner disconnects. `n` is the X
+screen from the connection, not a monitor, and not hard-coded.
+
+Two things about this are worth stating, because they are why it fits the ADR
+rather than sitting beside it:
+
+- **It is still capability, not identity.** The question is "is something blending
+  windows on this screen", answered by the X server about the live session. No
+  compositor is named, and one installed later starts working with no release.
+- **It only refuses the overlay.** A bare X session with RandR keeps its gamma
+  ramp, which is then the only software dimming it has, and hardware control is
+  untouched. `dujactl doctor` prints the reason, and the flyout discloses it
+  through the `#103` caption shape the consequences below already name.
+
+`Unavailable::NoCompositor` is an X11-only state and the rule's Wayland arm never
+consults the flag: a Wayland compositor *is* the compositing manager, so there is
+no session in which layer-shell exists and blending does not.
+
+### It is necessary and not sufficient, and the wave that builds the window owes two things
+
+Step 5 above gives gamma a downgrade path — `refuse_gamma`, called on a `failed`
+event. **The compositor bit has no counterpart, and must gain one.** Two gaps, both
+recorded in `docs/debt.md` rather than left implied:
+
+1. **A compositing manager that stops mid-session.** `picom` crashes or is
+   restarted and an already-mapped overlay becomes the black rectangle this
+   amendment exists to prevent. Nothing re-resolves the report today — the Linux
+   event pump delivers kernel uevents, suspend and unlock, and the start or death
+   of an X client produces none of them. The overlay wave must select for the
+   selection itself (`XFixesSelectSelectionInput` on `_NET_WM_CM_S<n>`) and tear
+   down on an owner change, which is the exact analogue of `refuse_gamma`. Until
+   then the check is a startup answer, and this ADR should not be read as claiming
+   otherwise.
+2. **Fullscreen unredirection.** Every compositing manager unredirects a
+   fullscreen window as a performance optimisation, and an always-on-top
+   fullscreen window is precisely what an overlay is. An alpha channel below 1
+   normally disqualifies a window from it, so this is a hazard rather than a
+   certainty — but the EWMH way to be sure is `_NET_WM_BYPASS_COMPOSITOR = 2`
+   ("never bypass"), and the overlay must set it. Without it the screen can go
+   black *with* a compositing manager running and the selection owned, which is
+   the same failure this amendment is about, reached by a different route.
 
 ## Consequences
 

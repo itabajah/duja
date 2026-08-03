@@ -133,6 +133,13 @@ already holds it. The answer is per session rather than by desktop name (ADR-001
 so this is not a list of supported compositors. GNOME's Mutter is widely
 reported to offer neither, and where that holds software dimming reports itself
 unavailable; hardware control works either way.
+On **X11** the overlay additionally needs a compositing manager to be running,
+because X itself does not blend a window's alpha channel: it draws the window's
+colours at full strength and lets the compositor do the blending. On a bare window
+manager with no `picom` or equivalent, Duja reports overlay dimming as unavailable
+and uses the XRandR gamma ramp instead, which is then the only software dimming
+that session has. Hardware control is unaffected. `dujactl doctor` prints which of
+these your session actually offers, so you never have to guess.
 
 ## Build from source
 

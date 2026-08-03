@@ -302,6 +302,31 @@ mod tests {
         assert!(text.contains("another client holds it"), "{text}");
     }
 
+    /// The X11 case a user is most likely to hit and least likely to diagnose:
+    /// a bare window manager with no compositing manager. The overlay is refused
+    /// and the ramp still works, so the report must show the two arms disagreeing
+    /// rather than collapsing to "software dimming unavailable".
+    #[test]
+    fn an_uncomposited_x11_session_reports_the_two_arms_separately() {
+        let report = LinuxReport {
+            connectors: vec![],
+            dimming: DimmingRow {
+                transport: "x11".to_owned(),
+                // The reason comes from the probe's own `Display`, not a literal:
+                // a copy would keep this test green after the rule was reverted,
+                // and green while asserting text the product no longer emits.
+                overlay: Some(duja_dimmer::linux_caps::Unavailable::NoCompositor.to_string()),
+                gamma: None,
+            },
+        };
+
+        let text = joined(&report);
+
+        assert!(text.contains("overlay dimming: unavailable"), "{text}");
+        assert!(text.contains("compositing manager"), "{text}");
+        assert!(text.contains("gamma dimming: available"), "{text}");
+    }
+
     #[test]
     fn available_dimming_says_so_without_a_reason() {
         let report = LinuxReport {

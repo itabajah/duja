@@ -27,5 +27,14 @@ duja-panel.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 duja-dimmer.workspace = true
 
+[dev-dependencies]
+# The same crate again, unconditionally, and only for tests. `linux_report` is
+# pure and compiles on all three lanes, so its tests must be able to name the
+# reason strings the probe actually emits rather than copy them as literals - a
+# copy stays green after the rule it pins has been reverted. A dev-dependency
+# gets that on every lane without putting the dimmer in the shipped CLI's graph
+# on Windows or macOS, which is what the target section above is for.
+duja-dimmer.workspace = true
+
 [lints]
 workspace = true
