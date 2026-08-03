@@ -51,14 +51,14 @@ pub fn probe_session() -> SurfaceCaps {
             )
         }
         Transport::X11 => {
-            let (connected, randr, compositor) = x11::probe();
+            let answered = x11::probe();
             resolve(
                 env,
                 &Probe {
-                    connected,
+                    connected: answered.connected,
                     globals: &[],
-                    randr,
-                    compositor,
+                    randr: answered.randr,
+                    compositor: answered.compositor,
                 },
             )
         }

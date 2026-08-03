@@ -40,21 +40,39 @@
 //! the direction that breaks a screen rather than the direction that refuses one.
 //!
 //! X11 has no per-window translucency of its own. An ARGB32 window's alpha
-//! channel means nothing to the X server, which copies the window's contents to
-//! the screen as they are; the channel is honoured only by a **compositing
-//! manager** reading the window's off-screen pixmap and blending it. Duja's
-//! overlay is premultiplied black, so its colour bytes are zero at *every* alpha
-//! — 10% and 90% are the same pixels, and the difference between them lives
-//! entirely in a byte only a compositor reads. Map that window with no compositor
-//! running and the screen goes **solid black** at the first hint of dimming, with
-//! Duja's own UI behind it and the only exit a keyboard the user cannot see.
+//! channel means nothing to the X server: it draws the window's **colour bytes,
+//! at full coverage, whatever they are**. The channel is honoured only by a
+//! **compositing manager**, which redirects the window to an off-screen pixmap
+//! and blends that. Duja's overlay is filled black, so with no compositor running
+//! every alpha from 1% to 100% paints the same thing — a black rectangle over the
+//! whole monitor, with Duja's own UI behind it and the only exit a keyboard the
+//! user can no longer see. (Premultiplied or straight alpha makes no difference;
+//! black is `(0, 0, 0)` either way. A lighter fill would give an opaque grey
+//! screen instead, which is not an improvement.)
 //!
 //! So the X11 overlay arm asks a second question: does a compositing manager own
-//! the `_NET_WM_CM_S<n>` selection. That is the EWMH convention every compositor
-//! follows to announce itself, and it is a live answer — a user who kills
-//! `picom` mid-session stops being able to dim in software, which is exactly the
-//! truth to report. It is also the same shape as the gamma arm: a capability that
-//! presence alone cannot settle.
+//! the `_NET_WM_CM_S<n>` selection. Every compositing manager takes it — the
+//! window-manager spec requires it, which is why `gdk_screen_is_composited` and
+//! Qt's `isCompositingManagerRunning` ask the same question — and the X server
+//! clears a selection when its owner disconnects, so the answer cannot go stale.
+//!
+//! **This is necessary, not sufficient, and neither half is settled at startup.**
+//! Two things the check does not cover, both owed to the wave that builds the
+//! window:
+//!
+//! - A compositing manager that **stops** mid-session (`picom` crashes, or the
+//!   user restarts it) turns an already-mapped overlay into that black rectangle.
+//!   Nothing re-resolves the report today, because there is no overlay to protect
+//!   yet; when there is, it has to watch the selection —
+//!   `XFixesSelectSelectionInput` on `_NET_WM_CM_S<n>` — and tear down on an owner
+//!   change, which is the exact analogue of [`SurfaceCaps::refuse_gamma`].
+//! - Every compositing manager **unredirects** a fullscreen window as a
+//!   performance optimisation, and an always-on-top fullscreen window is precisely
+//!   what an overlay is. A window with an alpha channel below 1 normally
+//!   disqualifies itself, but the EWMH way to be sure is
+//!   `_NET_WM_BYPASS_COMPOSITOR = 2`, and the overlay must set it.
+//!
+//! `docs/debt.md` carries both.
 
 use std::fmt;
 
@@ -64,7 +82,17 @@ pub enum Transport {
     /// A Wayland compositor.
     Wayland,
     /// An X server (including Xwayland, which Duja neither detects nor needs to:
-    /// an X client on Xwayland gets X11's mechanisms and they work).
+    /// an X client on Xwayland gets X11's mechanisms and mostly they work — with
+    /// the caveat below).
+    ///
+    /// The caveat is the compositor check. Under Xwayland the Wayland compositor
+    /// blends X windows whether or not anything owns `_NET_WM_CM_S<n>`, so a
+    /// session that reaches this arm with `WAYLAND_DISPLAY` unset — a systemd user
+    /// unit, a sanitised environment — could be told its overlay is unavailable
+    /// when it would in fact work. wlroots, Mutter and Weston all have their X
+    /// window manager claim the selection, so this is a small risk rather than a
+    /// live one, and it errs toward refusing a working overlay rather than
+    /// blacking out a screen.
     X11,
     /// Neither. A TTY, a container, a service.
     None,
@@ -93,7 +121,8 @@ pub enum Unavailable {
         extension: &'static str,
     },
     /// X11 only: no compositing manager owns `_NET_WM_CM_S<n>`, so the X server
-    /// would draw the overlay's alpha channel as opaque black.
+    /// would draw the overlay's colour bytes at full coverage and ignore its
+    /// alpha.
     ///
     /// Not a Wayland state. A Wayland compositor *is* the compositing manager, so
     /// there is no session in which layer-shell exists and blending does not.
@@ -175,14 +204,24 @@ pub const GAMMA_CONTROL: &str = "zwlr_gamma_control_manager_v1";
 /// The X extension a gamma ramp needs.
 pub const RANDR: &str = "RANDR";
 
-/// The selection a compositing manager owns to announce itself, less the screen
-/// number the caller appends.
+/// The selection a compositing manager owns to announce itself on X screen
+/// `screen`.
 ///
-/// EWMH names it `_NET_WM_CM_Sn` for screen `n`; on the overwhelmingly common
-/// single-screen session that is `_NET_WM_CM_S0`, but the number is the *X screen*
-/// (a separate root window, as in `DISPLAY=:0.1`), not a monitor, so it must come
-/// from the connection rather than be hard-coded.
-pub const COMPOSITOR_SELECTION_PREFIX: &str = "_NET_WM_CM_S";
+/// The spec names it `_NET_WM_CM_Sn`; on the overwhelmingly common single-screen
+/// session that is `_NET_WM_CM_S0`, but the number is the *X screen* — a separate
+/// root window, as in `DISPLAY=:0.1` — and not a monitor, so it comes from the
+/// connection rather than being hard-coded.
+///
+/// This lives here, on the pure side, rather than beside the one call that uses
+/// it. It is string construction and needs no display server, and it is the only
+/// part of the compositor check any test can reach: a typo in the atom name
+/// compiles on all three lanes, passes every test, and reports "no compositing
+/// manager" on **every** X11 session forever, which is a permanently disabled
+/// overlay on a platform this project has no machine to notice it on.
+#[must_use]
+pub fn compositor_selection(screen: usize) -> String {
+    format!("_NET_WM_CM_S{screen}")
+}
 
 /// The environment variables that name a display server.
 ///
@@ -579,17 +618,56 @@ mod tests {
         assert_eq!(caps.overlay, Capability::Available);
     }
 
-    /// The reason is printed by `dujactl doctor`, so it has to say what to do
-    /// about it without naming a compositor (ADR-0011).
+    /// The reason is printed by `dujactl doctor`, so it has to name the missing
+    /// thing — not a specific one of them (ADR-0011), and not a symptom the user
+    /// cannot map back to a cause.
     #[test]
-    fn the_no_compositor_reason_explains_itself() {
+    fn the_no_compositor_reason_names_the_missing_thing() {
         let text = Unavailable::NoCompositor.to_string();
 
         assert!(text.contains("compositing manager"), "{text}");
         assert!(text.contains("blend"), "{text}");
-        for name in ["picom", "xcompmgr", "compton", "mutter", "kwin"] {
+        for name in ["picom", "xcompmgr", "compton"] {
             assert!(!text.to_ascii_lowercase().contains(name), "{text}");
         }
+    }
+
+    /// The atom name is the whole compositor check, and it is the only part of it
+    /// a test on any lane can reach. A typo here reports "no compositing manager"
+    /// on every X11 session forever, and Duja has no Linux machine to notice on.
+    #[test]
+    fn the_compositor_selection_is_the_spec_atom_for_the_screen() {
+        assert_eq!(compositor_selection(0), "_NET_WM_CM_S0");
+        // Not always zero: the number is the X screen, as in `DISPLAY=:0.1`.
+        assert_eq!(compositor_selection(1), "_NET_WM_CM_S1");
+        assert_eq!(compositor_selection(12), "_NET_WM_CM_S12");
+    }
+
+    /// An X server that will not talk to us reports `ConnectFailed` for both
+    /// arms, not the two more specific reasons. Those would be answers to
+    /// questions that were never asked, and they would send the user to install a
+    /// compositor for a display server they cannot reach.
+    #[test]
+    fn a_failed_x11_connection_reports_neither_specific_reason() {
+        let caps = resolve(
+            env(None, Some(":0")),
+            &Probe {
+                connected: false,
+                globals: &[],
+                randr: false,
+                compositor: false,
+            },
+        );
+
+        assert_eq!(caps.transport, Transport::X11);
+        assert_eq!(
+            caps.overlay,
+            Capability::Unavailable(Unavailable::ConnectFailed)
+        );
+        assert_eq!(
+            caps.gamma,
+            Capability::Unavailable(Unavailable::ConnectFailed)
+        );
     }
 
     /// ADR-0011 step 5. A session running `wlsunset` advertises
@@ -636,19 +714,43 @@ mod tests {
         );
     }
 
-    /// Every reason a user can see must say something they can act on, and none
-    /// of them may name a desktop — that is the whole decision.
-    #[test]
-    fn every_reason_is_printable_and_names_no_compositor() {
-        let reasons = [
+    /// One sample of every [`Unavailable`] variant.
+    ///
+    /// Built from a `match` on a value rather than written out as a list, so a
+    /// variant added later is a **compile error** here instead of a silent
+    /// omission from the invariant below. The previous form was a bare array, and
+    /// `NoCompositor` was added without anyone noticing it was missing.
+    fn every_reason() -> Vec<Unavailable> {
+        let all = [
             Unavailable::NoDisplayServer,
             Unavailable::ConnectFailed,
             Unavailable::ProtocolAbsent {
                 interface: LAYER_SHELL,
             },
             Unavailable::ExtensionAbsent { extension: RANDR },
+            Unavailable::NoCompositor,
             Unavailable::Refused,
         ];
+        for reason in &all {
+            // Exhaustive by construction: no wildcard arm, so a new variant
+            // fails to compile until it is added to `all` above.
+            match reason {
+                Unavailable::NoDisplayServer
+                | Unavailable::ConnectFailed
+                | Unavailable::ProtocolAbsent { .. }
+                | Unavailable::ExtensionAbsent { .. }
+                | Unavailable::NoCompositor
+                | Unavailable::Refused => {}
+            }
+        }
+        all.to_vec()
+    }
+
+    /// Every reason a user can see must say something they can act on, and none
+    /// of them may name a desktop — that is the whole decision.
+    #[test]
+    fn every_reason_is_printable_and_names_no_compositor() {
+        let reasons = every_reason();
         for reason in reasons {
             let text = reason.to_string();
             assert!(!text.is_empty(), "{reason:?}");

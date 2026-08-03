@@ -1508,16 +1508,28 @@ string is checked for the absence of `gnome`, `kde`, `mutter`, `kwin`, `sway` an
 **Then building the surface found a defect in the rule, and it was the dangerous
 kind.** ADR-0011 as first written said an X11 overlay needs no extension and that
 a successful connection was the whole requirement. X11 has no per-window
-translucency: the server copies a window's contents to the screen and ignores the
-alpha channel, which only a **compositing manager** reads and blends. Duja's
-overlay is premultiplied black, so its colour bytes are zero at every alpha — 10%
-and 90% are the same pixels — and on a bare X session the first drag below the
-hardware floor would have turned the monitor solid black with no visible way back.
-The overlay arm now also asks whether a compositing manager owns
-`_NET_WM_CM_S<n>`, which keeps it a capability question about the live session
-rather than an identity one, and leaves the RandR gamma ramp available on exactly
-the sessions that have no compositor. The ADR carries the amendment and the QA
-checklist runs that case **before** the happy path.
+translucency: the server draws a window's colour bytes at full coverage and
+ignores its alpha, which only a **compositing manager** reads and blends. Duja's
+overlay is black, so on a bare X session every alpha paints the same thing, and
+the first drag below the hardware floor would have turned the monitor solid black
+with no visible way back. The overlay arm now also asks whether a compositing
+manager owns `_NET_WM_CM_S<n>` — the selection the window-manager spec requires
+every one of them to take, which is what `gdk_screen_is_composited` asks too. That
+keeps it a capability question about the live session rather than an identity one,
+and leaves the RandR gamma ramp available on exactly the sessions that have no
+compositor.
+
+The review of that fix then established that the check is **necessary and not
+sufficient**, and both gaps belong to the wave that builds the window. A
+compositing manager that stops mid-session leaves an already-mapped overlay
+unredirected, and nothing re-resolves the report — the event pump carries kernel
+uevents and suspend, not the death of an X client — so the overlay has to watch
+the selection itself and tear down on an owner change, which is the exact analogue
+of `refuse_gamma`. And every compositing manager unredirects fullscreen windows,
+which an always-on-top overlay is, so it must carry
+`_NET_WM_BYPASS_COMPOSITOR = 2` to forbid that. The ADR amendment states both,
+`debt.md` carries both, and the QA checklist runs the black-screen cases **before**
+the happy path.
 
 **Wave 3 gave Linux a real event pump, an autostart entry and a browser.** Display
 hot-plug comes from the kernel's `NETLINK_KOBJECT_UEVENT` socket directly, with no

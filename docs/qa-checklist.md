@@ -58,15 +58,27 @@ with the phases; keep entries as observable behaviors, not implementation.
       black the screen out. Software overlay dimming reports itself unavailable
       naming the compositing manager as the reason, gamma still works if RandR is
       there, and hardware control is untouched.
-      <!-- X ignores a window's alpha channel; only a compositing manager blends it.
-           Duja's overlay is premultiplied black, so with no compositor every alpha
-           renders as opaque black over the whole monitor. This is the one Linux
-           check whose failure mode is unrecoverable-looking rather than merely
-           broken, so run it before the happy path, not after. -->
+      <!-- X ignores a window's alpha channel and draws its colour bytes at full
+           coverage; only a compositing manager blends. Duja's overlay is black, so
+           with no compositor every alpha renders as opaque black over the whole
+           monitor. This is the one Linux check whose failure mode is
+           unrecoverable-looking rather than merely broken, so run it before the
+           happy path, not after. -->
+- [ ] **Kill the compositing manager while Duja is dimming in software** on X11.
+      The overlay must come down, not turn into a black screen. ADR-0011's
+      amendment makes this the overlay's own responsibility (watch
+      `_NET_WM_CM_S<n>` and tear down on an owner change); until that lands the
+      capability is a startup answer only, and `docs/debt.md` carries it. Failing
+      this before the overlay wave ships is expected; failing it after is a release
+      blocker.
+- [ ] **Fullscreen app while dimming** on X11: a compositing manager may unredirect
+      a fullscreen window, which produces the same black screen with a compositor
+      running. The overlay is meant to carry `_NET_WM_BYPASS_COMPOSITOR = 2` to
+      forbid that; check a fullscreen video and a fullscreen game.
 - [ ] Start a compositing manager **while Duja is running** on an X11 session that
-      had none: the overlay must become available without a restart. ADR-0011
-      requires the report to be re-resolved on session change rather than settled
-      once, and this is the direction a capability table could never represent.
+      had none: the overlay becomes available without a restart. Same mechanism as
+      the kill case above and the same debt row; this is the direction a capability
+      table could never represent.
 - [ ] Wayland session that **advertises** `zwlr_layer_shell_v1`: the overlay appears and dims.
 - [ ] Wayland session that advertises **neither** wlr protocol: software dimming reports itself
       unavailable *with the reason*, and hardware paths still work.

@@ -312,10 +312,10 @@ mod tests {
             connectors: vec![],
             dimming: DimmingRow {
                 transport: "x11".to_owned(),
-                overlay: Some(
-                    "no compositing manager is running, so X11 cannot blend a translucent window"
-                        .to_owned(),
-                ),
+                // The reason comes from the probe's own `Display`, not a literal:
+                // a copy would keep this test green after the rule was reverted,
+                // and green while asserting text the product no longer emits.
+                overlay: Some(duja_dimmer::linux_caps::Unavailable::NoCompositor.to_string()),
                 gamma: None,
             },
         };
