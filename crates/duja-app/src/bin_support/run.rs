@@ -310,8 +310,9 @@ const RESTORE_UNIT: &str = "CRTC(s)";
 /// (the tray, which owns the gamma sink, is not built on Linux until the ksni
 /// wave), so there is no crash marker either and
 /// `startup::recover_from_crash_marker` cannot fire. Like macOS it is also a
-/// general screen rescue — it writes identity to every CRTC that is driving an
-/// output, clearing a ramp left behind by `redshift`, `gammastep`, or a crashed
+/// general screen rescue — it writes identity to every CRTC with a writable
+/// table, including ones driving no output (a gamma table survives its CRTC being
+/// disabled), clearing a ramp left behind by `redshift`, `gammastep`, or a crashed
 /// tool, whether or not Duja put it there. That width is also what makes it
 /// flatten a *running* colour-temperature tool's tint until that tool's next
 /// update; `duja-dimmer`'s `src/linux/gamma.rs` documents the composition that fixes
@@ -376,7 +377,7 @@ fn restore_outcome(
 ) -> (Vec<String>, bool) {
     if restored == 0 && failed.is_empty() {
         return (
-            vec!["nothing to restore (no displays with a resettable gamma ramp)".to_owned()],
+            vec!["nothing to restore (nothing here holds a resettable gamma ramp)".to_owned()],
             true,
         );
     }
@@ -456,7 +457,7 @@ mod tests {
         let (lines, ok) = restore_outcome(0, &[], "restored identity gamma on", "display(s)");
         assert_eq!(
             lines,
-            ["nothing to restore (no displays with a resettable gamma ramp)"]
+            ["nothing to restore (nothing here holds a resettable gamma ramp)"]
         );
         assert!(ok);
     }

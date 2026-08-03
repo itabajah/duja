@@ -91,11 +91,18 @@ const RAMP_MAX: f64 = 65_535.0;
 /// because `WAYLAND_DISPLAY` never made it into the process. `ssh` with
 /// `DISPLAY` exported, `sudo`, and a `tmux` server older than the session are the
 /// same shape. So this must not be the only gate, and it is not: `linux::gamma`
-/// asks the server itself, with the `XWAYLAND` extension query X.Org added for
+/// also asks the server, with the `XWAYLAND` extension query X.Org added for
 /// exactly this purpose (*"Only Xwayland initializes this extension. Thus, if the
-/// extension is present, the X server is Xwayland"*). That check is authoritative
-/// and costs one round trip on connect; this one costs two `getenv`s and skips
-/// the connect entirely, which is why both exist.
+/// extension is present, the X server is Xwayland"*).
+///
+/// The two are **peers**, and it would be comfortable but wrong to call the
+/// protocol one authoritative: that extension is dated 2022-07-29 and Xwayland
+/// 22.1.0 shipped five months earlier, so the Xwayland in Ubuntu 22.04 LTS and
+/// Debian bookworm does not advertise it. Each gate covers the other's blind
+/// spot — this one catches an old Xwayland with `WAYLAND_DISPLAY` set, that one
+/// catches a new Xwayland reached from a stripped environment — and an old
+/// Xwayland from a stripped environment is covered by neither. See
+/// `XWAYLAND_EXTENSION` in `src/linux/gamma.rs`.
 ///
 /// What neither of them depends on is the thing this project cannot verify:
 /// whether Xwayland *accepts* a gamma write or refuses it, which turns on the
@@ -287,6 +294,90 @@ pub const fn hdr_active_for(transport: Transport) -> Option<bool> {
     }
 }
 
+/// Which CRTCs a walk of the display server should return.
+///
+/// Two jobs, two answers, and conflating them is a defect in each direction — so
+/// the predicate is [`walk_includes`], here, rather than an `if` in the backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Walk {
+    /// Only CRTCs with an output attached: what Duja could *dim*. A CRTC showing
+    /// nothing cannot be given an overlay or addressed by a display.
+    Driving,
+    /// Every CRTC with a writable table, attached or not: what could be holding a
+    /// *stale ramp*. A gamma table survives its CRTC being disabled, so a monitor
+    /// unplugged after a crash is on a CRTC that is driving nothing and is
+    /// nonetheless exactly what a rescue exists to reach.
+    Restorable,
+}
+
+/// The walk a rescue pass must use.
+///
+/// Named rather than written inline at the call site, because using the narrower
+/// walk there is a defect with **no visible symptom at the time**: `duja
+/// --restore` reports a clean rescue and the dark ramp comes back with the
+/// monitor, after the user has been told it worked. That is the shape the first
+/// review of this module found, and a constant with a test on it is what stops
+/// it coming back.
+pub const RESCUE_WALK: Walk = Walk::Restorable;
+
+/// Whether a walk includes a CRTC, given whether anything is attached to it.
+#[must_use]
+pub const fn walk_includes(walk: Walk, has_outputs: bool) -> bool {
+    match walk {
+        Walk::Driving => has_outputs,
+        Walk::Restorable => true,
+    }
+}
+
+/// Why a rescue pass is over before it has touched a CRTC.
+///
+/// Deliberately has **no** "the channel is open" variant: that case is the caller
+/// not calling this at all, so there is no arm here that cannot fire and no
+/// `unwrap_or_default` guarding a branch that never happens. The distinction it
+/// *does* carry is the whole point — one of these is "there is nothing here to
+/// rescue" and the other is "the rescue could not run", and a user staring at a
+/// dark screen needs them told apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelRefusal<'a> {
+    /// There is no `XRandR` gamma channel in this session **at all** — a Wayland
+    /// compositor, an Xwayland server, no display server. Nothing here was ever
+    /// dimmed by this mechanism, so there is nothing to put back.
+    Absent(&'a str),
+    /// There should be a channel and it could not be reached: no `XAUTHORITY`, a
+    /// dead server, `RandR` missing or too old. Something may well be dimmed and
+    /// this pass could not touch it.
+    Unreachable(&'a str),
+}
+
+/// What a rescue pass reports when it never got as far as a CRTC.
+///
+/// Pure because it is a *decision* and it was got wrong once in each direction.
+/// The first version of this module collapsed every refusal into an empty report,
+/// so `sudo duja --restore` — sudo drops `XAUTHORITY`, and sudo is the first thing
+/// anyone with a dark screen tries — printed "nothing to restore" and exited 0.
+/// The fix for that then over-corrected: an Xwayland session, which genuinely has
+/// nothing to rescue, came back as a *failure* with a non-zero exit, contradicting
+/// this module's own documentation and the QA checklist written beside it.
+///
+/// Both mistakes are this one branch, so it lives here with a test on each arm
+/// rather than in the backend where no CI lane can reach it.
+#[must_use]
+pub fn rescue_refusal_report(refusal: ChannelRefusal<'_>) -> crate::RestoreReport {
+    match refusal {
+        // Nothing to reset, and saying so is the truth rather than a shrug.
+        ChannelRefusal::Absent(_) => crate::RestoreReport::default(),
+        // A failure the user has to see, with the reason and a non-zero exit.
+        ChannelRefusal::Unreachable(reason) => crate::RestoreReport {
+            restored: Vec::new(),
+            failed: vec![(CHANNEL_ROW.to_owned(), reason.to_owned())],
+        },
+    }
+}
+
+/// The `failed` row name for a rescue that could not run at all, as opposed to a
+/// named CRTC that would not take a ramp.
+pub const CHANNEL_ROW: &str = "XRandR gamma channel";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +414,13 @@ mod tests {
     /// silent: making the stamp `format!("crtc-{crtc}")`, to match what every
     /// fixture in `linux_outputs` and `backend` writes, would leave the whole
     /// suite green while the gamma channel refused every display on Linux.
+    ///
+    /// One level of the gap stays open and is worth naming rather than implying
+    /// away: this pins the two *functions* against each other, not the call site.
+    /// The production stamp is in `linux::outputs`, which is `cfg(linux)`-only and
+    /// needs an X server, so an edit that bypasses [`crtc_token`] there is caught
+    /// by nothing here. What closes that is a reader noticing the comment at the
+    /// call site, which is why one is there.
     #[test]
     fn crtc_token_round_trips() {
         for crtc in [1u32, 63, 4096, u32::MAX] {
@@ -476,6 +574,56 @@ mod tests {
     fn a_mirrored_crtc_names_every_output_it_drives() {
         let outputs = ["DP-1".to_owned(), "HDMI-A-1".to_owned()];
         assert_eq!(crtc_label(7, &outputs), "DP-1+HDMI-A-1 (CRTC 7)");
+    }
+
+    /// The rescue walk must reach a CRTC that is driving nothing, and the
+    /// addressing walk must not.
+    ///
+    /// Reds `RESCUE_WALK = Walk::Driving`, which is the round-1 defect: a monitor
+    /// unplugged between a crash and the rescue sits on a CRTC with no outputs,
+    /// its ramp is skipped, `--restore` reports clean, and the dark table comes
+    /// back with the monitor.
+    #[test]
+    fn a_rescue_reaches_a_crtc_that_is_driving_nothing() {
+        assert!(
+            walk_includes(RESCUE_WALK, false),
+            "a rescue that skips an idle CRTC misses the ramp on an unplugged monitor"
+        );
+        assert!(walk_includes(RESCUE_WALK, true));
+        assert!(walk_includes(Walk::Driving, true));
+        assert!(
+            !walk_includes(Walk::Driving, false),
+            "an idle CRTC cannot be dimmed or addressed"
+        );
+    }
+
+    /// A session with no channel has nothing to rescue; a channel that could not
+    /// be reached is a failure the user must see. Reds either of the two mistakes
+    /// this branch has already made, in either direction.
+    #[test]
+    fn a_rescue_tells_nothing_to_do_apart_from_could_not_run() {
+        let absent = rescue_refusal_report(ChannelRefusal::Absent("this session is Wayland"));
+        assert!(absent.restored.is_empty());
+        assert!(
+            absent.is_clean(),
+            "a session with no gamma channel has nothing to fail at"
+        );
+
+        let unreachable =
+            rescue_refusal_report(ChannelRefusal::Unreachable("X11 connect failed: no auth"));
+        assert!(!unreachable.is_clean(), "the user must see this one fail");
+        assert_eq!(
+            unreachable.failed.first().map(|(row, _)| row.as_str()),
+            Some(CHANNEL_ROW),
+            "the failure is the channel itself, not a CRTC"
+        );
+        assert!(
+            unreachable
+                .failed
+                .first()
+                .is_some_and(|(_, reason)| reason.contains("no auth")),
+            "the reason has to reach the user: it is the whole diagnostic"
+        );
     }
 
     #[test]

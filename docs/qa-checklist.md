@@ -112,8 +112,14 @@ with the phases; keep entries as observable behaviors, not implementation.
       `XWAYLAND` extension is present). Check the second in isolation by clearing
       `WAYLAND_DISPLAY` from the environment and leaving `DISPLAY` set — a `systemd
       --user` unit or an `ssh` login is the real-world shape — and confirm it still
-      refuses. If it reports restoring CRTCs there, the protocol check is not working
-      and every gamma write in the session is going somewhere the user cannot see.
+      refuses. If it reports restoring CRTCs there, check the Xwayland version before
+      calling it a bug: the `XWAYLAND` extension only exists from **xorgproto 2022.2
+      (July 2022)**, so Xwayland 22.1.x — Ubuntu 22.04 LTS, Debian bookworm — does
+      not advertise it and this second gate genuinely cannot see it. On those, the
+      environment gate is the only one, and the uncovered case (old Xwayland *and* a
+      stripped environment) is a documented limit rather than a defect. On anything
+      newer, a count there means the protocol check is broken and every gamma write
+      in that session is going somewhere the user cannot see.
 - [ ] **`--restore` flattens a running colour-temperature tool's tint**, and that is
       the documented behaviour rather than a bug: one LUT per CRTC, last writer wins,
       and Duja keeps no baseline yet (`docs/debt.md`). Check that Duja did not leave the
