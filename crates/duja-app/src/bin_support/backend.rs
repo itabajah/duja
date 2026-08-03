@@ -194,7 +194,14 @@ pub(crate) struct DisplayGeom {
 /// nothing on Windows). See [`DisplayGeom`] for the per-platform units and the two
 /// tokens. Never errors.
 pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<DisplayGeom>) {
-    let ddc: Vec<(DiscoveredDisplay, DisplayGeom)> = discover_ddc()
+    let mut found_ddc = discover_ddc();
+    let mut found_panel = discover_panel();
+    // Linux only: neither backend can place its own display, so both are joined
+    // to the display server's outputs here, together, from one enumeration.
+    // Everywhere else this is a no-op and the geometry is already set.
+    place_linux(&mut found_ddc, &mut found_panel);
+
+    let ddc: Vec<(DiscoveredDisplay, DisplayGeom)> = found_ddc
         .into_iter()
         .map(|found| {
             // All three or none of them: see `DdcGeometry` for why a display that
@@ -216,7 +223,7 @@ pub(crate) fn discover_all() -> (Vec<DiscoveredDisplay>, Vec<DisplayGeom>) {
             (found.display, geom)
         })
         .collect();
-    let panel: Vec<(DiscoveredDisplay, DisplayGeom)> = discover_panel()
+    let panel: Vec<(DiscoveredDisplay, DisplayGeom)> = found_panel
         .into_iter()
         .map(|found| {
             let geom = panel_geom(&found.display, found.geometry.as_ref());
@@ -294,6 +301,30 @@ fn merge_displays(
 struct FoundDdc {
     display: DiscoveredDisplay,
     geometry: Option<DdcGeometry>,
+    /// Linux only: what this display's DRM connector can be matched to a display
+    /// server output by. See [`LinuxJoinKey`].
+    #[cfg(any(test, target_os = "linux"))]
+    key: Option<LinuxJoinKey>,
+}
+
+/// What a Linux display is joined to the display server's outputs by: the DRM
+/// connector name, with the EDID as the fallback the naming caveats in
+/// [`duja_core::linux::drm`] require.
+///
+/// Carried on the *found* display rather than resolved inside each backend arm so
+/// that [`discover_all`] can do the join **once**, for every display, against one
+/// enumeration of the display server. Two enumerations would mean two X
+/// connections or two Wayland round trips on every display event, and — worse —
+/// two independent pools, so a monitor and the built-in panel could each be given
+/// the same output.
+///
+/// Compiled under `cfg(test)` on every host as well as on Linux, in the pattern
+/// `duja-ddc`'s `correlate` and `duja-platform`'s `mac_events` established: the
+/// placement rule built on it is pure, so its tests run on all three lanes.
+#[cfg(any(test, target_os = "linux"))]
+struct LinuxJoinKey {
+    name: String,
+    edid: Vec<u8>,
 }
 
 /// Where a DDC display sits, and the two tokens the software-dimming channels
@@ -347,6 +378,10 @@ fn discover_ddc() -> Vec<FoundDdc> {
                         gamma_token: d.gdi_device.clone(),
                         surface_token: d.gdi_device,
                     }),
+                    // Windows reports its own rectangle, so there is nothing to
+                    // join and no key to carry.
+                    #[cfg(test)]
+                    key: None,
                 }
             })
             .collect(),
@@ -392,6 +427,9 @@ fn discover_ddc() -> Vec<FoundDdc> {
                         gamma_token: d.cg_display_id.to_string(),
                         surface_token: d.surface_id.to_string(),
                     }),
+                    // CoreGraphics reports its own rectangle; nothing to join.
+                    #[cfg(test)]
+                    key: None,
                 }
             })
             .collect(),
@@ -401,21 +439,22 @@ fn discover_ddc() -> Vec<FoundDdc> {
 
 #[cfg(target_os = "linux")]
 fn discover_ddc() -> Vec<FoundDdc> {
-    // Two differences from the other two arms, both consequences of what sysfs
-    // does and does not know:
+    // One difference from the other two arms, and it is a consequence of what
+    // sysfs does not know: the kind is ALWAYS `ExternalDdc`. The Linux backend
+    // skips internal connectors at enumeration, because DDC/CI cannot reach an
+    // eDP panel at all — there is no channel to open. So, as on macOS, there is
+    // no internal-DDC fallback carrier, and a Linux laptop panel comes from
+    // `duja-panel`'s backlight or not at all. Unlike macOS that is a property of
+    // the wire rather than a filtering choice.
     //
-    // 1. The kind is ALWAYS `ExternalDdc`. The Linux backend skips internal
-    //    connectors at enumeration, because DDC/CI cannot reach an eDP panel at
-    //    all — there is no channel to open. So, as on macOS, there is no
-    //    internal-DDC fallback carrier, and a Linux laptop panel comes from
-    //    `duja-panel`'s backlight or not at all. Unlike macOS that is a property
-    //    of the wire rather than a filtering choice.
-    // 2. `geometry` is ALWAYS `None`. Sysfs answers "which monitors exist and how
-    //    do I talk to them", never "where are they" — that belongs to X11 or
-    //    Wayland, joined to this list on the connector name, and a Linux session
-    //    may have no display server at all. Until that arrives a Linux display is
-    //    hardware-controllable and not software-dimmable, which the planner reads
-    //    straight off the absent geometry.
+    // The geometry arrives in a second step the other two arms do not need. Sysfs
+    // answers "which monitors exist and how do I talk to them", never "where are
+    // they": that belongs to X11 or Wayland, and a session may have no display
+    // server at all. So this arm reports `geometry: None` and carries the join key
+    // instead, and `discover_all` places every display at once — see
+    // `place_from_outputs`. A connector that matches nothing keeps the `None`:
+    // hardware-controllable, not software-dimmable, which the planner reads
+    // straight off the absent geometry.
     match duja_ddc::enumerate() {
         Ok(displays) => displays
             .into_iter()
@@ -427,11 +466,109 @@ fn discover_ddc() -> Vec<FoundDdc> {
                     capabilities: hardware_brightness_caps(),
                 },
                 geometry: None,
+                key: Some(LinuxJoinKey {
+                    name: d.connector,
+                    edid: d.edid,
+                }),
             })
             .collect(),
         Err(_) => Vec::new(),
     }
 }
+
+/// Place every Linux display from one enumeration of the display server's
+/// outputs.
+///
+/// Pure: the outputs are an argument, so the whole rule — which displays offer a
+/// join key, which of them a placement lands on, and the order the two lists
+/// consume it in — runs on all three CI lanes. Only its one caller touches a
+/// display server.
+///
+/// Both lists are joined **together**, against one pool. Doing them separately
+/// would let a monitor and the built-in panel each be handed the same output, and
+/// would cost a second connection on every display event.
+///
+/// A display with no key contributes nothing and consumes nothing: on Linux only
+/// a panel can be in that state (`duja-panel` reports no connector on a machine
+/// with no controllable backlight), and miscounting it would shift every later
+/// display's rectangle onto its neighbour.
+#[cfg(any(test, target_os = "linux"))]
+fn place_from_outputs(
+    ddc: &mut [FoundDdc],
+    panel: &mut [FoundPanel],
+    outputs: &[duja_dimmer::linux_outputs::ServerOutput],
+) {
+    use duja_dimmer::linux_outputs::Connector;
+
+    let keys: Vec<Connector<'_>> = ddc
+        .iter()
+        .filter_map(|found| found.key.as_ref())
+        .chain(panel.iter().filter_map(|found| found.key.as_ref()))
+        .map(|key| Connector {
+            name: &key.name,
+            edid: &key.edid,
+        })
+        .collect();
+    if keys.is_empty() {
+        return;
+    }
+    let placements = duja_dimmer::linux_outputs::join(&keys, outputs);
+
+    let mut placed = placements.into_iter();
+    for found in ddc.iter_mut() {
+        if found.key.is_none() {
+            continue;
+        }
+        // Assigned only on a match, never cleared on a miss: a backend that did
+        // report a geometry keeps it, and this function stays the thing that
+        // *adds* one. On Linux no backend reports one, so the distinction is
+        // dormant — but it should not be this code that decides that.
+        //
+        // One token does both jobs, as on Windows and unlike macOS: on X11 it is
+        // the CRTC id, and two outputs on one CRTC share a framebuffer *and* a
+        // gamma table, so the mirror-group key and the gamma address are the same
+        // thing. On Wayland it is the output name.
+        if let Some(place) = placed.next().flatten() {
+            found.geometry = Some(DdcGeometry {
+                bounds: place.bounds,
+                gamma_token: place.token.clone(),
+                surface_token: place.token,
+            });
+        }
+    }
+    for found in panel.iter_mut() {
+        if found.key.is_none() {
+            continue;
+        }
+        if let Some(place) = placed.next().flatten() {
+            found.geometry = Some(PanelGeometry::new(
+                place.bounds,
+                place.token.clone(),
+                place.token,
+            ));
+        }
+    }
+}
+
+/// Place every Linux display against the live display server.
+///
+/// The one call in the placement path that connects to anything. On a session
+/// with no display server, or one where nothing matched, every display keeps the
+/// `None` its backend reported and Linux stays hardware-control-only.
+#[cfg(target_os = "linux")]
+fn place_linux(ddc: &mut [FoundDdc], panel: &mut [FoundPanel]) {
+    // Nothing to place means nothing to ask: a machine with no monitors Duja can
+    // drive should not open an X connection to discover that.
+    if ddc.iter().all(|f| f.key.is_none()) && panel.iter().all(|f| f.key.is_none()) {
+        return;
+    }
+    place_from_outputs(ddc, panel, &duja_dimmer::enumerate_outputs());
+}
+
+/// Not Linux: every backend here either reports its own geometry or genuinely has
+/// none, so there is nothing to join.
+#[cfg(not(target_os = "linux"))]
+fn place_linux(_ddc: &mut [FoundDdc], _panel: &mut [FoundPanel]) {}
 
 /// No DDC backend on this target: `duja-ddc` exposes `enumerate` only on Windows,
 /// macOS and Linux, so there is nothing to enumerate.
@@ -448,21 +585,53 @@ fn discover_ddc() -> Vec<FoundDdc> {
 /// row stamped `hardware_range: true` that no opener can serve would claim control
 /// Duja does not have.
 fn discover_panel() -> Vec<FoundPanel> {
-    match duja_panel::enumerate() {
-        Ok(panels) => panels
-            .into_iter()
-            .map(|p| FoundPanel {
-                display: DiscoveredDisplay {
-                    id: p.id().clone(),
-                    kind: DisplayKind::InternalPanel,
-                    name: Some(p.name().to_owned()),
-                    capabilities: hardware_brightness_caps(),
-                },
-                geometry: p.geometry().cloned(),
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    }
+    let Ok(panels) = duja_panel::enumerate() else {
+        return Vec::new();
+    };
+    // Resolved once, outside the map: on Linux it is a full `/sys/class/backlight`
+    // plus `/sys/class/drm` scan, and a machine has one panel — re-deriving it per
+    // entry would repeat work `enumerate` has just done.
+    #[cfg(any(test, target_os = "linux"))]
+    let key = panel_join_key();
+
+    panels
+        .into_iter()
+        .map(|p| FoundPanel {
+            display: DiscoveredDisplay {
+                id: p.id().clone(),
+                kind: DisplayKind::InternalPanel,
+                name: Some(p.name().to_owned()),
+                capabilities: hardware_brightness_caps(),
+            },
+            geometry: p.geometry().cloned(),
+            #[cfg(any(test, target_os = "linux"))]
+            key: key.as_ref().map(|k| LinuxJoinKey {
+                name: k.name.clone(),
+                edid: k.edid.clone(),
+            }),
+        })
+        .collect()
+}
+
+/// The built-in panel's join key on Linux, and nothing anywhere else.
+///
+/// Split out so `discover_panel` stays one shared body. Windows and macOS panels
+/// need no join — WMI genuinely has no rectangle to report, and a
+/// `DisplayServices` panel already carries its own — so there is no key to look
+/// for, and under `cfg(test)` on those hosts this is what keeps the field
+/// constructible without inventing a Linux fact.
+#[cfg(target_os = "linux")]
+fn panel_join_key() -> Option<LinuxJoinKey> {
+    duja_panel::panel_connector().map(|connector| LinuxJoinKey {
+        name: connector.name,
+        edid: connector.edid,
+    })
+}
+
+/// Not Linux: no connector to join on. See [`panel_join_key`]'s Linux twin.
+#[cfg(all(test, not(target_os = "linux")))]
+fn panel_join_key() -> Option<LinuxJoinKey> {
+    None
 }
 
 /// One panel found by the OS panel backend: its metadata plus whatever geometry
@@ -474,6 +643,10 @@ fn discover_panel() -> Vec<FoundPanel> {
 struct FoundPanel {
     display: DiscoveredDisplay,
     geometry: Option<duja_panel::PanelGeometry>,
+    /// Linux only: the built-in panel's DRM connector, when there is one. See
+    /// [`LinuxJoinKey`].
+    #[cfg(any(test, target_os = "linux"))]
+    key: Option<LinuxJoinKey>,
 }
 
 /// Fold a panel's backend-reported geometry into a [`DisplayGeom`].
@@ -857,5 +1030,241 @@ mod tests {
                     && display.kind == DisplayKind::ExternalDdc)
         );
         assert_eq!(out.len(), 2);
+    }
+
+    // --- the Linux placement: connectors joined to display-server outputs -----
+    //
+    // The rule runs on every lane because the outputs are an argument. What it
+    // pins is the part that is easy to get silently wrong: which displays offer a
+    // key, which of them consume a placement, and that both lists draw from ONE
+    // pool. The join itself is `duja_dimmer::linux_outputs`, tested there.
+    mod linux_placement {
+        use super::super::{
+            DdcGeometry, FoundDdc, FoundPanel, LinuxJoinKey, hardware_brightness_caps,
+            place_from_outputs,
+        };
+        use duja_core::dimmer::DisplayBounds;
+        use duja_core::id::StableDisplayId;
+        use duja_core::manager::DiscoveredDisplay;
+        use duja_core::model::DisplayKind;
+        use duja_dimmer::linux_outputs::ServerOutput;
+
+        fn id(serial: &str) -> StableDisplayId {
+            StableDisplayId::from_parts("DEL", 0xA131, Some(serial)).unwrap()
+        }
+
+        fn edid(seed: u8) -> Vec<u8> {
+            let mut bytes = vec![0_u8; 128];
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                *byte = seed.wrapping_add(u8::try_from(index % 251).unwrap_or(0));
+            }
+            bytes
+        }
+
+        fn ddc(serial: &str, connector: Option<&str>) -> FoundDdc {
+            FoundDdc {
+                display: DiscoveredDisplay {
+                    id: id(serial),
+                    kind: DisplayKind::ExternalDdc,
+                    name: Some(serial.to_owned()),
+                    capabilities: hardware_brightness_caps(),
+                },
+                geometry: None,
+                key: connector.map(|name| LinuxJoinKey {
+                    name: name.to_owned(),
+                    edid: edid(1),
+                }),
+            }
+        }
+
+        fn panel(connector: Option<&str>) -> FoundPanel {
+            FoundPanel {
+                display: DiscoveredDisplay {
+                    id: id("panel"),
+                    kind: DisplayKind::InternalPanel,
+                    name: Some("Internal Display".to_owned()),
+                    capabilities: hardware_brightness_caps(),
+                },
+                geometry: None,
+                key: connector.map(|name| LinuxJoinKey {
+                    name: name.to_owned(),
+                    edid: edid(2),
+                }),
+            }
+        }
+
+        fn output(name: &str, token: &str, x: i32) -> ServerOutput {
+            ServerOutput {
+                name: name.to_owned(),
+                edid: None,
+                bounds: DisplayBounds::new(x, 0, 1920, 1080),
+                token: token.to_owned(),
+            }
+        }
+
+        fn ddc_geometry(found: Option<&FoundDdc>) -> Option<&DdcGeometry> {
+            found.and_then(|f| f.geometry.as_ref())
+        }
+
+        /// The whole point of the wave: a Linux monitor that had no rectangle
+        /// gets one, and both software-dimming tokens carry the output's token,
+        /// because on Linux one string addresses gamma and names the framebuffer.
+        #[test]
+        fn a_matched_connector_gets_bounds_and_both_tokens() {
+            let mut monitors = vec![ddc("A", Some("DP-1"))];
+            let mut panels: Vec<FoundPanel> = Vec::new();
+
+            place_from_outputs(
+                &mut monitors,
+                &mut panels,
+                &[output("DP-1", "crtc-42", 1920)],
+            );
+
+            let geometry = ddc_geometry(monitors.first()).expect("DP-1 matched");
+            assert_eq!(geometry.bounds, DisplayBounds::new(1920, 0, 1920, 1080));
+            assert_eq!(geometry.gamma_token, "crtc-42");
+            assert_eq!(geometry.surface_token, "crtc-42");
+        }
+
+        /// The built-in panel is placed the same way and from the same pool. It
+        /// is the display that most needs it: a backlight's floor is high, so the
+        /// sub-floor range is exactly where a laptop user notices its absence.
+        #[test]
+        fn the_panel_is_placed_from_the_same_pool() {
+            let mut monitors = vec![ddc("A", Some("DP-1"))];
+            let mut panels = vec![panel(Some("eDP-1"))];
+
+            place_from_outputs(
+                &mut monitors,
+                &mut panels,
+                &[output("DP-1", "crtc-1", 1920), output("eDP-1", "crtc-0", 0)],
+            );
+
+            let geometry = panels
+                .first()
+                .and_then(|found| found.geometry.as_ref())
+                .expect("eDP-1 matched");
+            assert_eq!(geometry.bounds(), DisplayBounds::new(0, 0, 1920, 1080));
+            assert_eq!(geometry.gamma_token(), "crtc-0");
+            assert_eq!(geometry.surface_token(), "crtc-0");
+            // And the monitor did not take the panel's output.
+            assert_eq!(
+                ddc_geometry(monitors.first()).map(|g| g.bounds),
+                Some(DisplayBounds::new(1920, 0, 1920, 1080))
+            );
+        }
+
+        /// A display with no key contributes nothing to the join and must consume
+        /// nothing from it. Miscounting here shifts every later display's
+        /// rectangle onto its neighbour, which is a silent wrong answer: the
+        /// overlay appears, on the wrong screen.
+        #[test]
+        fn a_keyless_entry_does_not_consume_a_placement() {
+            let mut monitors = vec![ddc("A", None), ddc("B", Some("DP-2"))];
+            let mut panels: Vec<FoundPanel> = Vec::new();
+
+            place_from_outputs(&mut monitors, &mut panels, &[output("DP-2", "crtc-9", 0)]);
+
+            assert!(
+                ddc_geometry(monitors.first()).is_none(),
+                "the keyless entry stays unplaced"
+            );
+            assert_eq!(
+                ddc_geometry(monitors.get(1)).map(|g| g.gamma_token.clone()),
+                Some("crtc-9".to_owned()),
+                "the keyed entry gets its OWN output, not a shifted one"
+            );
+        }
+
+        /// The same rule across the boundary between the two lists: a keyless
+        /// panel must not shift the placement a later one is owed.
+        #[test]
+        fn a_keyless_panel_does_not_shift_the_next_one() {
+            let mut monitors: Vec<FoundDdc> = Vec::new();
+            let mut panels = vec![panel(None), panel(Some("eDP-1"))];
+
+            place_from_outputs(&mut monitors, &mut panels, &[output("eDP-1", "crtc-0", 0)]);
+
+            assert!(panels.first().is_some_and(|f| f.geometry.is_none()));
+            assert_eq!(
+                panels
+                    .get(1)
+                    .and_then(|f| f.geometry.as_ref())
+                    .map(|g| g.gamma_token().to_owned()),
+                Some("crtc-0".to_owned())
+            );
+        }
+
+        /// Two outputs on one CRTC is an X11 mirror. Both displays keep their own
+        /// rectangle and share a surface token, which is what collapses them into
+        /// one overlay instead of double-darkening the shared framebuffer.
+        #[test]
+        fn mirrored_monitors_share_a_surface_token() {
+            let mut monitors = vec![ddc("A", Some("DP-1")), ddc("B", Some("HDMI-A-1"))];
+            let mut panels: Vec<FoundPanel> = Vec::new();
+
+            place_from_outputs(
+                &mut monitors,
+                &mut panels,
+                &[output("DP-1", "crtc-7", 0), output("HDMI-A-1", "crtc-7", 0)],
+            );
+
+            let first = ddc_geometry(monitors.first()).expect("placed");
+            let second = ddc_geometry(monitors.get(1)).expect("placed");
+            assert_eq!(first.surface_token, second.surface_token);
+        }
+
+        /// No display server, or one whose outputs match nothing: every display
+        /// keeps the `None` its backend reported, which is the state Linux was
+        /// already in and which the planner already handles by planning no
+        /// overlay.
+        #[test]
+        fn no_outputs_leaves_everything_unplaced() {
+            let mut monitors = vec![ddc("A", Some("DP-1"))];
+            let mut panels = vec![panel(Some("eDP-1"))];
+
+            place_from_outputs(&mut monitors, &mut panels, &[]);
+
+            assert!(ddc_geometry(monitors.first()).is_none());
+            assert!(panels.first().is_some_and(|f| f.geometry.is_none()));
+        }
+
+        /// This function **adds** a geometry and never clears one. The entry
+        /// below has a key, so it reaches the assignment loop, and that key
+        /// matches nothing, so it takes the miss branch — which is the branch
+        /// that used to overwrite with `None`. A keyless entry would not test it:
+        /// the empty-keys early return means neither loop ever runs.
+        #[test]
+        fn a_miss_does_not_clear_a_geometry_a_backend_reported() {
+            let mut monitors = vec![FoundDdc {
+                geometry: Some(DdcGeometry {
+                    bounds: DisplayBounds::new(5, 6, 7, 8),
+                    gamma_token: "already".to_owned(),
+                    surface_token: "already".to_owned(),
+                }),
+                ..ddc("A", Some("DP-1"))
+            }];
+            let mut panels: Vec<FoundPanel> = Vec::new();
+
+            // Nothing named DP-1, so the connector reaches the loop and misses.
+            place_from_outputs(&mut monitors, &mut panels, &[output("DP-9", "crtc-0", 0)]);
+
+            assert_eq!(
+                ddc_geometry(monitors.first()).map(|g| g.bounds),
+                Some(DisplayBounds::new(5, 6, 7, 8))
+            );
+        }
+
+        /// Nothing to place at all returns before either loop, and changes
+        /// nothing.
+        #[test]
+        fn no_keys_at_all_is_not_an_error() {
+            let mut monitors = vec![ddc("A", None)];
+            let mut panels: Vec<FoundPanel> = Vec::new();
+
+            place_from_outputs(&mut monitors, &mut panels, &[output("DP-1", "crtc-0", 0)]);
+
+            assert!(ddc_geometry(monitors.first()).is_none());
+        }
     }
 }

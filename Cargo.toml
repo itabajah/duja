@@ -144,6 +144,13 @@ rustix = { version = "1", features = ["fs", "process", "net", "event", "pipe"] }
 # to identify it.
 x11rb = { version = "0.13", features = ["randr"] }
 wayland-client = "0.31"
+# `zxdg_output_manager_v1`, which is the only way to ask a Wayland compositor where
+# an output sits in *logical* coordinates. `wl_output` reports the mode in physical
+# pixels and an integer scale, which cannot express fractional scaling and so
+# cannot be divided back into the desktop rectangle a layer surface actually
+# occupies. Same story as the other two: already in `Cargo.lock` through winit, so
+# this declares no new package.
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 # Linux D-Bus (duja-panel's logind backlight writer, P7). The version is pinned
 # to what `i-slint-backend-winit` already resolves and `async-io` matches its
 # executor selection, so the Linux graph gains no second async runtime — see

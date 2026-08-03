@@ -81,31 +81,68 @@ pub(crate) fn enumerate() -> Vec<PanelDisplay> {
 
 /// [`enumerate`] against an injected root.
 fn enumerate_from(root: &Path) -> Vec<PanelDisplay> {
-    let Some(device) = backlight::scan(root).into_iter().next() else {
-        return Vec::new();
-    };
-    let Some(panel) = internal_connector(root) else {
-        return Vec::new();
-    };
-    let Ok(id) = StableDisplayId::from_edid(&panel.edid) else {
-        return Vec::new();
-    };
+    found(root).map_or_else(Vec::new, |(panel, _)| vec![panel])
+}
+
+/// The DRM connector behind the built-in panel: the join key between this
+/// backend's panel and the display server's idea of where it is.
+///
+/// Sysfs knows the panel exists, not where the desktop puts it. The rectangle
+/// belongs to X11 or Wayland, joined to this list on the connector name with the
+/// EDID as the fallback, and a Linux session may have no display server at all.
+/// So the panel's own `geometry` stays `None` — "this backend cannot say" — and
+/// the caller that *can* say does the join with these two fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PanelConnector {
+    /// The DRM connector name with its `card<N>-` prefix stripped: `eDP-1`.
+    pub name: String,
+    /// The raw EDID bytes read from that connector.
+    pub edid: Vec<u8>,
+}
+
+/// The connector behind the panel `enumerate` would list, or `None` if it
+/// would list none.
+///
+/// The two answers come from one body, so a *single* call cannot produce a
+/// connector for a panel it did not also report, nor a panel with no way to
+/// place it. It is not a guarantee across two calls: a caller that invokes
+/// `enumerate` and then this walks `/sys` twice, and a backlight device that
+/// appeared in between would be visible to the second and not the first. Nothing
+/// harmful follows — the join simply fails for a panel that is not in the list —
+/// but the invariant is per call, not per pair.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn panel_connector() -> Option<PanelConnector> {
+    found(Path::new(SYSFS_ROOT)).map(|(_, connector)| connector)
+}
+
+/// The built-in panel and the connector it came from, against an injected root.
+fn found(root: &Path) -> Option<(PanelDisplay, PanelConnector)> {
+    let device = backlight::scan(root).into_iter().next()?;
+    let panel = internal_connector(root)?;
+    let id = StableDisplayId::from_edid(&panel.edid).ok()?;
     let name = EdidInfo::parse(&panel.edid)
         .ok()
         .and_then(|info| info.monitor_name)
         .unwrap_or_else(|| "Internal Display".to_owned());
-    vec![PanelDisplay {
-        id,
-        name,
-        // The backlight device name, which is both the handle `open` re-scans
-        // for and the second argument logind's `SetBrightness` takes. Documented
-        // opaque like every other backend's, so no caller may parse it.
-        instance_name: device.name,
-        // No bounds: sysfs knows the panel exists, not where the desktop puts
-        // it. That answer belongs to the display server, and there may not be
-        // one. `None` means "this backend cannot say", exactly as on Windows.
-        geometry: None::<PanelGeometry>,
-    }]
+    Some((
+        PanelDisplay {
+            id,
+            name,
+            // The backlight device name, which is both the handle `open` re-scans
+            // for and the second argument logind's `SetBrightness` takes. Documented
+            // opaque like every other backend's, so no caller may parse it.
+            instance_name: device.name,
+            // No bounds: sysfs knows the panel exists, not where the desktop puts
+            // it. That answer belongs to the display server, and there may not be
+            // one. `None` means "this backend cannot say", exactly as on Windows.
+            geometry: None::<PanelGeometry>,
+        },
+        PanelConnector {
+            name: panel.name,
+            edid: panel.edid,
+        },
+    ))
 }
 
 /// The built-in panel's DRM connector: the first internal one carrying an EDID.
@@ -247,6 +284,43 @@ mod tests {
         fixture.connector("card0-DP-1", &edid());
 
         assert!(enumerate_from(fixture.root()).is_empty());
+    }
+
+    /// The panel and its join key come from one body, so a caller can never be
+    /// handed a connector for a panel that is not in the list. Asserted on a
+    /// fixture that produces a panel and on one that does not, because the
+    /// dangerous direction is the second: a connector with no panel would place
+    /// an overlay over a screen Duja does not control.
+    #[test]
+    fn the_connector_and_the_panel_agree_in_both_directions() {
+        let laptop = Fixture::new();
+        laptop.backlight("intel_backlight", "raw", 96_000, 48_000);
+        laptop.connector("card0-eDP-1", &edid());
+
+        let (panel, connector) = found(laptop.root()).expect("a laptop has both");
+        assert_eq!(connector.name, "eDP-1");
+        assert_eq!(connector.edid, edid());
+        assert_eq!(panel.instance_name(), "intel_backlight");
+
+        // A desktop: an external connector, no backlight, and therefore neither.
+        let desktop = Fixture::new();
+        desktop.connector("card0-DP-1", &edid());
+        assert!(found(desktop.root()).is_none());
+    }
+
+    /// The connector is the *internal* one even when an external monitor sorts
+    /// before it. Joining on an external connector would place the panel's
+    /// overlay over somebody else's screen.
+    #[test]
+    fn the_connector_is_the_internal_one_not_the_first_one() {
+        let fixture = Fixture::new();
+        fixture.backlight("intel_backlight", "raw", 100, 50);
+        fixture.connector("card0-DP-1", &edid());
+        fixture.connector("card0-eDP-1", &edid());
+
+        let (_, connector) = found(fixture.root()).expect("the laptop has a panel");
+
+        assert_eq!(connector.name, "eDP-1");
     }
 
     /// A controllable backlight with no identity is not reported, because the

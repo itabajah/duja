@@ -76,14 +76,20 @@ pub struct DrmConnector {
     /// the desktop rectangle discovered from X11 or Wayland. Sysfs is the only
     /// place the `card<N>-` prefix exists at all.
     ///
-    /// **That join is not universal, and wave 4 must not assume it is.** It holds
-    /// for the modesetting DDX and for DRM-backed Wayland compositors, which is
-    /// the modern stack. It is reported not to hold for the NVIDIA proprietary
-    /// X11 driver, which names outputs on its own indexing (`DP-0`, `HDMI-0`),
-    /// nor for the legacy `xf86-video-intel` DDX, which omits the hyphen before
-    /// the index (`eDP1`, `DP1`) and so defeats a string-equality join outright.
-    /// Neither is verified by this project. The name is carried as the *best*
-    /// join key available, not as a guarantee, and wave 4 owes it a fallback.
+    /// **That join is not universal, and the joiner does not assume it is.** It
+    /// holds for the modesetting DDX and for DRM-backed Wayland compositors,
+    /// which is the modern stack. It is reported not to hold for the NVIDIA
+    /// proprietary X11 driver, which names outputs on its own indexing (`DP-0`,
+    /// `HDMI-0`), nor for the legacy `xf86-video-intel` DDX, which omits the
+    /// hyphen before the index (`eDP1`, `DP1`) and so defeats a string-equality
+    /// join outright. Neither is verified by this project.
+    ///
+    /// So the name is carried as the *best* join key available, not as a
+    /// guarantee, and `duja_dimmer::linux_outputs` supplies the fallback: the
+    /// [`edid`](Self::edid) below. That module also declines to trust a name
+    /// match that a present EDID contradicts — the NVIDIA namespaces overlap and
+    /// are offset by one, so a name equality there is a *wrong* answer rather
+    /// than a missing one.
     pub name: String,
     /// The raw EDID bytes: at least one 128-byte block.
     pub edid: Vec<u8>,

@@ -1477,12 +1477,58 @@ takes an injected filesystem root, so its rules are unit-tested on all three CI
 lanes rather than on the one machine that has a `/sys`. What is genuinely
 Linux-only is one ioctl and one D-Bus call.
 
-**Not yet possible on Linux: software dimming.** Both backends report no
-geometry, honestly — sysfs does not know where the desktop puts a monitor — so
-the planner plans no overlay and the continuum stops at the hardware floor. Wave
-4 supplies the rectangle from the display server and joins it on the DRM
-connector name, which X11 RandR and Wayland `xdg_output` spell identically on
-the modern stack (`debt.md` records the two drivers where they do not).
+**Wave 2 left both backends reporting no geometry**, honestly — sysfs does not
+know where the desktop puts a monitor — so the planner planned no overlay and the
+continuum stopped at the hardware floor. **Wave 4 supplies the rectangle.** The
+display server enumerates its outputs (X11 `RandR` output plus CRTC rectangle;
+Wayland `wl_output` name plus `xdg_output` logical geometry) and every connector
+is joined to one of them.
+
+Wave 2 recorded that connector-name equality holds for the modesetting DDX and
+DRM-backed Wayland compositors, is reported not to hold for the NVIDIA
+proprietary X11 driver (its own indexing: `DP-0`) or the legacy
+`xf86-video-intel` DDX (`eDP1`, no hyphen), and that wave 4 owed it a fallback.
+The EDID is that fallback: both sides read it off the same monitor and neither
+invents it. Only the base block is compared, because sysfs publishes the whole
+blob and an X11 driver may publish only the first 128 bytes.
+
+**The first draft joined by name first, and its review showed that is exactly
+backwards.** The NVIDIA case is not "the names do not match" — that driver
+indexes from zero where DRM indexes from one, so the two namespaces *overlap and
+are offset by one* and sysfs `DP-1` is the server's `DP-2`. A name-first rule
+placed two of three displays on their **neighbour's** screen and stamped the
+result "matched by name": a silent wrong answer, in the exact configuration the
+fallback was added for. The passes now run strongest-evidence-first — name and
+EDID agreeing, then EDID alone, then a bare name only where no EDID could have
+checked it — and a name match that a present EDID contradicts is not taken at
+all. Every Wayland placement is the third kind, because Wayland publishes no
+EDID (there is no protocol for it).
+
+**Ambiguity refuses rather than guesses, in both directions.** Two identical
+monitors with no serial number are byte-identical to both sides, so neither is
+placed: an overlay on the wrong screen is a silent wrong answer, where an
+unplaced display is the state Linux was already in. Checking only that *one
+connector matches one output* is half the rule, and the review found the missing
+half is reachable — two identical monitors with one **disabled** leave a single
+output both connectors match equally well, and a multi-GPU machine produces two
+connectors both called `DP-1` once the `card<N>-` prefix is stripped. A pair is
+claimed only when the match is unique both ways.
+
+Both lists are joined **together, from one enumeration**: the monitors and the
+built-in panel draw from one pool, so they cannot be handed the same output, and
+a display event costs one connection rather than two. The rule is pure — the
+outputs are an argument — so it runs on all three lanes; only the enumeration
+itself is Linux-only.
+
+**Geometry without a surface is still geometry without a surface.** Linux's
+`PlatformDimmer` is `StubDimmer` until the overlay lands, so the planner now
+produces overlay commands that are recorded and discarded. The visible result is
+unchanged — the continuum still stops at the hardware floor — with one exception
+worth knowing about: surface tokens also switch **mirror grouping** on, and the
+group rule pins a software-only group's hardware members to maximum on the
+premise that one shared overlay does the dimming. That premise is false until the
+overlay exists. `debt.md` carries it, with why withholding the token instead
+would be worse.
 
 **Wave 4 landed ADR-0011's capability probe first, on purpose.** The rule that
 decides what a Linux session can dim is pure — environment and Wayland registry

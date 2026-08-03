@@ -76,6 +76,11 @@ pub use display_services::{DisplayServicesApi, DisplayServicesTransport, RealDis
 #[cfg(target_os = "linux")]
 pub use linux::LinuxPanelTransport;
 
+/// The DRM connector behind the built-in panel, for the caller that joins this
+/// backend's panel to a display server's rectangle. See [`linux::PanelConnector`].
+#[cfg(target_os = "linux")]
+pub use linux::{PanelConnector, panel_connector};
+
 use duja_core::dimmer::DisplayBounds;
 use duja_core::id::StableDisplayId;
 
@@ -97,7 +102,12 @@ use duja_core::id::StableDisplayId;
 /// - **Linux** — always absent. Sysfs knows the panel exists and how to drive it,
 ///   not where the desktop puts it: that is the display server's answer, and a
 ///   Linux session may have no display server at all. The rectangle arrives from
-///   the X11/Wayland side, joined on the DRM connector name.
+///   the X11/Wayland side, joined on the DRM connector name **and** the EDID:
+///   name and EDID together first, then EDID alone, then a bare name only where
+///   the server published no EDID to check it with. `panel_connector` hands the
+///   caller both keys, and `duja_dimmer::linux_outputs` owns the rule. The bounds that come back are
+///   **not one unit** across Linux — X11 screen pixels, Wayland logical
+///   coordinates — as [`DisplayBounds`] records.
 /// - **Windows** — always absent. WMI's `WmiMonitorBrightnessMethods` exposes no
 ///   monitor rectangle and no GDI device for the panel it controls, so there is
 ///   nothing honest to put here; a Windows laptop panel that needs software

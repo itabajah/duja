@@ -10,8 +10,11 @@
 //! compositor — which is precisely why it is this small. Every decision the
 //! feature makes is on the other side of the boundary.
 
+mod outputs;
 mod wayland;
 mod x11;
+
+pub use outputs::enumerate_outputs;
 
 use crate::linux_caps::{Probe, SessionEnv, SurfaceCaps, Transport, resolve, transport};
 

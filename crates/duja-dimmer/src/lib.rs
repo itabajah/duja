@@ -61,6 +61,14 @@ mod mac_geom;
 // X11 windows and real `wl_surface`s cannot run on a headless runner.
 pub mod linux_caps;
 
+// The other pure Linux half: matching the connectors sysfs found to the outputs
+// the display server enumerated, which is how a Linux display acquires the
+// rectangle neither `duja-ddc` nor `duja-panel` can supply. Unconditional and
+// display-server-free for the same reason `linux_caps` is — it names no `x11rb`
+// or `wayland-client` type, so its rules (name first, EDID as the documented
+// fallback, ambiguity refused) are tested on all three lanes.
+pub mod linux_outputs;
+
 // The only thing in this crate that talks to a Linux display server: it connects,
 // reads two booleans and a list of interface names, and hands them to
 // `linux_caps` as plain data. Nothing it does can run in CI, which is exactly why
@@ -69,7 +77,7 @@ pub mod linux_caps;
 mod linux;
 
 #[cfg(target_os = "linux")]
-pub use linux::probe_session;
+pub use linux::{enumerate_outputs, probe_session};
 
 // Re-export the cross-platform vocabulary so callers can depend on this crate
 // alone for the dimming surface.

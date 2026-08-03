@@ -46,6 +46,15 @@ pub const GAMMA_FLOOR: f32 = 0.3;
 /// - **macOS**: **points**. `CGDisplayBounds` (the enumeration source) and
 ///   `NSWindow` frames (the overlay sink) both speak points, so a Retina display
 ///   reports its logical point size and no scaling happens in between.
+/// - **Linux**: whichever unit the session's display server speaks, and the two
+///   differ. On **X11** these are `RandR` CRTC coordinates, which are the X
+///   screen's device pixels. On **Wayland** they are `xdg_output`'s **logical**
+///   coordinates, already divided by the output's scale — including a fractional
+///   one, which is the whole reason `xdg_output` is read instead of `wl_output`'s
+///   physical mode and integer scale. Both sinks speak the same unit as their
+///   source (an X11 override-redirect window is placed in screen pixels; a
+///   `wl_surface` lives in logical space), so nothing is converted in between —
+///   but "Linux" is not one unit, and a caller must not treat it as one.
 ///
 /// Each platform's producer and consumer agree within that platform and pass the
 /// value through verbatim, so nothing needs converting — but a **cross-platform**
