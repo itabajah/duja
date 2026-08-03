@@ -29,15 +29,27 @@
 //! - **A fullscreen window is unredirected.** Compositors do this as a
 //!   performance optimisation, and an always-on-top fullscreen window is exactly
 //!   what an overlay is. Every overlay therefore carries
-//!   `_NET_WM_BYPASS_COMPOSITOR = 2` ("never bypass").
+//!   `_NET_WM_BYPASS_COMPOSITOR = 2` ("never bypass") — a mitigation rather than
+//!   a guarantee, for the reason [`crate::linux_overlay`] gives.
+//!
+//! # There is no always-on-top on X11
+//!
+//! `CreateWindow` places a window above its siblings, and every top-level is a
+//! sibling of an override-redirect overlay under the root. So raising once at map
+//! time is not enough: the first window the user opens afterwards sits *undimmed*
+//! on top of the overlay. The watcher therefore also selects `SubstructureNotify`
+//! on the root and the worker re-raises on anything that is not one of its own
+//! windows. A raise-war with another always-on-top client is possible and is a
+//! documented limit rather than something this can prevent.
 //!
 //! # Input must pass through
 //!
 //! The security invariant ADR-0003 states for every platform. Here it is the
 //! **`XFixes` input shape**: each overlay's input region is set to an empty region,
 //! so the server routes every pointer and keyboard event to whatever is beneath.
-//! Without `XFixes` there is no way to do this on X11 at all, so the backend
-//! refuses to start rather than mapping a window that would swallow clicks.
+//! SHAPE's own `ShapeInput` kind can express the same thing, so `XFixes` is not
+//! the only mechanism X offers — it is the one this uses, and the backend refuses
+//! to start without it rather than mapping a window that would swallow clicks.
 //!
 //! # Crash safety
 //!
@@ -53,6 +65,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
+use tracing::warn;
 use x11rb::connection::Connection as _;
 use x11rb::protocol::Event;
 use x11rb::protocol::shape::SK;
@@ -78,7 +91,7 @@ use crate::plan::{OverlayEntry, OverlayOp, apply_ops, plan_transition};
 /// Same contract as the Windows backend's: the caller is the Slint UI thread, and
 /// a worker wedged in an X round trip against an unresponsive server must not
 /// freeze it. A late reply lands on a dropped receiver and is discarded.
-const REPLY_BUDGET: Duration = Duration::from_millis(750);
+const REPLY_BUDGET: Duration = Duration::from_secs(2);
 
 /// A command for the overlay worker.
 enum Command {
@@ -86,8 +99,12 @@ enum Command {
     Apply(Vec<DimCommand>, SyncSender<Result<(), DimmerError>>),
     /// Remove every overlay; reply when done.
     Clear(SyncSender<Result<(), DimmerError>>),
-    /// The compositing manager is gone: tear everything down, no reply.
+    /// The compositing manager is gone: tear everything down and latch, no reply.
     CompositorLost,
+    /// Something other than an overlay was mapped or restacked, so the overlays
+    /// are no longer on top. Carries the window that moved, so the worker can
+    /// ignore its own.
+    Restacked(Window),
     /// Stop the worker.
     Stop,
 }
@@ -98,6 +115,7 @@ impl fmt::Debug for Command {
             Command::Apply(cmds, _) => f.debug_tuple("Apply").field(&cmds.len()).finish(),
             Command::Clear(_) => f.write_str("Clear"),
             Command::CompositorLost => f.write_str("CompositorLost"),
+            Command::Restacked(window) => f.debug_tuple("Restacked").field(window).finish(),
             Command::Stop => f.write_str("Stop"),
         }
     }
@@ -181,14 +199,30 @@ impl X11Dimmer {
         // `XFixes` is what makes the overlay click-through. Refuse without it: an
         // overlay that swallows every click is worse than no dimming, and it is
         // the one failure a user cannot work around from inside the app.
-        let xfixes = connection
+        //
+        // The version is negotiated, not assumed. The server answers with the
+        // minimum of what was asked and what it has, and `SetWindowShapeRegion`
+        // is an XFixes **2.0** request - so a server that negotiates 1 would take
+        // this request as a `BadRequest`, and without checking, that failure
+        // would surface as a mapped window that eats every click.
+        let negotiated = connection
             .xfixes_query_version(5, 0)
             .map_err(|e| DimmerError::Os(format!("XFixes query failed: {e}")))?
             .reply();
-        if xfixes.is_err() {
-            return Err(DimmerError::Os(
-                "the X server has no XFixes, so an overlay could not pass input through".to_owned(),
-            ));
+        let too_old = |version: u32| {
+            DimmerError::Os(format!(
+                "the X server offers XFixes {version}, and an input shape needs 2 or later"
+            ))
+        };
+        match negotiated {
+            Ok(reply) if reply.major_version >= XFIXES_INPUT_SHAPE_VERSION => {}
+            Ok(reply) => return Err(too_old(reply.major_version)),
+            Err(_) => {
+                return Err(DimmerError::Os(
+                    "the X server has no XFixes, so an overlay could not pass input through"
+                        .to_owned(),
+                ));
+            }
         }
 
         let compositor_selection = intern(
@@ -203,6 +237,13 @@ impl X11Dimmer {
         let atoms = Atoms::intern(&connection)?;
         let waker_window = create_waker_window(&connection, root)?;
 
+        // One colormap for every overlay: they all use the same visual on the same
+        // root. A per-window one would have to be freed explicitly - a colormap
+        // does not die with the window that used it - and every dim/undim cycle
+        // would leak one for the life of the connection.
+        let colormap = request(connection.generate_id())?;
+        checked(connection.create_colormap(xproto::ColormapAlloc::NONE, colormap, root, visual))?;
+
         // Ask for owner changes on the compositor selection *before* the watcher
         // starts, so a manager that dies during startup is not missed.
         connection
@@ -214,6 +255,15 @@ impl X11Dimmer {
                     | xfixes::SelectionEventMask::SELECTION_CLIENT_CLOSE,
             )
             .map_err(|e| DimmerError::Os(format!("cannot watch the compositor selection: {e}")))?;
+        // And for anything being mapped or restacked on the root. X has no
+        // always-on-top: `CreateWindow` puts a new window above its siblings, and
+        // every top-level is a sibling of an override-redirect overlay. Without
+        // this the desktop dims and the first window the user opens sits undimmed
+        // on top of it.
+        request(connection.change_window_attributes(
+            root,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY),
+        ))?;
         connection
             .flush()
             .map_err(|e| DimmerError::Os(format!("X flush failed: {e}")))?;
@@ -228,9 +278,11 @@ impl X11Dimmer {
                     connection: worker_connection,
                     root,
                     visual,
+                    colormap,
                     atoms,
                     windows: Vec::new(),
                     current: Vec::new(),
+                    lost: false,
                 };
                 state.run(&rx);
             })
@@ -255,6 +307,15 @@ impl X11Dimmer {
     }
 
     /// Destroy every overlay and stop both threads. Idempotent.
+    ///
+    /// # Limitation
+    ///
+    /// The [`apply`](Dimmer::apply)/[`clear`](Dimmer::clear) reply wait is bounded
+    /// by `REPLY_BUDGET`, but these joins are **not**. A worker inside a `flush`
+    /// against a wedged X server never reaches the `Stop`, and stable `std` has no
+    /// timed join. Same trade the Windows backend documents: the wedge that would
+    /// hang this join has already degraded apply/clear to a backend failure, so the
+    /// UI stays responsive until quit — at which point `Drop` runs this.
     pub fn shutdown(&mut self) {
         if let Some(worker) = self.worker.take() {
             let _ = self.tx.send(Command::Stop);
@@ -342,9 +403,24 @@ struct Worker {
     connection: Arc<RustConnection>,
     root: Window,
     visual: u32,
+    /// One colormap for every overlay. They all use the same visual on the same
+    /// root, so one is enough — and a per-window one would leak, because a
+    /// colormap is freed explicitly rather than with the window that used it.
+    colormap: xproto::Colormap,
     atoms: Atoms,
     windows: Vec<Overlay>,
     current: Vec<OverlayEntry>,
+    /// Latched once the compositing manager goes away.
+    ///
+    /// Tearing the overlays down is only half the answer: without this the very
+    /// next `apply` would plan a full set of `Create`s and map fresh windows onto
+    /// a session that can no longer blend them, which is a black screen — the
+    /// exact failure the teardown exists to prevent, one slider sample later.
+    /// This is the [`crate::linux_caps::SurfaceCaps::refuse_gamma`] analogue for
+    /// the overlay arm, and like it, it never un-latches: a compositor that comes
+    /// back needs a fresh backend, because this connection's windows are gone and
+    /// nothing here re-runs the startup checks.
+    lost: bool,
 }
 
 impl Worker {
@@ -352,24 +428,23 @@ impl Worker {
         while let Ok(command) = rx.recv() {
             match command {
                 Command::Apply(commands, reply) => {
-                    let ops = plan_transition(&self.current, &commands);
-                    let result = self.execute(&ops);
-                    if result.is_ok() {
-                        self.current = apply_ops(&self.current, &ops);
-                    }
+                    let result = self.apply(&commands);
                     let _ = reply.send(result);
                 }
                 Command::Clear(reply) => {
+                    // Always allowed, even after the compositor is lost: there is
+                    // then nothing to clear and the caller gets the state it
+                    // asked for.
                     let result = self.destroy_all();
                     let _ = reply.send(result);
                 }
-                // Not a reply-bearing command: nothing asked for this, and the
-                // only correct response is to stop covering the screen. Failures
-                // are ignored because there is no caller to report them to and
-                // the windows die with the connection regardless.
+                // Nothing asked for this, so there is no caller to report a
+                // failure to. The windows die with the connection regardless.
                 Command::CompositorLost => {
+                    self.lost = true;
                     let _ = self.destroy_all();
                 }
+                Command::Restacked(window) => self.raise_above(window),
                 Command::Stop => {
                     let _ = self.destroy_all();
                     return;
@@ -379,54 +454,134 @@ impl Worker {
         let _ = self.destroy_all();
     }
 
+    /// Diff, execute, and record **what actually happened**.
+    fn apply(&mut self, commands: &[DimCommand]) -> Result<(), DimmerError> {
+        if self.lost {
+            return Err(DimmerError::Unsupported);
+        }
+        let ops = plan_transition(&self.current, commands);
+        let (applied, outcome) = self.execute(&ops);
+        // Folded from `applied`, never from `ops`, and on the failure path too.
+        // The two diverge whenever an op is skipped (a rectangle X11 cannot
+        // express) or the list stops early, and recording an op that did not
+        // happen leaves `current` describing a window that does not exist — after
+        // which the planner never emits `Create` for that display again and it
+        // can never be dimmed for the rest of the session.
+        self.current = apply_ops(&self.current, &applied);
+        outcome
+    }
+
     /// Run the planner's ops, stopping at the first failure.
-    fn execute(&mut self, ops: &[OverlayOp]) -> Result<(), DimmerError> {
+    ///
+    /// Returns the ops that genuinely took effect, which is what the caller folds
+    /// into its record of the screen.
+    fn execute(&mut self, ops: &[OverlayOp]) -> (Vec<OverlayOp>, Result<(), DimmerError>) {
+        let mut applied: Vec<OverlayOp> = Vec::new();
         for op in ops {
-            match op {
-                OverlayOp::Create { id, bounds, alpha } => {
-                    let Some(rect) = x11_rect(*bounds) else {
-                        // A rectangle X11 cannot describe. Skipping is right:
-                        // the alternative is a wrapped window covering a display
-                        // the user did not dim. See `linux_overlay::x11_rect`.
-                        continue;
-                    };
-                    self.create(id.clone(), rect, *alpha)?;
-                }
-                OverlayOp::MoveResize { id, bounds } => {
-                    let Some((x, y, width, height)) = x11_rect(*bounds) else {
-                        self.destroy(id)?;
-                        continue;
-                    };
-                    if let Some(overlay) = self.find(id) {
-                        let config = xproto::ConfigureWindowAux::new()
-                            .x(i32::from(x))
-                            .y(i32::from(y))
-                            .width(u32::from(width))
-                            .height(u32::from(height))
-                            .stack_mode(StackMode::ABOVE);
-                        request(self.connection.configure_window(overlay.window, &config))?;
-                        // The input region is in window coordinates and stays
-                        // empty across a resize, so it does not need rebuilding.
-                    }
-                }
-                OverlayOp::SetAlpha { id, alpha } => {
-                    if let Some(overlay) = self.find(id) {
+            // `Ok(None)` means the op was skipped: nothing changed on screen, so
+            // nothing may be recorded either. Each arm says for itself what it
+            // did, because for one of them that is not the op it was given.
+            let outcome: Result<Option<OverlayOp>, DimmerError> = match op {
+                OverlayOp::Create { id, bounds, alpha } => match x11_rect(*bounds) {
+                    // A rectangle X11 cannot describe. Skipping is right — the
+                    // alternative is a wrapped window covering a display the user
+                    // did not dim (see `linux_overlay::x11_rect`) — and it must
+                    // NOT be recorded, or the planner never emits `Create` for
+                    // that display again and it stays undimmable for the session
+                    // even after it moves back into range.
+                    None => Ok(None),
+                    Some(rect) => self
+                        .create(id.clone(), rect, *alpha)
+                        .map(|()| Some(op.clone())),
+                },
+                OverlayOp::MoveResize { id, bounds } => match x11_rect(*bounds) {
+                    Some((x, y, width, height)) => match self.find(id) {
+                        // No window to move: the record and the screen have
+                        // already diverged. Recording nothing drops the entry, so
+                        // the next plan re-creates it.
+                        None => Ok(None),
+                        Some(overlay) => {
+                            let config = xproto::ConfigureWindowAux::new()
+                                .x(i32::from(x))
+                                .y(i32::from(y))
+                                .width(u32::from(width))
+                                .height(u32::from(height))
+                                .stack_mode(StackMode::ABOVE);
+                            // The input region is in window coordinates and stays
+                            // empty across a resize, so it needs no rebuilding.
+                            request(self.connection.configure_window(overlay.window, &config))
+                                .map(|_| Some(op.clone()))
+                        }
+                    },
+                    // Moved somewhere X11 cannot express. The window goes, and
+                    // what is recorded is the **destroy** rather than the move,
+                    // so the record says what the screen says.
+                    None => self
+                        .destroy(id)
+                        .map(|()| Some(OverlayOp::Destroy { id: id.clone() })),
+                },
+                OverlayOp::SetAlpha { id, alpha } => match self.find(id) {
+                    None => Ok(None),
+                    Some(overlay) => {
                         let window = overlay.window;
-                        self.repaint(window, *alpha)?;
+                        self.repaint(window, *alpha).map(|()| Some(op.clone()))
                     }
-                }
-                OverlayOp::Destroy { id } => self.destroy(id)?,
+                },
+                OverlayOp::Destroy { id } => self.destroy(id).map(|()| Some(op.clone())),
+            };
+            match outcome {
+                Ok(Some(done)) => applied.push(done),
+                Ok(None) => {}
+                Err(e) => return (applied, Err(e)),
             }
         }
-        flush(&self.connection)
+        (applied, flush(&self.connection))
     }
 
     fn find(&self, id: &StableDisplayId) -> Option<&Overlay> {
         self.windows.iter().find(|o| &o.id == id)
     }
 
+    /// Put every overlay back on top after something else was mapped or raised.
+    ///
+    /// X has no always-on-top: `CreateWindow` places a new window above its
+    /// siblings, and every top-level is a sibling of an override-redirect overlay
+    /// under the root. Without this the desktop dims and then the first window the
+    /// user opens sits *undimmed* on top of it, which reads as the feature simply
+    /// not working.
+    ///
+    /// `window` is what moved. Ignoring our own windows is what keeps two Duja
+    /// overlays from restacking each other forever; a raise-war with another
+    /// always-on-top client is still possible and is a documented limit.
+    fn raise_above(&self, window: Window) {
+        if self.windows.iter().any(|o| o.window == window) {
+            return;
+        }
+        let above = xproto::ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+        for overlay in &self.windows {
+            let _ = self.connection.configure_window(overlay.window, &above);
+        }
+        let _ = self.connection.flush();
+    }
+
     /// Create one overlay: an override-redirect ARGB window with an empty input
     /// region, mapped above everything.
+    ///
+    /// # Everything up to the map is **checked**
+    ///
+    /// An x11rb void request returns a cookie meaning "queued", not "accepted".
+    /// Dropping that cookie discards the reply and routes any protocol error to
+    /// the event loop, where nothing here would act on it — so a `BadMatch` from
+    /// `create_window`, or a failed input-region call, would both read as success.
+    /// The second of those is the one that matters: it would leave a mapped,
+    /// full-screen, override-redirect window that **swallows every click**, with
+    /// the flyout you would use to turn it off underneath it.
+    ///
+    /// So each step up to and including the input region is `check`ed, which
+    /// costs a round trip and runs once per display per dim session. The two
+    /// property writes and the map are not: a failed property is a hint the
+    /// compositor does not get, and a failed map is a window that is simply not
+    /// there, neither of which can trap the user.
     fn create(
         &mut self,
         id: StableDisplayId,
@@ -435,30 +590,23 @@ impl Worker {
     ) -> Result<(), DimmerError> {
         let (x, y, width, height) = rect;
         let window = request(self.connection.generate_id())?;
-        let colormap = request(self.connection.generate_id())?;
-        request(self.connection.create_colormap(
-            xproto::ColormapAlloc::NONE,
-            colormap,
-            self.root,
-            self.visual,
-        ))?;
 
         let attributes = CreateWindowAux::new()
-            // Premultiplied black at this alpha. The compositor blends it; with
-            // no compositor every alpha would paint the same opaque rectangle,
-            // which is why `spawn` refuses to start without one.
+            // Black at this alpha, with the alpha in the top byte. The compositor
+            // blends it; with no compositor every alpha would paint the same
+            // opaque rectangle, which is why `spawn` refuses to start without one.
             .background_pixel(premultiplied_black(alpha))
             // Required whenever the window's depth differs from its parent's:
             // the border pixel would otherwise be inherited from a colormap that
             // does not describe this visual, and the server answers `BadMatch`.
             .border_pixel(0)
-            .colormap(colormap)
+            .colormap(self.colormap)
             // The window manager never sees this window: no decorations, no
             // focus, no placement policy, no stacking interference.
             .override_redirect(1_u32)
             .event_mask(EventMask::NO_EVENT);
 
-        request(self.connection.create_window(
+        checked(self.connection.create_window(
             ARGB_DEPTH,
             window,
             self.root,
@@ -473,18 +621,27 @@ impl Worker {
         ))?;
 
         // ADR-0003's security invariant: an empty input region means the server
-        // routes every pointer and key event to whatever is underneath. This is
-        // the whole click-through mechanism on X11 and there is no alternative.
+        // routes every pointer and key event to whatever is underneath.
         let region = request(self.connection.generate_id())?;
-        request(self.connection.xfixes_create_region(region, &[]))?;
-        request(
-            self.connection
-                .xfixes_set_window_shape_region(window, SK::INPUT, 0, 0, region),
-        )?;
+        if let Err(e) = checked(self.connection.xfixes_create_region(region, &[])).and_then(|()| {
+            checked(
+                self.connection
+                    .xfixes_set_window_shape_region(window, SK::INPUT, 0, 0, region),
+            )
+        }) {
+            // The window exists and is still unmapped. Destroy it rather than
+            // leave an input-stealing rectangle one `map_window` away. The
+            // colormap is shared and outlives every window, so it is not freed
+            // here.
+            let _ = self.connection.xfixes_destroy_region(region);
+            let _ = self.connection.destroy_window(window);
+            let _ = self.connection.flush();
+            return Err(e);
+        }
 
-        // Never let a compositor unredirect this window. Without it a fullscreen
-        // game or video turns the overlay opaque - the same black screen the
-        // capability check exists to prevent, reached by a different route.
+        // Ask no compositing manager to unredirect this window. See
+        // `linux_overlay::BYPASS_COMPOSITOR_NEVER` for what that does and does
+        // not guarantee.
         request(self.connection.change_property32(
             PropMode::REPLACE,
             window,
@@ -550,35 +707,57 @@ impl Worker {
     }
 }
 
-/// Watch the compositing-manager selection and report the moment it is lost.
+/// The single event loop: the compositing-manager selection, root restacking,
+/// and protocol errors.
 ///
 /// Blocks in `wait_for_event` on its own thread with a clone of the connection,
-/// which x11rb supports: the worker keeps issuing requests on the same connection
-/// meanwhile.
+/// which x11rb supports — its locking is built for exactly this, and the worker
+/// keeps issuing requests on the same connection meanwhile.
 ///
-/// Returns on a broken connection, on a `Stop` wake, or once it has reported the
-/// loss. There is nothing to watch for afterwards — the overlays are gone, and a
-/// compositor that comes back is picked up by the next `spawn`, which the app
-/// performs when its capability report is re-resolved.
+/// It keeps running after reporting a lost compositor, for two reasons. It is
+/// still the only consumer of this connection's event queue, and protocol errors
+/// arrive here rather than at the request that caused them, so a thread that
+/// returned early would leave them accumulating unread.
+///
+/// It does **not** watch for a compositor coming back. The overlays are gone and
+/// this connection's worker has latched, so recovering means a fresh backend —
+/// and nothing re-runs `spawn` today, because the app starts its dimmer once.
+/// `docs/debt.md` carries that.
 fn watch_compositor(connection: &RustConnection, tx: &Sender<Command>) {
     loop {
         let Ok(event) = connection.wait_for_event() else {
             return;
         };
-        match event {
+        let outcome = match event {
             Event::XfixesSelectionNotify(notify) => {
                 // Owner `NONE` is the manager going away. An owner *change* to a
                 // live window is a restart that already has a new manager, and
                 // the overlays are fine.
                 if notify.owner == x11rb::NONE {
-                    let _ = tx.send(Command::CompositorLost);
-                    return;
+                    tx.send(Command::CompositorLost)
+                } else {
+                    Ok(())
                 }
             }
-            // The shutdown wake. Anything else is noise on a window that asked
-            // for no events.
+            // Something appeared or moved in the stacking order. The worker
+            // decides whether it was one of ours.
+            Event::MapNotify(notify) => tx.send(Command::Restacked(notify.window)),
+            Event::ConfigureNotify(notify) => tx.send(Command::Restacked(notify.window)),
+            // A protocol error from a request whose cookie was dropped. The
+            // checked calls in `create` catch the ones that could trap a user;
+            // this is where the rest surface, and a silent drop is how an overlay
+            // that never appeared looks like one that did.
+            Event::Error(error) => {
+                warn!(?error, "the X server refused an overlay request");
+                Ok(())
+            }
+            // The shutdown wake.
             Event::ClientMessage(_) => return,
-            _ => {}
+            _ => Ok(()),
+        };
+        // The worker is gone, so there is nobody left to tell.
+        if outcome.is_err() {
+            return;
         }
     }
 }
@@ -658,9 +837,32 @@ fn owned(connection: &RustConnection, selection: xproto::Atom) -> bool {
         .is_some_and(|reply| reply.owner != x11rb::NONE)
 }
 
+/// The `XFixes` major version that introduced `SetWindowShapeRegion`, which is the
+/// whole click-through mechanism.
+const XFIXES_INPUT_SHAPE_VERSION: u32 = 2;
+
 /// Turn an x11rb request result into a [`DimmerError`].
+///
+/// This reports only that the request could be **queued**. A protocol error from
+/// the server arrives later, on the event queue, which is why anything that could
+/// trap a user goes through [`checked`] instead.
 fn request<T, E: fmt::Display>(result: Result<T, E>) -> Result<T, DimmerError> {
     result.map_err(|e| DimmerError::Os(format!("X request failed: {e}")))
+}
+
+/// Issue a void request and **wait for the server to accept it**.
+///
+/// One round trip, and the difference between "queued" and "worked". Used where a
+/// silent failure would leave the user worse off than no overlay: a window that
+/// was never created (so a display is never dimmed and never retried), or one
+/// whose input region was never set (so it swallows every click, including on the
+/// flyout that would turn it off).
+fn checked<C: x11rb::connection::Connection, E: fmt::Display>(
+    result: Result<x11rb::cookie::VoidCookie<'_, C>, E>,
+) -> Result<(), DimmerError> {
+    request(result)?
+        .check()
+        .map_err(|e| DimmerError::Os(format!("the X server refused a request: {e}")))
 }
 
 /// Flush pending requests so the screen actually changes.

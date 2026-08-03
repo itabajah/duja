@@ -39,6 +39,12 @@ windows = { version = "0.62", default-features = false, features = [
 # The X11 overlay backend owns a dedicated thread, exactly as the Windows one
 # does, and takes its commands over the same channel type.
 crossbeam-channel = { workspace = true }
+# A WARN when the X server refuses an overlay request. X protocol errors arrive
+# asynchronously, on the event queue rather than at the call that caused them, so
+# without a log the only ones anybody would ever learn about are the handful worth
+# a synchronous round trip. Already in the app's graph, and the Windows backend
+# takes it for the same reason.
+tracing = { workspace = true }
 x11rb = { workspace = true }
 wayland-client = { workspace = true }
 wayland-protocols = { workspace = true }

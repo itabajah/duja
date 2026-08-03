@@ -80,9 +80,16 @@ with the phases; keep entries as observable behaviors, not implementation.
       no in-app workaround: an overlay that swallows input cannot be dismissed
       from the flyout it is covering.
 - [ ] Start a compositing manager **while Duja is running** on an X11 session that
-      had none: the overlay becomes available without a restart. Same mechanism as
-      the kill case above and the same debt row; this is the direction a capability
-      table could never represent.
+      had none: the overlay becomes available without a restart. **Expected to fail
+      today** - the app starts its dimmer once, at launch, and `docs/debt.md`
+      carries the missing re-spawn seam. Kept on the list because it is the
+      direction a capability table could never represent, and because a passing run
+      is what closes that row.
+- [ ] **Open a window while dimming** on X11, then click around and switch
+      workspaces. The dimming must stay on top of every window that appears. Watch
+      for flicker against another always-on-top client (a second OSD, an on-screen
+      keyboard, a presentation tool): X has no always-on-top, so Duja re-raises on
+      every root restack, and two clients doing that can fight.
 - [ ] Wayland session that **advertises** `zwlr_layer_shell_v1`: the overlay appears and dims.
 - [ ] Wayland session that advertises **neither** wlr protocol: software dimming reports itself
       unavailable *with the reason*, and hardware paths still work.

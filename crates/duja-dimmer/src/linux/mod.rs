@@ -20,6 +20,8 @@ pub use overlay::X11Dimmer;
 
 use duja_core::dimmer::{DimCommand, Dimmer, DimmerError};
 
+use crate::linux_caps::{Probe, SessionEnv, SurfaceCaps, Transport, resolve, transport};
+
 /// The [`Dimmer`] for a Linux session, chosen at **runtime**.
 ///
 /// Windows and macOS each have one windowing system, so their `PlatformDimmer` is
@@ -27,16 +29,9 @@ use duja_core::dimmer::{DimCommand, Dimmer, DimmerError};
 /// mechanism, is a property of the session rather than the build. So this is a
 /// real type that picks when it starts, which is the same answer ADR-0011 gives
 /// for the capability report and for the same reason.
+#[derive(Debug)]
 pub struct LinuxDimmer {
     inner: Box<dyn Dimmer>,
-}
-
-impl std::fmt::Debug for LinuxDimmer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LinuxDimmer")
-            .field("inner", &self.inner)
-            .finish()
-    }
 }
 
 impl LinuxDimmer {
@@ -55,17 +50,15 @@ impl LinuxDimmer {
     pub fn spawn() -> Result<Self, DimmerError> {
         let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
         let display = std::env::var("DISPLAY").ok();
-        let env = crate::linux_caps::SessionEnv {
+        let env = SessionEnv {
             wayland_display: wayland_display.as_deref(),
             display: display.as_deref(),
         };
-        match crate::linux_caps::transport(env) {
-            crate::linux_caps::Transport::X11 => X11Dimmer::spawn().map(|dimmer| LinuxDimmer {
+        match transport(env) {
+            Transport::X11 => X11Dimmer::spawn().map(|dimmer| LinuxDimmer {
                 inner: Box::new(dimmer),
             }),
-            crate::linux_caps::Transport::Wayland | crate::linux_caps::Transport::None => {
-                Err(DimmerError::Unsupported)
-            }
+            Transport::Wayland | Transport::None => Err(DimmerError::Unsupported),
         }
     }
 }
@@ -79,8 +72,6 @@ impl Dimmer for LinuxDimmer {
         self.inner.clear()
     }
 }
-
-use crate::linux_caps::{Probe, SessionEnv, SurfaceCaps, Transport, resolve, transport};
 
 /// Resolve what this session can actually do.
 ///

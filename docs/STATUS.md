@@ -1535,13 +1535,32 @@ where the user asked to dim. **Whether the rectangle fits**: X11 geometry is
 16-bit, and doing that conversion with `as` would wrap a monitor past 32767
 pixels onto a display nobody asked to dim.
 
-The two hazards `#121`'s review predicted are closed by the window itself. It
-carries `_NET_WM_BYPASS_COMPOSITOR = 2`, so no compositing manager unredirects it
-for a fullscreen app; and a second thread holds `XFixesSelectSelectionInput` on
-`_NET_WM_CM_S<n>` and tears every overlay down the moment the owner goes to
-`None` — the analogue of `refuse_gamma` that the debt row asked for. Losing the
-dimming when `picom` dies is a visible, recoverable degradation; keeping it is a
-screen the user cannot see to fix.
+A second thread holds `XFixesSelectSelectionInput` on `_NET_WM_CM_S<n>`, tears
+every overlay down the moment the owner goes to `None`, and **latches** — which
+is the `refuse_gamma` analogue `#121`'s review asked for, both halves of it. The
+first draft had only the teardown, and its review pointed out that the very next
+slider sample would then map fresh windows onto a session that could no longer
+blend them: the same black screen, one frame later. The overlay also sets
+`_NET_WM_BYPASS_COMPOSITOR = 2` against fullscreen unredirection, which is the
+only standard lever there is and is recorded as a mitigation rather than a
+settlement, because a compositor evaluates unredirection against the window it is
+considering and picom unredirects the whole screen.
+
+**X has no always-on-top**, which the same review caught. `CreateWindow` places a
+window above its siblings and every top-level is a sibling of an
+override-redirect overlay, so raising once at map time means the first window the
+user opens sits *undimmed* on top of the dimming. The watcher selects
+`SubstructureNotify` on the root and the worker re-raises anything that is not
+its own. That is a raise-war with another always-on-top client waiting to happen,
+and `debt.md` says so rather than pretending otherwise.
+
+**Every request that could trap a user is checked**, not merely queued. An x11rb
+void request returns a cookie meaning "sent"; a protocol error arrives later, on
+the event queue. So a failed input-region call would have read as success and
+left a mapped, full-screen window that swallows every click — with the flyout you
+would use to turn it off underneath it. Window creation and the input region take
+a round trip each; the property writes and the map do not, because neither can
+trap anybody.
 
 Input passes through by the **`XFixes` empty input region**, which is the only
 mechanism X offers, so the backend refuses to start where the extension is absent

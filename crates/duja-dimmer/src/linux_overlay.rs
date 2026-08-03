@@ -7,9 +7,9 @@
 //! - **Which visual to use.** Get this wrong and the overlay is opaque. There is
 //!   no partial failure and no error to report — the window is created, mapped,
 //!   and black.
-//! - **What pixel to fill with.** The alpha lives in the top byte of a
-//!   premultiplied ARGB value, and a colour component that is not zero at low
-//!   alpha is a *brighter* overlay than asked for rather than a darker one.
+//! - **Where the alpha goes in the pixel.** It is the **top** byte of a 32-bit
+//!   value whose other three are the colour. Put it anywhere else and the
+//!   overlay is either invisible or a coloured wash.
 //! - **Whether the rectangle is even expressible.** X11 window geometry is 16-bit
 //!   signed position and 16-bit unsigned size. A desktop wider than 32767 pixels
 //!   silently wraps if the conversion is done with `as`.
@@ -30,15 +30,32 @@ use duja_core::dimmer::DisplayBounds;
 /// [`crate::linux_caps`] exists to prevent, reached past that check. The EWMH
 /// answer is this property: 0 means no preference, 1 means the window would like
 /// to bypass, and 2 means it must never be bypassed.
+///
+/// **This is a mitigation, not a guarantee, and the difference matters.** The
+/// property is defined for application windows, and a compositor evaluates
+/// unredirection against the window it is considering — picom's
+/// `unredir-if-possible` unredirects the *whole screen* rather than one window,
+/// so a property on the overlay cannot bind that decision. Setting it is the only
+/// standard lever there is; whether it is enough is a question for a real session
+/// with a real compositor, which is why the QA checklist gates on it and
+/// `docs/debt.md` keeps the row open.
 pub const BYPASS_COMPOSITOR_NEVER: u32 = 2;
 
-/// The pixel an overlay is filled with for a given alpha byte.
+/// The pixel an overlay is filled with for a given alpha byte: black, with the
+/// alpha in the top byte.
 ///
-/// **Premultiplied** ARGB, which is what a compositing manager expects from a
-/// 32-bit visual: each colour component is already scaled by the alpha, so black
-/// at any alpha has all three at zero and only the top byte varies. Writing an
-/// un-premultiplied `0xAA00_0000 | 0x00FF_FFFF` here would ask the compositor to
-/// blend *white* at that alpha and wash the screen out instead of dimming it.
+/// The format an X11 compositing manager reads from a 32-bit visual is
+/// **premultiplied** ARGB (`PictStandardARGB32`), and this value satisfies that —
+/// but for black it is a distinction without a difference, because premultiplied
+/// and straight-alpha black are the same bytes. [`crate::linux_caps`] says the
+/// same thing from the other direction, about why an uncomposited X session
+/// paints an opaque rectangle at every alpha. Naming the format here is a note
+/// for anyone who later wants a fill that is *not* black; it is not the reason
+/// this function is shaped the way it is.
+///
+/// What the function is actually for is the byte layout: alpha in the top eight
+/// bits, colour in the low 24, matching the visual [`choose_argb_visual`]
+/// insists on. Get that wrong and the overlay is invisible or a coloured wash.
 ///
 /// `alpha` is the quantized byte the [`crate::plan`] kernel produces, so 0 is
 /// "no overlay" (the backend destroys the window rather than filling it with
@@ -89,9 +106,11 @@ const COLOUR_MASK: u32 = 0x00FF_FFFF;
 /// at all: a display that cannot be dimmed in software is a missing feature, and
 /// a screen that goes black with no visible way back is a broken machine.
 ///
-/// The first match wins. Servers list visuals in a fixed order and any visual
-/// satisfying every condition here is interchangeable for this purpose — the
-/// masks *are* the pixel layout, so two visuals that pass have the same one.
+/// The first match wins. Two visuals that pass can still have *different* colour
+/// layouts (RGB and BGR both satisfy every condition), and that is fine here for
+/// one reason only: the overlay is filled with black, which is the same bytes in
+/// either. A fill that was not black would have to read the masks rather than
+/// assume them.
 #[must_use]
 pub fn choose_argb_visual(candidates: &[VisualCandidate]) -> Option<u32> {
     candidates
@@ -177,9 +196,11 @@ mod tests {
         assert_eq!(premultiplied_black(255), 0xFF00_0000);
     }
 
-    /// The failure this guards against is a wash-out rather than a no-op: an
-    /// un-premultiplied white-with-alpha pixel asks the compositor to blend
-    /// *white* over the screen, which brightens where the user asked to dim.
+    /// The colour bytes stay zero at every alpha, which is what makes the value
+    /// valid as premultiplied ARGB — the format an X11 compositor reads from a
+    /// 32-bit visual. For black the two encodings coincide, so this cannot catch
+    /// a premultiplication mistake; what it catches is a fill that stopped being
+    /// black, which would blend a colour over the screen instead of dimming it.
     #[test]
     fn no_alpha_ever_produces_a_non_black_colour() {
         for alpha in 0..=255_u8 {
