@@ -28,9 +28,11 @@
 //! Wherever the OS's raw answer needs *interpreting*, that step is a **pure
 //! decoder** rather than an inline expression, so it is compiled and tested on
 //! every CI lane and not only on the one that can run the query. That covers the
-//! three real decisions: `AppsUseLightTheme == 0` meaning dark, an **absent**
+//! real decisions: `AppsUseLightTheme == 0` meaning dark, an **absent**
 //! `AppsUseLightTheme` meaning light, a missing `AppleInterfaceStyle` meaning
-//! light, plus `ShellExecuteW`'s legacy "greater than 32" success rule.
+//! light, the XDG `color-scheme` enumeration (whose polarity is the *opposite* of
+//! `AppsUseLightTheme`'s), plus `ShellExecuteW`'s legacy "greater than 32"
+//! success rule.
 //!
 //! Not every arm has one, and that is the point of the rule rather than an
 //! exception to it: macOS answers all three questions with a value that needs no
@@ -46,9 +48,10 @@
 /// user-visible situations that a bare "could not open" cannot tell apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenUrlFailure {
-    /// The platform's own failure code where it has one — Windows'
-    /// `ShellExecuteW` legacy return. `None` on platforms that report only
-    /// success or failure, which is macOS.
+    /// The platform's own failure code where it has one: Windows'
+    /// `ShellExecuteW` legacy return, or the `errno` from spawning `xdg-open` on
+    /// Linux. `None` on macOS, which reports only success or failure, and on
+    /// Linux when the URL was refused before any process was started.
     pub code: Option<u32>,
 }
 
@@ -183,6 +186,30 @@ fn dark_from_interface_style(style: Option<&str>) -> bool {
 /// of this AND-ed the call's success flag into the result and so returned
 /// motion-**off** on a failed query — the opposite of the documented default, and
 /// exactly what this separation makes testable.
+/// Decode the freedesktop `color-scheme` setting into Duja's dark-mode answer.
+///
+/// The enumeration is defined by the XDG settings portal: `0` no preference,
+/// `1` prefer dark, `2` prefer light. Only `1` is dark; **`0` is light, not
+/// unknown**, which is the same rule the Windows and macOS backends already
+/// follow (both express "light" by the absence of a value). Widening
+/// no-preference to `None` is how a flyout ends up dark on a stock light desktop.
+///
+/// An unknown value is treated as light rather than dark for the same reason: a
+/// future scheme Duja does not recognise should not darken the UI on the guess.
+///
+/// Pure, so it is compiled and tested on every lane in the pattern the Windows
+/// registry decoders beside it use.
+#[cfg(any(test, target_os = "linux"))]
+const fn color_scheme_to_dark(scheme: u32) -> bool {
+    scheme == 1
+}
+
+/// Decode Windows' `SPI_GETCLIENTAREAANIMATION` answer into
+/// [`animations_enabled`].
+///
+/// `queried` is the OS-written `BOOL` from a **successful** query, or `None` when
+/// the call itself failed, which takes the motion-on default. Motion is on unless
+/// the OS explicitly reported client-area animations disabled.
 #[cfg(any(test, windows))]
 const fn animations_enabled_from(queried: Option<i32>) -> bool {
     match queried {
@@ -385,9 +412,185 @@ mod platform {
     }
 }
 
-// --- other targets ---------------------------------------------------------
+// --- targets with no desktop integration ---------------------------------------------------------
 
-#[cfg(not(any(windows, target_os = "macos")))]
+// --- Linux -----------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+mod platform {
+    use std::process::{Command, Stdio};
+
+    use super::{OpenUrlFailure, color_scheme_to_dark};
+
+    /// Open `url` in the user's browser via `xdg-open`.
+    ///
+    /// `xdg-open` rather than the XDG portal's `OpenURI`, and the choice is not
+    /// the obvious one. The portal is the modern, sandbox-friendly answer and
+    /// Duja already has a D-Bus client, so it looked free.
+    ///
+    /// The deciding detail is `parent_window`. It is **optional** — an app that
+    /// cannot produce an identifier is expected to pass an empty string — but
+    /// under Wayland producing one means an `xdg_foreign` export handle Duja has
+    /// no way to obtain from Slint, and an empty one is reported to make some
+    /// portals park the browser *behind* the current window. So the portal route
+    /// costs a D-Bus round trip to get a worse outcome than the one-line spawn.
+    /// `xdg-open` is present on every desktop that ships a portal and needs
+    /// nothing from the toolkit.
+    ///
+    /// Best-effort, matching the cross-platform contract: `Ok` means the process
+    /// was spawned, not that a browser appeared. The child is deliberately not
+    /// waited on — `xdg-open` can block for as long as it takes a browser to
+    /// start — and its streams are dropped so a chatty helper cannot fill a pipe
+    /// nobody reads.
+    pub(super) fn open_url(url: &str) -> Result<(), OpenUrlFailure> {
+        // `Command` passes arguments straight to `execvp`, so there is no shell
+        // and no injection to defend against. What there *is* to defend against
+        // is `xdg-open` reading a leading `-` as one of its own flags, which is
+        // why the scheme is checked rather than the string escaped.
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return Err(OpenUrlFailure { code: None });
+        }
+        Command::new("xdg-open")
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|mut child| {
+                // Reaped on a detached thread. `Child::drop` explicitly does not
+                // wait, so without this each opened link leaves a zombie for the
+                // lifetime of a process that is meant to run for weeks — and
+                // waiting *here* would block the caller for as long as a browser
+                // takes to start, which is the whole reason this is
+                // fire-and-forget. The Windows and macOS arms create no child at
+                // all, so this is the one platform that needs it.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            })
+            .map_err(|e| OpenUrlFailure {
+                // `OpenUrlFailure::code` is a `u32` because Windows' is; an
+                // errno is a small positive `i32`, so the conversion cannot
+                // lose information, and a negative value would not be an errno
+                // at all.
+                code: e.raw_os_error().and_then(|code| u32::try_from(code).ok()),
+            })
+    }
+
+    /// Read the desktop's colour scheme from the XDG settings portal.
+    ///
+    /// `org.freedesktop.portal.Settings.Read("org.freedesktop.appearance",
+    /// "color-scheme")` is the one cross-desktop answer: GNOME, KDE and the
+    /// wlroots portals all implement it, and it needs no per-desktop key names.
+    /// The reply is a variant-wrapped `u32` in the freedesktop `color-scheme`
+    /// enumeration, decoded by [`color_scheme_to_dark`].
+    ///
+    /// `None` on any failure, which here is genuinely "no answer": no session
+    /// bus, no portal, or a portal that does not implement the key. That is
+    /// narrower than it looks and matches the cross-platform contract — a
+    /// desktop with a portal that answers "no preference" is *not* unknown, it
+    /// is light, and is reported as `Some(false)`.
+    pub(super) fn os_dark_theme() -> Option<bool> {
+        let connection = zbus::blocking::Connection::session().ok()?;
+        let reply = connection
+            .call_method(
+                Some("org.freedesktop.portal.Desktop"),
+                "/org/freedesktop/portal/desktop",
+                Some("org.freedesktop.portal.Settings"),
+                "Read",
+                &("org.freedesktop.appearance", "color-scheme"),
+            )
+            .ok()?;
+        // The reply is `(v)` whose payload is **itself** a variant — the
+        // double-wrapping that is exactly why the portal later grew a `ReadOne`
+        // method. `zvariant` peels the outer one during deserialisation; the
+        // inner must be peeled explicitly, and `TryFrom` will not do it: its
+        // impls match the enum variant exactly and never unwrap a
+        // `Value::Value`, so `u32::try_from` on the result is `IncorrectType`
+        // every single time. `downcast_ref` is the API that peels one level.
+        //
+        // Getting this wrong is silent and total: `Read` succeeds, the `?`
+        // swallows the type error, `os_dark_theme` answers `None` on every
+        // desktop, and `ConfigTheme::System` — the serde default — resolves to
+        // the caller's dark fallback. Every Linux user on a stock light desktop
+        // gets a dark flyout.
+        let reply: zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
+        Some(color_scheme_to_dark(scheme_from_reply(&reply)?))
+    }
+
+    /// Peel the portal's doubly-wrapped reply down to the scheme number.
+    ///
+    /// Split out from the call so it can be tested: the D-Bus round trip cannot
+    /// run in CI, but the unwrapping is where the mistake was, and a synthetic
+    /// value reproduces it exactly.
+    fn scheme_from_reply(reply: &zbus::zvariant::OwnedValue) -> Option<u32> {
+        reply.downcast_ref::<&u32>().ok().copied()
+    }
+
+    /// Whether the desktop wants UI animations.
+    ///
+    /// Always `true`, and this one is a genuine gap rather than a placeholder
+    /// with a plan. The XDG appearance namespace has **no** animations key, so
+    /// there is no cross-desktop query to make: GNOME has
+    /// `org.gnome.desktop.interface enable-animations`, KDE has a different one,
+    /// and reading either means either a `gsettings` subprocess per query or a
+    /// per-desktop table of the kind ADR-0011 argues against. `true` is what
+    /// every desktop ships with and what the cross-platform contract says a
+    /// failed query answers, so the behaviour is right; only the fidelity is
+    /// missing. Tracked in `docs/debt.md`.
+    pub(super) const fn animations_enabled() -> bool {
+        true
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use zbus::zvariant::{OwnedValue, Value};
+
+        use super::scheme_from_reply;
+
+        /// The reply's payload is a variant **inside** a variant — spelled
+        /// `Value::Value` explicitly here, because `Value::from(Value)` is the
+        /// identity conversion and would flatten the very nesting under test.
+        /// `TryFrom`
+        /// will not peel the inner one — it matches the enum variant exactly and
+        /// returns `IncorrectType` for a `Value::Value`. Getting this wrong is
+        /// silent and total: `Read` succeeds, the error is swallowed by a `?`,
+        /// `os_dark_theme` answers `None` on every desktop, and `System` — the
+        /// serde default — resolves to the caller's **dark** fallback. Every
+        /// Linux user on a stock light desktop would get a dark flyout.
+        #[test]
+        fn the_portals_doubly_wrapped_reply_is_peeled_to_the_number() {
+            let nested = Value::Value(Box::new(Value::U32(1)));
+            let owned = OwnedValue::try_from(nested).expect("owned");
+
+            assert_eq!(scheme_from_reply(&owned), Some(1));
+        }
+
+        /// Each scheme the portal defines survives the peeling, so the decoder
+        /// below it sees the real number rather than a default.
+        #[test]
+        fn every_scheme_value_survives_the_round_trip() {
+            for scheme in 0u32..=2 {
+                let owned = OwnedValue::try_from(Value::Value(Box::new(Value::U32(scheme))))
+                    .expect("owned");
+                assert_eq!(scheme_from_reply(&owned), Some(scheme), "scheme {scheme}");
+            }
+        }
+
+        /// A payload that is not a number at all must be `None` rather than a
+        /// panic or a fabricated `0` — `0` is "no preference", which is a real
+        /// answer meaning light.
+        #[test]
+        fn a_payload_of_the_wrong_type_is_no_answer() {
+            let owned =
+                OwnedValue::try_from(Value::Value(Box::new(Value::from("dark")))).expect("owned");
+
+            assert_eq!(scheme_from_reply(&owned), None);
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod platform {
     use super::OpenUrlFailure;
 
@@ -419,6 +622,36 @@ mod platform {
 
 #[cfg(test)]
 mod tests {
+    /// The XDG `color-scheme` enumeration asks about *dark*, so only `1` is
+    /// dark — the opposite polarity to Windows' `AppsUseLightTheme` two decoders
+    /// below, which is exactly why both are pinned rather than either assumed.
+    #[test]
+    fn only_prefer_dark_is_dark_in_the_xdg_colour_scheme() {
+        // 0 = no preference, 1 = prefer dark, 2 = prefer light.
+        assert!(!super::color_scheme_to_dark(0));
+        assert!(super::color_scheme_to_dark(1));
+        assert!(!super::color_scheme_to_dark(2));
+    }
+
+    /// "No preference" is **light**, not unknown. The crate contract says `None`
+    /// means the query failed, and both other platforms express light by the
+    /// absence of a value; widening no-preference to unknown is how a flyout
+    /// ends up dark on a stock light-themed desktop.
+    #[test]
+    fn no_preference_is_light_rather_than_unknown() {
+        assert!(!super::color_scheme_to_dark(0));
+    }
+
+    /// A value from a future revision of the enumeration must not darken the UI
+    /// on a guess. Light is the safe default in the same sense the other two
+    /// backends use it: it is what the desktop ships with.
+    #[test]
+    fn an_unrecognised_colour_scheme_is_treated_as_light() {
+        for scheme in [3u32, 4, 99, u32::MAX] {
+            assert!(!super::color_scheme_to_dark(scheme), "scheme {scheme}");
+        }
+    }
+
     /// `AppsUseLightTheme` asks about *light*, so `0` is dark. Inverting this is
     /// the obvious slip and it would flip every `System`-theme user's flyout.
     #[test]

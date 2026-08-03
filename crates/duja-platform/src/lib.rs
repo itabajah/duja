@@ -17,12 +17,18 @@
 //! - **macOS** (P6) — a dedicated `CFRunLoop` thread with
 //!   `CGDisplayRegisterReconfigurationCallback` (display topology) and `IOKit`
 //!   `IORegisterForSystemPower` (suspend/resume). See the `mac` module.
-//! - **Linux** (P7) — udev `drm` monitor.
+//! - **Linux** (P7) — the kernel's `NETLINK_KOBJECT_UEVENT` socket for display
+//!   hot-plug, and logind's `PrepareForSleep` for suspend/resume. Two sources,
+//!   because the kernel offers no suspend notification and D-Bus is absent in
+//!   containers, `ssh` sessions and non-systemd machines where hot-plug still
+//!   has to work. **Not** a udev `drm` monitor: that means libudev, a C library
+//!   and a system dependency, to receive the same netlink messages. ADR-0022
+//!   reverses the older plan this line used to describe.
 //!
-//! On the remaining non-Windows, non-macOS targets the pump is still a no-op:
+//! On the remaining targets the pump is still a no-op:
 //! [`spawn`](EventPump::spawn) succeeds and returns a receiver that stays open
 //! but never yields an event (so `recv_timeout` blocks and times out rather than
-//! reporting a disconnect). The real Linux backend replaces it in P7.
+//! reporting a disconnect).
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
@@ -33,6 +39,17 @@ mod win;
 
 #[cfg(target_os = "macos")]
 mod mac;
+
+#[cfg(target_os = "linux")]
+mod linux;
+
+// Pure raw-uevent → `PlatformEvent` mapping for the Linux backend. Same shape and
+// same reason as `mac_events`: compiled on Linux, where `linux::uevent` calls it,
+// and under `cfg(test)` on every host so its rules are unit-tested without a
+// Linux machine. It matters more here — a GitHub runner has no `drm` connector to
+// unplug, so this is the only part of hot-plug detection any test can reach.
+#[cfg(any(test, target_os = "linux"))]
+mod linux_events;
 
 // Pure raw-code → `PlatformEvent` mapping for the macOS backend. Compiled on
 // macOS (where `mac::sys` calls it) and, under `cfg(test)`, on every host so its
@@ -119,7 +136,10 @@ impl EventPump {
     /// arrive. On Windows the call blocks until the event thread has created
     /// its window and registered every notification, so any initialization
     /// failure surfaces here as [`PlatformError`] (the thread is joined before
-    /// returning). On other targets it always succeeds with a silent receiver.
+    /// returning). On Linux it can fail too, on one condition: the
+    /// `NETLINK_KOBJECT_UEVENT` socket not opening or not binding. A missing
+    /// logind is **not** a failure there — the pump runs with hot-plug alone. On
+    /// the remaining targets it always succeeds with a silent receiver.
     ///
     /// # Errors
     ///
@@ -155,22 +175,27 @@ type Backend = win::Pump;
 #[cfg(target_os = "macos")]
 type Backend = mac::Pump;
 
-// -- Non-Windows, non-macOS no-op backend ---------------------------------
+// -- Linux backend selection ----------------------------------------------
 
-/// Placeholder backend for targets without a real event source yet (Linux, P7).
+#[cfg(target_os = "linux")]
+type Backend = linux::Pump;
+
+// -- Remaining targets: no-op backend -------------------------------------
+
+/// Placeholder backend for targets with no real event source.
 ///
 /// Holds the sending half of the channel open so the returned receiver blocks
 /// (and times out) rather than reporting an immediate disconnect — matching the
 /// "silent but live" contract documented on [`EventPump::spawn`].
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 struct Noop {
     _tx: crossbeam_channel::Sender<PlatformEvent>,
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 type Backend = Noop;
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 impl Noop {
     // RATIONALE (clippy::unnecessary_wraps): the backend `spawn` contract is
     // fallible on Windows; the no-op backend keeps the identical signature so
@@ -220,7 +245,7 @@ mod tests {
         assert!(format!("{e:?}").contains("Init"));
     }
 
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     #[test]
     fn noop_backend_spawns_and_shuts_down_without_firing() {
         use std::time::Duration;

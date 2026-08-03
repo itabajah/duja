@@ -307,7 +307,10 @@ pub(crate) fn run(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
     let gamma_allowed =
         duja_dimmer::gamma_support_from_hdr(duja_dimmer::is_hdr_active()).allows_gamma();
     debug!(gamma_allowed, "resolved HDR gamma verdict");
-    let theme = settings::ui_theme(config.general.theme, os_dark_theme());
+    let theme = settings::ui_theme(
+        config.general.theme,
+        os_theme_if_needed(config.general.theme),
+    );
     let accent = settings_apply::accent_to_choice(config.general.accent);
 
     // 4. Flyout window FIRST (icon-first: the UI must exist or there is no app).
@@ -951,6 +954,27 @@ const fn become_accessory_app() {}
 /// and `settings::ui_theme` still resolves that to dark.
 fn os_dark_theme() -> Option<bool> {
     duja_platform::os_dark_theme()
+}
+
+/// [`os_dark_theme`], but **only** when the user's preference actually depends on
+/// it.
+///
+/// `refresh_system_theme` runs before every flyout show and its own docs say it
+/// is "a no-op when the preference is `Light`/`Dark` (the OS is not consulted)".
+/// That was true of the resolution and false of the call: Rust evaluates
+/// arguments eagerly, so the query ran on every show whatever the preference was.
+///
+/// On Windows that costs one `RegGetValueW` and the difference is invisible. On
+/// Linux the same call is a **session-bus connection**: a SASL handshake, a
+/// zbus connection with its own executor thread, and an XDG portal method call
+/// with no client-side timeout — on the Slint main thread, before every tray
+/// click. If `xdg-desktop-portal` is not already running, that call triggers bus
+/// activation, whose `dbus-daemon` start timeout is 25 seconds, and the tray is
+/// frozen for all of it.
+pub(crate) fn os_theme_if_needed(pref: duja_core::config::Theme) -> Option<bool> {
+    matches!(pref, duja_core::config::Theme::System)
+        .then(os_dark_theme)
+        .flatten()
 }
 
 /// Seconds since the Unix epoch (saturating; `0` if the clock is before epoch).

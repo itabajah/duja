@@ -73,6 +73,14 @@ rustix = { workspace = true }
 # (LaunchAgent plist).
 directories = { workspace = true }
 
+# -- Linux event pump + panel/desktop integration ----------------------------
+[target.'cfg(target_os = "linux")'.dependencies]
+# logind's PrepareForSleep signal, the only source of suspend/resume on Linux
+# (the kernel offers userspace none). Taken from the workspace so the version and
+# feature selection stay identical to duja-panel's and to the one
+# i-slint-backend-winit already resolves; see ADR-0022.
+zbus = { workspace = true }
+
 # -- macOS event pump + tray geometry ---------------------------------------
 [target.'cfg(target_os = "macos")'.dependencies]
 # CoreFoundation run-loop plumbing for the dedicated CFRunLoop thread. The
@@ -140,6 +148,7 @@ objc2-core-foundation = { workspace = true, features = ["std", "CFCGTypes"] }
 
 [dev-dependencies]
 duja-core = { workspace = true, features = ["test-support"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

@@ -1484,6 +1484,34 @@ the planner plans no overlay and the continuum stops at the hardware floor. Wave
 connector name, which X11 RandR and Wayland `xdg_output` spell identically on
 the modern stack (`debt.md` records the two drivers where they do not).
 
+**Wave 3 gave Linux a real event pump, an autostart entry and a browser.** Display
+hot-plug comes from the kernel's `NETLINK_KOBJECT_UEVENT` socket directly, with no
+libudev: that is a C library and a system dependency, to receive the same messages
+`rustix` reads through safe wrappers, and it would not have worked in the
+containers and `ssh` sessions where the D-Bus half is absent anyway. Suspend and
+resume come from logind's `PrepareForSleep`, which is the only source there is —
+the kernel offers userspace no equivalent. A machine with no system bus gets
+hot-plug alone and no error, which is the split ADR-0022 chose.
+
+**The whole pump contains no `unsafe`.** The netlink socket, its address type, the
+`poll` that waits on it and the self-pipe that ends it are all `rustix` safe
+wrappers, so `duja-platform` still confines `unsafe` to its Windows and macOS `sys`
+modules. Doing it through `libc` would have meant a hand-rolled `sockaddr_nl` and
+four unsafe blocks for no capability the safe path lacks.
+
+Autostart is one XDG `.desktop` file in `~/.config/autostart`, not a systemd user
+unit: the unit starts Duja on *login*, including an `ssh` login with no display
+server and no tray to put an icon in, where the spec starts it when a **desktop
+session** starts. `open_url` uses `xdg-open` rather than the portal's `OpenURI`,
+which wants a parent-window handle Slint cannot produce under Wayland. Dark mode
+comes from the portal's `color-scheme`, the one cross-desktop key.
+
+Two Linux gaps stay open on purpose and are in `debt.md`: `SessionUnlocked` has no
+honest source (logind's `Lock`/`Unlock` are requests, not state), and
+`cursor_anchor` is still the placeholder, because answering it needs the
+display-server connection wave 4 builds — and on Wayland there is no global cursor
+position at all, so it is not a port of the Windows path.
+
 ## Notes & gotchas for whoever continues
 
 - **Environment**: Rust pinned 1.96.1 (MSRV 1.94), MSVC, edition 2024.
