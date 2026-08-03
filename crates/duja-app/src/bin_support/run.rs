@@ -267,7 +267,7 @@ const RESTORE_SUMMARY: &str = "restored identity gamma on";
 /// **`--restore` on macOS now does two jobs at once**, and they are worth keeping
 /// apart:
 ///
-/// - It can undo **Duja's own** ramp. [`gamma::GammaBackend`]'s macOS sink and its
+/// - It can undo **Duja's own** ramp. `gamma::GammaBackend`'s macOS sink and its
 ///   only consumer, the tray, both exist now, so a `dim_mode = "gamma"` display
 ///   engaged by a previous run is genuinely something this can be reversing.
 /// - It remains a **general screen rescue**: `CGDisplayRestoreColorSyncSettings`
@@ -308,7 +308,11 @@ const RESTORE_SUMMARY: &str = "restored identity gamma on";
 /// Xwayland's virtual CRTCs and change nothing, so the command reports zero
 /// displays instead of claiming a restore it did not perform.
 ///
-/// [`gamma::GammaBackend`]: super::gamma
+// Deliberately not an intra-doc link: `bin_support::gamma::GammaBackend` is
+// `cfg`-gated to the platforms that have a tray, and this function is no longer.
+// Rustdoc runs on the ubuntu lane with `-D warnings`, where the target does not
+// exist, so the link that resolved fine while this arm was Windows/macOS-only
+// would fail the build the moment Linux joined it.
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub(crate) fn restore() -> ExitCode {
     let report = duja_dimmer::restore_all();

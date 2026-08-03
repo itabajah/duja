@@ -11,9 +11,9 @@
 //!
 //! - [`xrandr_refusal`] — whether this session has an `XRandR` gamma channel at
 //!   all. The dangerous answer is not "no": it is a Wayland session, where
-//!   `DISPLAY` almost always points at Xwayland, every request below would
-//!   succeed, and the ramp would land on Xwayland's virtual CRTCs where nothing
-//!   ever shows it.
+//!   `DISPLAY` almost always points at Xwayland, the connection and the extension
+//!   are both there, and the table would land on a virtual CRTC that is not on
+//!   the path to any monitor.
 //! - [`crtc_from_token`] — recovering the CRTC id from the display-surface token,
 //!   where the failure is dimming *a different monitor*.
 //! - [`ramp`] — the ramp itself, where a wrong curve is a wrongly-lit screen and
@@ -48,11 +48,14 @@ pub const MIN_RAMP_SIZE: u16 = 2;
 
 /// The largest gamma table `SetCrtcGamma` can carry over a core X11 connection.
 ///
-/// Derived, not chosen. The core protocol caps a request at the server's
-/// `maximum_request_length`, which is `65535` four-byte units — `262_140` bytes —
-/// on every X server in use. `SetCrtcGamma` spends 12 of those on its header
-/// (opcode, length, CRTC, size, pad) and `6 * size` on the three `CARD16`
-/// channels, so `6 * size <= 262_128`, i.e. `size <= 43_688`.
+/// Derived, not chosen, and the derivation is checked against x11rb's own
+/// serialiser rather than read off the spec alone. The core protocol caps a
+/// request at the server's `maximum_request_length`, which is `65535` four-byte
+/// units — `262_140` bytes — on every X server in use. `SetCrtcGamma` spends 12
+/// of those on its header (major and minor opcode, length, CRTC, size, two pad
+/// bytes) and `6 * size` on the three `CARD16` channels, with a single trailing
+/// pad to a four-byte boundary. So `6 * size <= 262_128`, i.e. `size <= 43_688`,
+/// and `43_688` is even, so it needs no padding and lands exactly on the ceiling.
 ///
 /// This is a sanity bound and not a hardware one: real CRTCs report 256, 1024 or
 /// 4096, so nothing that exists is anywhere near it. Its job is to turn a garbage
@@ -75,14 +78,21 @@ const RAMP_MAX: f64 = 65_535.0;
 ///
 /// "No display server" is the boring answer. The answer that matters is
 /// **Wayland**, because on a Wayland session `DISPLAY` is almost always set — to
-/// Xwayland — and every step of the gamma path below would then *succeed*:
-/// `x11rb::connect` connects, `RandR` is present, `GetCrtcGammaSize` answers, and
-/// `SetCrtcGamma` writes a ramp into Xwayland's own virtual CRTC. Xwayland
-/// renders into a `wl_surface`; it does not own the outputs and its gamma tables
-/// are not on the path to any monitor. The user would get a silent no-op with an
-/// `Ok(())` behind it, and Duja would record a ramp as live and later "restore"
-/// it — the failure this crate rates worst, an OS call that reports success while
-/// nothing on screen changes.
+/// Xwayland — and the gamma path below then runs against the wrong server. What
+/// is certain is the half that makes it dangerous: `x11rb::connect` connects,
+/// `RandR` is present, and Xwayland does not own the outputs. It renders into a
+/// `wl_surface`, so whatever it does with a CRTC gamma table, that table is not
+/// on the path to any monitor.
+///
+/// What this project has **not** verified is whether Xwayland accepts the write
+/// or refuses it — that turns on the gamma size it reports for its virtual CRTCs,
+/// which needs a Wayland session to read and Duja has none. Both branches are
+/// possible and only one of them is quiet: a refusal surfaces as an error the
+/// caller can act on, while an acceptance is an `Ok(())` behind a screen that
+/// never changed, and Duja would then record a ramp as live and later "restore"
+/// it. Gating on the transport costs nothing and does not depend on which branch
+/// is real; gating on "can I reach an X server" would be correct only in the
+/// branch nobody has checked.
 ///
 /// So the refusal is by **transport**, decided by [`crate::linux_caps::transport`]
 /// from the environment, and not by whether an X connection can be opened. A

@@ -192,6 +192,18 @@ fn write_table(
 /// multi-head GPU has spare: it shows nothing, so there is nothing on it to dim
 /// and nothing to restore, and including it would inflate `duja --restore`'s
 /// count past the number of monitors the user can see.
+///
+/// # Where that skip has a boundary
+///
+/// A CRTC keeps its table while it is disabled, so a ramp Duja engaged on a
+/// monitor that was then **unplugged** is skipped by a restore run while it is
+/// away, and comes back with the monitor. The window is narrow — it needs the
+/// unplug to happen between the engage and the restore, and the next restore
+/// after the replug catches it — but it is a window, and the alternative trades
+/// it for a report that names CRTCs the user has no monitor for. Named here
+/// rather than fixed, because the fix that closes it properly is the per-CRTC
+/// baseline the module docs describe, which knows what Duja actually touched
+/// instead of sweeping everything.
 #[must_use]
 pub fn enumerate_gamma_displays() -> Vec<GammaDisplay> {
     match with_session(collect_crtcs) {
@@ -303,7 +315,7 @@ pub fn restore_all() -> RestoreReport {
 }
 
 /// Whether HDR is active on this session; see
-/// [`hdr_active_for`](crate::linux_gamma::hdr_active_for) for why the answer is
+/// [`hdr_active_for`] for why the answer is
 /// decided by transport and what the X11 answer's one documented exception is.
 ///
 /// Read-only; never changes display state.
@@ -314,10 +326,9 @@ pub fn is_hdr_active() -> Option<bool> {
 
 /// Whether gamma dimming is safe on the current session.
 ///
-/// A convenience over [`is_hdr_active`]: HDR ⇒
-/// [`GammaSupport::UnsupportedHdr`](crate::GammaSupport::UnsupportedHdr), SDR ⇒
-/// [`GammaSupport::Supported`](crate::GammaSupport::Supported), an indeterminate
-/// probe ⇒ [`GammaSupport::Unknown`](crate::GammaSupport::Unknown).
+/// A convenience over [`is_hdr_active`]: HDR ⇒ [`GammaSupport::UnsupportedHdr`],
+/// SDR ⇒ [`GammaSupport::Supported`], an indeterminate probe ⇒
+/// [`GammaSupport::Unknown`].
 #[must_use]
 pub fn display_supports_gamma() -> GammaSupport {
     gamma_support_from_hdr(is_hdr_active())
