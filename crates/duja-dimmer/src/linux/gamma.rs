@@ -761,12 +761,29 @@ fn open() -> Result<Session, Unavailable> {
     // `ProcRRQueryVersion` compares only the **major** version, then answers with
     // either the client's pair verbatim or the server's — so asking 1.3 of a 1.6
     // server yields 1.6, not 1.3. The `>=` below is what makes that harmless.
+    // The two halves of this one call are different kinds of unavailable, and the
+    // difference is exactly what `Unavailable` exists for. x11rb resolves an
+    // extension before it can send the request, so a server with **no RandR at
+    // all** fails on the send with `UnsupportedExtension` — and such a server has
+    // no per-CRTC gamma mechanism, so Duja can never have dimmed anything through
+    // it and "nothing to restore" is literally true. That is `NoChannel`.
+    //
+    // Compare a server whose RandR is merely older than 1.3 (handled at the walk,
+    // not here): its gamma *writes* are 1.2 and work perfectly, so a ramp may well
+    // be live and only the walk that would find it is missing. That one is a
+    // failure the user has to see. Collapsing the two would report a rescue as
+    // failed on a server that never had a channel to rescue.
     let version = connection
         .randr_query_version(
             RANDR_SCREEN_RESOURCES_CURRENT.0,
             RANDR_SCREEN_RESOURCES_CURRENT.1,
         )
-        .map_err(|e| Unavailable::Failed(format!("this X server has no RandR extension: {e}")))?
+        .map_err(|e| {
+            Unavailable::NoChannel(format!(
+                "this X server has no RandR extension, so it has no per-CRTC gamma \
+                 table to reset: {e}"
+            ))
+        })?
         .reply()
         .map_err(|e| Unavailable::Failed(format!("RandR QueryVersion failed: {e}")))?;
     Ok(Session {
