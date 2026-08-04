@@ -185,10 +185,13 @@ mod tests {
         // - `cap_pct: None` reds **here on Windows** (the arm below expects
         //   `Some(50)`) and is invisible elsewhere, since `None` is the right
         //   answer off Windows.
-        // - `advisory: false` reds **only on the macOS lane**. On Windows `false`
-        //   is the correct value, so no Windows-side assertion can call it a bug —
-        //   the same shape as `gamma_cap_pct_for_platform`'s own test, and the
-        //   reason this one asserts all three targets instead of just the host.
+        // - `advisory: false` reds on the **macOS and ubuntu** lanes, and on
+        //   neither for the same reason: macOS can accept a ramp and not apply it,
+        //   while X11's `ProcRRSetCrtcGamma` discards the driver's result and
+        //   answers `Success` regardless. On Windows `false` is the correct value,
+        //   so no Windows-side assertion can call it a bug — the same shape as
+        //   `gamma_cap_pct_for_platform`'s own test, and the reason this one
+        //   asserts every target instead of just the host.
         //
         // Asserted as the whole struct rather than field by field, so a future
         // third limit cannot be added and left unpinned.

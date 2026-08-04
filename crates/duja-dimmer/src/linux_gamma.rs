@@ -728,7 +728,8 @@ mod tests {
         assert!(!connection_survives(ConnectionFault::Io));
         assert!(
             !connection_survives(ConnectionFault::ExtensionLookupPoisoned),
-            "x11rb caches a failed QueryExtension for the life of the connection,              and every request here resolves RandR first"
+            "x11rb caches a failed QueryExtension for the life of the connection, \
+             and every request here resolves RandR first"
         );
     }
 

@@ -134,14 +134,20 @@ with the phases; keep entries as observable behaviors, not implementation.
            a protocol guarantee. If it does not, that row fails for a reason that is
            not a Duja bug. -->
 - [ ] **An X server with no `RandR` at all** — `X -extension RANDR`, or `Xnest`.
-      **Not `Xvnc`**: TigerVNC's server does have RandR (that is how `xrandr`-driven
-      resize works under it), so it tests the row below instead. `duja --restore` must
+      **Not `Xvnc`**: TigerVNC's server is built on xorg-server's own `randr/` and
+      calls `RRScreenInit`, so it advertises the stock RandR version (1.6 on any
+      xorg-server since 1.19) and exercises the *ordinary* path — neither this row
+      nor the one below. `Xnest` works because it never calls `RRScreenInit`, so
+      `RRExtensionInit` early-returns and the extension is genuinely absent. `duja --restore` must
       print "nothing to restore" and exit **0**, not a failure: such a server has no
       per-CRTC gamma table, so Duja can never have dimmed through it. This
       classification has flipped twice in review and no CI lane can reach it — if it
       exits non-zero, `UnsupportedExtension` is not what x11rb surfaces on that stack.
 - [ ] **An X server whose `RandR` is present but older than 1.3.** Opposite
-      expectation, and the contrast is the point: `duja --restore` must print a
+      expectation, and the contrast is the point. No easy modern server sits here —
+      RandR has been at 1.6 since xorg-server 1.19 (2016) — so this may only be
+      reachable on a genuinely old distribution or not at all; record it as
+      untested rather than inventing a stand-in. If you can reach one: `duja --restore` must print a
       `failed:` line saying the CRTCs cannot be listed and exit **non-zero**. The gamma
       *writes* are RandR 1.2 and work, so a ramp may well be live and only the walk
       that would find it is missing — that is a rescue which could not run, not a

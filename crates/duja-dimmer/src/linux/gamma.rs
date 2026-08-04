@@ -317,8 +317,12 @@ fn collect_crtcs(session: &Session, walk: Walk) -> Result<CrtcWalk, Fault> {
         // no connector on it. A non-`Success` status leaves every other field of
         // the reply undefined per the protocol — `InvalidConfigTime` is what a
         // hot-plug racing this walk looks like — so `outputs` must not be read
-        // from one. An info the server will not give up costs the CRTC its name
-        // and nothing else: the ramp is still written.
+        // from one. An info the server will not give up costs the CRTC its name,
+        // and on the rescue walk that is all it costs — the ramp is still
+        // written. On the addressing walk it costs more: with no outputs to show
+        // for it, `walk_includes` drops the CRTC entirely, which is right (it
+        // cannot be addressed by a display that has no rectangle) but is not
+        // "nothing".
         let info = match connection
             .randr_get_crtc_info(crtc, timestamp)
             .map_err(|e| Fault::connection("RandR GetCrtcInfo", &e))?
@@ -535,9 +539,13 @@ fn session_transport() -> Transport {
 fn classify_connection_error(error: &ConnectionError) -> ConnectionFault {
     match error {
         ConnectionError::IoError(_) => ConnectionFault::Io,
-        // `x11rb` answers this **only** from a `CheckState::Error` entry, which a
-        // failed `QueryExtension` sets for the life of the connection — so it is
-        // never a one-off. See `ConnectionFault::ExtensionLookupPoisoned`.
+        // On a `RustConnection` — the only kind this module opens — `x11rb` answers
+        // this **only** from a `CheckState::Error` entry, which a failed
+        // `QueryExtension` sets for the life of the connection, so it is never a
+        // one-off. (The `xcb_ffi` backend also uses it for any libxcb code it does
+        // not recognise; misreading one of those as permanent would cost a
+        // reconnect, which is the safe direction.) See
+        // `ConnectionFault::ExtensionLookupPoisoned`.
         ConnectionError::UnknownError => ConnectionFault::ExtensionLookupPoisoned,
         _ => ConnectionFault::PerRequest,
     }
@@ -573,27 +581,26 @@ struct Fault {
 impl Fault {
     /// A failure to even queue the request.
     ///
-    /// Only an `IoError` means the socket is gone. The others describe *this
-    /// request* over a connection that is still usable: `UnsupportedExtension`
-    /// (the server lacks something this build asked for), `MaximumRequestLengthExceeded`,
-    /// `ParseError` (a reply this client could not decode — it arrives here via
-    /// `ReplyError`, not from the send side), and `UnknownError`, which is what
-    /// x11rb answers for a `QueryExtension` that came back an X11 error. Throwing
-    /// the connection away for any of them buys a needless connect, `.Xauthority`
-    /// read and setup handshake on the next call, on the UI thread mid-drag.
+    /// **Two** variants finish the connection, not one. `IoError` means the socket
+    /// is gone, and `UnknownError` means its extension lookup is permanently
+    /// poisoned — see [`classify_connection_error`], which is where that is
+    /// decided and why. (An earlier draft of this paragraph listed `UnknownError`
+    /// among the survivable ones while the code already dropped it. A maintainer
+    /// acting on the doc rather than the code would have restored a wedge this PR
+    /// has already had to fix twice, which is why it is called out rather than
+    /// quietly corrected.)
+    ///
+    /// The genuinely survivable ones describe *this request* over a connection
+    /// that still works: `UnsupportedExtension` (the server lacks something this
+    /// build asked for) and `MaximumRequestLengthExceeded`. Throwing the
+    /// connection away for either buys a needless connect, `.Xauthority` read and
+    /// setup handshake on the next call, on the UI thread mid-drag.
     ///
     /// `ConnectionError` is `#[non_exhaustive]`, so a future variant lands in the
     /// survivable bucket. That is the right default here — the failure mode of
     /// guessing wrong is a slow reconnect, not a wedge — but it is a guess, and
     /// saying so is the point of this paragraph.
     fn connection(context: &str, error: &ConnectionError) -> Self {
-        // One `matches!` to name the fault, then the rule is the pure one. The
-        // `UnknownError` arm is not caution: `x11rb`'s extension manager caches a
-        // failed `QueryExtension` as `CheckState::Error` and answers every later
-        // lookup for that name with the same error **for the life of the
-        // connection** — and every request in this module resolves the `RandR`
-        // opcode first, so such a connection can never serve another one. Keeping
-        // it would wedge the gamma channel until the process restarts.
         Fault {
             message: format!("{context} failed: {error}"),
             connection_lost: !connection_survives(classify_connection_error(error)),
@@ -808,10 +815,11 @@ fn with_session<T>(f: impl FnOnce(&Session) -> Result<T, Fault>) -> Result<T, Un
 ///
 /// # It is a peer of the environment check, not a replacement for it
 ///
-/// The Xwayland on Ubuntu 22.04 LTS (supported into 2027) and Debian bookworm is
-/// the 22.1 branch, whose source registers no such extension and whose
-/// `hw/xwayland/meson.build` carries no `xwaylandproto` dependency — 24.1 does. So
-/// on those distributions this query answers "not Xwayland" for a server that is.
+/// The extension is registered by Xwayland **23.1 and later**:
+/// `hw/xwayland/meson.build` carries `xwaylandproto_dep` on the 23.1, 23.2 and
+/// 24.1 branches and not on 22.1. So on Ubuntu 22.04 LTS (supported into 2027)
+/// and Debian bookworm, which ship the 22.1 branch, this query answers "not
+/// Xwayland" for a server that is.
 ///
 /// The dates are consistent with that (the spec is 2022-07-29, 22.1.0 was February
 /// 2022) but they do **not** establish it, and an earlier draft of this comment

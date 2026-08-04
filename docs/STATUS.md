@@ -440,7 +440,7 @@ noticing.
 So the two platforms differ in **mechanism**, not likelihood: Windows states a rule
 and Duja satisfies it; macOS fails on *valid* triples, with no rule to satisfy and
 no readback that detects it. That asymmetry is precisely what makes the disclosure
-macOS-only — which is to say the correction did not merely reword the deferral, it
+macOS-only **at the time** — which is to say the correction did not merely reword the deferral, it
 removed the reason for it. So (c) landed here: a `duja_dimmer::gamma_is_advisory()`
 and a second caption, plumbed beside the cap through a `GammaLimits` struct. The
 struct exists because `advisory` would otherwise have sat next to `gamma_allowed`

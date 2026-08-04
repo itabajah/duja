@@ -307,9 +307,11 @@ pub fn gamma_is_advisory() -> bool {
 ///   that CRTC is ever enabled — which is the behaviour the rescue *wants*, and is
 ///   also a write that provably did not reach a screen.
 ///
-///   Like macOS, there is no rule to comply with — `ProcRRSetCrtcGamma` validates
-///   only `stuff->size != crtc->gammaSize` — so this cannot be engineered away,
-///   which is the question this function asks.
+///   Like macOS, there is no rule to comply with. `ProcRRSetCrtcGamma` checks the
+///   request's wire encoding and that `stuff->size == crtc->gammaSize`, and
+///   nothing about the ramp's **values** — so unlike Windows there is no bound to
+///   stay inside, and this cannot be engineered away, which is the question this
+///   function asks.
 /// - **Other targets**: `false` — there is no gamma backend at all, so nothing can
 ///   silently fail.
 #[cfg(not(windows))]
