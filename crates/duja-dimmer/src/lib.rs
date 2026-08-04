@@ -105,6 +105,14 @@ pub mod linux_overlay;
 // `x11rb`-free for the same reason as its three neighbours.
 pub mod linux_gamma;
 
+// The decisions a Wayland layer-shell overlay makes that are data rather than
+// windowing: which layer it sits in, what it refuses to be moved for, whether its
+// omitted size is legal for its anchor, and whether clicks pass through it.
+// Unconditional and `wayland-client`-free for the same reason as its neighbours,
+// and with a sharper edge than most — two of these four are protocol errors,
+// which terminate the connection rather than degrading.
+pub mod linux_layer;
+
 // Everything in this crate that talks to a Linux display server. Nothing it does
 // can run in CI, which is exactly why each of its modules is this small.
 #[cfg(target_os = "linux")]
