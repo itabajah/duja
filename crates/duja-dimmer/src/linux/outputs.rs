@@ -146,7 +146,13 @@ fn x11() -> Vec<ServerOutput> {
             // The CRTC, not the output: two outputs on one CRTC are an X11
             // mirror, and they share both a framebuffer and a gamma table. See
             // `ServerOutput::token`.
-            token: info.crtc.to_string(),
+            //
+            // Through `crtc_token` rather than `to_string`, because the gamma
+            // channel parses this back with `crtc_from_token` and the two ends
+            // are in different crates: the pair is round-tripped by one test, so
+            // changing the format here cannot silently make every Linux display
+            // refuse a ramp.
+            token: crate::linux_gamma::crtc_token(info.crtc),
         });
     }
     outputs

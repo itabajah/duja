@@ -185,10 +185,13 @@ mod tests {
         // - `cap_pct: None` reds **here on Windows** (the arm below expects
         //   `Some(50)`) and is invisible elsewhere, since `None` is the right
         //   answer off Windows.
-        // - `advisory: false` reds **only on the macOS lane**. On Windows `false`
-        //   is the correct value, so no Windows-side assertion can call it a bug —
-        //   the same shape as `gamma_cap_pct_for_platform`'s own test, and the
-        //   reason this one asserts all three targets instead of just the host.
+        // - `advisory: false` reds on the **macOS and ubuntu** lanes, and on
+        //   neither for the same reason: macOS can accept a ramp and not apply it,
+        //   while X11's `ProcRRSetCrtcGamma` discards the driver's result and
+        //   answers `Success` regardless. On Windows `false` is the correct value,
+        //   so no Windows-side assertion can call it a bug — the same shape as
+        //   `gamma_cap_pct_for_platform`'s own test, and the reason this one
+        //   asserts every target instead of just the host.
         //
         // Asserted as the whole struct rather than field by field, so a future
         // third limit cannot be added and left unpinned.
@@ -214,7 +217,24 @@ mod tests {
             "macOS takes the whole range and can still not apply it"
         );
 
-        #[cfg(not(any(windows, target_os = "macos")))]
+        // Linux takes the whole range for the same reason macOS does — `RandR`
+        // validates only that the table length matches the CRTC's — and is
+        // advisory for a sharper reason than macOS's: `ProcRRSetCrtcGamma`
+        // discards the driver hook's result and answers `Success` regardless, so
+        // an accepted write is not evidence the LUT reached the CRTC. Duja's own
+        // rescue reaches that state deliberately, by writing to CRTCs that drive
+        // nothing.
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            limits,
+            GammaLimits {
+                cap_pct: None,
+                advisory: true,
+            },
+            "X11 takes the whole range and reports success whatever the driver did"
+        );
+
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         assert_eq!(
             limits,
             GammaLimits::UNLIMITED,

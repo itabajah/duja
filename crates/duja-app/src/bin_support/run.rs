@@ -235,16 +235,33 @@ fn wait_for_quit() {
 }
 
 /// What `--restore` resets the gamma ramp *to*, which is not the same thing on
-/// both platforms — so the summary line must not claim it is.
+/// all three platforms — so the summary line must not claim it is.
 ///
 /// Windows writes a linear ramp per display (`restore_identity`); macOS asks the
 /// window server to reload each display's `ColorSync` profile
 /// (`CGDisplayRestoreColorSyncSettings`), which for a calibrated display is by
-/// definition *not* identity.
+/// definition *not* identity; Linux writes a linear ramp per `RandR` CRTC, which
+/// is the Windows shape — X11 has no server-side profile to reload, so identity
+/// is all there is to write back.
 #[cfg(windows)]
 const RESTORE_SUMMARY: &str = "restored identity gamma on";
 #[cfg(target_os = "macos")]
 const RESTORE_SUMMARY: &str = "reset gamma to the ColorSync profile on";
+#[cfg(target_os = "linux")]
+const RESTORE_SUMMARY: &str = "restored identity gamma on";
+
+/// What a restored row *is*, which is also not the same on all three.
+///
+/// Windows and macOS enumerate displays. Linux enumerates **CRTCs**, and
+/// deliberately includes ones that are driving no output: a `RandR` gamma table
+/// survives its CRTC being disabled, so a monitor unplugged between a crash and
+/// the rescue would otherwise be skipped and come back dark after the user had
+/// been told the rescue succeeded. That makes the count larger than the number of
+/// monitors on any multi-head GPU, so it must not call them displays.
+#[cfg(any(windows, target_os = "macos"))]
+const RESTORE_UNIT: &str = "display(s)";
+#[cfg(target_os = "linux")]
+const RESTORE_UNIT: &str = "CRTC(s)";
 
 /// `--restore`: reset any persisted screen state.
 ///
@@ -263,7 +280,7 @@ const RESTORE_SUMMARY: &str = "reset gamma to the ColorSync profile on";
 /// **`--restore` on macOS now does two jobs at once**, and they are worth keeping
 /// apart:
 ///
-/// - It can undo **Duja's own** ramp. [`gamma::GammaBackend`]'s macOS sink and its
+/// - It can undo **Duja's own** ramp. `gamma::GammaBackend`'s macOS sink and its
 ///   only consumer, the tray, both exist now, so a `dim_mode = "gamma"` display
 ///   engaged by a previous run is genuinely something this can be reversing.
 /// - It remains a **general screen rescue**: `CGDisplayRestoreColorSyncSettings`
@@ -284,11 +301,42 @@ const RESTORE_SUMMARY: &str = "reset gamma to the ColorSync profile on";
 /// only recovery macOS has, since nothing writes a marker for
 /// `startup::recover_from_crash_marker` to find.
 ///
-/// [`gamma::GammaBackend`]: super::gamma
-#[cfg(any(windows, target_os = "macos"))]
+/// # And what it rescues on Linux
+///
+/// An X11 `RandR` gamma ramp is server state and **outlives the process that set
+/// it**, exactly as a Windows one does — which is why
+/// `xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command (not
+/// `xgamma`, which drives a different API and says nothing about this one). So this is a real rescue on Linux from the moment the
+/// backend exists, and today it is the *only* one: nothing engages a ramp yet
+/// (the tray, which owns the gamma sink, is not built on Linux until the ksni
+/// wave), so there is no crash marker either and
+/// `startup::recover_from_crash_marker` cannot fire. Like macOS it is also a
+/// general screen rescue — it writes identity to every CRTC with a writable
+/// table, including ones driving no output (a gamma table survives its CRTC being
+/// disabled), clearing a ramp left behind by `redshift`, `gammastep`, or a crashed
+/// tool, whether or not Duja put it there. That width is also what makes it
+/// flatten a *running* colour-temperature tool's tint until that tool's next
+/// update; `duja-dimmer`'s `src/linux/gamma.rs` documents the composition that fixes
+/// it, and `docs/debt.md` carries both.
+///
+/// A Wayland session is refused rather than served: the ramp would land on
+/// Xwayland's virtual CRTCs and change nothing, so the command prints "nothing to
+/// restore" and exits 0 instead of claiming a restore it did not perform.
+///
+// Deliberately not an intra-doc link: `bin_support::gamma::GammaBackend` is
+// `cfg`-gated to the platforms that have a tray, and this function is no longer.
+// Rustdoc runs on the ubuntu lane with `-D warnings`, where the target does not
+// exist, so the link that resolved fine while this arm was Windows/macOS-only
+// would fail the build the moment Linux joined it.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub(crate) fn restore() -> ExitCode {
     let report = duja_dimmer::restore_all();
-    let (lines, ok) = restore_outcome(report.restored.len(), &report.failed, RESTORE_SUMMARY);
+    let (lines, ok) = restore_outcome(
+        report.restored.len(),
+        &report.failed,
+        RESTORE_SUMMARY,
+        RESTORE_UNIT,
+    );
     for line in lines {
         println!("{line}");
     }
@@ -308,26 +356,33 @@ pub(crate) fn restore() -> ExitCode {
 /// cross-platform: the report type is per-backend, but its shape is not, and
 /// these tests then run on all three CI lanes.
 ///
-/// The empty-report branch is reachable on Windows only. On macOS
-/// `restore_all` reports every enumerated display (falling back to the main
-/// display when enumeration is empty), so `restored` is never empty there and
+/// The empty-report branch is reachable on Windows and Linux, and **not** on
+/// macOS: `restore_all` there reports every enumerated display and falls back to
+/// the main display when enumeration is empty, so `restored` is never empty and
 /// the "nothing to restore" line cannot fire — noted so nobody reads it as a
-/// macOS "Duja had nothing to clean up" signal.
+/// macOS "Duja had nothing to clean up" signal. On Linux it is the ordinary
+/// answer for a session with no `XRandR` gamma channel at all (Wayland, or no
+/// display server), which is a refusal rather than an emptiness, but the line is
+/// right either way: there is nothing this command can reset.
 // RATIONALE (dead_code): the pure decision stays cross-platform so its tests run
 // on every CI OS, but it is only *called* from the gamma-capable arm above.
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+#[cfg_attr(
+    not(any(windows, target_os = "macos", target_os = "linux")),
+    allow(dead_code)
+)]
 fn restore_outcome(
     restored: usize,
     failed: &[(String, String)],
     summary: &str,
+    unit: &str,
 ) -> (Vec<String>, bool) {
     if restored == 0 && failed.is_empty() {
         return (
-            vec!["nothing to restore (no displays with a resettable gamma ramp)".to_owned()],
+            vec!["nothing to restore (nothing here holds a resettable gamma ramp)".to_owned()],
             true,
         );
     }
-    let mut lines = vec![format!("{summary} {restored} display(s)")];
+    let mut lines = vec![format!("{summary} {restored} {unit}")];
     lines.extend(
         failed
             .iter()
@@ -336,14 +391,17 @@ fn restore_outcome(
     (lines, failed.is_empty())
 }
 
-/// `--restore` where no dimmer backend exists (currently Linux): there is no
-/// gamma ramp Duja could have left behind, so there is nothing to undo.
+/// `--restore` where no gamma backend exists: there is no ramp Duja could have
+/// left behind, so there is nothing to undo.
 ///
-/// Deliberately narrow. This arm used to cover macOS too and told the user
-/// "software dimming is Windows-only in this build", which stopped being true
-/// when the macOS dimmer landed in P6 wave 1 — a stub that had quietly become a
-/// false statement about the user's own screen.
-#[cfg(not(any(windows, target_os = "macos")))]
+/// Deliberately narrow, and it has now been narrowed twice. It used to cover
+/// macOS and told the user "software dimming is Windows-only in this build",
+/// which stopped being true when the macOS dimmer landed in P6 wave 1. It then
+/// covered Linux and said there was no gamma ramp to undo, which stopped being
+/// true with the `XRandR` backend. Both times it was a stub that had quietly
+/// become a false statement about the user's own screen, which is the failure
+/// mode to watch for here: what is left is the genuinely backend-less targets.
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub(crate) fn restore() -> ExitCode {
     println!("nothing to restore (no software dimming backend on this platform)");
     ExitCode::SUCCESS
@@ -397,10 +455,10 @@ mod tests {
 
     #[test]
     fn restore_reports_nothing_to_do_only_when_the_report_is_wholly_empty() {
-        let (lines, ok) = restore_outcome(0, &[], "restored identity gamma on");
+        let (lines, ok) = restore_outcome(0, &[], "restored identity gamma on", "display(s)");
         assert_eq!(
             lines,
-            ["nothing to restore (no displays with a resettable gamma ramp)"]
+            ["nothing to restore (nothing here holds a resettable gamma ramp)"]
         );
         assert!(ok);
     }
@@ -410,13 +468,24 @@ mod tests {
         // The summary is a parameter precisely because Windows writes a linear
         // ramp while macOS reloads the ColorSync profile; "identity" is wrong on
         // macOS, so the caller supplies the verb rather than this deciding.
-        let (win, _) = restore_outcome(2, &[], "restored identity gamma on");
+        let (win, _) = restore_outcome(2, &[], "restored identity gamma on", "display(s)");
         assert_eq!(win, ["restored identity gamma on 2 display(s)"]);
-        let (mac, _) = restore_outcome(2, &[], "reset gamma to the ColorSync profile on");
+        let (mac, _) = restore_outcome(
+            2,
+            &[],
+            "reset gamma to the ColorSync profile on",
+            "display(s)",
+        );
         assert_eq!(
             mac,
             ["reset gamma to the ColorSync profile on 2 display(s)"]
         );
+        // Linux counts CRTCs, not displays, because its walk deliberately
+        // includes CRTCs driving nothing (a disabled CRTC keeps its gamma table,
+        // so a rescue that skipped them would miss a monitor unplugged after a
+        // crash). Calling those "displays" would overstate what the user has.
+        let linux = restore_outcome(4, &[], "restored identity gamma on", "CRTC(s)").0;
+        assert_eq!(linux, ["restored identity gamma on 4 CRTC(s)"]);
     }
 
     #[test]
@@ -428,7 +497,7 @@ mod tests {
             ),
             ("\\\\.\\DISPLAY2".to_owned(), "access denied".to_owned()),
         ];
-        let (lines, ok) = restore_outcome(1, &failed, "restored identity gamma on");
+        let (lines, ok) = restore_outcome(1, &failed, "restored identity gamma on", "display(s)");
         assert_eq!(
             lines,
             [
@@ -440,12 +509,41 @@ mod tests {
         assert!(!ok, "any failure must make --restore exit non-zero");
     }
 
+    /// A rescue that could not **run** must not look like a rescue that found
+    /// nothing to do. Linux reports that as a single failed row for the channel
+    /// itself, so the user sees the reason and the shell sees a non-zero exit.
+    ///
+    /// Reds the shape this arm shipped with before its review: every way the X11
+    /// path could fail — no `XAUTHORITY` (which is what `sudo duja --restore`
+    /// looks like), a dead server, `RandR` too old — collapsed into an empty
+    /// report, so the command told a user staring at a dark screen that there was
+    /// nothing to restore and exited 0.
+    #[test]
+    fn a_rescue_that_could_not_run_reports_the_reason_and_fails() {
+        let failed = [(
+            "XRandR gamma channel".to_owned(),
+            "X11 connect failed: no authorisation".to_owned(),
+        )];
+        let (lines, ok) = restore_outcome(0, &failed, "restored identity gamma on", "CRTC(s)");
+        assert!(!ok, "a rescue that could not run must exit non-zero");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("no authorisation") && line.contains("failed:")),
+            "the reason must reach the user: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("nothing to restore")),
+            "a failure must never read as nothing to do: {lines:?}"
+        );
+    }
+
     #[test]
     fn restore_reports_failures_even_when_nothing_was_restored() {
         // Not the empty-report case: a run where every display failed must still
         // say so and exit non-zero, rather than printing "nothing to restore".
         let failed = [("\\\\.\\DISPLAY1".to_owned(), "access denied".to_owned())];
-        let (lines, ok) = restore_outcome(0, &failed, "restored identity gamma on");
+        let (lines, ok) = restore_outcome(0, &failed, "restored identity gamma on", "display(s)");
         assert_eq!(
             lines.first().map(String::as_str),
             Some("restored identity gamma on 0 display(s)")

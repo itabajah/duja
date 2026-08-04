@@ -440,7 +440,7 @@ noticing.
 So the two platforms differ in **mechanism**, not likelihood: Windows states a rule
 and Duja satisfies it; macOS fails on *valid* triples, with no rule to satisfy and
 no readback that detects it. That asymmetry is precisely what makes the disclosure
-macOS-only — which is to say the correction did not merely reword the deferral, it
+macOS-only **at the time** — which is to say the correction did not merely reword the deferral, it
 removed the reason for it. So (c) landed here: a `duja_dimmer::gamma_is_advisory()`
 and a second caption, plumbed beside the cap through a `GammaLimits` struct. The
 struct exists because `advisory` would otherwise have sat next to `gamma_allowed`
@@ -1589,6 +1589,68 @@ build, so `LinuxDimmer` picks when it starts. A Wayland session reports
 `Unsupported` until its layer-shell backend lands, which is the one place the
 `#122` mirror-pin consequence still bites; `debt.md` carries it, now narrowed
 from Linux to Wayland.
+
+**A Wayland session is refused twice, by two gates that cover each other.** The
+environment check (`WAYLAND_DISPLAY` is set ⇒ not X11) is cheap and skips the
+connect, but this crate had already written down that it misfires:
+`Transport::X11`'s own docs name "a systemd user unit, a sanitised environment",
+and `sudo`, `ssh -X` and a `tmux` server older than the session are the same
+shape. A misfire is not a visible error — it is a ramp written to an Xwayland
+CRTC, an `Ok(())`, and a screen that never changed. So the server is asked too,
+with the `XWAYLAND` extension query X.Org added for exactly this: *"Only Xwayland
+initializes this extension. Thus, if the extension is present, the X server is
+Xwayland."*
+
+The first draft of this paragraph called that second gate authoritative, and it is
+not: only Xwayland **23.1 and later** register the extension, and the 22.1 branch
+that Ubuntu 22.04 LTS (supported into 2027) and Debian bookworm ship carries no
+`xwaylandproto` dependency at all. (A later draft argued that from release dates,
+which was a non-sequitur — point releases backport, and 22.1.9 postdates the spec
+by over a year. The source tree is the evidence.) Neither gate is a superset of the
+other — environment catches an old Xwayland that kept `WAYLAND_DISPLAY`, protocol
+catches a new one whose environment was stripped, and an old one from a stripped
+environment is caught by neither. Nothing available to an X client closes that
+last case, so it is written down rather than papered over.
+
+**The sub-floor gamma channel is `RandR`'s per-CRTC table**, and the CRTC is also
+the surface token wave 4 already stamps on every placed display, so the app's
+gamma sink can address a ramp without a second enumeration. Two outputs on one
+CRTC are an X11 mirror and share both a framebuffer and a gamma table, so the
+CRTC is the granularity the hardware actually has.
+
+**A Wayland session is refused by transport, not by whether a connection opens** —
+which is the decision the whole module is built around. `DISPLAY` points at
+Xwayland on almost every Wayland session, so every step of the XRandR gamma path
+*succeeds* there: it connects, `RandR` is present, `GetCrtcGammaSize` answers, and
+`SetCrtcGamma` writes a table into a virtual CRTC that is not on the path to any
+monitor. A gate that asked "can I reach an X server" would have produced an
+`Ok(())` behind a screen that never changed, and the coordinator above would then
+record a live ramp, never retry, and never plan the overlay that would have dimmed
+the display instead. The refusal reads the environment, exactly as ADR-0011's
+capability rule does.
+
+**Linux sits with Windows on crash safety, not with macOS**, and this is where it
+is owed something. The X server holds each CRTC's table as server state and does
+not reset it when the writing client disconnects — which is precisely why
+`xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command that exits. So a crash mid-dim leaves a dark screen
+with nothing running to undo it, and the marker-plus-guard machinery Windows
+carries is genuinely needed here. It is deliberately **not** built yet: nothing on
+Linux engages a ramp until the tray does (the sink the tray owns is the only
+engage path), so a guard now would have no caller and its tests would pin a
+lifecycle nothing drives. `duja --restore` is the manual rescue and is un-gated
+for Linux in the same PR; `debt.md` carries the guard as owed to the ksni wave,
+together with the baseline-composition that would stop a restore flattening a
+running `gammastep`'s tint.
+
+**The HDR verdict is now one module rather than three.** Each platform probes its
+own way — DXGI's colour space, `NSScreen`'s EDR headroom, and on Linux the
+transport, because there is no query to make — but what the answer *means* is the
+same everywhere and carries the safety rule that an uncertain probe reads as "no
+gamma". That was two byte-identical copies before Linux would have made it three.
+X11 answers `Some(false)`: the X protocol has no HDR path, so an X11 desktop is
+SDR and its CRTC LUT is the SDR pipeline's. Wayland answers `Unknown`, which is
+where Linux HDR actually happens and where there is no XRandR channel to use it
+with anyway.
 
 **Wave 4 landed ADR-0011's capability probe first, on purpose.** The rule that
 decides what a Linux session can dim is pure — environment and Wayland registry

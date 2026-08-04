@@ -90,6 +90,73 @@ with the phases; keep entries as observable behaviors, not implementation.
       for flicker against another always-on-top client (a second OSD, an on-screen
       keyboard, a presentation tool): X has no always-on-top, so Duja re-raises on
       every root restack, and two clients doing that can fight.
+- [ ] **`duja --restore` on X11 clears a ramp Duja did not set.** Run
+      `xrandr --output <name> --gamma 1:1:0.5` (or leave `redshift`/`gammastep`
+      running), then `duja --restore`: the screen must
+      return to normal and the command must report `restored identity gamma on N
+      CRTC(s)` and exit 0. **N counts CRTCs, not monitors**, and on a multi-head GPU it
+      is legitimately larger than the number of screens: the walk deliberately includes
+      CRTCs driving nothing, because a gamma table survives its CRTC being disabled.
+      Individual CRTCs are named (`DP-1 (CRTC 63)`, or `CRTC-3` for an idle one) only
+      on the failure lines. This is the whole of Linux's gamma crash recovery today —
+      there is no marker and no automatic recovery until the tray lands — so if this
+      does not work, a user who ever hits a stuck ramp has nothing.
+- [ ] **`sudo duja --restore` does not lie.** sudo drops `XAUTHORITY`, so the X
+      connection fails. The command must print the reason on a `failed:` line and exit
+      **non-zero**, never "nothing to restore" with exit 0. Same check for `DISPLAY`
+      pointed at a server that is not running. This is the one failure mode a user with
+      a dark screen will actually hit, because sudo is what people try first.
+- [ ] **`duja --restore` on a Wayland session refuses rather than lying.** It must
+      print "nothing to restore" and exit 0, **not** a count. `DISPLAY` is set to
+      Xwayland on almost every Wayland session, and Duja must refuse on two independent
+      grounds: the environment (`WAYLAND_DISPLAY` is set) and the server itself (the
+      `XWAYLAND` extension is present). Check the second in isolation by clearing
+      `WAYLAND_DISPLAY` from the environment and leaving `DISPLAY` set — a `systemd
+      --user` unit or an `ssh` login is the real-world shape — and confirm it still
+      refuses. If it reports restoring CRTCs there, check `Xwayland -version` before
+      calling it a bug: only **Xwayland 23.1 and later** register the `XWAYLAND`
+      extension, so the 22.1 branch in Ubuntu 22.04 LTS and Debian bookworm cannot
+      be seen by this gate however new the point release is. On those the
+      environment gate is the only one, and the uncovered case (22.1 *and* a
+      stripped environment) is a documented limit rather than a defect. On 23.1 or
+      later, a count there means the protocol check is broken and every gamma write
+      in that session is going somewhere the user cannot see.
+- [ ] **`--restore` flattens a running colour-temperature tool's tint**, and that is
+      the documented behaviour rather than a bug: one LUT per CRTC, last writer wins,
+      and Duja keeps no baseline yet (`docs/debt.md`). Check that Duja did not leave the
+      screen darker than it found it. `redshift`/`gammastep`/Night Light rewrite on a
+      timer and recover on their own; a **calibration** curve (`colord`, `xcalib`,
+      `dispwin`) is loaded once at login and does **not** come back until the next
+      login, so verify the tint loss and re-run the loader rather than waiting.
+      <!-- Use `xrandr --gamma` rather than `xgamma` to set the test ramp: `xgamma`
+           drives XFree86-VidModeExtension, and whether a server routes that into the
+           same per-CRTC RandR LUT Duja writes is a driver-level behaviour rather than
+           a protocol guarantee. If it does not, that row fails for a reason that is
+           not a Duja bug. -->
+- [ ] **An X server with no `RandR` at all** — `X -extension RANDR`, or `Xnest`.
+      **Not `Xvnc`**: TigerVNC's server is built on xorg-server's own `randr/` and
+      calls `RRScreenInit`, so it advertises the stock RandR version (1.6 on any
+      xorg-server since 1.19) and exercises the *ordinary* path — neither this row
+      nor the one below. `Xnest` works because it never calls `RRScreenInit`, so
+      `RRExtensionInit` early-returns and the extension is genuinely absent. `duja --restore` must
+      print "nothing to restore" and exit **0**, not a failure: such a server has no
+      per-CRTC gamma table, so Duja can never have dimmed through it. This
+      classification has flipped twice in review and no CI lane can reach it — if it
+      exits non-zero, `UnsupportedExtension` is not what x11rb surfaces on that stack.
+- [ ] **An X server whose `RandR` is present but older than 1.3.** Opposite
+      expectation, and the contrast is the point. No easy modern server sits here —
+      RandR has been at 1.6 since xorg-server 1.19 (2016) — so this may only be
+      reachable on a genuinely old distribution or not at all; record it as
+      untested rather than inventing a stand-in. If you can reach one: `duja --restore` must print a
+      `failed:` line saying the CRTCs cannot be listed and exit **non-zero**. The gamma
+      *writes* are RandR 1.2 and work, so a ramp may well be live and only the walk
+      that would find it is missing — that is a rescue which could not run, not a
+      session with nothing to rescue.
+- [ ] **A multi-head GPU reports more CRTCs than monitors.** `duja --restore` counts
+      CRTCs, and the rescue walk deliberately includes idle ones (a disabled CRTC keeps
+      its gamma table). If N equals the monitor count exactly on a machine with spare
+      CRTCs, the rescue is not reaching idle CRTCs and a ramp on an unplugged monitor
+      would be missed.
 - [ ] Wayland session that **advertises** `zwlr_layer_shell_v1`: the overlay appears and dims.
 - [ ] Wayland session that advertises **neither** wlr protocol: software dimming reports itself
       unavailable *with the reason*, and hardware paths still work.

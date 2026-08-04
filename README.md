@@ -136,10 +136,17 @@ unavailable; hardware control works either way.
 On **X11** the overlay additionally needs a compositing manager to be running,
 because X itself does not blend a window's alpha channel: it draws the window's
 colours at full strength and lets the compositor do the blending. On a bare window
-manager with no `picom` or equivalent, Duja reports overlay dimming as unavailable
-and uses the XRandR gamma ramp instead, which is then the only software dimming
-that session has. Hardware control is unaffected. `dujactl doctor` prints which of
-these your session actually offers, so you never have to guess.
+manager with no `picom` or equivalent, Duja reports overlay dimming as unavailable,
+and hardware control is unaffected. `dujactl doctor` prints which of these your
+session actually offers, so you never have to guess.
+X11 also has an XRandR gamma channel, which is what a display set to
+`dim_mode = "gamma"` uses to go below its hardware floor. It is opt-in per display
+rather than an automatic fallback, and no Duja build engages it on Linux yet
+because that runs through the tray, which is the row above. What does work today
+is `duja --restore`, which resets the gamma on every CRTC of your X screen and
+will clear a ramp any program left behind. On a Wayland session Duja refuses the gamma channel outright:
+`DISPLAY` there points at Xwayland, whose CRTCs are not on the path to any
+monitor, so a ramp written to them would change nothing on screen.
 
 ## Build from source
 

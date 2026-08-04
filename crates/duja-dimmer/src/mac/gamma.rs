@@ -175,26 +175,12 @@ pub fn restore_all() -> RestoreReport {
     }
 }
 
-/// What a [`restore_all`] pass did: the displays it reset and any it could not.
-///
-/// Mirrors the Windows report shape. On macOS the restore is a single global
-/// call, so `failed` is always empty; the field exists for surface parity.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct RestoreReport {
-    /// Names of displays whose gamma was restored.
-    pub restored: Vec<String>,
-    /// `(name, error)` for each display that could not be restored (always empty
-    /// on macOS).
-    pub failed: Vec<(String, String)>,
-}
-
-impl RestoreReport {
-    /// Whether every attempted display was restored (no failures).
-    #[must_use]
-    pub fn is_clean(&self) -> bool {
-        self.failed.is_empty()
-    }
-}
+// What a [`restore_all`] pass did. The shape is the same on all three platforms,
+// so it lives in one unconditional module and the crate root exports it from
+// there; here the restore is a single global call that returns `void`, so
+// `failed` is always empty and a row means the display's `ColorSync` profile
+// rather than identity. See `crate::gamma_support`.
+use crate::gamma_support::RestoreReport;
 
 #[cfg(test)]
 mod tests {

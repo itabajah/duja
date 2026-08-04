@@ -37,10 +37,10 @@ use duja_core::dimmer::{DimCommand, Dimmer, DimmerError};
 use crate::plan::{OverlayEntry, OverlayOp, plan_transition};
 
 pub use gamma::{
-    GammaDisplay, GammaRamp, MIN_ACCEPTED_GAMMA, RestoreReport, ScreenStateGuard, clear_marker,
+    GammaDisplay, GammaRamp, MIN_ACCEPTED_GAMMA, ScreenStateGuard, clear_marker,
     enumerate_gamma_displays, mark_dirty, marker_present, restore_all, restore_identity, set_gamma,
 };
-pub use hdr::{GammaSupport, display_supports_gamma, gamma_support_from_hdr, is_hdr_active};
+pub use hdr::{display_supports_gamma, is_hdr_active};
 
 /// Upper bound on how long [`WindowsDimmer::dispatch`] waits for the overlay
 /// worker's one-shot reply before giving up and degrading to a backend failure.

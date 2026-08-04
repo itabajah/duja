@@ -321,23 +321,11 @@ pub fn restore_all() -> RestoreReport {
     report
 }
 
-/// What a [`restore_all`] pass did: the displays whose gamma it reset and the
-/// ones it could not (with the OS error text).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct RestoreReport {
-    /// Device names whose gamma was restored to identity.
-    pub restored: Vec<String>,
-    /// `(device name, error)` for each display that could not be restored.
-    pub failed: Vec<(String, String)>,
-}
-
-impl RestoreReport {
-    /// Whether every attempted display was restored (no failures).
-    #[must_use]
-    pub fn is_clean(&self) -> bool {
-        self.failed.is_empty()
-    }
-}
+// What a [`restore_all`] pass did. The shape is the same on all three platforms,
+// so it lives in one unconditional module and the crate root exports it from
+// there; here a row is a GDI device name and identity gamma, and `failed` really
+// can be non-empty. See `crate::gamma_support`.
+use crate::gamma_support::RestoreReport;
 
 /// Write the crash marker at `path` (atomic create).
 ///
