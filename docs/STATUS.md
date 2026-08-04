@@ -1629,8 +1629,8 @@ capability rule does.
 
 **Linux sits with Windows on crash safety, not with macOS**, and this is where it
 is owed something. The X server holds each CRTC's table as server state and does
-not reset it when the writing client disconnects — which is precisely why `xgamma`
-works as a one-shot command that exits. So a crash mid-dim leaves a dark screen
+not reset it when the writing client disconnects — which is precisely why
+`xrandr --gamma` and `redshift -O` work as one-shot commands that exit. So a crash mid-dim leaves a dark screen
 with nothing running to undo it, and the marker-plus-guard machinery Windows
 carries is genuinely needed here. It is deliberately **not** built yet: nothing on
 Linux engages a ramp until the tray does (the sink the tray owns is the only

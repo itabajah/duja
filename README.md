@@ -143,8 +143,8 @@ X11 also has an XRandR gamma channel, which is what a display set to
 `dim_mode = "gamma"` uses to go below its hardware floor. It is opt-in per display
 rather than an automatic fallback, and no Duja build engages it on Linux yet
 because that runs through the tray, which is the row above. What does work today
-is `duja --restore`, which resets every CRTC's gamma and will clear a ramp any
-program left behind. On a Wayland session Duja refuses the gamma channel outright:
+is `duja --restore`, which resets the gamma on every CRTC of your X screen and
+will clear a ramp any program left behind. On a Wayland session Duja refuses the gamma channel outright:
 `DISPLAY` there points at Xwayland, whose CRTCs are not on the path to any
 monitor, so a ramp written to them would change nothing on screen.
 

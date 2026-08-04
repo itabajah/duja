@@ -90,8 +90,9 @@ with the phases; keep entries as observable behaviors, not implementation.
       for flicker against another always-on-top client (a second OSD, an on-screen
       keyboard, a presentation tool): X has no always-on-top, so Duja re-raises on
       every root restack, and two clients doing that can fight.
-- [ ] **`duja --restore` on X11 clears a ramp Duja did not set.** Run `xgamma -gamma .5`
-      (or leave `redshift`/`gammastep` running), then `duja --restore`: the screen must
+- [ ] **`duja --restore` on X11 clears a ramp Duja did not set.** Run
+      `xrandr --output <name> --gamma 1:1:0.5` (or leave `redshift`/`gammastep`
+      running), then `duja --restore`: the screen must
       return to normal and the command must report `restored identity gamma on N
       CRTC(s)` and exit 0. **N counts CRTCs, not monitors**, and on a multi-head GPU it
       is legitimately larger than the number of screens: the walk deliberately includes
@@ -127,6 +128,22 @@ with the phases; keep entries as observable behaviors, not implementation.
       timer and recover on their own; a **calibration** curve (`colord`, `xcalib`,
       `dispwin`) is loaded once at login and does **not** come back until the next
       login, so verify the tint loss and re-run the loader rather than waiting.
+      <!-- Use `xrandr --gamma` rather than `xgamma` to set the test ramp: `xgamma`
+           drives XFree86-VidModeExtension, and whether a server routes that into the
+           same per-CRTC RandR LUT Duja writes is a driver-level behaviour rather than
+           a protocol guarantee. If it does not, that row fails for a reason that is
+           not a Duja bug. -->
+- [ ] **An X server with no `RandR` at all** (`Xvnc`, `Xnest`, or `X -extension RANDR`):
+      `duja --restore` must print "nothing to restore" and exit **0**, not a failure.
+      Such a server has no per-CRTC gamma table, so Duja can never have dimmed through
+      it. This is a new classification, it has flipped twice in review, and no CI lane
+      can reach it — if it exits non-zero, `UnsupportedExtension` is not what x11rb
+      surfaces on that stack and the match in `open()` needs widening.
+- [ ] **A multi-head GPU reports more CRTCs than monitors.** `duja --restore` counts
+      CRTCs, and the rescue walk deliberately includes idle ones (a disabled CRTC keeps
+      its gamma table). If N equals the monitor count exactly on a machine with spare
+      CRTCs, the rescue is not reaching idle CRTCs and a ramp on an unplugged monitor
+      would be missed.
 - [ ] Wayland session that **advertises** `zwlr_layer_shell_v1`: the overlay appears and dims.
 - [ ] Wayland session that advertises **neither** wlr protocol: software dimming reports itself
       unavailable *with the reason*, and hardware paths still work.

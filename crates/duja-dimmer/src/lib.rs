@@ -61,8 +61,8 @@
 //! Linux splits the two. X11 overlay windows are owned by the connection and the
 //! server destroys them when it closes, so they need no marker. An X11 **gamma
 //! ramp** is the opposite: the server holds each CRTC's table and does not reset
-//! it when the client that wrote it disconnects, which is exactly why `xgamma`
-//! works as a one-shot command. So Linux sits with Windows on crash safety and
+//! it when the client that wrote it disconnects, which is exactly why
+//! `xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command. So Linux sits with Windows on crash safety and
 //! needs the same guard — which it does not have yet, deliberately, because
 //! nothing on Linux engages a ramp until the tray does. `restore_all` and
 //! `duja --restore` are the manual rescue in the meantime; see
@@ -218,8 +218,12 @@ pub fn min_gamma_factor() -> f32 {
 ///   the window server restores a process's transfer tables when it exits, so a
 ///   crashed ramp self-heals.)
 /// - **Linux**: `RandR`'s `SetCrtcGamma` validates nothing either — a table of
-///   zeroes is a legal request, which is how `xgamma -gamma 0` blacks a screen —
-///   so [`GAMMA_FLOOR`] is the only floor there is and it is genuinely reachable.
+///   zeroes is a legal request, because `ProcRRSetCrtcGamma` checks only that the
+///   table length matches the CRTC's — so [`GAMMA_FLOOR`] is the only floor there
+///   is and it is genuinely reachable. (An earlier draft cited `xgamma -gamma 0`
+///   here. That is the wrong evidence twice over: `xgamma` drives
+///   XFree86-VidModeExtension rather than this API, and it bounds its own argument
+///   below at 0.1.)
 ///   Note this is **not** the macOS situation: an X11 ramp *does* outlive the
 ///   process that set it (see the crate docs), so the absence of an OS clamp is
 ///   not paired with an OS safety net. `clamp_gamma` is load-bearing here.

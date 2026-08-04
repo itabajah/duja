@@ -15,10 +15,12 @@
 //!
 //! This is the property that decides the shape of everything above. The X server
 //! holds each CRTC's gamma table as **server state** and does not reset it when
-//! the client that wrote it disconnects — which is precisely why `xgamma -gamma
-//! .5` and `redshift -O 3000` work as one-shot commands that set a ramp and exit.
-//! So Linux sits with Windows, not with macOS: a crash mid-dim leaves the screen
-//! dark with nothing running to undo it.
+//! the client that wrote it disconnects — which is precisely why `xrandr --output
+//! DP-1 --gamma 1:1:0.5` and `redshift -O 3000` work as one-shot commands that set
+//! a ramp and exit. (Both of those drive `RandR`. `xgamma` is the example not to
+//! reach for: it goes through XFree86-VidModeExtension, a different API, so it is
+//! not evidence about this one.) So Linux sits with Windows, not with macOS: a
+//! crash mid-dim leaves the screen dark with nothing running to undo it.
 //!
 //! What exists today is the manual rescue — [`restore_all`], which `duja
 //! --restore` drives. What does not exist yet is the automatic one: the crash
@@ -60,8 +62,10 @@ use duja_core::dimmer::DimmerError;
 use crate::gamma_support::{GammaSupport, gamma_support_from_hdr};
 use crate::linux_caps::{SessionEnv, Transport, transport};
 use crate::linux_gamma::{
-    ChannelRefusal, MAX_RAMP_SIZE, MIN_RAMP_SIZE, RESCUE_WALK, Walk, crtc_label, hdr_active_for,
-    identity_ramp, ramp, rescue_refusal_report, walk_includes, xrandr_refusal,
+    ChannelRefusal, ConnectionFault, MAX_RAMP_SIZE, RESCUE_WALK, SendFailure, Walk,
+    connection_survives, crtc_label, hdr_active_for, identity_ramp, ramp, ramp_size_is_absent,
+    randr_lists_crtcs, rescue_refusal_report, send_failure_is_absent_channel, walk_includes,
+    writable_ramp_size, xrandr_refusal,
 };
 
 use crate::gamma_support::RestoreReport;
@@ -170,9 +174,13 @@ fn write_table(
             .map_err(|e| Fault::reply("RandR GetCrtcGammaSize", &e))?
             .size;
         let Some(table) = build(size) else {
+            let why = if ramp_size_is_absent(size) {
+                "has no gamma hardware"
+            } else {
+                "reports a table larger than one X11 request can carry"
+            };
             return Err(Fault::refused(format!(
-                "{} reports a gamma table of {size} entries, and only {MIN_RAMP_SIZE}..={MAX_RAMP_SIZE} \
-                 can be written (0 is a CRTC with no gamma hardware)",
+                "{} {why}: {size} entries is outside the writable range",
                 display.name
             )));
         };
@@ -306,7 +314,23 @@ fn collect_crtcs(session: &Session, walk: Walk) -> Result<CrtcWalk, Fault> {
                 continue;
             }
         };
-        if !(MIN_RAMP_SIZE..=MAX_RAMP_SIZE).contains(&size) {
+        if !writable_ramp_size(size) {
+            // Two different things wear one refusal, and only one of them is
+            // nothing. A size below the minimum is a CRTC with no gamma hardware:
+            // there is no ramp on it to reset, so skipping in silence is honest.
+            // A size *above* the maximum is a CRTC that has a table this crate
+            // cannot address, so it may be holding a dark ramp — dropping that one
+            // silently is a rescue reporting itself clean over a still-dimmed
+            // screen, which is this module's recurring defect in miniature.
+            if !ramp_size_is_absent(size) {
+                found.unreachable.push((
+                    crtc_label(crtc, &[]),
+                    format!(
+                        "reports a gamma table of {size} entries, larger than the {MAX_RAMP_SIZE} \
+                         one X11 request can carry"
+                    ),
+                ));
+            }
             continue;
         }
         // A non-`Success` status leaves every other field of the reply undefined
@@ -383,10 +407,17 @@ fn output_name(
 /// a dirty exit. Never fails as a whole: it reports which CRTCs it reset and which
 /// it could not.
 ///
-/// Its blast radius is every CRTC in the session, not only the ones Duja engaged —
-/// the same width as the macOS restore and wider than the Windows one. That is
-/// what makes it a rescue for a ramp any process left behind, and also what makes
-/// it flatten a running `gammastep`'s tint (module docs).
+/// Its blast radius is every CRTC on **this X screen**, not only the ones Duja
+/// engaged — the same width as the macOS restore and wider than the Windows one.
+/// That is what makes it a rescue for a ramp any process left behind, and also
+/// what makes it flatten a running `gammastep`'s tint (module docs).
+///
+/// "This X screen" and not "the session" is exact: the connection is opened
+/// against the default screen and `GetScreenResourcesCurrent` is per screen, so a
+/// Zaphod-mode server (`:0.0` / `:0.1`, dual-GPU without Xinerama) has a second
+/// screen this never walks — and would report a clean rescue with that screen
+/// still dimmed. `linux::outputs` has the identical single-root limit, so the two
+/// agree; `docs/debt.md` carries it rather than this quietly claiming otherwise.
 ///
 /// # An empty clean report means "nothing to restore", and only that
 ///
@@ -398,14 +429,17 @@ fn output_name(
 /// [`rescue_refusal_report`], which is pure and tested on every lane precisely
 /// because this module got it wrong in both directions on consecutive rounds:
 ///
-/// - A session with **no channel at all** — Wayland, an Xwayland server, no
+/// - A session with **no channel at all** — Wayland, an Xwayland server, an X
+///   server with no `RandR` extension (so no per-CRTC gamma table exists), or no
 ///   display server — returns an empty **clean** report. Nothing here was dimmed
 ///   by this mechanism, so there is nothing to put back.
 /// - A channel that **could not be reached** — no `XAUTHORITY` (which is what
 ///   `sudo duja --restore` looks like, and it is the first thing a user with a
-///   dark screen tries), a dead server, `RandR` missing or older than the walk
-///   needs — is a failure row with the reason, so the command says so and exits
-///   non-zero.
+///   dark screen tries), a dead server, or a `RandR` too **old** to list the
+///   CRTCs — is a failure row with the reason, so the command says so and exits
+///   non-zero. That last one is deliberately not in the bullet above: its gamma
+///   writes are `RandR` 1.2 and work, so a ramp may well be live and only the
+///   walk that would find it is missing.
 /// - A CRTC the server would not describe is named too, rather than silently
 ///   dropped: a rescue that reached one CRTC of four must not report itself clean.
 #[must_use]
@@ -505,9 +539,21 @@ impl Fault {
     /// guessing wrong is a slow reconnect, not a wedge — but it is a guess, and
     /// saying so is the point of this paragraph.
     fn connection(context: &str, error: &ConnectionError) -> Self {
+        // One `matches!` to name the fault, then the rule is the pure one. The
+        // `UnknownError` arm is not caution: `x11rb`'s extension manager caches a
+        // failed `QueryExtension` as `CheckState::Error` and answers every later
+        // lookup for that name with the same error **for the life of the
+        // connection** — and every request in this module resolves the `RandR`
+        // opcode first, so such a connection can never serve another one. Keeping
+        // it would wedge the gamma channel until the process restarts.
+        let fault = match error {
+            ConnectionError::IoError(_) => ConnectionFault::Io,
+            ConnectionError::UnknownError => ConnectionFault::ExtensionLookupPoisoned,
+            _ => ConnectionFault::PerRequest,
+        };
         Fault {
             message: format!("{context} failed: {error}"),
-            connection_lost: matches!(error, ConnectionError::IoError(_)),
+            connection_lost: !connection_survives(fault),
         }
     }
 
@@ -575,8 +621,16 @@ struct Session {
     root: Window,
     /// Whether the negotiated `RandR` is at least 1.3, which is what
     /// `GetScreenResourcesCurrent` needs. The gamma requests themselves are 1.2,
-    /// so a 1.2 server can still be **written** to; only the walk is unavailable,
-    /// and it says so rather than answering an empty list forever.
+    /// so a 1.2 server can still be **written** to; only the walk is unavailable.
+    ///
+    /// [`restore_all`] says so, with a failure row and a non-zero exit.
+    /// [`enumerate_gamma_displays`] does **not** — it keeps the
+    /// graceful-degradation contract its two sibling platforms have and answers an
+    /// empty list with a `debug!`, forever, on such a server. That asymmetry is
+    /// deliberate (a rescue must never look clean when it did not run, while an
+    /// enumeration returning nothing is the honest answer for a caller that only
+    /// wanted to know what it could dim) but it is an asymmetry, so it is written
+    /// down rather than left to be discovered.
     screen_resources_current: bool,
 }
 
@@ -626,8 +680,15 @@ enum SessionSlot {
     /// this module's review called that a connect storm and it is one.
     ///
     /// Sticky for the life of the process because it is a property of the server
-    /// this `DISPLAY` reaches, not of the moment. A session whose *environment*
-    /// changes is still caught first, by the per-call transport check.
+    /// this `DISPLAY` reaches, not of the moment.
+    ///
+    /// The limit of that, stated rather than implied: the per-call gate ahead of
+    /// the cache is `xrandr_refusal(session_transport())`, which only tells X11
+    /// from Wayland from nothing. A process whose `DISPLAY` moved from an Xwayland
+    /// `:0` to a real X server `:1` stays `Transport::X11`, hits this cache, and
+    /// is refused for the rest of its life. Nothing Duja does moves `DISPLAY`
+    /// under itself, so this is a caveat rather than a defect — but it is a real
+    /// one, and keying the cache on the `DISPLAY` string is what would close it.
     NoChannel(String),
 }
 
@@ -701,15 +762,21 @@ fn with_session<T>(f: impl FnOnce(&Session) -> Result<T, Fault>) -> Result<T, Un
 ///
 /// # It is a peer of the environment check, not a replacement for it
 ///
-/// The spec is dated **2022-07-29** and shipped in xorgproto 2022.2, but Xwayland
-/// **22.1.0 was released in February 2022** — five months earlier — so it does not
-/// advertise the extension. That is the Xwayland in Ubuntu 22.04 LTS (supported
-/// into 2027) and Debian bookworm, and on those this query answers "not Xwayland"
-/// for a server that is. So the two gates cover each other rather than one
-/// superseding the other: the environment catches an old Xwayland with
-/// `WAYLAND_DISPLAY` set, and this catches a new one where the environment was
-/// stripped. What is left uncovered is an old Xwayland reached from a stripped
-/// environment, and nothing available to a client closes that.
+/// The Xwayland on Ubuntu 22.04 LTS (supported into 2027) and Debian bookworm is
+/// the 22.1 branch, whose source registers no such extension and whose
+/// `hw/xwayland/meson.build` carries no `xwaylandproto` dependency — 24.1 does. So
+/// on those distributions this query answers "not Xwayland" for a server that is.
+///
+/// The dates are consistent with that (the spec is 2022-07-29, 22.1.0 was February
+/// 2022) but they do **not** establish it, and an earlier draft of this comment
+/// argued from them alone: point releases backport features routinely, and 22.1.9
+/// postdates the spec by more than a year. The source tree is the evidence.
+///
+/// So the two gates cover each other rather than one superseding the other: the
+/// environment catches an old Xwayland with `WAYLAND_DISPLAY` set, and this catches
+/// a new one where the environment was stripped. What is left uncovered is an old
+/// Xwayland reached from a stripped environment, and nothing available to a client
+/// closes that.
 const XWAYLAND_EXTENSION: &str = "XWAYLAND";
 
 /// The `RandR` version `GetScreenResourcesCurrent` was added in.
@@ -778,29 +845,32 @@ fn open() -> Result<Session, Unavailable> {
             RANDR_SCREEN_RESOURCES_CURRENT.0,
             RANDR_SCREEN_RESOURCES_CURRENT.1,
         )
-        .map_err(|e| match e {
-            // The **only** send-path error that means "no RandR here". x11rb
-            // resolves an extension's opcode before it can encode the request,
-            // and `major_opcode` propagates whatever `extension_information`
-            // returns — so an I/O error during that lookup arrives at this exact
-            // `map_err` too. Matching the variant rather than the call site is
-            // what keeps a dead connection out of the `NoChannel` bucket: routing
-            // it there would print "nothing to restore" and exit 0 for a broken
-            // session, which is the defect this PR's first review blocked on.
-            ConnectionError::UnsupportedExtension => Unavailable::NoChannel(
-                "this X server has no RandR extension, so it has no per-CRTC gamma \
-                 table to reset"
-                    .to_owned(),
-            ),
-            other => Unavailable::Failed(format!("RandR QueryVersion could not be sent: {other}")),
+        .map_err(|e| {
+            // `x11rb` resolves an extension's opcode before it can encode the
+            // request, and `major_opcode` propagates whatever
+            // `extension_information` returns — so an I/O error during that lookup
+            // arrives at this exact `map_err` too. Matching the variant rather
+            // than trusting the call site is what keeps a dead connection out of
+            // the "nothing to rescue" bucket; the rule itself is pure.
+            let failure = match e {
+                ConnectionError::UnsupportedExtension => SendFailure::ExtensionAbsent,
+                _ => SendFailure::Transport,
+            };
+            if send_failure_is_absent_channel(failure) {
+                Unavailable::NoChannel(
+                    "this X server has no RandR extension, so it has no per-CRTC gamma table"
+                        .to_owned(),
+                )
+            } else {
+                Unavailable::Failed(format!("RandR QueryVersion could not be sent: {e}"))
+            }
         })?
         .reply()
         .map_err(|e| Unavailable::Failed(format!("RandR QueryVersion failed: {e}")))?;
     Ok(Session {
         connection,
         root,
-        screen_resources_current: (version.major_version, version.minor_version)
-            >= RANDR_SCREEN_RESOURCES_CURRENT,
+        screen_resources_current: randr_lists_crtcs(version.major_version, version.minor_version),
     })
 }
 

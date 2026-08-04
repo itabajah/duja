@@ -25,8 +25,10 @@
 //! Worth stating here rather than only in the backend, because it is the one
 //! property that separates Linux from macOS and puts it with Windows. The X
 //! server holds each CRTC's gamma table as server state and does **not** reset it
-//! when the client that wrote it disconnects — which is exactly why `xgamma` and
-//! `redshift -O` work as one-shot commands that exit immediately. So a Duja that
+//! when the client that wrote it disconnects — which is exactly why
+//! `xrandr --gamma` and `redshift -O` work as one-shot commands that exit
+//! immediately. (Not `xgamma`: it drives a different API, XFree86-VidModeExtension,
+//! so it says nothing about this one.) So a Duja that
 //! crashes mid-dim leaves the screen dark with nothing left running to undo it.
 //!
 //! `duja --restore` is the manual rescue and exists today. The automatic one — a
@@ -329,6 +331,98 @@ pub const fn walk_includes(walk: Walk, has_outputs: bool) -> bool {
     }
 }
 
+/// Why an X11 request could not be **sent**, in the terms this crate decides on.
+///
+/// The backend maps one `x11rb` variant onto this and the rule lives here, which
+/// is the split the rest of the module already uses. It is here specifically
+/// because this is the decision that has been wrong twice in one PR — once by
+/// putting a missing extension on the failure side, and once by putting a dead
+/// connection on the *nothing to rescue* side, which is far worse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendFailure {
+    /// The server does not have the extension at all. `x11rb` answers this only
+    /// when `QueryExtension` came back with `present == false`.
+    ExtensionAbsent,
+    /// Anything else on the send path: the socket, the encoding, or a
+    /// `QueryExtension` that itself failed. **Never** the absence of a feature.
+    Transport,
+}
+
+/// Whether a send failure means this session never had a gamma channel.
+///
+/// Only a genuinely absent extension does. Everything else is a channel that
+/// might exist and might be holding a ramp, so it has to be reported rather than
+/// dismissed — `duja --restore` printing "nothing to restore" and exiting 0 at a
+/// dark screen is the failure this whole distinction exists to prevent.
+#[must_use]
+pub const fn send_failure_is_absent_channel(failure: SendFailure) -> bool {
+    matches!(failure, SendFailure::ExtensionAbsent)
+}
+
+/// What went wrong on a connection, in the terms this crate decides on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionFault {
+    /// The socket is gone.
+    Io,
+    /// The connection's extension lookup is permanently poisoned: once a
+    /// `QueryExtension` fails, `x11rb` caches the failure and answers every later
+    /// lookup for that name with the same error **for the life of the
+    /// connection**. Since every request in the gamma backend resolves the
+    /// `RandR` opcode first, such a connection can never serve another one.
+    ExtensionLookupPoisoned,
+    /// A per-request failure that leaves the connection usable: a reply this
+    /// client could not parse, a request too large to encode, a feature the
+    /// server does not have.
+    PerRequest,
+}
+
+/// Whether the connection survives this fault and can be reused.
+///
+/// The failure directions are deliberately asymmetric. Discarding a healthy
+/// connection costs one reconnect; **keeping a dead one costs the gamma channel
+/// for the life of the process**, because nothing else ever replaces it. So a
+/// fault that might be permanent is treated as permanent.
+#[must_use]
+pub const fn connection_survives(fault: ConnectionFault) -> bool {
+    matches!(fault, ConnectionFault::PerRequest)
+}
+
+/// Whether a `RandR` of this version can list a screen's CRTCs.
+///
+/// `GetScreenResourcesCurrent` is `RandR` 1.3. Every gamma request is 1.2, so a
+/// 1.2 server can still be written to — which is why this is a separate question
+/// from "is there a channel" and lands on the *failure* side of a rescue rather
+/// than the *nothing to do* side.
+#[must_use]
+pub const fn randr_lists_crtcs(major: u32, minor: u32) -> bool {
+    major > 1 || (major == 1 && minor >= 3)
+}
+
+/// Whether a CRTC's reported gamma-table length is one this crate can write.
+///
+/// The same bound [`ramp`] enforces, named so the walk and the writer cannot
+/// drift apart — and so the walk can tell the two reasons for failing it apart,
+/// which it must, because they are not the same thing to a rescue:
+/// [`ramp_size_is_absent`] says which.
+#[must_use]
+pub const fn writable_ramp_size(size: u16) -> bool {
+    MIN_RAMP_SIZE <= size && size <= MAX_RAMP_SIZE
+}
+
+/// Whether a size this crate cannot write means the CRTC holds **no ramp at all**
+/// (so a rescue may skip it in silence) rather than one it cannot reach.
+///
+/// A size below [`MIN_RAMP_SIZE`] is a CRTC with no gamma hardware: there is
+/// nothing on it to reset. A size *above* [`MAX_RAMP_SIZE`] is the opposite — that
+/// CRTC has a table, may well be holding a dark ramp, and this crate simply cannot
+/// address it. Skipping the second in silence is a rescue reporting itself clean
+/// with a screen still dimmed, which is this module's recurring defect in
+/// miniature.
+#[must_use]
+pub const fn ramp_size_is_absent(size: u16) -> bool {
+    size < MIN_RAMP_SIZE
+}
+
 /// Why a rescue pass is over before it has touched a CRTC.
 ///
 /// Deliberately has **no** "the channel is open" variant: that case is the caller
@@ -340,11 +434,15 @@ pub const fn walk_includes(walk: Walk, has_outputs: bool) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelRefusal<'a> {
     /// There is no `XRandR` gamma channel in this session **at all** — a Wayland
-    /// compositor, an Xwayland server, no display server. Nothing here was ever
-    /// dimmed by this mechanism, so there is nothing to put back.
+    /// compositor, an Xwayland server, no display server, or an X server with no
+    /// `RandR` extension (which therefore has no per-CRTC gamma table). Nothing
+    /// here was ever dimmed by this mechanism, so there is nothing to put back.
     Absent(&'a str),
     /// There should be a channel and it could not be reached: no `XAUTHORITY`, a
-    /// dead server, `RandR` missing or too old. Something may well be dimmed and
+    /// dead server, or a `RandR` too **old** to list the CRTCs — note that one is
+    /// not the bullet above: its gamma *writes* are 1.2 and work, so a ramp may
+    /// well be live and only the walk that would find it is missing. Something may
+    /// well be dimmed and
     /// this pass could not touch it.
     Unreachable(&'a str),
 }
@@ -595,6 +693,78 @@ mod tests {
             !walk_includes(Walk::Driving, false),
             "an idle CRTC cannot be dimmed or addressed"
         );
+    }
+
+    /// Only a genuinely absent extension is "nothing to rescue". Reds the defect
+    /// this PR shipped and reverted within one commit: routing every send failure
+    /// there meant a dead connection printed "nothing to restore" and exited 0 for
+    /// a session that may well be dimmed.
+    #[test]
+    fn only_a_missing_extension_means_a_missing_channel() {
+        assert!(send_failure_is_absent_channel(SendFailure::ExtensionAbsent));
+        assert!(
+            !send_failure_is_absent_channel(SendFailure::Transport),
+            "a transport failure may be hiding a live ramp and must be reported"
+        );
+    }
+
+    /// A fault that might be permanent is treated as permanent, because the two
+    /// failure directions are not symmetric: a needless reconnect costs one
+    /// handshake, a kept-but-dead connection costs the channel for the life of the
+    /// process.
+    #[test]
+    fn a_connection_survives_only_a_per_request_fault() {
+        assert!(connection_survives(ConnectionFault::PerRequest));
+        assert!(!connection_survives(ConnectionFault::Io));
+        assert!(
+            !connection_survives(ConnectionFault::ExtensionLookupPoisoned),
+            "x11rb caches a failed QueryExtension for the life of the connection,              and every request here resolves RandR first"
+        );
+    }
+
+    #[test]
+    fn only_randr_1_3_and_later_can_list_crtcs() {
+        assert!(!randr_lists_crtcs(1, 2), "GetScreenResourcesCurrent is 1.3");
+        assert!(randr_lists_crtcs(1, 3));
+        assert!(randr_lists_crtcs(1, 6), "a newer server still qualifies");
+        assert!(randr_lists_crtcs(2, 0), "so does a newer major");
+        assert!(!randr_lists_crtcs(0, 9));
+    }
+
+    /// The writable bound must be exactly `ramp`'s, or the walk and the writer
+    /// disagree about which CRTCs are addressable.
+    #[test]
+    fn the_walk_and_the_writer_agree_on_which_sizes_are_writable() {
+        for size in [
+            0u16,
+            1,
+            MIN_RAMP_SIZE,
+            2,
+            256,
+            4096,
+            MAX_RAMP_SIZE,
+            u16::MAX,
+        ] {
+            assert_eq!(
+                writable_ramp_size(size),
+                ramp(0.5, size).is_some(),
+                "size {size} is classified differently by the walk and the writer"
+            );
+        }
+    }
+
+    /// A CRTC with no gamma hardware holds nothing; one whose table is too large
+    /// to write holds something this crate cannot reach. A rescue may skip the
+    /// first silently and must not skip the second silently.
+    #[test]
+    fn an_unwritable_size_is_only_nothing_when_there_is_no_table() {
+        assert!(ramp_size_is_absent(0), "no gamma hardware");
+        assert!(ramp_size_is_absent(1), "no input axis, so no ramp to hold");
+        assert!(
+            !ramp_size_is_absent(MAX_RAMP_SIZE.saturating_add(1)),
+            "an oversized table is a ramp this crate cannot reach, not an absent one"
+        );
+        assert!(!ramp_size_is_absent(u16::MAX));
     }
 
     /// A session with no channel has nothing to rescue; a channel that could not
