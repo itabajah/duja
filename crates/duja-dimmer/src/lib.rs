@@ -391,11 +391,14 @@ mod tests {
         {
             assert!(
                 gamma_is_advisory(),
-                "the X server discards the driver's gamma result and answers Success                  regardless, so a write can be accepted and never reach a screen"
+                "the X server discards the driver's gamma result and answers \
+                 Success regardless, so a write can be accepted and never reach \
+                 a screen"
             );
             assert!(
                 (min_gamma_factor() - GAMMA_FLOOR).abs() < f32::EPSILON,
-                "RandR validates only the table length, which is why the verdict is                  advisory and why GAMMA_FLOOR is the only floor there is"
+                "RandR validates only the table length, which is why the verdict \
+                 is advisory and why GAMMA_FLOOR is the only floor there is"
             );
         }
         #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]

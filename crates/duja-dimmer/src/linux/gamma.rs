@@ -368,7 +368,8 @@ fn collect_crtcs(session: &Session, walk: Walk) -> Result<CrtcWalk, Fault> {
                 found.unreachable.push((
                     label,
                     format!(
-                        "reports a gamma table of {size} entries, larger than the {MAX_RAMP_SIZE}                          one X11 request can carry"
+                        "reports a gamma table of {size} entries; one X11 request \
+                         carries at most {MAX_RAMP_SIZE}"
                     ),
                 ));
             }
@@ -956,7 +957,8 @@ mod tests {
         assert_eq!(
             classify_connection_error(&ConnectionError::UnknownError),
             ConnectionFault::ExtensionLookupPoisoned,
-            "x11rb answers this only from a cached QueryExtension failure, which              is permanent for that connection"
+            "x11rb answers this only from a cached QueryExtension failure, which \
+             is permanent for that connection"
         );
         assert_eq!(
             classify_connection_error(&ConnectionError::MaximumRequestLengthExceeded),
