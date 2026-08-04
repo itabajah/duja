@@ -778,11 +778,21 @@ fn open() -> Result<Session, Unavailable> {
             RANDR_SCREEN_RESOURCES_CURRENT.0,
             RANDR_SCREEN_RESOURCES_CURRENT.1,
         )
-        .map_err(|e| {
-            Unavailable::NoChannel(format!(
+        .map_err(|e| match e {
+            // The **only** send-path error that means "no RandR here". x11rb
+            // resolves an extension's opcode before it can encode the request,
+            // and `major_opcode` propagates whatever `extension_information`
+            // returns — so an I/O error during that lookup arrives at this exact
+            // `map_err` too. Matching the variant rather than the call site is
+            // what keeps a dead connection out of the `NoChannel` bucket: routing
+            // it there would print "nothing to restore" and exit 0 for a broken
+            // session, which is the defect this PR's first review blocked on.
+            ConnectionError::UnsupportedExtension => Unavailable::NoChannel(
                 "this X server has no RandR extension, so it has no per-CRTC gamma \
-                 table to reset: {e}"
-            ))
+                 table to reset"
+                    .to_owned(),
+            ),
+            other => Unavailable::Failed(format!("RandR QueryVersion could not be sent: {other}")),
         })?
         .reply()
         .map_err(|e| Unavailable::Failed(format!("RandR QueryVersion failed: {e}")))?;
