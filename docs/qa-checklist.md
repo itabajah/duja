@@ -113,13 +113,13 @@ with the phases; keep entries as observable behaviors, not implementation.
       `XWAYLAND` extension is present). Check the second in isolation by clearing
       `WAYLAND_DISPLAY` from the environment and leaving `DISPLAY` set — a `systemd
       --user` unit or an `ssh` login is the real-world shape — and confirm it still
-      refuses. If it reports restoring CRTCs there, check the Xwayland version before
-      calling it a bug: the `XWAYLAND` extension only exists from **xorgproto 2022.2
-      (July 2022)**, so Xwayland 22.1.x — Ubuntu 22.04 LTS, Debian bookworm — does
-      not advertise it and this second gate genuinely cannot see it. On those, the
-      environment gate is the only one, and the uncovered case (old Xwayland *and* a
-      stripped environment) is a documented limit rather than a defect. On anything
-      newer, a count there means the protocol check is broken and every gamma write
+      refuses. If it reports restoring CRTCs there, check `Xwayland -version` before
+      calling it a bug: only **Xwayland 23.1 and later** register the `XWAYLAND`
+      extension, so the 22.1 branch in Ubuntu 22.04 LTS and Debian bookworm cannot
+      be seen by this gate however new the point release is. On those the
+      environment gate is the only one, and the uncovered case (22.1 *and* a
+      stripped environment) is a documented limit rather than a defect. On 23.1 or
+      later, a count there means the protocol check is broken and every gamma write
       in that session is going somewhere the user cannot see.
 - [ ] **`--restore` flattens a running colour-temperature tool's tint**, and that is
       the documented behaviour rather than a bug: one LUT per CRTC, last writer wins,
@@ -133,12 +133,19 @@ with the phases; keep entries as observable behaviors, not implementation.
            same per-CRTC RandR LUT Duja writes is a driver-level behaviour rather than
            a protocol guarantee. If it does not, that row fails for a reason that is
            not a Duja bug. -->
-- [ ] **An X server with no `RandR` at all** (`Xvnc`, `Xnest`, or `X -extension RANDR`):
-      `duja --restore` must print "nothing to restore" and exit **0**, not a failure.
-      Such a server has no per-CRTC gamma table, so Duja can never have dimmed through
-      it. This is a new classification, it has flipped twice in review, and no CI lane
-      can reach it — if it exits non-zero, `UnsupportedExtension` is not what x11rb
-      surfaces on that stack and the match in `open()` needs widening.
+- [ ] **An X server with no `RandR` at all** — `X -extension RANDR`, or `Xnest`.
+      **Not `Xvnc`**: TigerVNC's server does have RandR (that is how `xrandr`-driven
+      resize works under it), so it tests the row below instead. `duja --restore` must
+      print "nothing to restore" and exit **0**, not a failure: such a server has no
+      per-CRTC gamma table, so Duja can never have dimmed through it. This
+      classification has flipped twice in review and no CI lane can reach it — if it
+      exits non-zero, `UnsupportedExtension` is not what x11rb surfaces on that stack.
+- [ ] **An X server whose `RandR` is present but older than 1.3.** Opposite
+      expectation, and the contrast is the point: `duja --restore` must print a
+      `failed:` line saying the CRTCs cannot be listed and exit **non-zero**. The gamma
+      *writes* are RandR 1.2 and work, so a ramp may well be live and only the walk
+      that would find it is missing — that is a rescue which could not run, not a
+      session with nothing to rescue.
 - [ ] **A multi-head GPU reports more CRTCs than monitors.** `duja --restore` counts
       CRTCs, and the rescue walk deliberately includes idle ones (a disabled CRTC keeps
       its gamma table). If N equals the monitor count exactly on a machine with spare

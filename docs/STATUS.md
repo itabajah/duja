@@ -1601,10 +1601,12 @@ with the `XWAYLAND` extension query X.Org added for exactly this: *"Only Xwaylan
 initializes this extension. Thus, if the extension is present, the X server is
 Xwayland."*
 
-The first draft of this paragraph called that second gate authoritative, and its
-review found the date: the extension is from **2022-07-29** and Xwayland 22.1.0
-shipped in **February 2022**, so the Xwayland in Ubuntu 22.04 LTS (supported into
-2027) and Debian bookworm does not advertise it. Neither gate is a superset of the
+The first draft of this paragraph called that second gate authoritative, and it is
+not: only Xwayland **23.1 and later** register the extension, and the 22.1 branch
+that Ubuntu 22.04 LTS (supported into 2027) and Debian bookworm ship carries no
+`xwaylandproto` dependency at all. (A later draft argued that from release dates,
+which was a non-sequitur — point releases backport, and 22.1.9 postdates the spec
+by over a year. The source tree is the evidence.) Neither gate is a superset of the
 other — environment catches an old Xwayland that kept `WAYLAND_DISPLAY`, protocol
 catches a new one whose environment was stripped, and an old one from a stripped
 environment is caught by neither. Nothing available to an X client closes that
@@ -1630,7 +1632,7 @@ capability rule does.
 **Linux sits with Windows on crash safety, not with macOS**, and this is where it
 is owed something. The X server holds each CRTC's table as server state and does
 not reset it when the writing client disconnects — which is precisely why
-`xrandr --gamma` and `redshift -O` work as one-shot commands that exit. So a crash mid-dim leaves a dark screen
+`xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command that exits. So a crash mid-dim leaves a dark screen
 with nothing running to undo it, and the marker-plus-guard machinery Windows
 carries is genuinely needed here. It is deliberately **not** built yet: nothing on
 Linux engages a ramp until the tray does (the sink the tray owns is the only

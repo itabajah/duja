@@ -291,12 +291,31 @@ pub fn gamma_is_advisory() -> bool {
 ///   is on. No rule exists to comply with, and `CGGetDisplayTransferByTable`
 ///   returns the written values while the screen is unchanged, so verification by
 ///   readback does not detect it either.
+/// - **Linux (X11)**: `true`, and for a reason read out of the X server's source
+///   rather than inferred. `ProcRRSetCrtcGamma` ends
+///   `RRCrtcGammaSet(crtc, red, green, blue); return Success;` — it **discards**
+///   that call's `Bool`, and `RRCrtcGammaSet` returns exactly the driver hook's
+///   result (`ret = (*pScrPriv->rrCrtcSetGamma)(pScreen, crtc)`). So a write the
+///   KMS driver refused is reported to the client as `Success`. Readback does not
+///   detect it either: `RRCrtcGammaSet` `memcpy`s into `crtc->gammaRed` first, and
+///   `GetCrtcGamma` answers from that server-side copy.
+///
+///   Duja does not need a driver to fail to reach this state, which is what makes
+///   it a property rather than a hazard: `restore_all` deliberately writes to
+///   CRTCs that are driving nothing, and a CRTC with no mode has no pipeline to
+///   program. It is stored, `Success` is returned, and the table is re-applied if
+///   that CRTC is ever enabled — which is the behaviour the rescue *wants*, and is
+///   also a write that provably did not reach a screen.
+///
+///   Like macOS, there is no rule to comply with — `ProcRRSetCrtcGamma` validates
+///   only `stuff->size != crtc->gammaSize` — so this cannot be engineered away,
+///   which is the question this function asks.
 /// - **Other targets**: `false` — there is no gamma backend at all, so nothing can
 ///   silently fail.
 #[cfg(not(windows))]
 #[must_use]
 pub fn gamma_is_advisory() -> bool {
-    cfg!(target_os = "macos")
+    cfg!(any(target_os = "macos", target_os = "linux"))
 }
 
 /// The crate version, as compiled in.
@@ -368,7 +387,18 @@ mod tests {
                 "no OS bound to comply with is exactly why the verdict is advisory"
             );
         }
-        #[cfg(not(any(windows, target_os = "macos")))]
+        #[cfg(target_os = "linux")]
+        {
+            assert!(
+                gamma_is_advisory(),
+                "the X server discards the driver's gamma result and answers Success                  regardless, so a write can be accepted and never reach a screen"
+            );
+            assert!(
+                (min_gamma_factor() - GAMMA_FLOOR).abs() < f32::EPSILON,
+                "RandR validates only the table length, which is why the verdict is                  advisory and why GAMMA_FLOOR is the only floor there is"
+            );
+        }
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         assert!(!gamma_is_advisory(), "no gamma backend, nothing to fail");
     }
 }

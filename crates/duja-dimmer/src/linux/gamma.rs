@@ -15,11 +15,11 @@
 //!
 //! This is the property that decides the shape of everything above. The X server
 //! holds each CRTC's gamma table as **server state** and does not reset it when
-//! the client that wrote it disconnects — which is precisely why `xrandr --output
-//! DP-1 --gamma 1:1:0.5` and `redshift -O 3000` work as one-shot commands that set
-//! a ramp and exit. (Both of those drive `RandR`. `xgamma` is the example not to
-//! reach for: it goes through XFree86-VidModeExtension, a different API, so it is
-//! not evidence about this one.) So Linux sits with Windows, not with macOS: a
+//! the client that wrote it disconnects — which is precisely why
+//! `xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command that sets a
+//! ramp and exits. (That one and only that one: `xgamma` drives
+//! XFree86-VidModeExtension, and `redshift` picks between `randr`, `drm` and
+//! `vidmode` backends at runtime, so neither is evidence about this API.) So Linux sits with Windows, not with macOS: a
 //! crash mid-dim leaves the screen dark with nothing running to undo it.
 //!
 //! What exists today is the manual rescue — [`restore_all`], which `duja
@@ -175,7 +175,7 @@ fn write_table(
             .size;
         let Some(table) = build(size) else {
             let why = if ramp_size_is_absent(size) {
-                "has no gamma hardware"
+                "has no gamma table to write"
             } else {
                 "reports a table larger than one X11 request can carry"
             };
@@ -195,6 +195,12 @@ fn write_table(
         // the display instead. It costs a round trip per write — `check` inserts
         // a sync and blocks for the answer — which is the price of knowing, and
         // is the second of the two this function makes.
+        //
+        // What it buys is the *protocol* half and not the whole. `Success` here
+        // means the server stored the table: `ProcRRSetCrtcGamma` discards
+        // `RRCrtcGammaSet`'s return, which is the driver hook's own result, so a
+        // write KMS refused reads as accepted. See `crate::gamma_is_advisory`,
+        // which is `true` on Linux for exactly this.
         connection
             .randr_set_crtc_gamma(display.crtc, &table, &table, &table)
             .map_err(|e| Fault::connection("RandR SetCrtcGamma", &e))?
@@ -273,8 +279,15 @@ struct CrtcWalk {
 /// - a **protocol** error (a CRTC that went away mid-walk) skips that CRTC but is
 ///   recorded in [`CrtcWalk::unreachable`], so a rescue names it instead of
 ///   quietly reporting itself clean;
-/// - a gamma size outside the writable range is genuinely nothing — a CRTC with
-///   no gamma hardware holds no ramp — and is skipped silently.
+/// - a gamma size below the writable range is genuinely nothing — a CRTC with no
+///   gamma table holds no ramp — and is skipped silently, while one *above* it is
+///   recorded, because that CRTC has a table this crate cannot address.
+///
+/// Every CRTC is named before anything can reject it, which costs a `GetCrtcInfo`
+/// on CRTCs that then turn out to have no gamma table. That is one round trip on
+/// a local socket, on a path that runs per display event rather than per frame,
+/// and it buys a report whose *failure* rows carry connector names — which are the
+/// rows a user has to match against something on their desk.
 fn collect_crtcs(session: &Session, walk: Walk) -> Result<CrtcWalk, Fault> {
     let connection = &session.connection;
     if !session.screen_resources_current {
@@ -297,47 +310,15 @@ fn collect_crtcs(session: &Session, walk: Walk) -> Result<CrtcWalk, Fault> {
     let timestamp = resources.config_timestamp;
     let mut found = CrtcWalk::default();
     for crtc in resources.crtcs {
-        let size = match connection
-            .randr_get_crtc_gamma_size(crtc)
-            .map_err(|e| Fault::connection("RandR GetCrtcGammaSize", &e))?
-            .reply()
-        {
-            Ok(reply) => reply.size,
-            Err(e) => {
-                let fault = Fault::reply("RandR GetCrtcGammaSize", &e);
-                if fault.connection_lost {
-                    return Err(fault);
-                }
-                found
-                    .unreachable
-                    .push((crtc_label(crtc, &[]), fault.message));
-                continue;
-            }
-        };
-        if !writable_ramp_size(size) {
-            // Two different things wear one refusal, and only one of them is
-            // nothing. A size below the minimum is a CRTC with no gamma hardware:
-            // there is no ramp on it to reset, so skipping in silence is honest.
-            // A size *above* the maximum is a CRTC that has a table this crate
-            // cannot address, so it may be holding a dark ramp — dropping that one
-            // silently is a rescue reporting itself clean over a still-dimmed
-            // screen, which is this module's recurring defect in miniature.
-            if !ramp_size_is_absent(size) {
-                found.unreachable.push((
-                    crtc_label(crtc, &[]),
-                    format!(
-                        "reports a gamma table of {size} entries, larger than the {MAX_RAMP_SIZE} \
-                         one X11 request can carry"
-                    ),
-                ));
-            }
-            continue;
-        }
-        // A non-`Success` status leaves every other field of the reply undefined
-        // per the protocol — `InvalidConfigTime` is what a hot-plug racing this
-        // walk looks like — so `outputs` must not be read from it. An info the
-        // server will not give up costs the CRTC its label, and on the rescue
-        // walk that is all it costs: the ramp is still written.
+        // The label is built **first**, before anything can reject this CRTC.
+        // Every row that reaches the user is one they have to find on their desk,
+        // and the rows most worth naming are the failures; building the name only
+        // on the success path left the oversized-table row reading `CRTC-63` with
+        // no connector on it. A non-`Success` status leaves every other field of
+        // the reply undefined per the protocol — `InvalidConfigTime` is what a
+        // hot-plug racing this walk looks like — so `outputs` must not be read
+        // from one. An info the server will not give up costs the CRTC its name
+        // and nothing else: the ramp is still written.
         let info = match connection
             .randr_get_crtc_info(crtc, timestamp)
             .map_err(|e| Fault::connection("RandR GetCrtcInfo", &e))?
@@ -353,17 +334,50 @@ fn collect_crtcs(session: &Session, walk: Walk) -> Result<CrtcWalk, Fault> {
             }
         };
         let outputs = info.map(|info| info.outputs).unwrap_or_default();
+        let mut names = Vec::new();
+        for output in &outputs {
+            names.extend(output_name(connection, *output, timestamp)?);
+        }
+        let label = crtc_label(crtc, &names);
+
+        let size = match connection
+            .randr_get_crtc_gamma_size(crtc)
+            .map_err(|e| Fault::connection("RandR GetCrtcGammaSize", &e))?
+            .reply()
+        {
+            Ok(reply) => reply.size,
+            Err(e) => {
+                let fault = Fault::reply("RandR GetCrtcGammaSize", &e);
+                if fault.connection_lost {
+                    return Err(fault);
+                }
+                found.unreachable.push((label, fault.message));
+                continue;
+            }
+        };
+        if !writable_ramp_size(size) {
+            // Two different things wear one refusal, and only one of them is
+            // nothing. A size below the minimum is a CRTC with no gamma table at
+            // all: there is no ramp on it to reset, so skipping in silence is
+            // honest. A size *above* the maximum is a CRTC that has a table this
+            // crate cannot address, so it may be holding a dark ramp — dropping
+            // that one silently is a rescue reporting itself clean over a
+            // still-dimmed screen, which is this module's recurring defect in
+            // miniature.
+            if !ramp_size_is_absent(size) {
+                found.unreachable.push((
+                    label,
+                    format!(
+                        "reports a gamma table of {size} entries, larger than the {MAX_RAMP_SIZE}                          one X11 request can carry"
+                    ),
+                ));
+            }
+            continue;
+        }
         if !walk_includes(walk, !outputs.is_empty()) {
             continue;
         }
-        let mut names = Vec::new();
-        for output in outputs {
-            names.extend(output_name(connection, output, timestamp)?);
-        }
-        found.displays.push(GammaDisplay {
-            crtc,
-            name: crtc_label(crtc, &names),
-        });
+        found.displays.push(GammaDisplay { crtc, name: label });
     }
     Ok(found)
 }
@@ -509,6 +523,39 @@ fn session_transport() -> Transport {
     })
 }
 
+/// Name what an `x11rb` connection error *is*, so the rule that acts on it can
+/// live in the pure module.
+///
+/// This mapping and its sibling [`classify_send_error`] are the two places where
+/// a wrong answer is not a wrong rule but a wrong input, and they are the reason
+/// this module has a test at all: they are total functions over a constructible
+/// enum, so the ubuntu lane can pin them with no X server. The decision they feed
+/// has been wrong twice in this PR's history.
+fn classify_connection_error(error: &ConnectionError) -> ConnectionFault {
+    match error {
+        ConnectionError::IoError(_) => ConnectionFault::Io,
+        // `x11rb` answers this **only** from a `CheckState::Error` entry, which a
+        // failed `QueryExtension` sets for the life of the connection — so it is
+        // never a one-off. See `ConnectionFault::ExtensionLookupPoisoned`.
+        ConnectionError::UnknownError => ConnectionFault::ExtensionLookupPoisoned,
+        _ => ConnectionFault::PerRequest,
+    }
+}
+
+/// Name what a failure to *send* a request is, for [`send_failure_is_absent_channel`].
+///
+/// `UnsupportedExtension` is the only variant that means the feature is absent:
+/// `x11rb` produces it solely from `extension_information` answering `Ok(None)`,
+/// which comes solely from a `QueryExtension` reply with `present == false`.
+/// Everything else — including an I/O error *during* that lookup, which reaches
+/// the same call site — is transport.
+fn classify_send_error(error: &ConnectionError) -> SendFailure {
+    match error {
+        ConnectionError::UnsupportedExtension => SendFailure::ExtensionAbsent,
+        _ => SendFailure::Transport,
+    }
+}
+
 /// Why one gamma request failed, and whether the connection survived it.
 ///
 /// The second field is the whole reason this type exists rather than a bare
@@ -546,14 +593,9 @@ impl Fault {
         // connection** — and every request in this module resolves the `RandR`
         // opcode first, so such a connection can never serve another one. Keeping
         // it would wedge the gamma channel until the process restarts.
-        let fault = match error {
-            ConnectionError::IoError(_) => ConnectionFault::Io,
-            ConnectionError::UnknownError => ConnectionFault::ExtensionLookupPoisoned,
-            _ => ConnectionFault::PerRequest,
-        };
         Fault {
             message: format!("{context} failed: {error}"),
-            connection_lost: !connection_survives(fault),
+            connection_lost: !connection_survives(classify_connection_error(error)),
         }
     }
 
@@ -568,9 +610,12 @@ impl Fault {
     /// fires, since almost every request here carries a reply.
     fn reply(context: &str, error: &ReplyError) -> Self {
         match error {
+            // The server refusing one request. Routed through the same rule as
+            // everything else rather than writing `false` here, so the module has
+            // one place that decides whether a connection survives.
             ReplyError::X11Error(_) => Fault {
                 message: format!("{context} failed: {error}"),
-                connection_lost: false,
+                connection_lost: !connection_survives(ConnectionFault::PerRequest),
             },
             ReplyError::ConnectionError(e) => Fault::connection(context, e),
         }
@@ -580,7 +625,7 @@ impl Fault {
     fn refused(message: String) -> Self {
         Fault {
             message,
-            connection_lost: false,
+            connection_lost: !connection_survives(ConnectionFault::PerRequest),
         }
     }
 }
@@ -852,11 +897,7 @@ fn open() -> Result<Session, Unavailable> {
             // arrives at this exact `map_err` too. Matching the variant rather
             // than trusting the call site is what keeps a dead connection out of
             // the "nothing to rescue" bucket; the rule itself is pure.
-            let failure = match e {
-                ConnectionError::UnsupportedExtension => SendFailure::ExtensionAbsent,
-                _ => SendFailure::Transport,
-            };
-            if send_failure_is_absent_channel(failure) {
+            if send_failure_is_absent_channel(classify_send_error(&e)) {
                 Unavailable::NoChannel(
                     "this X server has no RandR extension, so it has no per-CRTC gamma table"
                         .to_owned(),
@@ -877,6 +918,56 @@ fn open() -> Result<Session, Unavailable> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two `x11rb` mappings, pinned on the ubuntu lane.
+    ///
+    /// These are the highest-risk lines in the module — a correct rule fed a
+    /// wrong input is still a wrong answer, and this is the classification that
+    /// has been wrong in both directions inside one PR. They are total functions
+    /// over a constructible enum, so unlike everything else here they cost
+    /// nothing to test: no X server, no connection, no display.
+    ///
+    /// Reds a swap of the two `SendFailure` arms, which would report "nothing to
+    /// restore" and exit 0 for a dead connection, and a swap of the
+    /// `ConnectionFault` ones, which would keep a permanently poisoned connection
+    /// and wedge the gamma channel for the life of the process.
+    #[test]
+    fn an_x11rb_error_is_named_for_what_it_actually_means() {
+        assert_eq!(
+            classify_send_error(&ConnectionError::UnsupportedExtension),
+            SendFailure::ExtensionAbsent
+        );
+        for error in [
+            ConnectionError::UnknownError,
+            ConnectionError::MaximumRequestLengthExceeded,
+            ConnectionError::IoError(std::io::Error::other("socket gone")),
+        ] {
+            assert_eq!(
+                classify_send_error(&error),
+                SendFailure::Transport,
+                "{error:?} is not the absence of an extension"
+            );
+        }
+
+        assert_eq!(
+            classify_connection_error(&ConnectionError::IoError(std::io::Error::other("gone"))),
+            ConnectionFault::Io
+        );
+        assert_eq!(
+            classify_connection_error(&ConnectionError::UnknownError),
+            ConnectionFault::ExtensionLookupPoisoned,
+            "x11rb answers this only from a cached QueryExtension failure, which              is permanent for that connection"
+        );
+        assert_eq!(
+            classify_connection_error(&ConnectionError::MaximumRequestLengthExceeded),
+            ConnectionFault::PerRequest
+        );
+        assert_eq!(
+            classify_connection_error(&ConnectionError::UnsupportedExtension),
+            ConnectionFault::PerRequest,
+            "a missing extension says nothing about the socket"
+        );
+    }
 
     /// The label a token-built display carries, which is all the app's gamma sink
     /// can give it. Runs on the Linux CI lane with no X server: it touches no

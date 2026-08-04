@@ -26,9 +26,9 @@
 //! property that separates Linux from macOS and puts it with Windows. The X
 //! server holds each CRTC's gamma table as server state and does **not** reset it
 //! when the client that wrote it disconnects — which is exactly why
-//! `xrandr --gamma` and `redshift -O` work as one-shot commands that exit
-//! immediately. (Not `xgamma`: it drives a different API, XFree86-VidModeExtension,
-//! so it says nothing about this one.) So a Duja that
+//! `xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command that exits
+//! immediately. (Not `xgamma`, which drives XFree86-VidModeExtension, and not
+//! `redshift`, which chooses its backend at runtime — neither is evidence here.) So a Duja that
 //! crashes mid-dim leaves the screen dark with nothing left running to undo it.
 //!
 //! `duja --restore` is the manual rescue and exists today. The automatic one — a
@@ -98,10 +98,12 @@ const RAMP_MAX: f64 = 65_535.0;
 /// extension is present, the X server is Xwayland"*).
 ///
 /// The two are **peers**, and it would be comfortable but wrong to call the
-/// protocol one authoritative: that extension is dated 2022-07-29 and Xwayland
-/// 22.1.0 shipped five months earlier, so the Xwayland in Ubuntu 22.04 LTS and
-/// Debian bookworm does not advertise it. Each gate covers the other's blind
-/// spot — this one catches an old Xwayland with `WAYLAND_DISPLAY` set, that one
+/// protocol one authoritative: only Xwayland **23.1 and later** register that
+/// extension — the 22.1 branch that Ubuntu 22.04 LTS and Debian bookworm ship
+/// carries no `xwaylandproto` dependency at all — so on those it answers "not
+/// Xwayland" for a server that is. (Argue that from the source tree and not from
+/// release dates: point releases backport, and 22.1.9 postdates the spec by over
+/// a year.) Each gate covers the other's blind spot — this one catches an old Xwayland with `WAYLAND_DISPLAY` set, that one
 /// catches a new Xwayland reached from a stripped environment — and an old
 /// Xwayland from a stripped environment is covered by neither. See
 /// `XWAYLAND_EXTENSION` in `src/linux/gamma.rs`.
@@ -370,9 +372,17 @@ pub enum ConnectionFault {
     /// connection**. Since every request in the gamma backend resolves the
     /// `RandR` opcode first, such a connection can never serve another one.
     ExtensionLookupPoisoned,
-    /// A per-request failure that leaves the connection usable: a reply this
-    /// client could not parse, a request too large to encode, a feature the
-    /// server does not have.
+    /// A per-request failure that leaves the connection usable: a request too
+    /// large to encode, a feature the server does not have, or a reply this client
+    /// could not parse.
+    ///
+    /// That last one has an exception worth knowing rather than hiding: a parse
+    /// failure on a `QueryExtension` **reply** also poisons the lookup, so the
+    /// connection is in fact finished. It is not special-cased because it
+    /// self-heals in one call — the next request's lookup returns
+    /// [`ExtensionLookupPoisoned`](Self::ExtensionLookupPoisoned) and the
+    /// connection is dropped then — so the cost is one wasted round trip rather
+    /// than a wedge.
     PerRequest,
 }
 

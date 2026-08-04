@@ -304,8 +304,9 @@ const RESTORE_UNIT: &str = "CRTC(s)";
 /// # And what it rescues on Linux
 ///
 /// An X11 `RandR` gamma ramp is server state and **outlives the process that set
-/// it**, exactly as a Windows one does — which is why `xgamma` works as a
-/// one-shot command. So this is a real rescue on Linux from the moment the
+/// it**, exactly as a Windows one does — which is why
+/// `xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command (not
+/// `xgamma`, which drives a different API and says nothing about this one). So this is a real rescue on Linux from the moment the
 /// backend exists, and today it is the *only* one: nothing engages a ramp yet
 /// (the tray, which owns the gamma sink, is not built on Linux until the ksni
 /// wave), so there is no crash marker either and
@@ -319,8 +320,8 @@ const RESTORE_UNIT: &str = "CRTC(s)";
 /// it, and `docs/debt.md` carries both.
 ///
 /// A Wayland session is refused rather than served: the ramp would land on
-/// Xwayland's virtual CRTCs and change nothing, so the command reports zero
-/// displays instead of claiming a restore it did not perform.
+/// Xwayland's virtual CRTCs and change nothing, so the command prints "nothing to
+/// restore" and exits 0 instead of claiming a restore it did not perform.
 ///
 // Deliberately not an intra-doc link: `bin_support::gamma::GammaBackend` is
 // `cfg`-gated to the platforms that have a tray, and this function is no longer.
