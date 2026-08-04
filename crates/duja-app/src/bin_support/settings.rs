@@ -214,7 +214,24 @@ mod tests {
             "macOS takes the whole range and can still not apply it"
         );
 
-        #[cfg(not(any(windows, target_os = "macos")))]
+        // Linux takes the whole range for the same reason macOS does — `RandR`
+        // validates only that the table length matches the CRTC's — and is
+        // advisory for a sharper reason than macOS's: `ProcRRSetCrtcGamma`
+        // discards the driver hook's result and answers `Success` regardless, so
+        // an accepted write is not evidence the LUT reached the CRTC. Duja's own
+        // rescue reaches that state deliberately, by writing to CRTCs that drive
+        // nothing.
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            limits,
+            GammaLimits {
+                cap_pct: None,
+                advisory: true,
+            },
+            "X11 takes the whole range and reports success whatever the driver did"
+        );
+
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         assert_eq!(
             limits,
             GammaLimits::UNLIMITED,
