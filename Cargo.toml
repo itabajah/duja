@@ -142,6 +142,17 @@ rustix = { version = "1", features = ["fs", "process", "net", "event", "pipe"] }
 # generated protocol code and no crate. ADR-0011 is the decision they implement,
 # and its point is that these are used to *ask* the session what it offers, never
 # to identify it.
+#
+# The `x11rb` requirement is **held at 0.13 on purpose** (ADR-0023, declining
+# `#128`). Asking for 0.14 would not upgrade anything: `softbuffer`,
+# `x11-clipboard` and `winit` all require `x11rb` on a caret range over 0.13, and
+# Duja declares none of them — so 0.14 arrives *beside* 0.13 rather than replacing
+# it, which makes the paragraph above false for this line. Worse, it would leave
+# one process with two `RustConnection` builds that connect differently: 0.14 drops
+# the abstract-unix-socket fallback and `x11-clipboard` would keep it. The lever
+# that lifts this is a **Slint** bump carrying that graph onto 0.14, not a
+# dependabot ping. `multiple-versions = "warn"`, so cargo-deny will not catch a
+# re-introduction on its own; `.github/dependabot.yml` carries the ignore.
 x11rb = { version = "0.13", features = ["randr", "xfixes", "shape"] }
 wayland-client = "0.31"
 # `zxdg_output_manager_v1`, which is the only way to ask a Wayland compositor where

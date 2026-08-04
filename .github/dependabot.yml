@@ -7,6 +7,17 @@ updates:
     groups:
       cargo-minor-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # ADR-0023. x11rb 0.14 cannot replace 0.13 in this graph: softbuffer,
+      # x11-clipboard and winit all require a caret range over 0.13 and Duja
+      # declares none of them, so the bump adds a second x11rb beside the first
+      # rather than upgrading anything -- and leaves one process with two
+      # RustConnection builds that connect differently. Remove this entry when a
+      # Slint bump carries that graph onto 0.14. Scoped to 0.14.x on purpose: a
+      # future 0.15 should ask again, because the answer depends on a diff that
+      # can change.
+      - dependency-name: "x11rb"
+        versions: ["0.14.x"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

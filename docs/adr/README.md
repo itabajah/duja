@@ -42,6 +42,7 @@ leaves its decision standing.
 | [0020](0020-release-integrity-and-signing-readiness.md) | Release integrity & signing readiness (no injection, gated publish, hermetic, Azure-ready) | accepted |
 | [0021](0021-tray-anchor-coordinate-contract.md) | Tray-anchor coordinate contract (y-down normalized, unit named, two derived factors) | accepted |
 | [0022](0022-linux-dbus-and-the-executor-already-there.md) | Linux D-Bus: zbus, and the async executor already in the build | accepted |
+| [0023](0023-x11rb-stays-on-0-13.md) | x11rb stays on 0.13 until the Slint graph moves (declining #128) | accepted |
 
 Spike evidence lives on branches `spike/eventloop`, `spike/ddc`,
 `spike/overlay` (code is not merged; findings are).
