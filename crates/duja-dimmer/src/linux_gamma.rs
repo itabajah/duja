@@ -22,9 +22,14 @@
 //!
 //! # An `XRandR` ramp outlives the process that set it
 //!
-//! Worth stating here rather than only in the backend, because it is the one
-//! property that separates Linux from macOS and puts it with Windows. The X
-//! server holds each CRTC's gamma table as server state and does **not** reset it
+//! Worth stating here rather than only in the backend, because it is the property
+//! that decides whether a crash guard is needed — and it separates the two Linux
+//! transports from each other rather than Linux from anything. **X11** is with
+//! Windows. **Wayland** is not: a `zwlr_gamma_control_v1` ramp lives only as long
+//! as the client's object and the compositor puts the original back when it dies,
+//! which it does when the socket closes, so that transport needs no guard at all
+//! ([`crate::linux_wlr_gamma`]). The X server holds each CRTC's gamma table as
+//! server state and does **not** reset it
 //! when the client that wrote it disconnects — which is exactly why
 //! `xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command that exits
 //! immediately. (Not `xgamma`, which drives XFree86-VidModeExtension, and not
@@ -34,7 +39,7 @@
 //! `duja --restore` is the manual rescue and exists today. The automatic one — a
 //! crash marker and an RAII guard, the machinery Windows carries — is owed to the
 //! wave that gives Linux a tray to engage gamma from; nothing engages a ramp on
-//! Linux until then. `docs/debt.md` carries it.
+//! Linux until then. `docs/debt.md` carries it, scoped to this transport.
 
 use duja_core::dimmer::clamp_gamma;
 
@@ -125,8 +130,12 @@ const RAMP_MAX: f64 = 65_535.0;
 /// screen that never changed, and Duja would then record a ramp as live and later
 /// "restore" it. Refusing before the write is correct under either branch.
 ///
-/// A Wayland session's gamma channel is `wlr-gamma-control` (or the compositor's
-/// own night-light), which is a different backend and a later wave.
+/// A Wayland session's gamma channel is `wlr-gamma-control`, which is a different
+/// backend and lives in [`crate::linux_wlr_gamma`] and `linux::wlr_gamma`.
+/// [`crate::linux_wlr_gamma::wlr_gamma_refusal`] is this function's mirror image,
+/// and `every_session_has_at_most_one_gamma_channel_and_a_desktop_has_one` pins
+/// the pair against each other: no session may claim both, and every session with
+/// a display server must claim one.
 #[must_use]
 pub const fn xrandr_refusal(transport: Transport) -> Option<&'static str> {
     match transport {
@@ -293,8 +302,17 @@ pub fn crtc_label(crtc: u32, outputs: &[String]) -> String {
 ///   [`GammaSupport::Unknown`](crate::GammaSupport::Unknown) ⇒ the caller plans an
 ///   overlay). Wayland is where Linux HDR actually happens — gamescope, `KWin`,
 ///   and `wp_color_management_v1` — and there is no way to ask from here. Unknown
-///   is the honest answer and it costs nothing, because a Wayland session has no
-///   `XRandR` gamma channel to use it with in the first place ([`xrandr_refusal`]).
+///   is the honest answer, and it is the **safe** one rather than the free one.
+///
+///   An earlier draft of this paragraph said it "costs nothing, because a Wayland
+///   session has no `XRandR` gamma channel to use it with in the first place". The
+///   premise was true and is not any more: that session has a
+///   `zwlr_gamma_control_v1` channel now ([`crate::linux_wlr_gamma`]), so this
+///   verdict is what refuses it. Refusing is still right — a ramp under HDR is at
+///   best ignored and at worst a display Duja believes it has dimmed and has not —
+///   but it is now a cost rather than a freebie, and `docs/debt.md` carries the
+///   remedy: `wp_color_management_v1`'s per-output `tf_named`, which answers the
+///   question instead of guessing at it.
 ///
 /// # The X11 answer has one documented exception, and it does not change it
 ///

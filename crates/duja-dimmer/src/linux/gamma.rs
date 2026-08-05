@@ -1,5 +1,10 @@
-//! The opt-in gamma path on X11 (`RandR` CRTC ramps), and why Linux needs the
-//! crash machinery macOS does not.
+//! The opt-in gamma path on X11 (`RandR` CRTC ramps), and why **this transport**
+//! needs the crash machinery macOS does not.
+//!
+//! The Wayland half is `super::wlr_gamma`, and it is a sibling rather than a
+//! variation: different protocol, different address, different ownership, and the
+//! opposite answer to every question this module's docs raise below. `super`
+//! chooses between them at runtime.
 //!
 //! Like the other two platforms, gamma is **not** on the default dimming path:
 //! an overlay reaches true black without touching a transfer table, and gamma is
@@ -13,14 +18,18 @@
 //!
 //! # A ramp here outlives the process, exactly as on Windows
 //!
-//! This is the property that decides the shape of everything above. The X server
+//! This is the property that decides the shape of everything above, and it is not
+//! shared with the other Linux transport: a `zwlr_gamma_control_v1` ramp is undone
+//! by the compositor when the client's object dies, so none of what follows
+//! applies there. The X server
 //! holds each CRTC's gamma table as **server state** and does not reset it when
 //! the client that wrote it disconnects — which is precisely why
 //! `xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command that sets a
 //! ramp and exits. (That one and only that one: `xgamma` drives
 //! XFree86-VidModeExtension, and `redshift` picks between `randr`, `drm` and
-//! `vidmode` backends at runtime, so neither is evidence about this API.) So Linux sits with Windows, not with macOS: a
-//! crash mid-dim leaves the screen dark with nothing running to undo it.
+//! `vidmode` backends at runtime, so neither is evidence about this API.) So an X11
+//! session sits with Windows, not with macOS: a crash mid-dim leaves the screen
+//! dark with nothing running to undo it.
 //!
 //! What exists today is the manual rescue — [`restore_all`], which `duja
 //! --restore` drives. What does not exist yet is the automatic one: the crash
@@ -59,19 +68,23 @@ use x11rb::rust_connection::RustConnection;
 
 use duja_core::dimmer::DimmerError;
 
-use crate::gamma_support::{GammaSupport, gamma_support_from_hdr};
-use crate::linux_caps::{SessionEnv, Transport, transport};
+use crate::linux::session_transport;
 use crate::linux_gamma::{
     ChannelRefusal, ConnectionFault, MAX_RAMP_SIZE, RESCUE_WALK, SendFailure, Walk,
-    connection_survives, crtc_label, hdr_active_for, identity_ramp, ramp, ramp_size_is_absent,
-    randr_lists_crtcs, rescue_refusal_report, send_failure_is_absent_channel, walk_includes,
-    writable_ramp_size, xrandr_refusal,
+    connection_survives, crtc_label, identity_ramp, ramp, ramp_size_is_absent, randr_lists_crtcs,
+    rescue_refusal_report, send_failure_is_absent_channel, walk_includes, writable_ramp_size,
+    xrandr_refusal,
 };
 
 use crate::gamma_support::RestoreReport;
 
 /// A display whose gamma transfer table can be driven, identified by its `RandR`
 /// **CRTC**.
+///
+/// One of the two channels a Linux session can have; `wlr_gamma::OutputDisplay`
+/// is the other, and `super::GammaDisplay` is what a caller sees. Named for the
+/// thing it addresses rather than for the platform, because on Linux the platform
+/// is not what decides which one exists.
 ///
 /// The CRTC and not the output: two outputs driven by one CRTC are an X11 mirror,
 /// and they share a framebuffer *and* a gamma table, so the CRTC is the
@@ -82,12 +95,12 @@ use crate::gamma_support::RestoreReport;
 /// Holds an id and a label, so the value is cheap, [`Send`], and safe to store —
 /// there is no handle to open or close, and the connection is shared.
 #[derive(Debug, Clone)]
-pub struct GammaDisplay {
+pub struct CrtcDisplay {
     crtc: randr::Crtc,
     name: String,
 }
 
-impl GammaDisplay {
+impl CrtcDisplay {
     /// Wrap a raw `RandR` CRTC id, labelled by the id alone.
     ///
     /// This is the constructor the app's gamma sink uses, because a `gamma_token`
@@ -95,7 +108,7 @@ impl GammaDisplay {
     /// labels naming the connectors, which is what a user reading a report needs.
     #[must_use]
     pub fn from_crtc(crtc: u32) -> Self {
-        GammaDisplay {
+        CrtcDisplay {
             crtc,
             name: crtc_label(crtc, &[]),
         }
@@ -106,12 +119,6 @@ impl GammaDisplay {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
-    }
-
-    /// The raw `RandR` CRTC id.
-    #[must_use]
-    pub fn crtc(&self) -> u32 {
-        self.crtc
     }
 }
 
@@ -133,7 +140,7 @@ impl GammaDisplay {
 /// record a refused engage, so it retries, which recovers a ramp that never
 /// landed and rewrites one that did. The residue is a ramp nothing restores if the
 /// process then exits, which is the same gap the missing crash guard leaves.
-pub fn set_gamma(display: &GammaDisplay, factor: f32) -> Result<(), DimmerError> {
+pub fn set_gamma(display: &CrtcDisplay, factor: f32) -> Result<(), DimmerError> {
     write_table(display, |size| ramp(factor, size))
 }
 
@@ -146,7 +153,7 @@ pub fn set_gamma(display: &GammaDisplay, factor: f32) -> Result<(), DimmerError>
 ///
 /// # Errors
 /// As [`set_gamma`].
-pub fn restore_identity(display: &GammaDisplay) -> Result<(), DimmerError> {
+pub fn restore_identity(display: &CrtcDisplay) -> Result<(), DimmerError> {
     write_table(display, identity_ramp)
 }
 
@@ -159,7 +166,7 @@ pub fn restore_identity(display: &GammaDisplay) -> Result<(), DimmerError> {
 /// socket, and a CRTC reconfigured since the last write can report a different
 /// one, for which the server rejects the request outright rather than rescaling.
 fn write_table(
-    display: &GammaDisplay,
+    display: &CrtcDisplay,
     build: impl FnOnce(u16) -> Option<Vec<u16>>,
 ) -> Result<(), DimmerError> {
     // Both kinds of unavailability collapse here: a caller of `set_gamma` has one
@@ -243,7 +250,7 @@ fn write_table(
 /// rescue could not run") must go through [`restore_all`], which reports the
 /// failure instead of swallowing it.
 #[must_use]
-pub fn enumerate_gamma_displays() -> Vec<GammaDisplay> {
+pub fn enumerate_gamma_displays() -> Vec<CrtcDisplay> {
     match with_session(|session| collect_crtcs(session, Walk::Driving)) {
         Ok(walk) => walk.displays,
         Err(e) => {
@@ -274,7 +281,7 @@ fn rescue_crtcs() -> Result<CrtcWalk, Unavailable> {
 #[derive(Default)]
 struct CrtcWalk {
     /// CRTCs the walk can address.
-    displays: Vec<GammaDisplay>,
+    displays: Vec<CrtcDisplay>,
     /// `(name, reason)` for each CRTC the server would not describe. Ignored by
     /// the addressing walk, reported by the rescue.
     unreachable: Vec<(String, String)>,
@@ -398,7 +405,7 @@ fn collect_crtcs(session: &Session, walk: Walk) -> Result<CrtcWalk, Fault> {
         if !walk_includes(walk, !outputs.is_empty()) {
             continue;
         }
-        found.displays.push(GammaDisplay { crtc, name: label });
+        found.displays.push(CrtcDisplay { crtc, name: label });
     }
     Ok(found)
 }
@@ -509,39 +516,6 @@ pub fn restore_all() -> RestoreReport {
         }
     }
     report
-}
-
-/// Whether HDR is active on this session; see
-/// [`hdr_active_for`] for why the answer is
-/// decided by transport and what the X11 answer's one documented exception is.
-///
-/// Read-only; never changes display state.
-#[must_use]
-pub fn is_hdr_active() -> Option<bool> {
-    hdr_active_for(session_transport())
-}
-
-/// Whether gamma dimming is safe on the current session.
-///
-/// A convenience over [`is_hdr_active`]: HDR ⇒ [`GammaSupport::UnsupportedHdr`],
-/// SDR ⇒ [`GammaSupport::Supported`], an indeterminate probe ⇒
-/// [`GammaSupport::Unknown`].
-#[must_use]
-pub fn display_supports_gamma() -> GammaSupport {
-    gamma_support_from_hdr(is_hdr_active())
-}
-
-/// Which display server this session is on, from `WAYLAND_DISPLAY` and `DISPLAY`.
-///
-/// Read per call rather than cached: a cached answer is wrong for exactly the
-/// session that changed under a running process, and two `getenv`s cost nothing.
-fn session_transport() -> Transport {
-    let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
-    let display = std::env::var("DISPLAY").ok();
-    transport(SessionEnv {
-        wayland_display: wayland_display.as_deref(),
-        display: display.as_deref(),
-    })
 }
 
 /// Name what an `x11rb` connection error *is*, so the rule that acts on it can
@@ -674,8 +648,8 @@ impl Unavailable {
 }
 
 impl From<Unavailable> for DimmerError {
-    /// Every public entry point but [`restore_all`] treats the two the same way —
-    /// no ramp, fall back to the overlay — so they collapse to one error there.
+    /// Every entry point but `restore_all` treats the two the same way — no ramp,
+    /// fall back to the overlay — so they collapse to one error there.
     fn from(unavailable: Unavailable) -> Self {
         DimmerError::Os(match unavailable {
             Unavailable::NoChannel(reason) | Unavailable::Failed(reason) => reason,
@@ -1000,8 +974,7 @@ mod tests {
     /// connection.
     #[test]
     fn a_display_built_from_a_token_is_labelled_by_its_crtc() {
-        let display = GammaDisplay::from_crtc(63);
-        assert_eq!(display.crtc(), 63);
+        let display = CrtcDisplay::from_crtc(63);
         assert_eq!(display.name(), "CRTC-63");
     }
 
@@ -1024,11 +997,15 @@ mod tests {
     /// runner can observe.
     #[test]
     fn a_session_with_no_display_server_degrades_rather_than_failing_loudly() {
-        if session_transport() != Transport::None {
+        if session_transport() != crate::linux_caps::Transport::None {
             return;
         }
-        assert_eq!(is_hdr_active(), None, "no session, nothing to know");
-        assert!(!display_supports_gamma().allows_gamma());
+        assert_eq!(
+            super::super::is_hdr_active(),
+            None,
+            "no session, nothing to know"
+        );
+        assert!(!super::super::display_supports_gamma().allows_gamma());
         assert!(
             enumerate_gamma_displays().is_empty(),
             "there is no server to enumerate CRTCs from"
@@ -1037,9 +1014,9 @@ mod tests {
         assert!(report.restored.is_empty(), "nothing can have been restored");
         assert!(report.is_clean(), "nothing attempted cannot have failed");
         assert!(
-            set_gamma(&GammaDisplay::from_crtc(1), 0.5).is_err(),
+            set_gamma(&CrtcDisplay::from_crtc(1), 0.5).is_err(),
             "a ramp must never report success with no server to accept it"
         );
-        assert!(restore_identity(&GammaDisplay::from_crtc(1)).is_err());
+        assert!(restore_identity(&CrtcDisplay::from_crtc(1)).is_err());
     }
 }

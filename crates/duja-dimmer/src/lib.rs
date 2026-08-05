@@ -33,9 +33,11 @@
 //!   output rather than placed at a rectangle, and the compositor rather than Duja
 //!   decides how big it is. A session with no overlay mechanism reports
 //!   `Unsupported` and the app disables software dimming with hardware control
-//!   intact. The opt-in gamma channel is `RandR`'s per-CRTC transfer table, and
-//!   it is refused outright on a Wayland session rather than written to Xwayland,
-//!   where it would be accepted and change nothing.
+//!   intact. The opt-in gamma channel splits the same way and is chosen the same
+//!   way: `RandR`'s per-CRTC transfer table on X11, `zwlr_gamma_control_v1`'s
+//!   per-output table on Wayland. Neither is ever used on the other's session —
+//!   an `XRandR` ramp on a Wayland session would land on Xwayland's virtual CRTCs,
+//!   be accepted, and change nothing.
 //! - On other Unix targets, `StubDimmer` records-and-succeeds so higher layers
 //!   can run their logic unchanged (documented no-op).
 //!
@@ -65,15 +67,28 @@
 //! marker machinery and its `restore_all` is a single
 //! `CGDisplayRestoreColorSyncSettings` call.
 //!
-//! Linux splits the two. X11 overlay windows are owned by the connection and the
-//! server destroys them when it closes, so they need no marker. An X11 **gamma
-//! ramp** is the opposite: the server holds each CRTC's table and does not reset
-//! it when the client that wrote it disconnects, which is exactly why
-//! `xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command. So Linux sits with Windows on crash safety and
-//! needs the same guard — which it does not have yet, deliberately, because
-//! nothing on Linux engages a ramp until the tray does. `restore_all` and
-//! `duja --restore` are the manual rescue in the meantime; see
-//! `src/linux/gamma.rs` and `docs/debt.md`.
+//! Linux is not one answer but three, and which one applies is a property of the
+//! session rather than of the build. Overlays need no marker on either transport:
+//! an X11 override-redirect window is owned by the connection and a
+//! `zwlr_layer_shell_v1` surface by the compositor, and both die with the socket.
+//! The **gamma** channels are where the two transports part company, and they land
+//! on opposite sides of Windows and macOS:
+//!
+//! - **X11 sits with Windows.** The X server holds each CRTC's table and does not
+//!   reset it when the client that wrote it disconnects, which is exactly why
+//!   `xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command. So it
+//!   needs the same guard Windows carries — which it does not have yet,
+//!   deliberately, because nothing on Linux engages a ramp until the tray does.
+//!   `restore_all` and `duja --restore` are the manual rescue in the meantime.
+//! - **Wayland sits with macOS, and with a stronger guarantee.** A
+//!   `zwlr_gamma_control_v1` ramp lives exactly as long as the client's object, the
+//!   compositor destroys every object a client holds when its socket closes, and
+//!   destroying restores the table that was there before — so the recovery is
+//!   automatic, survives `SIGKILL`, and puts back a colour-temperature tool's own
+//!   curve rather than flattening it to identity. There is nothing for a rescue
+//!   pass to find and no marker to write.
+//!
+//! See `src/linux/gamma.rs`, `src/linux/wlr_gamma.rs` and `docs/debt.md`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
@@ -119,6 +134,14 @@ pub mod linux_gamma;
 // and with a sharper edge than most — two of these four are protocol errors,
 // which terminate the connection rather than degrading.
 pub mod linux_layer;
+
+// The decisions a `zwlr_gamma_control_v1` ramp makes that are arithmetic rather
+// than Wayland: how long the table is, how many bytes that is, and what those
+// bytes are. Unconditional for the same reason as its neighbours, and with the
+// sharpest edge of any of them — the compositor reads a fixed byte count and
+// answers a short one by **killing the client connection**, which would take the
+// layer-shell overlay down with the ramp.
+pub mod linux_wlr_gamma;
 
 // Everything in this crate that talks to a Linux display server. Nothing it does
 // can run in CI, which is exactly why each of its modules is this small.

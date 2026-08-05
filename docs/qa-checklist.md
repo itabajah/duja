@@ -163,6 +163,33 @@ with the phases; keep entries as observable behaviors, not implementation.
 - [ ] Wayland session advertising `zwlr_gamma_control_manager_v1` while another client
       (`wlsunset`, `gammastep`) already holds it: the bind is refused and the report flips to
       unavailable rather than claiming a gamma path Duja does not have.
+- [ ] **`duja --restore` on a Wayland session must not connect at all.** The row above
+      already pins the *answer* ("nothing to restore", exit 0); this one pins the
+      reason. A `zwlr_gamma_control_v1` ramp dies with the client that set it, so a
+      fresh process has nothing to find and opening a socket to discover that would
+      also mean binding a gamma manager for nothing. Watch with
+      `WAYLAND_DEBUG=1 duja --restore`: there must be **no** `zwlr_gamma_control`
+      traffic. (A `wl_display` connect from some other part of startup is fine; a
+      `get_gamma_control` is not.)
+- [ ] **A Wayland gamma dim survives being killed.** This is the property the whole
+      Wayland gamma design rests on and the one no CI lane can check. Once the tray
+      lands and a ramp can be engaged: dim a display through the gamma path on a
+      wlroots session, confirm the screen changed, then `kill -9` the process. The
+      screen must return to normal **immediately**, with no `duja --restore` and no
+      relaunch. If it stays dark, the compositor is not restoring on client
+      disconnect and the `#124` crash-guard debt row was narrowed to X11 wrongly.
+- [ ] **A Wayland gamma restore gives `gammastep` its curve back rather than
+      flattening it.** The opposite expectation from the X11 row above, and the
+      difference is the point: the compositor kept the original table. Start
+      `gammastep` (or `wlsunset`) *first* so the warm tint is visible, stop it so the
+      output is free, dim through the gamma path, then undim. The tint `gammastep`
+      left must come back, not a neutral screen. If it comes back neutral, the restore
+      is writing an identity table instead of destroying the control.
+- [ ] **`dujactl doctor` does not steal gamma from a running `gammastep`.** Run
+      `gammastep` and leave it running, then run `dujactl doctor` several times.
+      `gammastep` must keep working throughout — it must not log a gamma-control
+      failure or exit. Enumeration deliberately never binds a control, because that
+      would claim each output exclusively for the duration of a read-only query.
       <!-- Written by capability, not by compositor name, per ADR-0011: a name table would fail
            a correct implementation the day Mutter shipped either protocol. `dujactl doctor`
            prints which protocols the session offered, so these are checkable without guessing
