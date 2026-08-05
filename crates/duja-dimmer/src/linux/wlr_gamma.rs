@@ -257,11 +257,18 @@ impl OutputDisplay {
 /// [`State::forget`], and drop the entry, which leaves an untracked name after
 /// all. The order is worth getting right, because two drafts of this clause got it
 /// wrong in opposite directions. `Connection::flush` reports `Ok` only when the
-/// whole buffer went, and a round trip's first flush precedes any dispatch of that
-/// round trip — so the reachable sequence is not "the `set_gamma` is still buffered
-/// when the entry disappears". It is the worse one: the `set_gamma` **was sent**,
-/// the dispatch that follows delivers the `global_remove`, `forget` queues a
-/// `destroy`, and a later flush is the one that blocks.
+/// whole buffer went; and although `blocking_dispatch` does dispatch before it
+/// flushes, it can only dispatch what is already queued, and on this connection
+/// nothing but a round trip ever reads the socket — so entering one always finds
+/// the queue empty and the flush genuinely comes first. (That invariant is the
+/// whole of the argument, and it is stated here because the general claim, which
+/// an earlier draft made, is false about `blocking_dispatch`.)
+///
+/// So the reachable sequence is not "the `set_gamma` is still buffered when the
+/// entry disappears". It is the worse one: the `set_gamma` **was sent**, the
+/// dispatch that follows delivers the `global_remove`, `forget` queues a
+/// `destroy` — which the registry handler then flushes — and any later flush is
+/// the one that can block.
 ///
 /// And a withdrawn global does **not** mean the output is gone. wlroots calls
 /// `wlr_output_destroy_global` from `output_update_global` whenever an output has
@@ -602,6 +609,11 @@ impl State {
     /// output would stay claimed exclusively against every colour-temperature tool
     /// until the process exited. Giving the `wl_output` and `xdg_output` proxies
     /// back is the merely-tidy half.
+    ///
+    /// Queued, not sent — the caller flushes, and for this function the caller is
+    /// the registry dispatch handler, which does so precisely because nothing
+    /// downstream would. See the comment at the end of that handler: it is the one
+    /// destroy-site in this module with no round trip behind it.
     fn forget(&mut self, global: u32) {
         let Some(index) = self
             .outputs
@@ -1340,7 +1352,7 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
         registry: &WlRegistry,
         event: wl_registry::Event,
         _data: &GlobalListContents,
-        _connection: &Connection,
+        connection: &Connection,
         handle: &QueueHandle<Self>,
     ) {
         match event {
@@ -1356,6 +1368,28 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
             wl_registry::Event::GlobalRemove { name } => state.forget(name),
             _ => {}
         }
+        // **Both arms queue requests, and this is the only place that can send
+        // them.** A dispatch handler runs inside `dispatch_pending`, and
+        // `blocking_dispatch` returns as soon as that dispatched anything —
+        // without reaching its flush. So when the read that carried this event
+        // also carried the round trip's `done`, which is the ordinary case, the
+        // enclosing `roundtrip` exits with whatever these arms queued still
+        // sitting in the outgoing buffer.
+        //
+        // For `track` that costs a round trip: `resync`'s second pass is what
+        // sends the `bind`, which is exactly why it has a second pass. For
+        // `forget` there is no second pass and no later path that can help —
+        // `write`'s "went away" arm returns without `give_up`, `release` misses
+        // `find` and returns before its own round trip, and `release_all` cannot
+        // see an entry `forget` has already removed. The queued `destroy` would
+        // sit unsent while the compositor went on holding this client's control,
+        // exclusively, on an output nothing here can name any more.
+        //
+        // The failure is dropped for the same reason `give_up` drops its own: this
+        // is an event handler with nowhere to report to, the request stays queued
+        // either way, and a connection too broken to flush is one whose teardown
+        // will release the output anyway.
+        let _ = connection.flush();
     }
 }
 
