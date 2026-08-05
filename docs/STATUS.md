@@ -1585,10 +1585,14 @@ fault — where there is no compositing manager or no display server at all.
 
 **`PlatformDimmer` is not a type alias on Linux**, unlike the other two
 platforms. Which mechanism exists is a property of the session rather than the
-build, so `LinuxDimmer` picks when it starts. A Wayland session reports
-`Unsupported` until its layer-shell backend lands, which is the one place the
-`#122` mirror-pin consequence still bites; `debt.md` carries it, now narrowed
-from Linux to Wayland.
+build, so `LinuxDimmer` picks when it starts. Since `#130` a Wayland session
+gets `WaylandDimmer` — a `zwlr_layer_shell_v1` surface per dimmed **output**,
+sized by the compositor and filled by scaling one pixel through a
+`wp_viewport`. It still reports `Unsupported` where the compositor offers none
+of the three interfaces `linux_caps` names, which on GNOME is the case, and
+that is the one place the `#122` mirror-pin consequence still bites; `debt.md`
+carries it, now narrowed from Wayland to a Wayland session without
+layer-shell.
 
 **A Wayland session is refused twice, by two gates that cover each other.** The
 environment check (`WAYLAND_DISPLAY` is set ⇒ not X11) is cheap and skips the

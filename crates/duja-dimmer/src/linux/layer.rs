@@ -499,9 +499,14 @@ struct Worker {
     compositor: WlCompositor,
     layer_shell: ZwlrLayerShellV1,
     viewporter: WpViewporter,
-    /// Kept for the life of the connection rather than used once at startup: a
-    /// monitor plugged in mid-session needs a `zxdg_output_v1` of its own, and
-    /// destroying the manager would take every existing one with it.
+    /// Kept for the life of the connection rather than used once at startup,
+    /// because a monitor plugged in mid-session needs a `zxdg_output_v1` of its own
+    /// and only the manager can make one.
+    ///
+    /// Not because destroying it would take the existing ones with it — an earlier
+    /// draft said that and the protocol says the opposite: *"Any objects already
+    /// created through this instance are not affected."* `teardown` gives it back
+    /// for that reason rather than keeping it to the end.
     xdg_outputs: ZxdgOutputManagerV1,
     pool: WlShmPool,
     /// One 1x1 `wl_buffer` per dim level, created on first use and then kept.
@@ -1339,10 +1344,13 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for Worker {
             // its output comes back.
             zwlr_layer_surface_v1::Event::Closed => {
                 if let Some(index) = worker.overlays.iter().position(|o| o.key == *key) {
-                    let overlay = worker.overlays.swap_remove(index);
-                    let id = overlay.id.clone();
-                    Worker::forget(&overlay);
-                    worker.current.retain(|entry| entry.id != id);
+                    // Through `retire`, not a copy of its body. The two lines it
+                    // does are easy to inline and that is exactly the trap: this
+                    // handler and `drop_output` are the two paths with no op being
+                    // recorded, so anything either of them forgets is forgotten
+                    // permanently. A single choke point is the only version of that
+                    // invariant a later edit cannot half-apply.
+                    worker.retire(index);
                 }
             }
             _ => {}

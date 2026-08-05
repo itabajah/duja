@@ -106,8 +106,10 @@ pub struct ServerOutput {
     /// for a reason rather than by coincidence: on X11 it is the **CRTC** id, and
     /// two outputs driven by one CRTC show the same pixels *and* share one gamma
     /// table, so the mirror-group key and the gamma address are the same thing.
-    /// On Wayland it is the output name, and there is no mirroring for the two to
-    /// disagree about.
+    /// On Wayland it is the output name, and the two cannot disagree because a
+    /// mirrored monitor has no `wl_output` to name: the compositors that implement
+    /// mirroring withdraw the replica's global (`#130` verified `KWin` and
+    /// Hyprland; wlroots has no mirror mode at all).
     pub token: String,
 }
 
