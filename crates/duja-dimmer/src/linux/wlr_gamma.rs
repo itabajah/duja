@@ -1368,27 +1368,36 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
             wl_registry::Event::GlobalRemove { name } => state.forget(name),
             _ => {}
         }
-        // **Both arms queue requests, and this is the only place that can send
-        // them.** A dispatch handler runs inside `dispatch_pending`, and
+        // **Both arms queue requests, and without this nothing would send them.**
+        // A dispatch handler runs inside `dispatch_pending`, and
         // `blocking_dispatch` returns as soon as that dispatched anything —
         // without reaching its flush. So when the read that carried this event
         // also carried the round trip's `done`, which is the ordinary case, the
-        // enclosing `roundtrip` exits with whatever these arms queued still
+        // enclosing `roundtrip` would exit with whatever these arms queued still
         // sitting in the outgoing buffer.
         //
-        // For `track` that costs a round trip: `resync`'s second pass is what
-        // sends the `bind`, which is exactly why it has a second pass. For
-        // `forget` there is no second pass and no later path that can help —
-        // `write`'s "went away" arm returns without `give_up`, `release` misses
-        // `find` and returns before its own round trip, and `release_all` cannot
-        // see an entry `forget` has already removed. The queued `destroy` would
-        // sit unsent while the compositor went on holding this client's control,
-        // exclusively, on an output nothing here can name any more.
+        // `track` would survive that: `resync`'s second pass would send the
+        // `bind`, at the cost of a round trip. (It still has a second pass, but
+        // now only to *read* the `name` events this flush's `bind` provokes.)
+        // `forget` would not. There is no later path that can help it — `write`'s
+        // "went away" arm returns without `give_up`, `release` misses `find` and
+        // returns before its own round trip, and `release_all` cannot see an entry
+        // `forget` has already removed — so the queued `destroy` would sit unsent
+        // while the compositor went on holding this client's control, exclusively,
+        // on an output nothing here can name any more.
         //
-        // The failure is dropped for the same reason `give_up` drops its own: this
-        // is an event handler with nowhere to report to, the request stays queued
-        // either way, and a connection too broken to flush is one whose teardown
-        // will release the output anyway.
+        // **The dropped failure is a narrower version of that, not an absent one,
+        // and the first draft of this comment claimed otherwise.** It said the
+        // failure could be dropped "for the same reason `give_up` drops its own,
+        // and a connection too broken to flush is one whose teardown will release
+        // the output anyway" — which is doubly wrong: `give_up`'s doc retracts
+        // exactly that sentence, because a `WouldBlock` is a full buffer rather
+        // than a dying connection; and `give_up`'s residual is the milder one,
+        // since some later call flushes for it and nothing flushes for this. So a
+        // `WouldBlock` here reproduces the leak this flush exists to close,
+        // bounded only by process lifetime. It is dropped anyway because an event
+        // handler has nowhere to report to and blocking inside a dispatch is
+        // worse, and `docs/debt.md` records it beside its two siblings.
         let _ = connection.flush();
     }
 }
