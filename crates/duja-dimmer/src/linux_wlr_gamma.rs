@@ -59,8 +59,8 @@
 //! The property that decides everything above this module, and the one place
 //! Linux's two transports land on opposite sides. An `XRandR` ramp is server state
 //! with no owner and survives the client that wrote it — which is why
-//! `xrandr --gamma` works as a one-shot command, and why Linux needs the crash
-//! marker Windows carries. A `zwlr_gamma_control_v1` ramp is the opposite: the
+//! `xrandr --gamma` works as a one-shot command, and why an **X11 session** needs
+//! the crash marker Windows carries. A `zwlr_gamma_control_v1` ramp is the opposite: the
 //! protocol says destroying the object *"restores the original gamma tables"* — by
 //! which it means the output's default, not an earlier client's curve, since the
 //! compositor keeps no such thing — and the compositor destroys every object a
