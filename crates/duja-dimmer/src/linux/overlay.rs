@@ -519,8 +519,18 @@ impl Worker {
         let mut applied: Vec<OverlayOp> = Vec::new();
         for op in ops {
             let id = op_id(op);
+            // X11's answer to "can a surface go there": 16-bit signed position and
+            // 16-bit unsigned size. The two ops that carry no rectangle cannot be
+            // decided by it, and `plan_record` asserts it never consults this for
+            // them.
+            let placeable = match op {
+                OverlayOp::Create { bounds, .. } | OverlayOp::MoveResize { bounds, .. } => {
+                    x11_rect(*bounds).is_some()
+                }
+                OverlayOp::SetAlpha { .. } | OverlayOp::Destroy { .. } => true,
+            };
             let outcome: Result<Option<OverlayOp>, DimmerError> =
-                match plan_record(op, self.find(id).is_some()) {
+                match plan_record(op, self.find(id).is_some(), placeable) {
                     Recorded::Nothing => Ok(None),
                     // Either there is no window to act on, or the op would put one
                     // where X11 cannot express it. Destroying is a no-op in the

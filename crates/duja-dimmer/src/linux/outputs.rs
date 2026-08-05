@@ -324,11 +324,18 @@ impl Collector {
                     // The output name is both the join key and the address:
                     // `zwlr_gamma_control_manager_v1` and `zwlr_layer_shell_v1`
                     // are both per-`wl_output`, so per-output is the granularity
-                    // Wayland grants. It is NOT a mirror-set key — a compositor
-                    // that mirrors gives the two outputs the same logical
-                    // rectangle and different names, so token equality will not
-                    // fire and the group logic will not collapse them.
-                    // `docs/debt.md` carries that.
+                    // Wayland grants.
+                    //
+                    // An earlier draft added that this is "NOT a mirror-set key,
+                    // because a compositor that mirrors gives the two outputs the
+                    // same logical rectangle and different names". That premise is
+                    // wrong and `#130` retracted it: KWin and Hyprland both
+                    // *withdraw* a mirrored monitor's `wl_output` global, and
+                    // wlroots has no mirror mode, so a mirrored pair is one output
+                    // and there is nothing for a mirror-set key to collapse. What
+                    // survives is narrower — two outputs a user placed at one
+                    // origin would not group — and `docs/debt.md` carries that,
+                    // rather than what this comment used to point at.
                     token: name.clone(),
                     name,
                     edid: None,

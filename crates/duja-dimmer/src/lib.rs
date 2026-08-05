@@ -24,10 +24,14 @@
 //!   module docs for the observable-contract difference (non-blocking vs the
 //!   Windows blocking `apply`) and the running-run-loop requirement.
 //! - On Linux, `LinuxDimmer` picks a backend at **runtime** rather than at build
-//!   time, because Linux has no single windowing system: an X11 session gets
+//!   time, because Linux has no single windowing system. An X11 session gets
 //!   `X11Dimmer`, which owns a thread like the Windows one and holds an
 //!   override-redirect ARGB window per display, plus a second thread watching the
-//!   compositing-manager selection. A session with no overlay mechanism reports
+//!   compositing-manager selection. A Wayland session gets `WaylandDimmer`, one
+//!   thread again, holding a `zwlr_layer_shell_v1` surface per dimmed **output** —
+//!   which is the difference that shapes it, since a layer surface is bound to an
+//!   output rather than placed at a rectangle, and the compositor rather than Duja
+//!   decides how big it is. A session with no overlay mechanism reports
 //!   `Unsupported` and the app disables software dimming with hardware control
 //!   intact. The opt-in gamma channel is `RandR`'s per-CRTC transfer table, and
 //!   it is refused outright on a Wayland session rather than written to Xwayland,
@@ -44,7 +48,10 @@
 //! every event to what is beneath. SHAPE's `ShapeInput` expresses the same thing,
 //! so `XFixes` is the mechanism this uses rather than the only one there is — and
 //! the backend refuses to start without it rather than mapping a window that
-//! would swallow every click.
+//! would swallow every click. On Wayland it is an empty `wl_region` set as the
+//! surface's input region, applied **before the first commit** so the surface is
+//! never up without it; `set_keyboard_interactivity(none)` is the keyboard half
+//! and covers nothing else.
 //! Fullscreen-exclusive apps and the OS secure/login screens are documented
 //! known-limits on all three (an overlay cannot cover them).
 //!
@@ -105,6 +112,14 @@ pub mod linux_overlay;
 // `x11rb`-free for the same reason as its three neighbours.
 pub mod linux_gamma;
 
+// The decisions a Wayland layer-shell overlay makes that are data rather than
+// windowing: which layer it sits in, what it refuses to be moved for, whether its
+// omitted size is legal for its anchor, and whether clicks pass through it.
+// Unconditional and `wayland-client`-free for the same reason as its neighbours,
+// and with a sharper edge than most — two of these four are protocol errors,
+// which terminate the connection rather than degrading.
+pub mod linux_layer;
+
 // Everything in this crate that talks to a Linux display server. Nothing it does
 // can run in CI, which is exactly why each of its modules is this small.
 #[cfg(target_os = "linux")]
@@ -112,8 +127,9 @@ mod linux;
 
 #[cfg(target_os = "linux")]
 pub use linux::{
-    GammaDisplay, LinuxDimmer, X11Dimmer, display_supports_gamma, enumerate_gamma_displays,
-    enumerate_outputs, is_hdr_active, probe_session, restore_all, restore_identity, set_gamma,
+    GammaDisplay, LinuxDimmer, WaylandDimmer, X11Dimmer, display_supports_gamma,
+    enumerate_gamma_displays, enumerate_outputs, is_hdr_active, probe_session, restore_all,
+    restore_identity, set_gamma,
 };
 
 // The gamma path's cross-platform vocabulary: the HDR verdict and its safety rule,

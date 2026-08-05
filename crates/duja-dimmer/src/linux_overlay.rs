@@ -49,8 +49,8 @@ pub enum Recorded {
     /// Do the op, record it as given.
     AsPlanned,
     /// Destroy this display's window instead, and record **that** — because
-    /// either there is no window to act on, or the op would put one somewhere
-    /// X11 cannot express.
+    /// either there is no window to act on, or the op would put one where this
+    /// backend cannot put it.
     ///
     /// Recording a `Destroy` rather than nothing is what makes the diverged case
     /// *recover*: it drops the stale entry, so the next plan emits a fresh
@@ -59,26 +59,45 @@ pub enum Recorded {
     DestroyInstead,
 }
 
-/// Decide what one op does, given whether the backend has a window for it.
+/// Decide what one op does, given whether the backend has a window for it and
+/// whether the op's rectangle is one this backend can put a surface on.
 ///
 /// Pure, so the rule that keeps the record honest is tested on every lane —
 /// unlike the windowing it drives, which no lane can run.
+///
+/// # Shared by both Linux overlay backends
+///
+/// The rest of this module is X11's. This function and [`Recorded`] are not: the
+/// hazard they exist for is the planner's, so it is identical on a layer surface,
+/// and a second copy of it in [`crate::linux_layer`] would be two places for one
+/// hard-won rule to be fixed in. What differs between the two is only what makes a
+/// rectangle placeable, and that is why it is an argument rather than a call to
+/// [`x11_rect`] inside here:
+///
+/// - **X11** asks whether the rectangle fits 16-bit window geometry
+///   ([`x11_rect`]); a display beyond it would otherwise get a *wrapped* window
+///   over a monitor the user never dimmed.
+/// - **Wayland** asks whether some `wl_output` has exactly that logical rectangle
+///   and is not already dimmed, because a layer surface is bound to an output
+///   rather than placed on a root window
+///   ([`crate::linux_layer::take_output`]).
 #[must_use]
-pub fn plan_record(op: &OverlayOp, has_window: bool) -> Recorded {
+pub fn plan_record(op: &OverlayOp, has_window: bool, placeable: bool) -> Recorded {
     match op {
-        // A rectangle X11 cannot describe. Skipping is right — the alternative is
-        // a wrapped window covering a display the user did not dim — and there is
-        // no window yet, so there is nothing to record either way.
-        OverlayOp::Create { bounds, .. } => {
-            if x11_rect(*bounds).is_some() {
+        // Nowhere to put it. Skipping is right — the alternative is a window over
+        // a display the user did not dim — and there is no window yet, so there is
+        // nothing to record either way, and the next plan will try again.
+        OverlayOp::Create { .. } => {
+            if placeable {
                 Recorded::AsPlanned
             } else {
                 Recorded::Nothing
             }
         }
-        // Moved somewhere unexpressible, or moved when there is nothing to move.
-        OverlayOp::MoveResize { bounds, .. } => {
-            if has_window && x11_rect(*bounds).is_some() {
+        // Moved somewhere this backend cannot place it, or moved when there is
+        // nothing to move.
+        OverlayOp::MoveResize { .. } => {
+            if has_window && placeable {
                 Recorded::AsPlanned
             } else {
                 Recorded::DestroyInstead
@@ -424,6 +443,12 @@ mod tests {
         DisplayBounds::new(40_000, 0, 1920, 1080)
     }
 
+    /// What to pass for `placeable` on the two ops that carry no rectangle. The
+    /// value cannot matter for them, and
+    /// `an_op_with_no_rectangle_ignores_whether_one_is_placeable` is what makes
+    /// that true rather than assumed.
+    const NO_RECTANGLE: bool = true;
+
     #[test]
     fn an_ordinary_op_is_done_and_recorded_as_given() {
         let has = true;
@@ -434,7 +459,8 @@ mod tests {
                     bounds: ordinary(),
                     alpha: 128
                 },
-                false
+                false,
+                x11_rect(ordinary()).is_some()
             ),
             Recorded::AsPlanned
         );
@@ -444,7 +470,8 @@ mod tests {
                     id: id("a"),
                     bounds: ordinary()
                 },
-                has
+                has,
+                x11_rect(ordinary()).is_some()
             ),
             Recorded::AsPlanned
         );
@@ -454,12 +481,13 @@ mod tests {
                     id: id("a"),
                     alpha: 64
                 },
-                has
+                has,
+                NO_RECTANGLE
             ),
             Recorded::AsPlanned
         );
         assert_eq!(
-            plan_record(&OverlayOp::Destroy { id: id("a") }, has),
+            plan_record(&OverlayOp::Destroy { id: id("a") }, has, NO_RECTANGLE),
             Recorded::AsPlanned
         );
     }
@@ -478,7 +506,8 @@ mod tests {
                     bounds: unexpressible(),
                     alpha: 128
                 },
-                false
+                false,
+                x11_rect(unexpressible()).is_some()
             ),
             Recorded::Nothing
         );
@@ -497,7 +526,8 @@ mod tests {
                     id: id("a"),
                     bounds: ordinary()
                 },
-                false
+                false,
+                x11_rect(ordinary()).is_some()
             ),
             Recorded::DestroyInstead
         );
@@ -507,7 +537,8 @@ mod tests {
                     id: id("a"),
                     alpha: 64
                 },
-                false
+                false,
+                NO_RECTANGLE
             ),
             Recorded::DestroyInstead
         );
@@ -524,10 +555,37 @@ mod tests {
                     id: id("a"),
                     bounds: unexpressible()
                 },
-                true
+                true,
+                x11_rect(unexpressible()).is_some()
             ),
             Recorded::DestroyInstead
         );
+    }
+
+    /// `placeable` is about a rectangle, and two of the four ops do not carry
+    /// one. Asserting they ignore it in **both** directions is what lets the two
+    /// backends pass whatever is convenient there — and what would catch a later
+    /// edit that started consulting it, which on Wayland would mean an alpha
+    /// change destroying a working overlay because no *other* output was free.
+    #[test]
+    fn an_op_with_no_rectangle_ignores_whether_one_is_placeable() {
+        for placeable in [true, false] {
+            assert_eq!(
+                plan_record(
+                    &OverlayOp::SetAlpha {
+                        id: id("a"),
+                        alpha: 64
+                    },
+                    true,
+                    placeable
+                ),
+                Recorded::AsPlanned
+            );
+            assert_eq!(
+                plan_record(&OverlayOp::Destroy { id: id("a") }, true, placeable),
+                Recorded::AsPlanned
+            );
+        }
     }
 
     /// A destroy is always itself, including for a display with no window: the
@@ -535,7 +593,7 @@ mod tests {
     #[test]
     fn a_destroy_is_always_recorded_even_with_no_window() {
         assert_eq!(
-            plan_record(&OverlayOp::Destroy { id: id("a") }, false),
+            plan_record(&OverlayOp::Destroy { id: id("a") }, false, NO_RECTANGLE),
             Recorded::AsPlanned
         );
     }

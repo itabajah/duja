@@ -48,6 +48,14 @@ tracing = { workspace = true }
 x11rb = { workspace = true }
 wayland-client = { workspace = true }
 wayland-protocols = { workspace = true }
+wayland-protocols-wlr = { workspace = true }
+# The Wayland overlay worker waits on two things at once — the compositor's socket
+# and the channel its own commands arrive on — which is a `poll` over the
+# connection's fd and a self-pipe, exactly the shape `duja-platform`'s uevent pump
+# already uses. `fs` is `memfd_create`: the dim levels live in one anonymous file
+# the compositor maps, written once at startup. All three are safe wrappers, so the
+# backend needs no `unsafe`.
+rustix = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS overlay backend: click-through NSWindow overlays marshalled onto the main

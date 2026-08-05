@@ -195,8 +195,49 @@ pub struct SurfaceCaps {
     pub gamma: Capability,
 }
 
-/// The interface a Wayland overlay needs.
+/// The interface that gets a Wayland overlay onto the screen at all.
 pub const LAYER_SHELL: &str = "zwlr_layer_shell_v1";
+
+/// The interface that gets a dim *into* that overlay.
+///
+/// A dim is one translucent black rectangle covering an output, and `wl_shm` sizes
+/// a buffer in pixels — so without `wp_viewporter` to scale a single pixel up,
+/// covering a 4K output means allocating and re-rendering a 33 MB framebuffer per
+/// output per slider sample. Duja treats it as a requirement rather than an
+/// optimisation, which is why it is here in the *report* and not only in the
+/// backend: a doctor line saying "overlay: available" for a session the backend
+/// then refuses is worse than either answer alone.
+///
+/// It is a stable protocol from 2016 and every implementation checked ships it —
+/// wlroots as `types/wlr_viewporter.c`, `KWin` as `src/wayland/viewporter.cpp`,
+/// Mutter as `src/wayland/meta-wayland-viewporter.c` — so this is expected never to
+/// fire.
+///
+/// **Expected, not proven, and that is the reason it is a check at all.**
+/// `zwlr_layer_shell_v1` has at least five independent server implementations —
+/// wlroots, `KWin`, Hyprland's own, Smithay's (which niri and COSMIC build on), and
+/// Mir's — so no enumeration here can establish that none of them lacks
+/// `wp_viewporter`, and one that grew a sixth would not update this comment. An
+/// unchecked assumption of that shape fails as a `bind` error at startup on a
+/// session the report has already told the user is fine; a checked one is a line in
+/// `dujactl doctor` naming the interface.
+pub const VIEWPORTER: &str = "wp_viewporter";
+
+/// The interface that says *which output* an overlay belongs on.
+///
+/// `zwlr_layer_shell_v1.get_layer_surface` takes a `wl_output`, and everything
+/// above this layer speaks in rectangles, so a Wayland overlay is only placeable
+/// if each output's **logical** geometry is knowable. `wl_output`'s own events
+/// report a mode in physical pixels and an integer scale, which cannot express
+/// fractional scaling and so cannot be divided back into the desktop rectangle a
+/// surface actually occupies. `zxdg_output_manager_v1` is the only protocol that
+/// answers it.
+///
+/// Its absence would already be visible further up — [`crate::linux_outputs::join`]
+/// drops an output with no rectangle, so the display never acquires bounds — but it
+/// would be visible as *hardware control and no displays to dim*, which reads as a
+/// different fault than the one it is.
+pub const XDG_OUTPUT: &str = "zxdg_output_manager_v1";
 
 /// The interface a Wayland gamma ramp needs.
 pub const GAMMA_CONTROL: &str = "zwlr_gamma_control_manager_v1";
@@ -299,7 +340,7 @@ pub fn resolve(env: SessionEnv<'_>, probe: &Probe<'_>) -> SurfaceCaps {
             // Independently of each other: layer-shell without gamma-control is
             // the commonest wlroots configuration, and a table that treated them
             // as one capability would refuse the overlay on it.
-            overlay: from_registry(probe.globals, LAYER_SHELL),
+            overlay: wayland_overlay(probe.globals),
             gamma: from_registry(probe.globals, GAMMA_CONTROL),
         },
         Transport::X11 => SurfaceCaps {
@@ -321,6 +362,31 @@ pub fn resolve(env: SessionEnv<'_>, probe: &Probe<'_>) -> SurfaceCaps {
             },
         },
     }
+}
+
+/// Every interface a click-through dimming surface is built from: one to place it
+/// ([`LAYER_SHELL`]), one to fill it ([`VIEWPORTER`]), one to know which output it
+/// goes on ([`XDG_OUTPUT`]).
+///
+/// **The order is the reported order**, and it is the order the backend binds them
+/// in, so the two can never name different missing interfaces for one session.
+const WAYLAND_OVERLAY_INTERFACES: [&str; 3] = [LAYER_SHELL, VIEWPORTER, XDG_OUTPUT];
+
+/// Whether this registry can host a click-through dimming surface.
+///
+/// The first missing one wins, and that is why [`LAYER_SHELL`] is first: the answer
+/// is a sentence a user reads. A GNOME session has **two** of the three — Mutter
+/// implements `wp_viewporter` and `zxdg_output_manager_v1` and has no layer-shell
+/// at all — so `zwlr_layer_shell_v1` is both the true answer there and the only one
+/// that does not send someone looking for a Mutter bug that is not there.
+fn wayland_overlay(globals: &[&str]) -> Capability {
+    for interface in WAYLAND_OVERLAY_INTERFACES {
+        match from_registry(globals, interface) {
+            Capability::Available => {}
+            absent @ Capability::Unavailable(_) => return absent,
+        }
+    }
+    Capability::Available
 }
 
 /// Whether `interface` is in the registry.
@@ -466,12 +532,98 @@ mod tests {
     fn a_compositor_offering_both_protocols_gets_both_mechanisms() {
         let caps = resolve(
             env(Some("wayland-0"), None),
-            &connected(&["wl_compositor", LAYER_SHELL, GAMMA_CONTROL, "wl_seat"]),
+            &connected(&[
+                "wl_compositor",
+                LAYER_SHELL,
+                VIEWPORTER,
+                XDG_OUTPUT,
+                GAMMA_CONTROL,
+                "wl_seat",
+            ]),
         );
 
         assert_eq!(caps.overlay, Capability::Available);
         assert_eq!(caps.gamma, Capability::Available);
         assert!(caps.any_dimming());
+    }
+
+    /// Layer-shell gets the surface on screen; `wp_viewporter` is what puts a dim
+    /// in it without allocating a framebuffer per output. The overlay arm needs
+    /// both, and this is the half a registry check would otherwise miss — the
+    /// backend would bind, fail, and contradict a report that had already told the
+    /// user software dimming was available.
+    #[test]
+    fn a_layer_shell_with_no_way_to_scale_a_pixel_is_not_an_overlay() {
+        let caps = resolve(
+            env(Some("wayland-0"), None),
+            &connected(&["wl_compositor", "wl_shm", LAYER_SHELL, GAMMA_CONTROL]),
+        );
+
+        assert_eq!(
+            caps.overlay,
+            Capability::Unavailable(Unavailable::ProtocolAbsent {
+                interface: VIEWPORTER
+            })
+        );
+        // And only the overlay arm: gamma does not go through a surface at all.
+        assert_eq!(caps.gamma, Capability::Available);
+    }
+
+    /// A layer surface is created *on a `wl_output`*, and nothing above this layer
+    /// speaks in outputs — it speaks in rectangles. Without `zxdg_output_manager_v1`
+    /// no output has a logical rectangle, so there is no way to know which one a
+    /// display is, and an overlay would be placed by registry order.
+    #[test]
+    fn a_compositor_that_will_not_say_where_its_outputs_are_cannot_place_one() {
+        let caps = resolve(
+            env(Some("wayland-0"), None),
+            &connected(&["wl_compositor", "wl_shm", LAYER_SHELL, VIEWPORTER]),
+        );
+
+        assert_eq!(
+            caps.overlay,
+            Capability::Unavailable(Unavailable::ProtocolAbsent {
+                interface: XDG_OUTPUT
+            })
+        );
+    }
+
+    /// The report and the backend bind the same three interfaces in the same
+    /// order, which is what stops them naming different missing ones for one
+    /// session. Asserted as a list rather than left to the two call sites, because
+    /// the failure is a `dujactl doctor` line that contradicts what actually
+    /// happened at startup.
+    #[test]
+    fn the_reported_order_is_place_then_fill_then_locate() {
+        assert_eq!(
+            super::WAYLAND_OVERLAY_INTERFACES,
+            [LAYER_SHELL, VIEWPORTER, XDG_OUTPUT]
+        );
+    }
+
+    /// Which one is named matters, because the sentence is printed. The registry
+    /// below is a GNOME session: Mutter implements `wp_viewporter` and
+    /// `zxdg_output_manager_v1` and no layer-shell, so naming either of the other
+    /// two would send someone looking for a Mutter bug that is not there.
+    #[test]
+    fn a_gnome_session_is_told_about_the_shell_and_not_the_other_two() {
+        let caps = resolve(
+            env(Some("wayland-0"), None),
+            &connected(&[
+                "wl_compositor",
+                "wl_shm",
+                "xdg_wm_base",
+                VIEWPORTER,
+                XDG_OUTPUT,
+            ]),
+        );
+
+        assert_eq!(
+            caps.overlay,
+            Capability::Unavailable(Unavailable::ProtocolAbsent {
+                interface: LAYER_SHELL
+            })
+        );
     }
 
     /// The two are decided independently. Treating them as one capability would
@@ -481,7 +633,7 @@ mod tests {
     fn layer_shell_without_gamma_control_still_dims() {
         let caps = resolve(
             env(Some("wayland-0"), None),
-            &connected(&["wl_compositor", LAYER_SHELL]),
+            &connected(&["wl_compositor", LAYER_SHELL, VIEWPORTER, XDG_OUTPUT]),
         );
 
         assert_eq!(caps.overlay, Capability::Available);
@@ -609,7 +761,7 @@ mod tests {
             env(Some("wayland-0"), None),
             &Probe {
                 connected: true,
-                globals: &[LAYER_SHELL],
+                globals: &[LAYER_SHELL, VIEWPORTER, XDG_OUTPUT],
                 randr: false,
                 compositor: false,
             },
@@ -677,7 +829,7 @@ mod tests {
     fn a_refused_bind_downgrades_gamma_after_startup() {
         let mut caps = resolve(
             env(Some("wayland-0"), None),
-            &connected(&[LAYER_SHELL, GAMMA_CONTROL]),
+            &connected(&[LAYER_SHELL, VIEWPORTER, XDG_OUTPUT, GAMMA_CONTROL]),
         );
         assert_eq!(caps.gamma, Capability::Available);
 
@@ -698,14 +850,17 @@ mod tests {
     fn refusing_never_upgrades_and_never_overwrites_a_better_reason() {
         let mut refused = resolve(
             env(Some("wayland-0"), None),
-            &connected(&[LAYER_SHELL, GAMMA_CONTROL]),
+            &connected(&[LAYER_SHELL, VIEWPORTER, XDG_OUTPUT, GAMMA_CONTROL]),
         );
         refused.refuse_gamma();
         let once = refused.clone();
         refused.refuse_gamma();
         assert_eq!(refused, once, "refusing twice changes nothing");
 
-        let mut absent = resolve(env(Some("wayland-0"), None), &connected(&[LAYER_SHELL]));
+        let mut absent = resolve(
+            env(Some("wayland-0"), None),
+            &connected(&[LAYER_SHELL, VIEWPORTER]),
+        );
         let before = absent.clone();
         absent.refuse_gamma();
         assert_eq!(

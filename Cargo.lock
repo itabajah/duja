@@ -1156,9 +1156,11 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "proptest",
+ "rustix 1.1.4",
  "tracing",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-wlr",
  "windows 0.62.2",
  "x11rb",
 ]

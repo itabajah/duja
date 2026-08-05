@@ -10,6 +10,7 @@
 //! | [`crate::linux_caps`] | [`x11`], [`wayland`] — two booleans and a list of interface names |
 //! | [`crate::linux_outputs`] | [`outputs`] — each output's name, EDID and rectangle |
 //! | [`crate::linux_overlay`] | [`overlay`] — the override-redirect ARGB windows |
+//! | [`crate::linux_layer`] | [`layer`] — the `zwlr_layer_shell_v1` surfaces |
 //! | [`crate::linux_gamma`] | [`gamma`] — the `RandR` CRTC transfer tables |
 //!
 //! Nothing here can run in CI — a GitHub runner has no X server and no
@@ -17,6 +18,7 @@
 //! decision the feature makes is on the other side of the boundary.
 
 mod gamma;
+mod layer;
 mod outputs;
 mod overlay;
 mod wayland;
@@ -26,6 +28,7 @@ pub use gamma::{
     GammaDisplay, display_supports_gamma, enumerate_gamma_displays, is_hdr_active, restore_all,
     restore_identity, set_gamma,
 };
+pub use layer::WaylandDimmer;
 pub use outputs::enumerate_outputs;
 pub use overlay::X11Dimmer;
 
@@ -50,10 +53,10 @@ impl LinuxDimmer {
     ///
     /// # Errors
     /// [`DimmerError::Unsupported`] when the session has no overlay mechanism —
-    /// no display server, or a Wayland compositor (whose layer-shell backend
-    /// lands in the next wave). [`DimmerError::Os`] for a session that should
-    /// have worked and did not, which the caller logs before disabling software
-    /// dimming.
+    /// no display server, an X11 session with no compositing manager, or a
+    /// compositor missing one of the three protocols a layer-shell overlay is
+    /// built from. [`DimmerError::Os`] for a session that should have worked and
+    /// did not, which the caller logs before disabling software dimming.
     ///
     /// The caller treats both the same way (no dimmer, hardware control intact);
     /// they are distinguished because one is a fault worth a log line naming the
@@ -69,7 +72,10 @@ impl LinuxDimmer {
             Transport::X11 => X11Dimmer::spawn().map(|dimmer| LinuxDimmer {
                 inner: Box::new(dimmer),
             }),
-            Transport::Wayland | Transport::None => Err(DimmerError::Unsupported),
+            Transport::Wayland => WaylandDimmer::spawn().map(|dimmer| LinuxDimmer {
+                inner: Box::new(dimmer),
+            }),
+            Transport::None => Err(DimmerError::Unsupported),
         }
     }
 }
