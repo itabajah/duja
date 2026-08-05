@@ -893,6 +893,12 @@ mod tests {
     /// drive a ramp, and the two sessions with no `XRandR` channel are also the two
     /// that report `Unknown`. Reds a Wayland arm that answered `Some(false)` —
     /// which would advertise a gamma channel that silently writes to Xwayland.
+    ///
+    /// The **`XRandR`** channel, which is what the name means and is worth spelling
+    /// out now that it is no longer the only one. Since `#131` a Wayland session
+    /// has `wlr-gamma-control`, so "the one with a channel" would be two of them if
+    /// read literally — and this test would still be right, because that channel is
+    /// gated by the same `Unknown` verdict for a reason `docs/debt.md` carries.
     #[test]
     fn the_only_session_allowed_to_drive_a_ramp_is_the_one_with_a_channel() {
         for transport in [Transport::X11, Transport::Wayland, Transport::None] {

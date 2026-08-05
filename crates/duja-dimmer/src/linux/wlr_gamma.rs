@@ -23,13 +23,21 @@
 //! - **A dim is a live object, not a write.** The session below holds one
 //!   `zwlr_gamma_control_v1` per dimmed output for as long as the dim lasts.
 //!   Dropping the session is the restore.
-//! - **A restore is a `destroy`, not an identity table.** That is strictly better
-//!   than what X11 can do: writing the identity table *flattens* a running
-//!   `gammastep`'s warm evening curve, while destroying puts it back, because the
-//!   compositor kept the original. It also releases the output, which an identity
-//!   write would not — the protocol grants one client exclusive access per output,
-//!   so a Duja that keeps holding a control keeps every colour-temperature tool
-//!   locked out.
+//! - **A restore is a `destroy`, not an identity table** — and what that is worth
+//!   is narrower than it first looks, so it is worth stating exactly. The protocol
+//!   says destroying "restores the gamma table to its original value", and the
+//!   tempting reading is that a running `gammastep`'s warm curve comes back. It
+//!   does not, and the C says why: `gamma_control_destroy` emits `set_gamma` with
+//!   **no control attached**, the compositor re-queries, finds none, and applies
+//!   *no* colour transform. "Original" means the output's default, not some other
+//!   client's table — wlroots stores no such thing. That is the same end state an
+//!   X11 identity write produces.
+//!
+//!   What `destroy` really buys is the **release**. This protocol grants one client
+//!   exclusive access per output, and an identity write has no way to say "I am
+//!   finished with this"; a `destroy` does, so a colour-temperature tool can take
+//!   the output back. On X11 there is no ownership to hand over at all — the LUT is
+//!   shared and last writer wins.
 //! - **There is nothing for a rescue pass to find.** The guarantee survives
 //!   `SIGKILL`, so a Wayland session cannot be left dark by a crash and
 //!   [`restore_all`] never has to walk anything it did not itself engage. The
@@ -37,7 +45,7 @@
 //!
 //! # A wrong table length kills the connection, so this one is its own
 //!
-//! wlroots answers a short `pread` with
+//! wlroots answers a short read with
 //! `wl_resource_post_error(..., INVALID_GAMMA, ...)`, which terminates the client
 //! rather than the object. That is why [`crate::linux_wlr_gamma`] exists, and it
 //! is also why this module opens a **second** Wayland connection instead of
@@ -56,9 +64,20 @@
 //! taking gamma away from whatever else wanted it — for the duration of a query,
 //! from a read-only call, on a protocol whose commonest other user is a
 //! colour-temperature daemon the user chose to run. So the enumeration reports
-//! every named output and the availability question is settled where ADR-0011
-//! already puts it: at the attempt, by the `failed` event, which is what
-//! [`crate::linux_caps::SurfaceCaps::refuse_gamma`] was written for.
+//! every named output and the availability question is settled at the attempt, by
+//! the `failed` event, which is where ADR-0011 already puts it.
+//!
+//! **What that does not do is reach the capability report.** ADR-0011's step 5 is
+//! [`crate::linux_caps::SurfaceCaps::refuse_gamma`], and it still has no
+//! production caller: this backend turns `failed` into a
+//! [`DimmerError`] for the caller that asked, and
+//! nothing downgrades the `gamma` arm of a report `dujactl doctor` has already
+//! printed. That is not an oversight this PR could fix in passing — the only
+//! report on Linux comes from [`super::probe_session`], which is read-only by
+//! design, and a probe that attempted a bind would be doing the exact
+//! output-stealing this section refuses. So `refuse_gamma` is waiting on a caller
+//! that holds a report *across* an engage attempt, which is the app's gamma sink.
+//! `docs/debt.md` carries it.
 //!
 //! # Nothing engages this yet
 //!
@@ -72,7 +91,7 @@
 //! `docs/debt.md` carries the remedy, which is `wp_color_management_v1`'s
 //! per-output `tf_named`.
 
-use std::io::Write as _;
+use std::io::{Seek as _, Write as _};
 use std::os::fd::{AsFd as _, OwnedFd};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -104,9 +123,18 @@ const GAMMA_CONTROL_VERSION: std::ops::RangeInclusive<u32> = 1..=1;
 
 /// The `zxdg_output_manager_v1` versions this backend can use.
 ///
-/// 1 is enough for what it reads, and the ceiling matches [`super::outputs`] and
-/// [`super::layer`], which bind the same global.
-const XDG_OUTPUT_VERSIONS: std::ops::RangeInclusive<u32> = 1..=3;
+/// **The floor is 2, and it is not the 1 its two neighbours use.** `xdg_output`'s
+/// `name` event is `since="2"`, and a name is the only thing this backend reads
+/// from the protocol at all — so a v1 manager would bind, produce a
+/// `zxdg_output_v1` that never sends `name`, and leave every output on a
+/// `wl_output` older than 4 with no address, which is precisely the failure the
+/// fallback exists to prevent. Asking for 2 turns that into a clean
+/// `UnsupportedVersion` and `xdg: None`.
+///
+/// [`super::outputs`] and [`super::layer`] correctly ask for 1, because what they
+/// read — `logical_position` and `logical_size` — has been there since 1. Only the
+/// ceiling is shared.
+const XDG_OUTPUT_VERSIONS: std::ops::RangeInclusive<u32> = 2..=3;
 
 /// The `wl_output` version that added the `name` event.
 ///
@@ -180,10 +208,19 @@ pub fn set_gamma(display: &OutputDisplay, factor: f32) -> Result<(), DimmerError
 /// Give `display`'s output back to the compositor, which restores whatever gamma
 /// table it had before Duja took it.
 ///
-/// This is the Wayland spelling of the crate's `restore_identity`, and the two are
-/// **not the same end state** — this one is better. X11 has no baseline to put
-/// back, so it writes the identity table and flattens a running `gammastep`'s
-/// tint; here the compositor kept the original and hands it back on `destroy`.
+/// The Wayland spelling of the crate's `restore_identity`, and it reaches the same
+/// *screen* by a different mechanism: destroying the control makes the compositor
+/// apply no colour transform, which is what an X11 identity table also produces.
+///
+/// The difference is ownership rather than pixels. This protocol grants one client
+/// exclusive access per output, and letting go is the only way to give it back —
+/// so a colour-temperature tool can re-acquire afterwards, which on X11 has no
+/// equivalent because nothing owns the LUT there in the first place.
+///
+/// It does **not** restore some other client's curve. An earlier draft of this
+/// paragraph said the compositor "kept the original and hands it back"; wlroots
+/// keeps no such table, and the protocol's "original value" is the output's
+/// default.
 ///
 /// A display Duja never engaged is a silent success: there is no object to
 /// destroy and nothing was changed.
@@ -198,11 +235,36 @@ pub fn set_gamma(display: &OutputDisplay, factor: f32) -> Result<(), DimmerError
 ///
 /// # Errors
 /// [`DimmerError::Os`] for a session that has no gamma channel at all, or a
-/// connection that failed. Never for an output that simply is not dimmed.
+/// connection that is gone. Never for an output that simply is not dimmed, and —
+/// unlike [`set_gamma`] — never merely because the request could not be *sent*.
+///
+/// That asymmetry is deliberate and it matches [`restore_all`], which had it
+/// first. The operation is the local `destroy`, and once that has happened the dim
+/// is over whatever the socket does next: a `WouldBlock` leaves the request queued
+/// for the next flush, and a connection that has genuinely died takes every gamma
+/// control with it, which restores the very tables this was handing back. Reporting
+/// `Err` there would tell a caller "still dimmed" about a display that is not, and
+/// the caller would keep it marked dimmed while every later `release` was a no-op.
+/// A lost connection is still propagated, because that is what tells
+/// [`with_session`] to throw the session away.
 pub fn release(display: &OutputDisplay) -> Result<(), DimmerError> {
     with_session(|session| {
-        session.state.release(&display.name);
-        session.flush()
+        let Some(key) = session.state.find(&display.name).map(|tracked| tracked.key) else {
+            // Not tracked, so certainly not dimmed by this session. No round trip
+            // to look harder: unlike `write`, there is nothing to do even if the
+            // output turned up.
+            return Ok(());
+        };
+        session.state.release(key);
+        // A round trip rather than a flush, so the events this long-lived session
+        // would otherwise never read are dispatched — see `with_session` for why
+        // that matters on a connection that only advances when something calls it.
+        match session.roundtrip("release") {
+            // A lost connection is propagated so `with_session` throws the session
+            // away; anything else has already achieved what this call is for.
+            Err(fault) if fault.connection_lost => Err(fault),
+            Ok(()) | Err(_) => Ok(()),
+        }
     })
     .map_err(Into::into)
 }
@@ -215,12 +277,24 @@ pub fn release(display: &OutputDisplay) -> Result<(), DimmerError> {
 /// output with no name is skipped, because a name is the only address this
 /// protocol has and it is the token a display would be joined by.
 ///
+/// It **round-trips first**, and that is not a formality. The session outlives
+/// every call and only advances when something dispatches, so a monitor plugged in
+/// after it opened is invisible to [`State::track`]'s registry handler until some
+/// call happens to talk to the compositor. Every other entry point either writes
+/// (and round-trips as part of that) or only flushes, so without this an
+/// enumeration could answer from a picture of the outputs that is arbitrarily old
+/// — which would make the hot-plug handling this connection carries decorative on
+/// the one path whose entire job is to say what is there.
+///
 /// Returns an empty vector (never an error) when this session has no gamma
 /// channel or the connection failed, which is the graceful-degradation contract
 /// the other backends' enumerations keep.
 #[must_use]
 pub fn enumerate_gamma_displays() -> Vec<OutputDisplay> {
-    match with_session(|session| Ok(session.state.named())) {
+    match with_session(|session| {
+        session.roundtrip("enumerate")?;
+        Ok(session.state.named())
+    }) {
         Ok(displays) => displays,
         Err(e) => {
             debug!(error = %e.reason(), "no Wayland gamma outputs");
@@ -234,8 +308,8 @@ pub fn enumerate_gamma_displays() -> Vec<OutputDisplay> {
 /// Not a rescue, and it cannot be one: nothing on this transport survives the
 /// process that set it (module docs), so there is never a stale ramp for a later
 /// run to find. What this does is the *orderly* half — releasing the outputs
-/// before exit so the compositor restores each original table while Duja is still
-/// there to watch it, rather than a moment later when the socket closes.
+/// before exit, so each one is handed back while Duja is still there to see it
+/// rather than a moment later when the socket closes.
 ///
 /// So it deliberately **does not open a connection**. A `duja --restore` invoked
 /// as its own process holds no controls, and connecting only to discover that
@@ -251,11 +325,15 @@ pub fn restore_all() -> RestoreReport {
         return RestoreReport::default();
     };
     let restored = session.state.release_all();
-    // A flush failure is not a failed restore. Every control was destroyed on
-    // this side, so the compositor puts each table back either when the request
-    // arrives or when it notices the socket is gone — and the second of those is
-    // what a flush failure means has already happened.
-    let _ = session.flush();
+    // A failure here is not a failed restore. Every control was destroyed on this
+    // side, so the compositor drops each output's transform either when the
+    // request arrives or when it notices the socket is gone — and the second of
+    // those is what a transport failure means has already happened.
+    //
+    // A round trip rather than a flush, for the same reason [`release`] uses one:
+    // it is also the only thing that reads the socket, and this is one of the four
+    // paths that ever touch this connection.
+    let _ = session.roundtrip("restore_all");
     RestoreReport {
         restored,
         failed: Vec::new(),
@@ -360,10 +438,17 @@ impl State {
 
     /// Destroy one output's gamma control, if it holds one.
     ///
-    /// Queues the request; the caller flushes. The compositor restores that
-    /// output's original table when it arrives.
-    fn release(&mut self, name: &str) {
-        if let Some(tracked) = self.find(name)
+    /// Queues the request; the caller sends it. When it arrives the compositor
+    /// drops this client's colour transform, so the output goes back to its
+    /// default, and the output is free for another client to claim.
+    ///
+    /// Keyed rather than named, because every caller inside a write has already
+    /// resolved the key and a name is the wrong thing to re-resolve after a
+    /// dispatch: `wl_output` names are unique among *live* globals, so an
+    /// unplug-and-replug between two lookups can hand the same string to a
+    /// different output.
+    fn release(&mut self, key: u32) {
+        if let Some(tracked) = self.entry(key)
             && let Some(held) = tracked.control.take()
         {
             held.object.destroy();
@@ -439,22 +524,43 @@ impl Session {
             .map_err(|e| Fault::dispatch(context, &e))
     }
 
-    /// Write one output's gamma table.
+    /// The key of the output with this connector name, asking the compositor once
+    /// before giving up.
     ///
-    /// The length is re-read from the control on every write rather than assumed:
-    /// it is the number the compositor `pread`s, and sending a different one is a
-    /// protocol error that kills the connection.
-    fn write(&mut self, name: &str, factor: f32) -> Result<(), Fault> {
-        let key = self
-            .state
+    /// The retry is the point. This session outlives every call and its output list
+    /// only grows when the queue is dispatched, so a monitor plugged in after the
+    /// session opened is unknown to [`State::find`] until *something* talks to the
+    /// compositor. Without the round trip below, a display that appeared after
+    /// startup would answer "no Wayland output is named DP-3" on every call for the
+    /// life of the process — and the caller is documented to address displays by
+    /// token rather than by enumerating first, so nothing else would ever heal it.
+    fn key_for(&mut self, name: &str) -> Result<u32, Fault> {
+        if let Some(key) = self.state.find(name).map(|tracked| tracked.key) {
+            return Ok(key);
+        }
+        self.roundtrip("output lookup")?;
+        self.state
             .find(name)
             .map(|tracked| tracked.key)
-            .ok_or_else(|| Fault::refused(format!("no Wayland output is named {name}")))?;
+            .ok_or_else(|| Fault::refused(format!("no Wayland output is named {name}")))
+    }
+
+    /// Write one output's gamma table.
+    ///
+    /// The length comes from the `gamma_size` event, which is sent once when the
+    /// control is created and never again — so a control reused across writes
+    /// carries a cached length, and that is safe for a reason worth stating: a
+    /// change of gamma size means a different `wlr_output`, and losing the output
+    /// makes the control inert rather than silently re-sizing it.
+    fn write(&mut self, name: &str, factor: f32) -> Result<(), Fault> {
+        let key = self.key_for(name)?;
         let advertised = self.acquire(key, name)?;
         let Some(size) = ramp_size(advertised) else {
-            // Only reachable for a compositor that is not wlroots: wlroots answers
-            // a zero gamma size with `failed` and never sends `gamma_size` at all.
-            self.state.release(name);
+            // A compositor whose gamma size does not fit the builder. wlroots
+            // cannot reach this — it answers a zero size with `failed` and never
+            // sends `gamma_size` — but 1 and anything above `u16::MAX` land here
+            // too, so it is not the wlroots-only arm an earlier draft called it.
+            self.give_up(key);
             return Err(Fault::refused(format!(
                 "{name} reports a gamma table of {advertised} entries, which is not a \
                  table this crate can build"
@@ -464,16 +570,29 @@ impl Session {
             // Unreachable under `ramp_size`, which is the stricter of the two.
             // Kept as a refusal rather than an `unwrap_or_default`, because a
             // table of the wrong length is the one thing this must never send.
-            self.state.release(name);
+            self.give_up(key);
             return Err(Fault::refused(format!(
                 "{name} reports {size} gamma entries, which no table can be built for"
             )));
         };
-        let fd = table_file(&table)
-            .map_err(|e| Fault::refused(format!("{name}: cannot stage the gamma table: {e}")))?;
+        let fd = match table_file(&table) {
+            Ok(fd) => fd,
+            Err(e) => {
+                // Through `give_up` like its two neighbours. Staging the table is
+                // the one step that can fail *after* the output has been claimed
+                // exclusively — `memfd_create` is `ENOSYS` under some sandbox
+                // seccomp filters, and both it and the write can fail on a
+                // resource limit — and every one of those repeats on the next
+                // call, so keeping the claim would strand the output for good.
+                self.give_up(key);
+                return Err(Fault::refused(format!(
+                    "{name}: cannot stage the gamma table: {e}"
+                )));
+            }
+        };
         let Some(held) = self
             .state
-            .find(name)
+            .entry(key)
             .and_then(|tracked| tracked.control.as_ref())
         else {
             return Err(Fault::refused(format!(
@@ -493,13 +612,50 @@ impl Session {
         // would be reported to the caller as a live one — which is the failure
         // this crate's whole gamma path is shaped to avoid.
         self.roundtrip("set_gamma")?;
-        if self.failed(name) {
-            self.state.release(name);
-            return Err(Fault::refused(format!(
-                "{name} refused the gamma table after accepting the control"
-            )));
+        // Success is the control still being **there** and still healthy, not
+        // merely the absence of a `failed` flag. An earlier draft asked only the
+        // second question, through a helper that answered `false` for a control
+        // that had gone away — and "gone away" is a real outcome of this very
+        // round trip: the output can be unplugged while it runs, at which point
+        // `global_remove` reaches `State::forget`, the entry disappears, and the
+        // write that was silently dropped by an inert resource would have been
+        // reported as a live ramp. The caller does not retry a success, so the
+        // display would sit at full brightness with Duja believing it dimmed.
+        match self
+            .state
+            .entry(key)
+            .and_then(|tracked| tracked.control.as_ref())
+        {
+            Some(held) if !held.failed => Ok(()),
+            Some(_) => {
+                self.give_up(key);
+                Err(Fault::refused(format!(
+                    "{name} refused the gamma table after accepting the control"
+                )))
+            }
+            None => Err(Fault::refused(format!(
+                "{name} went away while its gamma table was being written"
+            ))),
         }
-        Ok(())
+    }
+
+    /// Hand an output's control back on a path that is about to return an error.
+    ///
+    /// The flush is the point, and leaving it out was a real leak rather than an
+    /// untidiness: `State::release` only *queues* the `destroy`, and every caller
+    /// here returns immediately afterwards, so without this the request would sit
+    /// in the output buffer until some later call happened to send something. An
+    /// output Duja has decided it cannot drive would stay claimed in the meantime,
+    /// and the protocol grants that claim exclusively — so the wait would be at a
+    /// colour-temperature tool's expense.
+    ///
+    /// The flush's own failure is dropped on purpose. This is already the error
+    /// path, the error being returned is the one worth reporting, and a connection
+    /// too broken to flush is one the compositor is about to tear down anyway —
+    /// which restores the table this was trying to hand back.
+    fn give_up(&mut self, key: u32) {
+        self.state.release(key);
+        let _ = self.flush();
     }
 
     /// The gamma-table length for an output, taking a control on it if this
@@ -508,22 +664,57 @@ impl Session {
     /// A control that has already answered is reused, so a slider drag is one
     /// `set_gamma` per sample and no round trip beyond the confirming one.
     ///
+    /// # A refusal arrives two different ways, because wlroots has done it two ways
+    ///
+    /// Current wlroots refuses the **newcomer**: `get_gamma_control` finds an
+    /// existing control for the output and answers `failed` on the object it just
+    /// created, leaving the incumbent untouched. Before `9108717d`
+    /// (2023-03-06, so wlroots 0.16 and earlier — which is what Debian bookworm
+    /// and Ubuntu 22.04 LTS ship) it did the opposite: it sent `failed` to the
+    /// **incumbent**, destroyed it, and returned without registering or answering
+    /// the newcomer at all. On those versions this object receives *neither*
+    /// `gamma_size` nor `failed`.
+    ///
+    /// Both land somewhere sensible below — the first in the `failed` arm, the
+    /// second in the arm that finds neither — and both end in a refusal with the
+    /// control given back. The second is worth knowing rather than treating as
+    /// defensive padding: on an LTS wlroots it is what *every* attempt against an
+    /// output another client holds looks like, and the object it leaves behind has
+    /// live user data, so a `set_gamma` sent without waiting for `gamma_size`
+    /// would be honoured while this client is not the registered controller. That
+    /// is why the size is a precondition of writing and not a convenience.
+    ///
     /// # Reusing one means acting on a `failed` flag that is one call stale
     ///
     /// A `failed` event is only seen when the queue is dispatched, and the last
     /// dispatch was the previous call's confirming round trip. So a control the
     /// compositor withdrew *between* two calls still looks live here, and the write
-    /// that follows goes to an object the server has already destroyed — which
-    /// libwayland answers by killing the client, not by ignoring the request.
+    /// that follows goes to an object the compositor has already given up on.
     ///
-    /// Left as it is, for two reasons rather than one. The window is the gap
-    /// between two calls on a path the caller drives in batches, and closing it
-    /// would cost a second round trip on *every* sample to catch an event that
-    /// arrives on almost none of them. And the consequence is bounded by a decision
-    /// already made for a different reason: this connection carries nothing but
-    /// gamma (module docs), so losing it costs one error and one reconnect, and the
-    /// next call rebinds and re-dims. What it explicitly cannot do is take the
-    /// layer-shell overlay with it.
+    /// **A failed control is inert, not dead**, which is what makes that safe, and
+    /// it is worth stating because the obvious guess is the opposite one. wlroots
+    /// never calls `wl_resource_destroy` on a gamma control from the server side —
+    /// the only call site is the client's own `destroy` request. Every server-side
+    /// teardown (`failed`, or the output going away) goes through
+    /// `gamma_control_destroy`, which nulls the resource's *user data* and leaves
+    /// the resource itself alive; a later `set_gamma` then hits
+    /// `if (gamma_control == NULL) goto error_fd`, which closes the descriptor and
+    /// does nothing else. No protocol error, no killed connection, and no ramp.
+    ///
+    /// So the stale flag costs one wasted write, and [`Session::write`]'s
+    /// confirming round trip is what turns it into an honest failure: that round
+    /// trip delivers the pending `failed`, and the check after it releases the
+    /// control and returns a refusal. The caller never learns a ramp is live when
+    /// it is not, which is the only property that actually has to hold.
+    ///
+    /// What this does *not* establish is the same behaviour on a compositor that
+    /// is not wlroots. One that really destroyed the resource would make the late
+    /// `set_gamma` a request on a dead id — though the protocol tells the client to
+    /// destroy the object itself on `failed`, which implies it expects the object
+    /// to still be there. Either way the blast radius is bounded by a decision made
+    /// for a different reason: this connection carries nothing but gamma (module
+    /// docs), so the worst case is one error and one reconnect, and what it
+    /// explicitly cannot do is take the layer-shell overlay with it.
     fn acquire(&mut self, key: u32, name: &str) -> Result<u32, Fault> {
         if let Some(tracked) = self.state.entry(key)
             && let Some(held) = &tracked.control
@@ -532,8 +723,18 @@ impl Session {
                 return Ok(size);
             }
             // A control that failed, or that never answered, is dead weight: give
-            // it back so the next attempt starts clean. Every reason for `failed`
-            // is transient, so this is a refusal for *now* and not a latch.
+            // it back so the next attempt starts clean.
+            //
+            // Not cached, and the cost of that is real rather than notional. Two
+            // of the protocol's four reasons for `failed` are another program's
+            // doing and stop being true when it exits; the first one it lists —
+            // "the output doesn't support gamma tables" — is permanent hardware.
+            // They are indistinguishable, one event with no discriminator, so
+            // caching would latch a refusal a user could have fixed by quitting
+            // `gammastep`. The price is that an output with no gamma LUT costs one
+            // object creation and one round trip on every call, forever. Refusing
+            // to latch is the right side of that trade: the latched version is a
+            // gamma channel the user cannot get back without restarting Duja.
             let held = tracked.control.take();
             if let Some(held) = held {
                 held.object.destroy();
@@ -568,48 +769,70 @@ impl Session {
                 "{name} went away while its gamma control was being taken"
             )));
         };
-        match &tracked.control {
-            Some(held) if held.failed => {
-                let held = tracked.control.take();
-                if let Some(held) = held {
-                    held.object.destroy();
-                }
-                Err(Fault::refused(format!(
-                    "{name} refused a gamma control: another client holds it, or the \
-                     output has no gamma table"
-                )))
-            }
-            Some(held) => held.size.ok_or_else(|| {
-                Fault::refused(format!(
-                    "{name} answered neither a gamma size nor a refusal"
-                ))
-            }),
-            None => Err(Fault::refused(format!(
+        // Both fields copied out before anything is taken, so the read and the
+        // hand-back do not fight over the same borrow.
+        let Some((failed, size)) = tracked
+            .control
+            .as_ref()
+            .map(|held| (held.failed, held.size))
+        else {
+            return Err(Fault::refused(format!(
                 "{name} lost its gamma control while it was being taken"
-            ))),
+            )));
+        };
+        if let Some(size) = size.filter(|_| !failed) {
+            return Ok(size);
         }
-    }
-
-    /// Whether this output's control has been told it is no longer valid.
-    fn failed(&mut self, name: &str) -> bool {
-        self.state
-            .find(name)
-            .and_then(|tracked| tracked.control.as_ref())
-            .is_some_and(|held| held.failed)
+        // Either the compositor refused, or it answered nothing at all. Both mean
+        // this session cannot write to that output, and both leave an object that
+        // has to be given back — the second one especially, because on wlroots
+        // 0.16 and earlier its user data is live, so an object left lying around
+        // there is one a later edit could write through without ever having been
+        // granted the output.
+        if let Some(held) = tracked.control.take() {
+            held.object.destroy();
+        }
+        Err(Fault::refused(if failed {
+            format!(
+                "{name} refused a gamma control: another client holds it, or the \
+                 output has no gamma table"
+            )
+        } else {
+            format!(
+                "{name} answered neither a gamma size nor a refusal, which on \
+                 wlroots 0.16 and earlier is what an output another client already \
+                 holds looks like"
+            )
+        }))
     }
 }
 
 /// Stage a gamma table in an anonymous file the compositor can read.
 ///
-/// A **memfd**, and the seekability is the requirement rather than the anonymity:
-/// wlroots reads the table with `pread(fd, table, size, 0)`, a positional read, so
-/// a pipe fails outright with `ESPIPE` and would be answered with a `failed`
-/// event for a table that was perfectly correct. It also sets `O_NONBLOCK` on the
-/// descriptor before reading, which a pipe would turn into a short read and
-/// therefore into a killed connection.
+/// A **memfd**, and it is handed over **rewound to offset 0**. Both halves matter,
+/// and the rewind is the one an earlier draft of this function argued *against*.
 ///
-/// The file is left at whatever offset the write ended at, deliberately: `pread`
-/// ignores the file position, so seeking back would be a no-op dressed as care.
+/// wlroots has read this descriptor two different ways, and the version boundary
+/// is what makes the rewind load-bearing rather than tidy. Since `15f2f664`
+/// (2023-06-05, so wlroots 0.17 onward) it is
+/// `pread(fd, table, table_size, 0)`, which ignores the file position entirely.
+/// Before that it was a plain `read(fd, table, table_size)`, which does not — and
+/// wlroots 0.15/0.16 is what Debian bookworm and Ubuntu 22.04 LTS ship, so that is
+/// a live configuration and not history.
+///
+/// A descriptor sent over `SCM_RIGHTS` is a `dup`, so the compositor **shares this
+/// side's open file description and its offset**. An un-rewound memfd is at EOF
+/// after the write above, which against a `read()` implementation is a zero-byte
+/// read, a length mismatch, and `INVALID_GAMMA` on the whole client connection:
+/// the session's first dim would kill it. One `lseek` makes the two behave
+/// identically, so the earlier draft's "a no-op dressed as care" was right about
+/// exactly one of the two implementations.
+///
+/// The **anonymity** is not the requirement; the **seekability** is. A pipe serves
+/// neither implementation: `pread` refuses one outright with `ESPIPE`, and the
+/// compositor sets `O_NONBLOCK` before reading, which turns the other into a short
+/// read and so into the same killed connection. A memfd is the cheapest thing that
+/// is a real file.
 fn table_file(table: &[u8]) -> std::io::Result<OwnedFd> {
     let fd = memfd_create("duja-gamma", MemfdFlags::CLOEXEC)?;
     let mut file = std::fs::File::from(fd);
@@ -617,6 +840,7 @@ fn table_file(table: &[u8]) -> std::io::Result<OwnedFd> {
     // and an `EINTR`, which is the whole of what the layer backend's own loop does
     // for a file this one has no reason to keep open afterwards.
     file.write_all(table)?;
+    file.rewind()?;
     Ok(OwnedFd::from(file))
 }
 
@@ -754,7 +978,27 @@ enum SessionSlot {
 /// call reported the connection lost, in which case it is dropped and the next
 /// call reconnects. Dropping it also destroys every gamma control on it, which is
 /// the right thing on a connection that is already gone: the compositor has
-/// restored those tables anyway.
+/// dropped those transforms anyway.
+///
+/// # Reading the socket is every entry point's job, and one case is left over
+///
+/// `linux::gamma` drains its X connection with `poll_for_event` after every call,
+/// because unsolicited events accumulate in an unbounded queue on a process that
+/// may run for weeks. The same pressure exists here and the consequence is worse:
+/// a Wayland client that never reads fills its socket buffer, and libwayland's
+/// server side answers a client it cannot write to by **disconnecting** it — which
+/// would drop every live gamma control at once, silently, with the slot still
+/// saying `Open` until the next call found out.
+///
+/// So all four entry points round-trip rather than flush ([`set_gamma`],
+/// [`release`], [`enumerate_gamma_displays`], [`restore_all`]), and a round trip
+/// reads and dispatches. What is left uncovered is a session that is **open and
+/// idle**: one that engaged a dim and was then left alone while the compositor
+/// kept sending `wl_output` reconfiguration events. That is narrower than it
+/// sounds, because the events that produce that traffic — hot-plug, mode and
+/// layout changes — are the same ones that make the app re-assert its dim, which
+/// is a call. It is a residual rather than a hazard, and `docs/debt.md` names it
+/// rather than this pretending the X11 sibling's drain has an equivalent here.
 fn with_session<T>(f: impl FnOnce(&mut Session) -> Result<T, Fault>) -> Result<T, Unavailable> {
     // The cheap gate first, before anything opens a socket. Read per call, so a
     // changed environment is caught immediately.
@@ -1017,24 +1261,30 @@ mod tests {
         assert!(report.is_clean(), "nothing attempted cannot have failed");
     }
 
-    /// `restore_all` must not open a connection. A `duja --restore` process holds
-    /// no controls, so connecting would be a socket and a round trip to learn
-    /// what was already known — and on a session that *is* Wayland it would also
-    /// take a gamma manager for nothing.
+    /// `restore_all` answers without a session, and says so rather than failing.
     ///
-    /// Asserted through the session slot rather than by observing a socket,
-    /// because the slot is the thing the rule is about: untouched means unopened.
+    /// # What this pins, and what it deliberately does not
+    ///
+    /// It pins the shape of the answer: a clean, empty report, no panic, no block.
+    /// That is the whole of what a CI lane can observe, and it is worth having —
+    /// `duja --restore` reads an empty clean report as "nothing to restore", so a
+    /// panic or a hang here is a broken command.
+    ///
+    /// It does **not** pin the rule the function is actually built around, which is
+    /// that no connection is opened. An earlier version of this test claimed to,
+    /// by asserting the session slot was untouched. That assertion cannot fail on
+    /// the only lane that runs this module: `with_session` returns at the transport
+    /// gate before `SESSION` is ever initialised, so on a headless runner the slot
+    /// is `None` however `restore_all` is written — including the version that goes
+    /// through `with_session` and opens one. It would have passed the mutation it
+    /// existed to catch.
+    ///
+    /// The no-connection rule is checked by the `WAYLAND_DEBUG` row in
+    /// `docs/qa-checklist.md` instead, which is honest about needing a session.
     #[test]
-    fn a_restore_with_no_session_does_not_open_one() {
+    fn a_restore_with_no_session_answers_rather_than_failing() {
         let report = restore_all();
-        assert!(report.is_clean());
-        assert!(report.restored.is_empty());
-        assert!(
-            SESSION.get().is_none_or(|cell| matches!(
-                &*cell.lock().unwrap_or_else(PoisonError::into_inner),
-                SessionSlot::Empty | SessionSlot::NoChannel(_)
-            )),
-            "restore_all opened a connection it had no reason to open"
-        );
+        assert!(report.is_clean(), "nothing attempted cannot have failed");
+        assert!(report.restored.is_empty(), "nothing can have been restored");
     }
 }

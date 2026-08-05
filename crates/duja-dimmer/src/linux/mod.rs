@@ -115,12 +115,13 @@ impl Dimmer for LinuxDimmer {
 /// | addressed by | a `RandR` **CRTC** id | a `wl_output`'s **connector name** |
 /// | granularity | one table per CRTC, so a mirrored pair shares one | one per output |
 /// | [`restore_identity`] writes | the identity table | nothing: it hands the output back |
-/// | after a crash | the ramp is still on the screen | the compositor has already put it back |
+/// | after a crash | the ramp is still on the screen | the output is already back to normal |
 ///
-/// The third row is the one a caller can be surprised by, and it is a difference
-/// in Wayland's favour: X11 has no baseline to restore, so it flattens a running
-/// `gammastep`'s warm curve, while a Wayland restore gives the output up and the
-/// compositor puts the original back.
+/// The third row reaches the same *screen* by either route — a compositor with no
+/// client transform and an X11 identity table look alike — and differs in what it
+/// does to **ownership**. `zwlr_gamma_control_v1` grants one client exclusive
+/// access per output, so letting go is the only way to give it back; the X11 LUT
+/// is shared and unowned, so there is nothing there to hand over.
 #[derive(Debug, Clone)]
 pub struct GammaDisplay(Channel);
 
@@ -193,13 +194,19 @@ pub fn set_gamma(display: &GammaDisplay, factor: f32) -> Result<(), DimmerError>
 /// Undo `display`'s dim.
 ///
 /// Named for what the other two platforms do, because the crate's surface is
-/// shared; **on Wayland it is not what happens**, and the difference is in the
-/// user's favour. X11 writes the identity transfer table, which is the only end
-/// state it has and which flattens a colour-temperature tool's curve along with
-/// Duja's dim. Wayland destroys the output's `zwlr_gamma_control_v1`, and the
-/// compositor restores the table that was there before Duja took it — the
-/// baseline composition `linux::gamma`'s docs describe as owed, already true on
-/// one of the two transports because the protocol does it.
+/// shared; on Wayland the mechanism is different even though the screen is not.
+/// X11 writes the identity transfer table. Wayland destroys the output's
+/// `zwlr_gamma_control_v1`, after which the compositor applies no colour transform
+/// — the same end state, plus the output released for another client to claim.
+///
+/// **It is not the baseline composition `linux::gamma`'s docs describe as owed**,
+/// and an earlier draft of this paragraph claimed it was "already true on one of
+/// the two transports because the protocol does it". That is wrong twice over:
+/// wlroots keeps no previous client's table to put back, and this protocol has no
+/// request to *read* the current gamma, so a baseline cannot even be sampled here.
+/// Composing a dim into a user's curve is owed on X11 and **impossible** on
+/// Wayland with this protocol; `docs/debt.md` says so rather than implying Wayland
+/// is done.
 ///
 /// # Errors
 /// As [`set_gamma`]. A Wayland display that was never dimmed is a silent success:
@@ -257,20 +264,38 @@ pub fn enumerate_gamma_displays() -> Vec<GammaDisplay> {
 ///   state that outlives the client that set it. A dark screen left by a crashed
 ///   Duja is exactly what this is for.
 /// - **Wayland** destroys the gamma controls *this process* holds and nothing
-///   else, because there is nothing else to find: the compositor restores an
-///   output's table when the client's object dies, and it does that when the
-///   socket closes too, so a crash cannot leave a Wayland session dark. It does
-///   not even open a connection to discover that.
+///   else, because there is nothing else to find: an output's dim lasts only as
+///   long as the client's object, and the compositor destroys every object a
+///   client holds when the socket closes, so a crash cannot leave a Wayland
+///   session dark. It does not even open a connection to discover that.
 ///
 /// So an empty clean report means "nothing to restore" on both, and on Wayland it
 /// is the *only* answer a fresh process can honestly give.
+///
+/// # Both are asked, rather than one being chosen
+///
+/// Unlike [`enumerate_gamma_displays`], this does not dispatch on the transport,
+/// and the difference is not an inconsistency. An enumeration is a question about
+/// *this* session, so asking the channel this session does not have would be
+/// asking the wrong thing. A restore is a question about what this **process** is
+/// holding — and each channel already refuses cleanly and without a syscall when
+/// it is not the one in play: `gamma::restore_all` stops at
+/// [`crate::linux_gamma::xrandr_refusal`] before it opens a socket, and
+/// `wlr_gamma::restore_all` returns an empty report unless it already has a live
+/// session.
+///
+/// What that buys is the case where the environment moved under a running process,
+/// which `session_transport`'s own documentation is at pains to say can happen. A
+/// process that engaged Wayland gamma and then saw `WAYLAND_DISPLAY` disappear
+/// would, under a transport switch, never hand those outputs back — and would
+/// report a clean rescue for work it did not do.
 #[must_use]
 pub fn restore_all() -> RestoreReport {
-    match session_transport() {
-        Transport::X11 => gamma::restore_all(),
-        Transport::Wayland => wlr_gamma::restore_all(),
-        Transport::None => RestoreReport::default(),
-    }
+    let mut report = wlr_gamma::restore_all();
+    let mut x11 = gamma::restore_all();
+    report.restored.append(&mut x11.restored);
+    report.failed.append(&mut x11.failed);
+    report
 }
 
 /// Whether HDR is active on this session; see

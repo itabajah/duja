@@ -98,9 +98,11 @@ with the phases; keep entries as observable behaviors, not implementation.
       is legitimately larger than the number of screens: the walk deliberately includes
       CRTCs driving nothing, because a gamma table survives its CRTC being disabled.
       Individual CRTCs are named (`DP-1 (CRTC 63)`, or `CRTC-3` for an idle one) only
-      on the failure lines. This is the whole of Linux's gamma crash recovery today —
+      on the failure lines. This is the whole of **X11's** gamma crash recovery today —
       there is no marker and no automatic recovery until the tray lands — so if this
-      does not work, a user who ever hits a stuck ramp has nothing.
+      does not work, an X11 user who ever hits a stuck ramp has nothing. A Wayland
+      session needs none of it; see the `kill -9` row below for why, and for the
+      check that the compositor really does behave that way.
 - [ ] **`sudo duja --restore` does not lie.** sudo drops `XAUTHORITY`, so the X
       connection fails. The command must print the reason on a `failed:` line and exit
       **non-zero**, never "nothing to restore" with exit 0. Same check for `DISPLAY`
@@ -161,8 +163,19 @@ with the phases; keep entries as observable behaviors, not implementation.
 - [ ] Wayland session that advertises **neither** wlr protocol: software dimming reports itself
       unavailable *with the reason*, and hardware paths still work.
 - [ ] Wayland session advertising `zwlr_gamma_control_manager_v1` while another client
-      (`wlsunset`, `gammastep`) already holds it: the bind is refused and the report flips to
-      unavailable rather than claiming a gamma path Duja does not have.
+      (`wlsunset`, `gammastep`) already holds it: an attempt to take gamma is **refused**,
+      and Duja reports that refusal to whatever asked rather than claiming a dim it does
+      not have. Check the refusal, not the doctor line: this row used to say "the report
+      flips to unavailable", and it does not. `SurfaceCaps::refuse_gamma` exists for that
+      downgrade and has no caller — `dujactl doctor` reads the registry only, and a probe
+      that *bound* a control to find out would take the output away from `wlsunset` to
+      answer a read-only question. `docs/debt.md` carries the gap.
+      <!-- On wlroots 0.17+ the refusal arrives as `failed` on Duja's new object. On 0.16
+           and earlier (Debian bookworm, Ubuntu 22.04 LTS) `get_gamma_control` instead
+           evicted the *incumbent* and answered the newcomer with nothing at all, so
+           Duja's object receives neither `gamma_size` nor `failed`. Both end in a
+           refusal; on the older ones, expect `wlsunset` to lose its tint as a side
+           effect, which is the compositor's behaviour and not Duja's. -->
 - [ ] **`duja --restore` on a Wayland session must not connect at all.** The row above
       already pins the *answer* ("nothing to restore", exit 0); this one pins the
       reason. A `zwlr_gamma_control_v1` ramp dies with the client that set it, so a
@@ -178,18 +191,28 @@ with the phases; keep entries as observable behaviors, not implementation.
       screen must return to normal **immediately**, with no `duja --restore` and no
       relaunch. If it stays dark, the compositor is not restoring on client
       disconnect and the `#124` crash-guard debt row was narrowed to X11 wrongly.
-- [ ] **A Wayland gamma restore gives `gammastep` its curve back rather than
-      flattening it.** The opposite expectation from the X11 row above, and the
-      difference is the point: the compositor kept the original table. Start
-      `gammastep` (or `wlsunset`) *first* so the warm tint is visible, stop it so the
-      output is free, dim through the gamma path, then undim. The tint `gammastep`
-      left must come back, not a neutral screen. If it comes back neutral, the restore
-      is writing an identity table instead of destroying the control.
-- [ ] **`dujactl doctor` does not steal gamma from a running `gammastep`.** Run
-      `gammastep` and leave it running, then run `dujactl doctor` several times.
-      `gammastep` must keep working throughout — it must not log a gamma-control
-      failure or exit. Enumeration deliberately never binds a control, because that
-      would claim each output exclusively for the duration of a read-only query.
+- [ ] **A Wayland gamma restore releases the output rather than parking on it.**
+      Not "the tint comes back": an earlier version of this row said that and it was
+      unrunnable, because stopping `gammastep` destroys `gammastep`'s own control and
+      the compositor drops its tint at that instant — there is nothing left for Duja
+      to restore, so the tester would have seen a neutral screen before Duja touched
+      anything and been told it was a bug. What the destroy actually buys is the
+      **release**, so check that instead. With `gammastep` stopped, dim through the
+      gamma path, undim, then start `gammastep` again: it must acquire the output and
+      its tint must appear. If it logs a gamma-control failure, Duja's restore wrote a
+      table instead of destroying the control, and is still holding the output.
+- [ ] **Nothing read-only steals gamma from a running `gammastep`.** Run
+      `gammastep` and leave it running, then exercise every Duja path that does not
+      deliberately engage a ramp: `dujactl doctor`, `dujactl list`, `duja --once`,
+      `duja --restore`. `gammastep` must keep its tint and must not log a
+      gamma-control failure throughout.
+      <!-- `dujactl doctor` cannot fail this one by construction today: it calls
+           `probe_session`, which reads the Wayland registry and binds no gamma
+           manager, so it never enumerates. The row is aimed at the enumeration path
+           (`enumerate_gamma_displays`), which deliberately reports every named output
+           WITHOUT taking a control, and at any future caller tempted to make it
+           truthful by binding one. Re-check this row the first time something on
+           Linux calls it. -->
       <!-- Written by capability, not by compositor name, per ADR-0011: a name table would fail
            a correct implementation the day Mutter shipped either protocol. `dujactl doctor`
            prints which protocols the session offered, so these are checkable without guessing

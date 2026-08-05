@@ -139,14 +139,21 @@ colours at full strength and lets the compositor do the blending. On a bare wind
 manager with no `picom` or equivalent, Duja reports overlay dimming as unavailable,
 and hardware control is unaffected. `dujactl doctor` prints which of these your
 session actually offers, so you never have to guess.
-X11 also has an XRandR gamma channel, which is what a display set to
+Both session types also have a gamma channel, which is what a display set to
 `dim_mode = "gamma"` uses to go below its hardware floor. It is opt-in per display
 rather than an automatic fallback, and no Duja build engages it on Linux yet
-because that runs through the tray, which is the row above. What does work today
-is `duja --restore`, which resets the gamma on every CRTC of your X screen and
-will clear a ramp any program left behind. On a Wayland session Duja refuses the gamma channel outright:
-`DISPLAY` there points at Xwayland, whose CRTCs are not on the path to any
-monitor, so a ramp written to them would change nothing on screen.
+because that runs through the tray, which is the row above. The two are different
+protocols: X11 uses XRandR's per-CRTC transfer table, and a Wayland compositor
+that offers `wlr-gamma-control` uses that instead. Duja never crosses them over.
+An XRandR ramp on a Wayland session would land on Xwayland's virtual CRTCs, which
+are not on the path to any monitor, so it would be accepted and change nothing on
+screen; Duja refuses it there rather than reporting a dim that did not happen.
+
+What works today is `duja --restore`, which resets the gamma on every CRTC of your
+X screen and will clear a ramp any program left behind. It has nothing to do on a
+Wayland session, and that is not a gap: a `wlr-gamma-control` ramp lives only as
+long as the program that set it, so the compositor puts the output back by itself
+the moment that program exits, even if it was killed.
 
 ## Build from source
 

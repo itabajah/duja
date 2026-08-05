@@ -29,8 +29,10 @@
 //! # A wrong table length is fatal, and that is why this module exists
 //!
 //! wlroots' `types/wlr_gamma_control_v1.c` answers `set_gamma` by computing
-//! `ramp_size * 3 * sizeof(uint16_t)` and `pread`ing exactly that many bytes at
-//! offset 0. A short read is not a `failed` event and not a degraded dim: it is
+//! `ramp_size * 3 * sizeof(uint16_t)` and reading exactly that many bytes from the
+//! descriptor (`pread` at offset 0 since wlroots 0.17; a plain `read` before it,
+//! which is why `linux::wlr_gamma`'s `table_file` rewinds). A short read is not a
+//! `failed` event and not a degraded dim: it is
 //! `wl_resource_post_error(..., ZWLR_GAMMA_CONTROL_V1_ERROR_INVALID_GAMMA, ...)`,
 //! which **terminates the whole client connection**. So the length is not a detail
 //! that fails locally — getting it wrong takes down every other Wayland object the
@@ -63,10 +65,12 @@
 //! alike, and a Wayland session has **nothing for a rescue pass to find**.
 //!
 //! That is also why there is no `identity_table` next to [`gamma_table`]. Writing
-//! the identity table would be the X11 restore, and on Wayland it is strictly
-//! worse than the one the protocol already offers: it flattens whatever the user's
-//! colour-temperature tool had set instead of putting it back, and it leaves the
-//! output's gamma control held so that tool can never take it again.
+//! the identity table would be the X11 restore, and on this transport it is the
+//! wrong shape: destroying the control gets to the same screen (the compositor
+//! then applies no transform at all) *and* releases the output, which an identity
+//! write cannot do. Since the protocol grants one client exclusive access per
+//! output, letting go is the whole difference — a table that says "no dimming" is
+//! still a client holding the output.
 
 use crate::linux_caps::Transport;
 use crate::linux_gamma::{MIN_RAMP_SIZE, ramp};
@@ -85,10 +89,11 @@ pub const CHANNELS: usize = 3;
 ///
 /// Two, from `sizeof(uint16_t)` in the implementation — **not** the sixteen the
 /// protocol's own prose claims (see the module docs). A table built to the XML's
-/// wording would be eight times too long, which is a `pread` that returns the
-/// requested count from a file with slack in it, so it would not even fail
-/// loudly: the compositor would read the first eighth of the buffer and program a
-/// ramp made of interleaved low bytes.
+/// wording would be eight times too long, and that is the direction that does
+/// **not** fail loudly: the compositor asks for `table_size` bytes from a file
+/// that has more than that, gets exactly what it asked for, and programs a ramp
+/// made of the first eighth of the buffer — interleaved low bytes. Only a table
+/// that is too *short* trips `INVALID_GAMMA`.
 pub const ENTRY_BYTES: usize = size_of::<u16>();
 
 /// The ramp length to build for a compositor that advertised `advertised`
@@ -137,9 +142,13 @@ pub fn table_bytes(size: u16) -> Option<usize> {
         return None;
     }
     // Checked rather than `saturating`: a saturated length is a *wrong* length,
-    // and a wrong length is the failure this whole module is shaped around. At
-    // the ceiling this is 393_210, so it cannot overflow even a 16-bit `usize`
-    // target's `u32` — the arithmetic is checked to say so, not because it can.
+    // and a wrong length is the failure this whole module is shaped around. On
+    // every target this crate builds for the product is at most 393_210 and
+    // cannot overflow, so this is checked to say so rather than because it can —
+    // with one exception that makes it more than a formality. On a 16-bit `usize`
+    // target the multiplication genuinely does overflow, and `checked_mul` turns
+    // that into the `None` every caller already reads as "send no table";
+    // `saturating_mul` would hand back 65_535 and send one two thirds too short.
     usize::from(size)
         .checked_mul(CHANNELS)
         .and_then(|entries| entries.checked_mul(ENTRY_BYTES))
@@ -377,6 +386,46 @@ mod tests {
             assert_eq!(entry(&table, index), expected, "entry {index}");
         }
         assert_eq!(Some(table.len()), table_bytes(size));
+    }
+
+    /// Every size [`ramp_size`] accepts is one the other two can serve, and every
+    /// size it refuses is one they refuse too.
+    ///
+    /// The floor lives in three places — `ramp_size`, `table_bytes` and `ramp`
+    /// underneath `gamma_table` — and nothing else ties them together. If they
+    /// ever disagreed the backend would take an output's gamma control, learn its
+    /// size, and then fail to build a table for it: an exclusive claim held for a
+    /// write that cannot happen. Reds any edit that moves one floor and not the
+    /// others.
+    #[test]
+    fn a_size_the_narrowing_accepts_is_one_the_builders_can_serve() {
+        for advertised in [
+            0_u32,
+            1,
+            2,
+            255,
+            256,
+            1024,
+            4096,
+            u32::from(MAX_RAMP_SIZE),
+            u32::from(MAX_RAMP_SIZE) + 1,
+            u32::from(u16::MAX),
+            u32::from(u16::MAX) + 1,
+            u32::MAX,
+        ] {
+            let Some(size) = ramp_size(advertised) else {
+                continue;
+            };
+            let bytes = table_bytes(size)
+                .unwrap_or_else(|| panic!("{advertised} was accepted but has no byte count"));
+            let table = gamma_table(0.5, size)
+                .unwrap_or_else(|| panic!("{advertised} was accepted but builds no table"));
+            assert_eq!(
+                table.len(),
+                bytes,
+                "size {size} disagrees with its own length"
+            );
+        }
     }
 
     /// A size the builder refuses produces no table at all, rather than a short

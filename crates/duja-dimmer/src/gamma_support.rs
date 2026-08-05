@@ -66,10 +66,10 @@ pub fn gamma_support_from_hdr(hdr_active: Option<bool>) -> GammaSupport {
 /// to every `RandR` CRTC with a writable table — **including ones driving no
 /// output**, because a gamma table survives its CRTC being disabled — and can fail
 /// per CRTC like Windows. On **Wayland** it is not a rescue at all and cannot be:
-/// the compositor restores an output's table when the client's gamma-control
-/// object dies, and it does that when the socket closes, so there is never a stale
-/// ramp for a later process to find. It hands back the controls *this* process
-/// holds, names those outputs, and never fails.
+/// an output's dim lasts only as long as the client's gamma-control object, and
+/// the compositor destroys every object a client holds when the socket closes, so
+/// there is never a stale ramp for a later process to find. It hands back the
+/// controls *this* process holds, names those outputs, and never fails.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RestoreReport {
     /// Names of the displays whose gamma was restored.

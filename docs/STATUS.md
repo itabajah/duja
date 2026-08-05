@@ -1649,17 +1649,36 @@ ramp builder: it was a fact about `SetCrtcGamma`'s encoding wearing the name of 
 fact about gamma tables, and left there it would have refused a legal Wayland ramp
 for an X11 reason.
 
-Three differences are worth stating rather than discovering. **A wrong table
-length is fatal to the connection**, not to the request: wlroots answers a short
-`pread` with `INVALID_GAMMA`, which terminates the client — so the length rules
-live in `linux_wlr_gamma`, tested on every lane, and the backend opens a *second*
-Wayland connection so a fatal gamma bug cannot take the layer-shell overlay down
-with it. **A restore is a `destroy`**, and it is better than what X11 can do: the
-compositor kept the original table and hands it back, instead of the identity
-write that flattens a running `gammastep`'s tint. **Enumeration does not bind**,
-because a control claims its output exclusively and a read-only call must not lock
-a colour-temperature daemon out of every monitor to answer a question; the
-availability answer stays where ADR-0011 puts it, at the attempt.
+Three differences are worth stating rather than discovering.
+
+**A wrong table length is fatal to the connection**, not to the request: wlroots
+answers a short read with `INVALID_GAMMA`, which terminates the client — so the
+length rules live in `linux_wlr_gamma`, tested on every lane, and the backend opens
+a *second* Wayland connection so a fatal gamma bug cannot take the layer-shell
+overlay down with it. The table is also handed over on a **rewound** descriptor,
+which is not fastidiousness: `SCM_RIGHTS` shares the sender's file offset, and
+wlroots read this fd with a plain `read()` until `15f2f664` (2023-06-05, so 0.17),
+which is after the 0.15/0.16 that Debian bookworm and Ubuntu 22.04 LTS ship. An
+un-rewound memfd is at EOF, so on those the session's *first* dim would have
+killed the connection. The first draft argued from the newer `pread` alone that
+rewinding "would be a no-op dressed as care".
+
+**A restore is a `destroy`** — and what that is worth is narrower than the first
+draft of this paragraph claimed. It said the compositor "kept the original table
+and hands it back", so a running `gammastep`'s tint would survive. It does not:
+`gamma_control_destroy` emits `set_gamma` with no control attached and the
+compositor applies *no* transform, which is the same end state an X11 identity
+write produces. What the destroy actually buys is the **release** — this protocol
+grants one client exclusive access per output, and an identity write has no way to
+say "I am finished", so on X11 there is nothing to hand over and here there is.
+
+**Enumeration does not bind**, because a control claims its output exclusively and
+a read-only call must not lock a colour-temperature daemon out of every monitor to
+answer a question; the availability answer stays where ADR-0011 puts it, at the
+attempt. The cost of that is honest and recorded: ADR-0011's step 5,
+`SurfaceCaps::refuse_gamma`, therefore still has **no** production caller, because
+the only report on Linux comes from a probe that binds nothing. `debt.md` carries
+it.
 
 **A Wayland session is refused by transport, not by whether a connection opens** —
 which is the decision the whole module is built around. `DISPLAY` points at
@@ -1689,14 +1708,16 @@ would stop a restore flattening a running `gammastep`'s tint.
 `zwlr_gamma_control_v1` ramp lives exactly as long as the client's object, the
 compositor destroys every object a client holds when its socket closes, and
 destroying restores the original table — so the recovery is automatic, survives
-`SIGKILL`, and puts a colour-temperature tool's own curve back rather than
-flattening it. There is nothing for a rescue pass to find, so `restore_all` on
-that transport does not even open a connection: a `duja --restore` process holds
-no controls, and an empty clean report is the truth rather than a shrug. `#131`
+`SIGKILL`. There is nothing for a rescue pass to find, so `restore_all` on that
+transport does not even open a connection: a `duja --restore` process holds no
+controls, and an empty clean report is the truth rather than a shrug. `#131`
 narrowed the `#124` debt row to X11 for exactly this, and checked the property
 against wlroots' `types/wlr_gamma_control_v1.c` rather than the protocol's prose
-alone — which mattered, because that prose also calls a `uint16_t` a "16-byte
-unsigned integer".
+alone — which mattered twice. That prose calls a `uint16_t` a "16-byte unsigned
+integer"; and its "restored to its original value" reads as though a previous
+client's curve comes back, when the implementation clears the transform outright.
+The first is why the pure module pins the entry width. The second cost this PR a
+review round, because the wrong reading had been written into six files.
 
 **The HDR verdict is now one module rather than three.** Each platform probes its
 own way — DXGI's colour space, `NSScreen`'s EDR headroom, and on Linux the
@@ -1715,11 +1736,15 @@ anyway" — which was true until `#131` built the channel it was talking about.
 overlay and the new backend will not be engaged. That is the safe direction (a
 ramp under HDR is at best ignored and at worst a display Duja believes it has
 dimmed and has not) and it is not the finished one. The remedy is a probe rather
-than a better guess, and it is ADR-0011-shaped: `wp_color_management_v1` gives
-each output an image description whose `tf_named` names the transfer function, so
-a PQ or HLG output is knowably HDR and anything else is knowably not. It is
-already in the `wayland-protocols` version this workspace builds against.
-`debt.md` carries it, owed by the same wave that owes the gamma sink.
+than a better guess, and it is ADR-0011-shaped: the colour-management protocol
+gives each output an image description whose `tf_named` names the transfer
+function, so a PQ or HLG output is knowably HDR. It answers for fewer outputs than
+that sentence first implied — the sibling `tf_power` event describes a pure power
+curve and names nothing, so it stays `Unknown` there as well as on a compositor
+with no colour management at all — and it needs the `staging` feature of
+`wayland-protocols`, which this workspace does not enable, rather than nothing at
+all. `debt.md` carries both corrections, owed by the same wave that owes the gamma
+sink.
 
 **Wave 4 landed ADR-0011's capability probe first, on purpose.** The rule that
 decides what a Linux session can dim is pure — environment and Wayland registry
