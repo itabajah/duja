@@ -175,8 +175,14 @@ pub struct WaylandDimmer {
     ///
     /// The worker sleeps in `poll` over the compositor's socket **and** this, so a
     /// command that arrives while nothing is happening on the wire still gets
-    /// served. Every send is followed by a byte here; closing it is what makes the
-    /// worker wake at shutdown even if the channel is already gone.
+    /// served. Every send is followed by a byte here.
+    ///
+    /// Closing it is a second, independent shutdown signal: the read end then
+    /// reports `POLLHUP` and reads `0`, which [`drain_wake`] reports as
+    /// [`Wake::Closed`] and the loop treats exactly like a `Stop`. That has to be
+    /// handled rather than merely documented — `POLLHUP` on a pipe is level
+    /// triggered and permanent, so a loop that woke on it and did nothing would
+    /// spin a core for as long as the process lived.
     wake: Option<OwnedFd>,
     worker: Option<JoinHandle<()>>,
 }
@@ -261,15 +267,33 @@ impl WaylandDimmer {
             outputs: Vec::new(),
             overlays: Vec::new(),
             current: Vec::new(),
+            desired: Vec::new(),
+            needs_replan: false,
             next_key: 0,
         };
         // Everything the compositor is advertising now. Anything that appears
         // later arrives as a registry `global` event and is bound the same way,
         // which is what makes a monitor plugged in mid-session dimmable.
         let registry = globals.registry().clone();
+        let mut queue = queue;
         for global in globals.contents().clone_list() {
             worker.track_output(&registry, global.name, &global.interface, global.version);
         }
+        // **One round trip, and it is not optional.** `get_xdg_output` is a request;
+        // an output's logical rectangle arrives afterwards as an event, and until it
+        // does `take_output` refuses that output and a `Create` for it records
+        // nothing. Without this the first `apply` after `spawn` can dim nothing at
+        // all and still answer `Ok`, because the worker holds applied state and has
+        // nothing to re-drive from when the geometry lands.
+        //
+        // `wl_display.sync` is answered only after every request queued before it
+        // and every event those requests generated, so one is enough by
+        // construction — the same argument `super::outputs` makes for its own
+        // enumeration pass. A failure here is a compositor that answered the
+        // registry and then stopped talking, which is a fault rather than a session.
+        queue
+            .roundtrip(&mut worker)
+            .map_err(|e| DimmerError::Os(format!("the compositor stopped answering: {e}")))?;
 
         let (tx, rx) = crossbeam_channel::unbounded::<Command>();
         let thread = std::thread::Builder::new()
@@ -286,14 +310,20 @@ impl WaylandDimmer {
 
     /// Destroy every overlay and stop the worker. Idempotent.
     ///
-    /// # Limitation
+    /// # This join is bounded, unlike the other two backends'
     ///
-    /// The [`apply`](Dimmer::apply)/[`clear`](Dimmer::clear) reply wait is bounded
-    /// by `REPLY_BUDGET`; this join is **not**, the same trade the other two
-    /// backends document. A worker blocked writing to a compositor that has
-    /// stopped reading never reaches the `Stop`, and stable `std` has no timed
-    /// join — but that compositor has already degraded apply/clear to a backend
-    /// failure, so the UI stays responsive until quit, which is when this runs.
+    /// Windows and X11 both document an unbounded join, because a worker inside a
+    /// blocking OS call against a wedged server never reaches its `Stop`. This
+    /// worker has no such call: `wayland-backend` writes the socket with
+    /// `MSG_DONTWAIT` (`rs/socket.rs`), so neither `flush` nor `read` can block on a
+    /// compositor that has stopped reading, and the only wait in the loop is a
+    /// `poll` this function's own `nudge` ends.
+    ///
+    /// The write end is closed **after** the join rather than before, which is the
+    /// opposite of `duja-platform`'s uevent pump. Both work: there the close *is*
+    /// the message, here the `Stop` is, and the pipe's EOF is the second, redundant
+    /// one. Keeping the fd alive across the join is what makes the nudge above
+    /// meaningful.
     pub fn shutdown(&mut self) {
         if let Some(worker) = self.worker.take() {
             let _ = self.tx.send(Command::Stop);
@@ -480,6 +510,19 @@ struct Worker {
     outputs: Vec<Tracked>,
     overlays: Vec<Overlay>,
     current: Vec<OverlayEntry>,
+    /// The last state a caller asked for, kept so it can be re-planned.
+    ///
+    /// `current` alone is not enough. A `Create` for an output whose geometry has
+    /// not arrived records **nothing** — correctly, since no surface was made — so
+    /// nothing in `current` remembers that a display wanted dimming and did not get
+    /// it. Without this the monitor stays dark-less until some later `apply`
+    /// happens to come along, and on a hot-plug there may not be one.
+    desired: Vec<DimCommand>,
+    /// Set when the compositor said something that changes what is placeable.
+    ///
+    /// Only output geometry does that today. Re-planning is free when nothing
+    /// moved: `plan_transition` diffs `desired` against `current` and emits no ops.
+    needs_replan: bool,
     next_key: u32,
 }
 
@@ -521,15 +564,15 @@ impl Worker {
     /// Forget an output the compositor has taken away, and tear down anything
     /// dimming it.
     ///
-    /// The compositor also sends `closed` on that output's layer surface, and
-    /// either path is enough on its own. Doing both is not a double free — the
-    /// first to run removes the overlay and the second finds nothing — and relying
-    /// on only one would leave a dead proxy in `overlays`, which is a display the
-    /// planner believes is dimmed and never emits `Create` for again.
+    /// The compositor also sends `closed` on that output's layer surface, and the
+    /// two arrive in an order the protocol deliberately does not fix — `wl_registry`
+    /// keeps a removed global's objects valid *"to avoid races between the global
+    /// going away and a client sending a request to it"*. So both paths have to be
+    /// complete on their own, and both go through [`Worker::retire`] for that
+    /// reason. Whichever runs second finds nothing, which is not a double free.
     fn drop_output(&mut self, name: u32) {
         while let Some(index) = self.overlays.iter().position(|o| o.output == name) {
-            let overlay = self.overlays.swap_remove(index);
-            Worker::forget(&overlay);
+            self.retire(index);
         }
         if let Some(index) = self.outputs.iter().position(|t| t.global == name) {
             let tracked = self.outputs.swap_remove(index);
@@ -551,7 +594,27 @@ impl Worker {
     /// A `dead` flag checked here would be unreachable code pretending to be a
     /// guard. There is no state in which this worker is running and its connection
     /// is not.
-    fn apply(&mut self, commands: &[DimCommand]) {
+    fn apply(&mut self, commands: Vec<DimCommand>) {
+        self.desired = commands;
+        self.replan();
+    }
+
+    /// Re-plan the last desired state against the screen as it is now.
+    ///
+    /// Called for a fresh `apply` and again whenever the compositor tells us
+    /// something that changes what is placeable, which is how a display whose
+    /// output had no geometry yet gets dimmed at all rather than waiting for a
+    /// later command that may never come.
+    fn replan(&mut self) {
+        self.needs_replan = false;
+        // Moved out and back rather than cloned: `execute` needs `&mut self`, and
+        // the desired state is not what it mutates.
+        let desired = std::mem::take(&mut self.desired);
+        self.plan_against(&desired);
+        self.desired = desired;
+    }
+
+    fn plan_against(&mut self, commands: &[DimCommand]) {
         let ops = plan_transition(&self.current, commands);
         let applied = self.execute(&ops);
         // Folded from `applied`, never from `ops`. The two diverge whenever an op
@@ -603,9 +666,16 @@ impl Worker {
                     self.destroy(id);
                     applied.push(OverlayOp::Destroy { id: id.clone() });
                 }
+                // Recorded **only if it happened**. `plan_record` has said it is
+                // doable and every arm below is infallible under that promise, so
+                // this can only differ from `true` on a bug in that pairing — but
+                // the cost of getting it wrong is a `current` entry describing a
+                // surface that does not exist, which is a permanently undimmable
+                // display. The guard belongs on this side of the record.
                 Recorded::AsPlanned => {
-                    self.perform(op, output);
-                    applied.push(op.clone());
+                    if self.perform(op, output) {
+                        applied.push(op.clone());
+                    }
                 }
             }
         }
@@ -615,26 +685,32 @@ impl Worker {
     /// Do exactly what an op says, having already been told it is doable.
     ///
     /// `output` is the index [`plan_record`]'s `placeable` was computed from, so
-    /// for a `Create` that reached this arm it is always `Some`. A `None` would be
-    /// a bug in that pairing rather than a state to handle, so it is a no-op rather
-    /// than a second, divergent policy — the same shape the X11 twin uses for its
-    /// infallible-by-construction lookups.
-    fn perform(&mut self, op: &OverlayOp, output: Option<usize>) {
+    /// for a `Create` that reached this arm it is always `Some`. Returns whether the
+    /// op actually happened, which the caller records — a `None` here, or a refused
+    /// `create`, would be a bug in that pairing, and answering `false` keeps it a
+    /// display that is retried next plan instead of one the record has silently
+    /// written off.
+    fn perform(&mut self, op: &OverlayOp, output: Option<usize>) -> bool {
         match op {
-            OverlayOp::Create { id, alpha, .. } => {
-                if let Some(index) = output {
-                    self.create(id.clone(), index, *alpha);
-                }
-            }
+            OverlayOp::Create { id, alpha, .. } => match output {
+                Some(index) => self.create(id.clone(), index, *alpha),
+                None => false,
+            },
             // **Nothing.** A layer surface anchored to all four edges of its output
             // with a delegated size follows that output on its own: the compositor
             // sends a `configure` with the new size and the handler resets the
             // viewport. The only thing that could need doing is moving the surface
             // to a *different* output, and `placeable` has already turned that case
             // into a destroy-and-recreate before reaching here.
-            OverlayOp::MoveResize { .. } => {}
-            OverlayOp::SetAlpha { id, alpha } => self.set_alpha(id, *alpha),
-            OverlayOp::Destroy { id } => self.destroy(id),
+            OverlayOp::MoveResize { .. } => true,
+            OverlayOp::SetAlpha { id, alpha } => {
+                self.set_alpha(id, *alpha);
+                true
+            }
+            OverlayOp::Destroy { id } => {
+                self.destroy(id);
+                true
+            }
         }
     }
 
@@ -685,9 +761,9 @@ impl Worker {
     /// leaves the surface unmapped and
     /// [`Worker::configured`](Worker::configured) finishes the job when that event
     /// arrives.
-    fn create(&mut self, id: StableDisplayId, output: usize, alpha: u8) {
+    fn create(&mut self, id: StableDisplayId, output: usize, alpha: u8) -> bool {
         let Some(tracked) = self.outputs.get(output) else {
-            return;
+            return false;
         };
         let wanted = dimmer_surface();
         // Checked before the request that would raise it, because `invalid_size` is
@@ -697,15 +773,15 @@ impl Worker {
         // reach a user's screen.
         if !size_is_legal(wanted.anchor, wanted.width, wanted.height) {
             warn!("refusing to create a layer surface with an illegal anchor/size pair");
-            return;
+            return false;
         }
         let Ok(layer) = zwlr_layer_shell_v1::Layer::try_from(wanted.layer) else {
             warn!(layer = wanted.layer, "not a layer this protocol has");
-            return;
+            return false;
         };
         let Some(anchor) = zwlr_layer_surface_v1::Anchor::from_bits(wanted.anchor) else {
             warn!(anchor = wanted.anchor, "not an anchor this protocol has");
-            return;
+            return false;
         };
 
         let output_proxy = tracked.output.clone();
@@ -760,6 +836,7 @@ impl Worker {
             alpha,
             configured: false,
         });
+        true
     }
 
     /// Finish mapping an overlay, or re-size one whose output changed mode.
@@ -861,10 +938,32 @@ impl Worker {
         let Some(index) = self.overlays.iter().position(|overlay| &overlay.id == id) else {
             return;
         };
-        // `swap_remove` keeps this indexing-free: lookup is by id, and stacking is
-        // the compositor's, so the order of this list means nothing.
+        self.retire(index);
+    }
+
+    /// Take one overlay down and forget the planner ever placed it.
+    ///
+    /// **Dropping the `current` entry is the half that is easy to leave out**, and
+    /// it is the half that matters. An overlay removed from `overlays` while its
+    /// entry stays in `current` is a display the planner believes is already dimmed
+    /// at exactly the level it wants — so on an unplug and replug at the same
+    /// rectangle and the same level, `plan_transition` emits **no op at all** and
+    /// that monitor is undimmed until the user next moves the slider.
+    ///
+    /// Harmless on the planner's own path, where `execute` records the `Destroy`
+    /// and `apply_ops` would have dropped the entry a moment later. Load-bearing on
+    /// the two asynchronous paths — `closed` and `global_remove` — where there is
+    /// no op being recorded and nothing else would ever drop it.
+    ///
+    /// `swap_remove` keeps this indexing-free: lookup is by id, and stacking is the
+    /// compositor's, so the order of `overlays` means nothing.
+    fn retire(&mut self, index: usize) {
+        if index >= self.overlays.len() {
+            return;
+        }
         let overlay = self.overlays.swap_remove(index);
         Worker::forget(&overlay);
+        self.current.retain(|entry| entry.id != overlay.id);
     }
 
     /// Destroy one overlay's three objects, innermost first.
@@ -889,6 +988,8 @@ impl Worker {
             Worker::forget(&overlay);
         }
         self.current.clear();
+        self.desired.clear();
+        self.needs_replan = false;
     }
 
     /// Give back everything this backend holds on the compositor.
@@ -906,6 +1007,12 @@ impl Worker {
         for tracked in self.outputs.drain(..) {
             release(&tracked);
         }
+        // The two globals that *can* be given back at the versions bound here.
+        // `wl_compositor.release` is version 7, `wl_shm.release` version 2 and
+        // `zwlr_layer_shell_v1.destroy` version 3, so those three stay — sending one
+        // of them would be the unknown opcode this module refuses everywhere else.
+        self.viewporter.destroy();
+        self.xdg_outputs.destroy();
     }
 }
 
@@ -946,6 +1053,12 @@ fn run(
     // these inline would borrow a temporary that dies before `poll` sees it.
     let connection_fd = connection.as_fd();
     let wake_fd = wake.as_fd();
+    // Whether the last flush ran out of socket buffer. See the flush below for why
+    // that is a wait rather than a failure, and why the poll has to ask for
+    // writability while it is set. Uninitialised on purpose: every turn assigns it
+    // before reading it, and an initialiser here would be a value that is never
+    // used and could go stale against the match below.
+    let mut flush_pending;
     loop {
         // Everything already read off the socket: the `configure` that maps a
         // surface created last turn, and the output geometry the commands below are
@@ -958,6 +1071,11 @@ fn run(
         if queue.dispatch_pending(worker).is_err() {
             return;
         }
+        // Anything those events made placeable that was not before. Must come after
+        // the dispatch and before the commands, for the ordering reason above.
+        if worker.needs_replan {
+            worker.replan();
+        }
         match serve_pending(worker, rx) {
             Turn::Continue => {}
             Turn::Stop => {
@@ -968,8 +1086,25 @@ fn run(
         }
         // One flush for both of the above: the events may have queued requests
         // (a `configure` acks and commits) and so may the commands.
-        if queue.flush().is_err() {
-            return;
+        //
+        // **`WouldBlock` here is a wait, not a failure**, and treating it as one
+        // would be the worst bug in this file. `wayland-backend` sends with
+        // `MSG_DONTWAIT` and deliberately does *not* record a `WouldBlock` as the
+        // connection's `last_error` (`store_if_not_wouldblock_and_return_error`) —
+        // that asymmetry is the library saying "the kernel buffer is full, poll for
+        // writability and call me again". The unsent bytes stay in the outgoing
+        // buffer, so retrying resends exactly what is left.
+        //
+        // A compositor that stops draining its client socket for a moment — frozen,
+        // stopped, swapping, a long GPU stall — is enough to fill ~208 KiB of
+        // `AF_UNIX` buffer. Returning here would end the worker, drop `rx`, and make
+        // every later apply fail with `Backend` for the rest of the session: a
+        // transient stall would permanently kill software dimming. So the flag is
+        // set and the poll below asks for writability too.
+        match queue.flush() {
+            Ok(()) => flush_pending = false,
+            Err(e) if would_block(&e) => flush_pending = true,
+            Err(_) => return,
         }
         // Arming the read is what makes the wait safe: between here and `poll`,
         // anything the compositor sends lands in the socket and makes it readable
@@ -978,8 +1113,16 @@ fn run(
             // Events arrived while flushing. Round again and dispatch them.
             continue;
         };
+        // `OUT` only while a flush is waiting for room. Asking for it
+        // unconditionally would make `poll` return immediately every time — the
+        // socket is almost always writable — and spin this thread on a core.
+        let connection_interest = if flush_pending {
+            PollFlags::IN | PollFlags::OUT
+        } else {
+            PollFlags::IN
+        };
         let mut fds = [
-            PollFd::new(&connection_fd, PollFlags::IN),
+            PollFd::new(&connection_fd, connection_interest),
             PollFd::new(&wake_fd, PollFlags::IN),
         ];
         // No timeout: everything this thread does is a reaction to one of these two
@@ -1003,20 +1146,23 @@ fn run(
             _ => return,
         };
         let ready = PollFlags::IN | PollFlags::HUP | PollFlags::ERR;
-        // The wake is checked first and the read cancelled: a command is waiting,
-        // and serving it is more useful than parsing events that will still be
-        // there on the next turn. Dropping the guard is what cancels the read; a
-        // guard carried across the loop would deadlock the next `prepare_read`.
-        if !(wake_ready & ready).is_empty() {
-            drop(guard);
-            drain_wake(wake);
-            continue;
-        }
+        // **The socket is read first, even when a command is also waiting**, and
+        // that ordering is the whole of the argument above rather than a
+        // preference. Every command arrives with a nudge, so both descriptors ready
+        // at once is the *normal* case, not a rare one — and it is exactly the case
+        // the ordering exists for: a resolution change makes the compositor's new
+        // geometry and the app's new rectangles ready together. Cancelling the read
+        // to serve the command first would leave those bytes in the socket,
+        // `dispatch_pending` would find an empty queue next turn, and the command
+        // would be judged against geometry from before the change — destroying a
+        // working overlay to rebuild it, which is precisely what this ordering is
+        // written to prevent.
+        //
+        // Dropping the guard is what cancels the read; a guard carried across the
+        // loop would deadlock the next `prepare_read`.
         if (connection_ready & ready).is_empty() {
             drop(guard);
-            continue;
-        }
-        if let Err(e) = guard.read() {
+        } else if let Err(e) = guard.read() {
             // `WouldBlock` is another queue's reader having taken the bytes first.
             // There is only one queue here, so it is unreachable rather than
             // expected — and treating it as fatal would end the thread on a
@@ -1025,6 +1171,11 @@ fn run(
                 warn!(%e, "the compositor connection ended");
                 return;
             }
+        }
+        if !(wake_ready & ready).is_empty() && drain_wake(wake) == Wake::Closed {
+            worker.teardown();
+            let _ = queue.flush();
+            return;
         }
     }
 }
@@ -1040,12 +1191,16 @@ fn serve_pending(worker: &mut Worker, rx: &Receiver<Command>) -> Turn {
     loop {
         match rx.try_recv() {
             Ok(Command::Apply(commands, reply)) => {
-                worker.apply(&commands);
+                worker.apply(commands);
                 let _ = reply.send(Ok(()));
             }
             Ok(Command::Clear(reply)) => {
                 // Always allowed, even after the connection died: there is then
                 // nothing to clear and the caller gets the state it asked for.
+                //
+                // `destroy_all` drops the desired state as well as the surfaces, and
+                // that is the whole point: a `clear` that left it standing would be
+                // undone by the next output-geometry event, which re-plans.
                 worker.destroy_all();
                 let _ = reply.send(Ok(()));
             }
@@ -1057,22 +1212,39 @@ fn serve_pending(worker: &mut Worker, rx: &Receiver<Command>) -> Turn {
     }
 }
 
+/// What draining the wake pipe found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wake {
+    /// Some number of nudges, now consumed.
+    Nudged,
+    /// The write end is gone. [`WaylandDimmer`] has been dropped without its
+    /// `Stop` being served, and this is the second, independent shutdown signal.
+    Closed,
+}
+
 /// Consume the wake bytes so the pipe does not stay readable.
 ///
 /// Any number of nudges collapse into one turn of the loop, which is the intent:
 /// the channel is drained in full each time, so a second byte would only buy an
 /// extra empty pass.
-fn drain_wake(wake: &OwnedFd) {
+///
+/// **`Closed` has to end the loop, not merely be reported.** `POLLHUP` on a pipe
+/// whose write end is gone is level triggered and permanent, so a caller that woke
+/// on it, read its zero bytes and went back to `poll` would be handed the same
+/// readiness immediately and forever — a hot loop with no blocking syscall in it,
+/// burning a core for the life of the process and hanging any `join`.
+fn drain_wake(wake: &OwnedFd) -> Wake {
     let mut sink = [0_u8; 64];
     loop {
         match rustix::io::read(wake, &mut sink[..]) {
-            // A short read means the pipe is now empty, and a zero-length one means
-            // the write end is gone — which the disconnected channel reports too.
+            // A full buffer may not be all of it; go round again.
             Ok(count) if count == sink.len() => {}
+            // End of file: every write end has been closed.
+            Ok(0) => return Wake::Closed,
             Err(Errno::INTR) => {}
             // A short read, or `EAGAIN` on an empty non-blocking pipe. The latter
             // is the ordinary exit.
-            Ok(_) | Err(_) => return,
+            Ok(_) | Err(_) => return Wake::Nudged,
         }
     }
 }
@@ -1183,12 +1355,19 @@ impl Dispatch<ZxdgOutputV1, u32> for Worker {
         else {
             return;
         };
+        let before = tracked.logical();
         match event {
             zxdg_output_v1::Event::LogicalPosition { x, y } => tracked.position = Some((x, y)),
             zxdg_output_v1::Event::LogicalSize { width, height } => {
                 tracked.size = Some((width, height));
             }
-            _ => {}
+            _ => return,
+        }
+        // An output that has just become placeable, or moved. Either way the last
+        // desired state may now be satisfiable where it was not, so ask the loop to
+        // re-plan; `Worker::replan` is a no-op when nothing has actually changed.
+        if tracked.logical() != before {
+            worker.needs_replan = true;
         }
     }
 }

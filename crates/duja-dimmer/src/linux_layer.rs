@@ -201,8 +201,9 @@ pub fn dim_pool() -> [u8; DIM_POOL_BYTES] {
 ///
 /// `i32` because that is the request's type, and the arithmetic cannot overflow
 /// it: the largest offset is `255 * 4`. An offset that ran past the end of the pool
-/// would not be a wrong shade — the compositor answers `wl_shm.error.invalid_fd`
-/// or refuses the buffer outright, and either way the connection dies — which is
+/// would not be a wrong shade — the compositor answers
+/// `wl_shm_pool.error.invalid_stride` (*"invalid size or stride during buffer
+/// creation"*) and a protocol error kills the connection — which is
 /// why this and [`dim_pool`] are pinned against each other by a test rather than
 /// each against its own arithmetic.
 /// Not `const`: `i32::from` is not a const trait method yet, and widening with an
