@@ -218,25 +218,39 @@ impl OutputDisplay {
 /// compositor gets the table and the release in the same batch, so it applies and
 /// drops the transform without a frame in between.
 ///
-/// The other ordering exists because `flush` is **not** all-or-nothing, which an
+/// The other ordering exists because a flush is **not** all-or-nothing, which an
 /// earlier draft of this paragraph assumed when it promised that "what cannot
 /// happen is the caller being told the engage failed while the output stays dimmed
-/// and claimed". `BufferedSocket::flush` advances over the outgoing buffer per
-/// `send_msg` and retains only the unsent remainder, so a partial write can land
-/// the 8-byte `set_gamma` and stop before the 12-byte `wl_display.sync` behind it.
-/// The compositor then has the table while this call reports failure, and it keeps
-/// it until the queued `destroy` is sent.
+/// and claimed". Both implementations advance over the outgoing buffer and retain
+/// only the unsent remainder — `wayland-backend`'s own `BufferedSocket::flush`
+/// advances per `send_msg`, and libwayland's `wl_connection_flush` does
+/// `out.tail += len` and bails on the first `sendmsg` that will not take more — so
+/// a partial write can land the 8-byte `set_gamma` and stop before the 12-byte
+/// `wl_display.sync` behind it. The compositor then has the table while this call
+/// reports failure, and keeps it until the queued `destroy` is sent.
+///
+/// (Both, because which one runs is not this crate's choice. `duja-dimmer` alone
+/// compiles `wayland-backend`'s Rust backend, but the app's feature graph unifies
+/// on `client_system` — winit, softbuffer and smithay-clipboard all ask for it —
+/// so the shipped binary is talking to libwayland. Citing only the Rust one would
+/// send a maintainer to code that is not in the call graph they are debugging.)
 ///
 /// **What sends it is another call, and there is no guarantee one comes.** The
-/// obvious bound — "every later call flushes first" — is not true of this backend
-/// and its own neighbours say so: [`release`] returns before its round trip for an
-/// output this session never dimmed, and [`with_session`]'s transport gate returns
-/// before touching the connection at all, which is exactly the
-/// `WAYLAND_DISPLAY`-disappeared case [`super::restore_all`] is shaped around. So
-/// the residual is real rather than theoretical, it is bounded by the process
-/// lifetime (the compositor drops every transform when the socket closes), and
-/// `docs/debt.md` carries it beside the read-side twin instead of this claiming a
-/// bound it does not have.
+/// obvious bound — "every later call flushes first" — is not true of this backend:
+/// [`with_session`]'s transport gate returns before touching the connection at
+/// all, which is exactly the `WAYLAND_DISPLAY`-disappeared case
+/// [`super::restore_all`] is shaped around. So the residual is real rather than
+/// theoretical, it is bounded by the process lifetime (the compositor drops every
+/// transform when the socket closes), and `docs/debt.md` carries it beside the
+/// read-side twin instead of this claiming a bound it does not have.
+///
+/// It is *narrower* than the previous draft implied, though, and the correction
+/// runs the other way for once. That draft also offered [`release`] as a
+/// counterexample, on the grounds that it returns before its round trip for an
+/// output this session never dimmed. True of an **untracked** name, and this
+/// residual cannot arise for one: reaching it means `key_for` found the output and
+/// `acquire` took a control on it, so the entry is still there with `control:
+/// None`, and a `release` for it round-trips and flushes like any other call.
 pub fn set_gamma(display: &OutputDisplay, factor: f32) -> Result<(), DimmerError> {
     with_session(|session| session.write(&display.name, factor)).map_err(Into::into)
 }
@@ -365,10 +379,19 @@ pub fn restore_all() -> RestoreReport {
         return RestoreReport::default();
     };
     let restored = session.state.release_all();
-    // A failure here is not a failed restore. Every control was destroyed on this
-    // side, so the compositor drops each output's transform either when the
-    // request arrives or when it notices the socket is gone — and the second of
-    // those is what a transport failure means has already happened.
+    // A failure here is not a failed restore *on this side*: every control has
+    // been destroyed locally, so nothing here still believes it holds one.
+    //
+    // Deliberately not the stronger claim that the compositor has therefore already
+    // dropped the transforms. An earlier version of this comment said a transport
+    // failure means "it notices the socket is gone", which is the equation
+    // `give_up`'s doc had to retract — a `WouldBlock` is a full buffer, not a dying
+    // connection, and it leaves the `destroy`s queued on a live socket. In that
+    // case the outputs really are still dimmed when this returns a clean report.
+    // The report stays clean anyway, because the alternative is worse: the callers
+    // are `duja --restore` and quit, both of which exit immediately afterwards, and
+    // the compositor drops every transform when the socket closes. `docs/debt.md`
+    // carries the residual.
     //
     // A round trip rather than a flush, for the same reason [`release`] uses one:
     // it is also the only thing that reads the socket, and this is one of the four
@@ -388,8 +411,8 @@ pub fn restore_all() -> RestoreReport {
     // "every later call would then fail", which is the self-healing that was
     // already there. Worth keeping anyway, and worth being exact about who pays:
     // the spurious failure lands on the next call that goes through
-    // `with_session` — a dim or a release — not on another `restore_all`, which
-    // does not.
+    // `with_session` — a dim, a release or an enumeration — not on another
+    // `restore_all`, which does not.
     if lost {
         *guard = SessionSlot::Empty;
     }
@@ -710,8 +733,8 @@ impl Session {
         //
         // A *survivable* failure of this round trip — a `WouldBlock` flush — is the
         // one case where returning `Err` would not be the whole truth, because
-        // `set_gamma` is already in the outgoing buffer and `BufferedSocket::flush`
-        // keeps what it could not send. Some later call would deliver it, and the
+        // `set_gamma` is already in the outgoing buffer and a blocked flush keeps
+        // what it could not send. Some later call would deliver it, and the
         // caller, having been told the engage failed, would have planned an overlay
         // and would never release the output. So the control is handed back on the
         // way out: the `destroy` is queued behind the `set_gamma`, and the
@@ -1045,8 +1068,10 @@ impl Fault {
 /// Only one kind is: a `WouldBlock`, which means the compositor's socket buffer
 /// was full at the moment of the write and nothing else. `wayland-backend` sends
 /// with `MSG_DONTWAIT` and deliberately does **not** record a `WouldBlock` as the
-/// connection's `last_error`, and `BufferedSocket::flush` keeps the unsent bytes,
-/// so the request is still queued and the next call sends it. Treating it as
+/// connection's `last_error` — the helper is spelled the same in its Rust and its
+/// libwayland backend, so this holds whichever one the build resolves to — and a
+/// blocked flush keeps the unsent bytes, so the request is still queued and the
+/// next call sends it. Treating it as
 /// fatal is the defect `#130`'s review found in the layer backend, where it
 /// cost the overlay for the rest of the session; here it would cost the dim a
 /// frame and an error, which is smaller and still wrong.
