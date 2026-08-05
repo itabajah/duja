@@ -1593,16 +1593,23 @@ one** of the three interfaces `linux_caps` names, not only when it has none of
 them: on GNOME that one is `zwlr_layer_shell_v1`, Mutter implementing the other
 two.
 
-`#130` also **retired** the `#122` mirror-pin consequence for Linux rather than
-narrowing it again. The pin needs a clone group with two members, and a Wayland
-session cannot produce one: the surface token is the `wl_output` name,
-`linux_outputs::resolve` refuses a contested connector↔output pair outright, so
-no two displays ever carry the same token, so `group_clones` only ever yields
-singletons and `fan_out_hardware` writes nothing for a lone software-only
-member. X11 *can* group — its token is the CRTC, which two outputs genuinely
-share — and X11 has had the overlay the pin assumes since wave 4b-3. `debt.md`
-carries the one consequence that survives, which is hypothetical rather than
-live.
+`#130` **moved** the `#122` mirror-pin consequence off Wayland rather than
+narrowing it there again. The pin needs a clone group with two members, and a
+Wayland session cannot produce one: the surface token is the `wl_output` name,
+`linux_outputs::resolve` places a connector only where the match is mutually
+unique, so no two displays ever carry the same token, so `group_clones` only
+ever yields singletons and `fan_out_hardware` writes nothing for a lone
+software-only member.
+
+**X11 is where it actually bites, and that is not new.** Its token is the CRTC,
+which two outputs in a `--same-as` mirror genuinely share, so an X11 group *can*
+have two members — and the overlay the pin assumes is **not** unconditional
+there: `X11Dimmer::spawn` refuses outright when nothing owns `_NET_WM_CM_S<n>`,
+because without a compositing manager every alpha paints the same opaque black
+rectangle. So on a bare WM with no compositor, a mirrored pair with one member
+latched software-only pins the other to 100% with nothing drawing. `debt.md`
+carries that, re-scoped from "Wayland" to "X11 with no compositing manager",
+along with the hypothetical Wayland residual.
 
 **A Wayland session is refused twice, by two gates that cover each other.** The
 environment check (`WAYLAND_DISPLAY` is set ⇒ not X11) is cheap and skips the
