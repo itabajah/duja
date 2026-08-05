@@ -253,11 +253,25 @@ impl OutputDisplay {
 /// with `control: None`, and a `release` for it round-trips and flushes like any
 /// other call.
 ///
-/// "Normally" because `blocking_dispatch` dispatches pending events *before* it
-/// flushes, so the same round trip can deliver a `global_remove`, reach
-/// [`State::forget`], and drop the entry before the flush blocks. That leaves an
-/// untracked name after all — and it is the one case where none of this matters,
-/// since the output is gone and the compositor tore its control down with it.
+/// "Normally" because a round trip can deliver a `global_remove`, reach
+/// [`State::forget`], and drop the entry, which leaves an untracked name after
+/// all. The order is worth getting right, because two drafts of this clause got it
+/// wrong in opposite directions. `Connection::flush` reports `Ok` only when the
+/// whole buffer went, and a round trip's first flush precedes any dispatch of that
+/// round trip — so the reachable sequence is not "the `set_gamma` is still buffered
+/// when the entry disappears". It is the worse one: the `set_gamma` **was sent**,
+/// the dispatch that follows delivers the `global_remove`, `forget` queues a
+/// `destroy`, and a later flush is the one that blocks.
+///
+/// And a withdrawn global does **not** mean the output is gone. wlroots calls
+/// `wlr_output_destroy_global` from `output_update_global` whenever an output has
+/// no current mode — disabling a head is enough — while the `wlr_output` itself
+/// lives on, and the gamma control's teardown listener is registered on
+/// `output->events.destroy`, which does not fire for that. So the compositor can
+/// still be holding this client's control, with its table applied, after the
+/// client has stopped being able to address the output. `forget` destroying it is
+/// therefore load-bearing rather than tidy, and a blocked flush there is the same
+/// residual as everywhere else in this paragraph.
 pub fn set_gamma(display: &OutputDisplay, factor: f32) -> Result<(), DimmerError> {
     with_session(|session| session.write(&display.name, factor)).map_err(Into::into)
 }
@@ -397,19 +411,26 @@ pub fn restore_all() -> RestoreReport {
     // case the outputs really are still dimmed when this returns a clean report.
     //
     // The report stays clean anyway, and the reason is about the callers rather
-    // than about this function. There are three: `duja --restore`, the tray's quit
-    // path, and the tray's "Restore screen" action. The first two exit immediately,
-    // so the socket closes and the compositor drops every transform — a failure row
-    // there would name an output that is already fine. **The third does not exit**,
-    // and on it a blocked flush really would leave a dimmed output behind a clean
-    // report, on the one button a user presses precisely because a screen is stuck.
+    // than about this function. There are four, and **two of them do not exit**:
     //
-    // It is not reachable yet: `bin_support::tray` is `cfg`-gated to Windows and
-    // macOS, so `duja --restore` is Linux's only caller today. The ksni wave brings
-    // the other two, and `docs/debt.md` carries this so that wave has to decide
-    // rather than inherit. (An earlier version of this comment said "the callers
-    // are `duja --restore` and quit", which was two thirds of the list and the
-    // wrong two thirds.)
+    //   - `duja --restore` — exits.
+    //   - the tray's quit path — exits.
+    //   - the tray's "Restore screen" action — **does not**.
+    //   - crash-marker recovery at startup — **does not**; it runs and the app
+    //     carries on booting.
+    //
+    // For the exiting two a failure row would name an output that is already fine:
+    // the socket closes behind them and the compositor drops every transform. For
+    // the other two a blocked flush really would leave a dimmed output behind a
+    // clean report — and one of them is the button a user presses precisely because
+    // a screen is stuck.
+    //
+    // None of the three is reachable yet: `bin_support::tray` is `cfg`-gated to
+    // Windows and macOS, so `duja --restore` is Linux's only caller today. The ksni
+    // wave brings the rest, and `docs/debt.md` carries this so that wave has to
+    // decide rather than inherit. (This comment has now been wrong about the list
+    // twice — first naming two callers, then three — which is its own argument for
+    // enumerating them rather than characterising them.)
     //
     // A round trip rather than a flush, for the same reason [`release`] uses one:
     // it is also the only thing that reads the socket, and this is one of the four
@@ -569,10 +590,18 @@ impl State {
 
     /// Stop tracking an output the compositor has withdrawn.
     ///
-    /// Its gamma control is already gone on the server side — wlroots destroys
-    /// every control on an output when the output goes away — so this is the
-    /// client-side half: give the proxies back rather than leak them for the life
-    /// of the connection.
+    /// **Do not assume the control is already gone on the server side.** wlroots
+    /// tears a gamma control down from its `output->events.destroy` listener, and
+    /// a withdrawn global is not always a destroyed output: `output_update_global`
+    /// calls `wlr_output_destroy_global` for any output with no current mode, so
+    /// disabling a head withdraws the global while the `wlr_output` — and this
+    /// client's control on it, table and all — survives.
+    ///
+    /// So destroying the control here is the point rather than tidiness: it is what
+    /// releases an output this session can no longer even name, and without it that
+    /// output would stay claimed exclusively against every colour-temperature tool
+    /// until the process exited. Giving the `wl_output` and `xdg_output` proxies
+    /// back is the merely-tidy half.
     fn forget(&mut self, global: u32) {
         let Some(index) = self
             .outputs
