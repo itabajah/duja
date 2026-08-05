@@ -247,10 +247,17 @@ impl OutputDisplay {
 /// It is *narrower* than the previous draft implied, though, and the correction
 /// runs the other way for once. That draft also offered [`release`] as a
 /// counterexample, on the grounds that it returns before its round trip for an
-/// output this session never dimmed. True of an **untracked** name, and this
-/// residual cannot arise for one: reaching it means `key_for` found the output and
-/// `acquire` took a control on it, so the entry is still there with `control:
-/// None`, and a `release` for it round-trips and flushes like any other call.
+/// output this session never dimmed. True of an **untracked** name, and the
+/// residual almost never arises for one: reaching it means `key_for` found the
+/// output and `acquire` took a control on it, so the entry is normally still there
+/// with `control: None`, and a `release` for it round-trips and flushes like any
+/// other call.
+///
+/// "Normally" because `blocking_dispatch` dispatches pending events *before* it
+/// flushes, so the same round trip can deliver a `global_remove`, reach
+/// [`State::forget`], and drop the entry before the flush blocks. That leaves an
+/// untracked name after all — and it is the one case where none of this matters,
+/// since the output is gone and the compositor tore its control down with it.
 pub fn set_gamma(display: &OutputDisplay, factor: f32) -> Result<(), DimmerError> {
     with_session(|session| session.write(&display.name, factor)).map_err(Into::into)
 }
@@ -388,10 +395,21 @@ pub fn restore_all() -> RestoreReport {
     // `give_up`'s doc had to retract — a `WouldBlock` is a full buffer, not a dying
     // connection, and it leaves the `destroy`s queued on a live socket. In that
     // case the outputs really are still dimmed when this returns a clean report.
-    // The report stays clean anyway, because the alternative is worse: the callers
-    // are `duja --restore` and quit, both of which exit immediately afterwards, and
-    // the compositor drops every transform when the socket closes. `docs/debt.md`
-    // carries the residual.
+    //
+    // The report stays clean anyway, and the reason is about the callers rather
+    // than about this function. There are three: `duja --restore`, the tray's quit
+    // path, and the tray's "Restore screen" action. The first two exit immediately,
+    // so the socket closes and the compositor drops every transform — a failure row
+    // there would name an output that is already fine. **The third does not exit**,
+    // and on it a blocked flush really would leave a dimmed output behind a clean
+    // report, on the one button a user presses precisely because a screen is stuck.
+    //
+    // It is not reachable yet: `bin_support::tray` is `cfg`-gated to Windows and
+    // macOS, so `duja --restore` is Linux's only caller today. The ksni wave brings
+    // the other two, and `docs/debt.md` carries this so that wave has to decide
+    // rather than inherit. (An earlier version of this comment said "the callers
+    // are `duja --restore` and quit", which was two thirds of the list and the
+    // wrong two thirds.)
     //
     // A round trip rather than a flush, for the same reason [`release`] uses one:
     // it is also the only thing that reads the socket, and this is one of the four
