@@ -338,9 +338,9 @@ pub fn gamma_is_advisory() -> bool {
 ///   is on. No rule exists to comply with, and `CGGetDisplayTransferByTable`
 ///   returns the written values while the screen is unchanged, so verification by
 ///   readback does not detect it either.
-/// - **Linux**: `true` on both transports, for two different reasons, and the
-///   function cannot tell them apart because it is chosen per target rather than
-///   per session. On **Wayland** the reason is **timing rather than silence** — on
+/// - **Linux (Wayland)**: `true`, and the companion bullet below says why X11 is
+///   too. The function cannot tell them apart, because it is chosen per target
+///   rather than per session. Here the reason is **timing rather than silence** — on
 ///   the versions where it is a reason at all. A driver that refuses an
 ///   otherwise-valid LUT *is* reported; an earlier draft of this bullet said it was
 ///   not, and named an API (`wlr_output_set_gamma`) that wlroots removed in 0.18.
