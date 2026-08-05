@@ -173,7 +173,11 @@ fn write_table(
             .reply()
             .map_err(|e| Fault::reply("RandR GetCrtcGammaSize", &e))?
             .size;
-        let Some(table) = build(size) else {
+        // The transport's own bound, checked here rather than inside `ramp`,
+        // because that is where the request is actually made: `SetCrtcGamma` is a
+        // core request capped by `maximum_request_length`, and a
+        // `zwlr_gamma_control_v1` ramp of the same length is perfectly legal.
+        if !writable_ramp_size(size) {
             let why = if ramp_size_is_absent(size) {
                 "has no gamma table to write"
             } else {
@@ -181,6 +185,18 @@ fn write_table(
             };
             return Err(Fault::refused(format!(
                 "{} {why}: {size} entries is outside the writable range",
+                display.name
+            )));
+        }
+        let Some(table) = build(size) else {
+            // Unreachable under the check above, which is stricter than the
+            // builder's own floor. Kept as a refusal rather than an
+            // `unwrap_or_default`, because a table this backend did not build is
+            // the one thing it must never send: the server validates only the
+            // length, so a wrong-but-well-sized table is written and returns
+            // `Success`.
+            return Err(Fault::refused(format!(
+                "{} reports {size} gamma entries, which no table can be built for",
                 display.name
             )));
         };

@@ -50,6 +50,15 @@ pub const MIN_RAMP_SIZE: u16 = 2;
 
 /// The largest gamma table `SetCrtcGamma` can carry over a core X11 connection.
 ///
+/// **A property of the X11 transport, not of gamma tables**, which is why it is
+/// named for it and why [`ramp`] no longer enforces it. `zwlr_gamma_control_v1`
+/// sends its table over a **file descriptor** rather than in a request, so nothing
+/// on the Wayland side is bounded by a request length; a compositor that reports a
+/// larger `gamma_size` is asking for a table this crate must be able to build.
+/// Enforcing it in the pure builder would refuse a Wayland ramp for an X11 reason.
+/// [`writable_ramp_size`] is where the X11 writer and the X11 rescue walk both
+/// read it.
+///
 /// Derived, not chosen, and the derivation is checked against x11rb's own
 /// serialiser rather than read off the spec alone. The core protocol caps a
 /// request at the server's `maximum_request_length`, which is `65535` four-byte
@@ -206,12 +215,19 @@ pub fn crtc_token(crtc: u32) -> String {
 /// darken linearly. One channel is returned rather than three: the dim is neutral
 /// by construction, and the caller sends the same slice as red, green and blue.
 ///
-/// Returns `None` for a size outside [`MIN_RAMP_SIZE`]`..=`[`MAX_RAMP_SIZE`]
-/// rather than guessing — see both constants for why each bound exists. Total and
-/// never-panicking otherwise.
+/// Returns `None` below [`MIN_RAMP_SIZE`] rather than guessing: a one-entry table
+/// has no input axis and a zero-entry one is a CRTC reporting no gamma hardware,
+/// and neither is a table this could scale.
+///
+/// **There is no upper bound here.** [`MAX_RAMP_SIZE`] is what one *X11 request*
+/// can carry, which is a fact about that transport and not about gamma; the
+/// Wayland channel hands its table over a file descriptor and has no such
+/// ceiling. The X11 writer applies it, and [`writable_ramp_size`] is the shared
+/// predicate. Total and never-panicking either way — `size` is a `u16`, so the
+/// largest allocation this can be asked for is 64 Ki entries.
 #[must_use]
 pub fn ramp(factor: f32, size: u16) -> Option<Vec<u16>> {
-    if !(MIN_RAMP_SIZE..=MAX_RAMP_SIZE).contains(&size) {
+    if size < MIN_RAMP_SIZE {
         return None;
     }
     let f = f64::from(clamp_gamma(factor));
@@ -408,12 +424,15 @@ pub const fn randr_lists_crtcs(major: u32, minor: u32) -> bool {
     major > 1 || (major == 1 && minor >= 3)
 }
 
-/// Whether a CRTC's reported gamma-table length is one this crate can write.
+/// Whether a CRTC's reported gamma-table length is one **X11** can write.
 ///
-/// The same bound [`ramp`] enforces, named so the walk and the writer cannot
-/// drift apart — and so the walk can tell the two reasons for failing it apart,
-/// which it must, because they are not the same thing to a rescue:
-/// [`ramp_size_is_absent`] says which.
+/// Both bounds, and it is now the only place the upper one is applied: [`ramp`]
+/// enforces the floor alone, because that is the half that is a property of gamma
+/// tables rather than of a transport. So this is what the X11 writer and the X11
+/// rescue walk share, and what stops them drifting apart.
+///
+/// The walk also has to tell the two failures apart, because they are not the same
+/// thing to a rescue: [`ramp_size_is_absent`] says which.
 #[must_use]
 pub const fn writable_ramp_size(size: u16) -> bool {
     MIN_RAMP_SIZE <= size && size <= MAX_RAMP_SIZE
@@ -642,13 +661,29 @@ mod tests {
     fn an_impossible_table_size_is_refused() {
         assert_eq!(ramp(0.5, 0), None, "a CRTC with no gamma table");
         assert_eq!(ramp(0.5, 1), None, "a table with no input axis");
-        assert_eq!(
-            ramp(0.5, MAX_RAMP_SIZE.saturating_add(1)),
-            None,
-            "a table larger than one request can carry"
-        );
-        assert_eq!(ramp(0.5, u16::MAX), None);
-        assert!(ramp(0.5, MAX_RAMP_SIZE).is_some(), "the bound is inclusive");
+        // And nothing above: a size only one transport cannot carry is still a
+        // table, which `a_table_too_large_for_an_x11_request_is_still_a_table`
+        // pins from the other side.
+        assert!(ramp(0.5, MIN_RAMP_SIZE).is_some(), "the floor is inclusive");
+        assert!(ramp(0.5, u16::MAX).is_some());
+        assert!(ramp(0.5, MAX_RAMP_SIZE).is_some());
+    }
+
+    /// **The bound `ramp` carried is X11's *request length*, not a property of
+    /// gamma tables.** `SetCrtcGamma` is a core request and so is capped by
+    /// `maximum_request_length`; a `zwlr_gamma_control_v1` ramp travels over a
+    /// **file descriptor**, which has no such ceiling. A compositor reporting a
+    /// `gamma_size` above it is asking for a table this module must be able to
+    /// build, and refusing it here would be refusing a Wayland ramp for an X11
+    /// reason. The transport's bound belongs to the transport.
+    #[test]
+    fn a_table_too_large_for_an_x11_request_is_still_a_table() {
+        let size = MAX_RAMP_SIZE.saturating_add(1);
+        let table = ramp(0.5, size).expect("a size only X11 cannot carry is still a table");
+        assert_eq!(table.len(), usize::from(size));
+        assert!(identity_ramp(size).is_some());
+        // ...and the X11 writer is what has to refuse it.
+        assert!(!writable_ramp_size(size));
     }
 
     /// The derivation in [`MAX_RAMP_SIZE`]'s docs, asserted rather than trusted:
@@ -742,11 +777,18 @@ mod tests {
         assert!(!randr_lists_crtcs(0, 9));
     }
 
-    /// The writable bound must be exactly `ramp`'s, or the walk and the writer
-    /// disagree about which CRTCs are addressable.
+    /// The X11 walk and the X11 writer must classify every size identically, or
+    /// the rescue reports a CRTC unreachable that the writer would have written,
+    /// or worse the other way round. They share [`writable_ramp_size`] for exactly
+    /// that reason.
+    ///
+    /// `ramp` is deliberately **not** the third party here: it is stricter than
+    /// nothing and looser than X11, because the ceiling is the transport's. Where
+    /// the two differ is asserted below rather than left implicit, so collapsing
+    /// them back together reds.
     #[test]
     fn the_walk_and_the_writer_agree_on_which_sizes_are_writable() {
-        for size in [
+        let sizes = [
             0u16,
             1,
             MIN_RAMP_SIZE,
@@ -754,14 +796,29 @@ mod tests {
             256,
             4096,
             MAX_RAMP_SIZE,
+            MAX_RAMP_SIZE.saturating_add(1),
             u16::MAX,
-        ] {
+        ];
+        for size in sizes {
+            // The walk's predicate is the writer's, by construction and by name.
             assert_eq!(
                 writable_ramp_size(size),
-                ramp(0.5, size).is_some(),
+                (MIN_RAMP_SIZE..=MAX_RAMP_SIZE).contains(&size),
                 "size {size} is classified differently by the walk and the writer"
             );
+            // And the builder answers the narrower question: is this a table at
+            // all, transport aside.
+            assert_eq!(
+                ramp(0.5, size).is_some(),
+                size >= MIN_RAMP_SIZE,
+                "size {size}: the builder must bound only the floor"
+            );
         }
+
+        // The gap is the whole point of the split, so name it.
+        let beyond_x11 = MAX_RAMP_SIZE.saturating_add(1);
+        assert!(ramp(0.5, beyond_x11).is_some());
+        assert!(!writable_ramp_size(beyond_x11));
     }
 
     /// A CRTC with no gamma hardware holds nothing; one whose table is too large
