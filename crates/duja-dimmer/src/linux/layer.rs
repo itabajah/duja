@@ -118,8 +118,9 @@ const REPLY_BUDGET: Duration = Duration::from_secs(2);
 
 /// The `zwlr_layer_surface_v1` namespace every Duja overlay is created with.
 ///
-/// Compositors expose this to users for per-surface rules (sway's `layer` criteria,
-/// Hyprland's `layerrule`), so it is a name someone might type. It is not an
+/// Some compositors expose it to users for per-surface rules — Hyprland matches it
+/// in `layerrule` — so it is a name someone might type. (sway does not: its
+/// criteria are window attributes and there is no `layer` among them.) It is not an
 /// identifier Duja reads back and nothing depends on its value.
 const NAMESPACE: &str = "duja-dimmer";
 
@@ -204,8 +205,10 @@ impl WaylandDimmer {
     /// surface above everything, `wp_viewporter` to fill it without a per-output
     /// framebuffer, and `zxdg_output_manager_v1` to know which output a display's
     /// rectangle is. [`crate::linux_caps`] reports exactly these three and in this
-    /// order, which is why a session that reaches here is one the report has
-    /// already called dimmable.
+    /// order, so a refusal here and the report always name the same interface.
+    /// Nothing *gates* this on that report — the app calls `spawn` directly and
+    /// `probe_session` is `dujactl doctor`'s — which is why the two agreeing has to
+    /// come from sharing the order rather than from one consulting the other.
     ///
     /// [`DimmerError::Os`] for a session that should have worked and did not: no
     /// compositor at `WAYLAND_DISPLAY`, a registry that answers without
@@ -916,10 +919,11 @@ impl Worker {
             1,
             1,
             ARGB_STRIDE,
-            // `argb8888`, not `xrgb8888`. Every compositor is required to support
-            // both, and the wrong one of the two is a fully opaque black rectangle
-            // over the monitor at every dim level — the Wayland shape of the X11
-            // hazard `choose_argb_visual` exists for.
+            // `argb8888`, not `xrgb8888`. The protocol says every renderer
+            // *should* support both and that any other format is optional, so this
+            // is the pair that can be assumed — and the wrong one of the two is a
+            // fully opaque black rectangle over the monitor at every dim level,
+            // the Wayland shape of the X11 hazard `choose_argb_visual` exists for.
             wl_shm::Format::Argb8888,
             &self.handle,
             (),
@@ -966,11 +970,18 @@ impl Worker {
         self.current.retain(|entry| entry.id != overlay.id);
     }
 
-    /// Destroy one overlay's three objects, innermost first.
+    /// Destroy one overlay's three objects, the `wl_surface` last.
     ///
-    /// Order matters: `wp_viewport` and `zwlr_layer_surface_v1` both hold state on
-    /// the `wl_surface`, and destroying the surface out from under either is
-    /// `no_surface` on the next request that touches it.
+    /// **Only that last part is required**, and it is required by the core
+    /// protocol rather than by either extension: a `wl_surface` destroyed while it
+    /// still has a role object raises `defunct_role_object`. `wp_viewport`'s
+    /// `no_surface` error does not apply here in either order, because the protocol
+    /// excepts the one request this sends: `no_surface` is raised by all of that
+    /// interface's requests *"except 'destroy'"*, and `zwlr_layer_surface_v1` has
+    /// no such error at all — its five are `invalid_surface_state`,
+    /// `invalid_size`, `invalid_anchor`, `invalid_keyboard_interactivity` and
+    /// `invalid_exclusive_edge`. Viewport first is tidiness; surface last is the
+    /// rule.
     fn forget(overlay: &Overlay) {
         overlay.viewport.destroy();
         overlay.layer.destroy();

@@ -7,10 +7,12 @@
 //!
 //! - **What the surface asks not to be moved for.** `set_exclusive_zone`
 //!   defaults to `0`, which asks the compositor to *move the surface out from
-//!   under* anything holding an exclusive zone. For a panel, that is correct. For
-//!   a dimmer it leaves a bright undimmed strip exactly where the panel is. The
-//!   value a dimmer wants is `-1`, and the protocol names wallpapers and lock
-//!   screens as the precedent.
+//!   under* anything holding an exclusive zone. That default is a **notification**'s
+//!   value in the protocol's own worked example — *"a notification might set its
+//!   exclusive zone to 0, so that it is moved to avoid occluding the panel"*, where
+//!   the panel itself sets `10`. For a dimmer it leaves a bright undimmed strip
+//!   exactly where the panel is. The value a dimmer wants is `-1`, and the same
+//!   example names wallpapers and lock screens as the precedent.
 //! - **Whether an omitted size is even legal.** `set_size(0, 0)` asks the
 //!   compositor to size the surface, which is the only way to get this right
 //!   under fractional scaling. But *"you must set your anchor to opposite edges
@@ -236,13 +238,23 @@ pub fn dim_pool_offset(alpha: u8) -> i32 {
 /// same event. A near-match would mean the two have diverged, and dimming the
 /// nearest output would then be a guess about which monitor the user meant.
 ///
-/// # `taken` is what makes mirroring work
+/// # `taken`, because a rectangle need not identify an output
 ///
-/// Two mirrored outputs are two `wl_output`s at one logical rectangle, and the
-/// layer above sends one command per *display*, so both commands carry the same
-/// bounds. Without excluding what is already dimmed, both overlays would land on
-/// the first output: one monitor dimmed twice, the other not at all, and no error
+/// Nothing stops two outputs sharing a logical rectangle: sway has no mirror mode
+/// and will place two monitors at the same origin if a user configures it that way.
+/// The layer above then sends one command per *display*, both carrying the same
+/// bounds, and without excluding what is already dimmed both overlays land on the
+/// first output — one monitor dimmed twice, the other not at all, and no error
 /// anywhere. `taken` is the indices the caller's live overlays already hold.
+///
+/// **This is not the mirroring case, and an earlier draft said it was.** The two
+/// layer-shell compositors that implement mirroring both *withdraw* the replica's
+/// `wl_output` global — `KWin`'s `Workspace::updateOutputs` skips a replicated
+/// output before it becomes a `LogicalOutput`, and Hyprland's `ProtocolManager`
+/// says so outright (*"mirrored outputs should have their global removed, as they
+/// are not physical parts of the layout"*). A mirrored pair is therefore one
+/// output, one surface, one dim. The rule stands on the configured-overlap case
+/// instead, which is the one that is actually reachable.
 ///
 /// An output whose `zxdg_output_v1` geometry has not arrived yet is `None` and is
 /// never chosen. That is a display left undimmed for one apply rather than an
@@ -487,11 +499,12 @@ mod tests {
         );
     }
 
-    /// The mirroring case, which is the whole reason `taken` exists. Two outputs
-    /// at one rectangle receive one overlay each; without this both commands
-    /// resolve to output 0 and the second monitor is never dimmed.
+    /// Two monitors a user has placed at the same origin receive one overlay
+    /// each; without `taken` both commands resolve to output 0 and the second
+    /// monitor is never dimmed. Not the mirroring case — see [`take_output`] for
+    /// why a mirrored pair is one `wl_output` rather than two.
     #[test]
-    fn two_outputs_mirroring_one_rectangle_get_one_overlay_each() {
+    fn two_outputs_sharing_one_rectangle_get_one_overlay_each() {
         let outputs = [Some(at(0)), Some(at(0))];
         let wanted = DisplayBounds::new(0, 0, 1920, 1080);
 

@@ -208,13 +208,19 @@ pub const LAYER_SHELL: &str = "zwlr_layer_shell_v1";
 /// backend: a doctor line saying "overlay: available" for a session the backend
 /// then refuses is worse than either answer alone.
 ///
-/// In practice this never decides anything, and that is the intent. It is a stable
-/// protocol from 2016 and both implementations of layer-shell ship it — wlroots as
-/// `types/wlr_viewporter.c`, `KWin` as `src/wayland/viewporter.cpp` — so a registry
-/// with `zwlr_layer_shell_v1` and no `wp_viewporter` is not a configuration anyone
-/// has. It is checked because "nobody has that" is an argument for the check being
-/// cheap, not for the failure being survivable: unchecked, it is a `bind` that
-/// fails at startup on a session the report has already told the user is fine.
+/// It is a stable protocol from 2016 and every implementation checked ships it —
+/// wlroots as `types/wlr_viewporter.c`, `KWin` as `src/wayland/viewporter.cpp`,
+/// Mutter as `src/wayland/meta-wayland-viewporter.c` — so this is expected never to
+/// fire.
+///
+/// **Expected, not proven, and that is the reason it is a check at all.**
+/// `zwlr_layer_shell_v1` has at least five independent server implementations —
+/// wlroots, `KWin`, Hyprland's own, Smithay's (which niri and COSMIC build on), and
+/// Mir's — so no enumeration here can establish that none of them lacks
+/// `wp_viewporter`, and one that grew a sixth would not update this comment. An
+/// unchecked assumption of that shape fails as a `bind` error at startup on a
+/// session the report has already told the user is fine; a checked one is a line in
+/// `dujactl doctor` naming the interface.
 pub const VIEWPORTER: &str = "wp_viewporter";
 
 /// The interface that says *which output* an overlay belongs on.
@@ -369,9 +375,10 @@ const WAYLAND_OVERLAY_INTERFACES: [&str; 3] = [LAYER_SHELL, VIEWPORTER, XDG_OUTP
 /// Whether this registry can host a click-through dimming surface.
 ///
 /// The first missing one wins, and that is why [`LAYER_SHELL`] is first: the answer
-/// is a sentence a user reads. A GNOME session has none of the three, and telling
-/// it about `wp_viewporter` — which Mutter does implement — would send someone
-/// looking for a bug that is not there.
+/// is a sentence a user reads. A GNOME session has **two** of the three — Mutter
+/// implements `wp_viewporter` and `zxdg_output_manager_v1` and has no layer-shell
+/// at all — so `zwlr_layer_shell_v1` is both the true answer there and the only one
+/// that does not send someone looking for a Mutter bug that is not there.
 fn wayland_overlay(globals: &[&str]) -> Capability {
     for interface in WAYLAND_OVERLAY_INTERFACES {
         match from_registry(globals, interface) {
@@ -594,15 +601,21 @@ mod tests {
         );
     }
 
-    /// Which of the two is named matters, because the sentence is printed. A
-    /// session with neither is a GNOME session, and pointing it at `wp_viewporter`
-    /// — which Mutter does implement — would send someone looking for a bug that
-    /// is not there.
+    /// Which one is named matters, because the sentence is printed. The registry
+    /// below is a GNOME session: Mutter implements `wp_viewporter` and
+    /// `zxdg_output_manager_v1` and no layer-shell, so naming either of the other
+    /// two would send someone looking for a Mutter bug that is not there.
     #[test]
-    fn a_session_missing_both_is_told_about_the_shell_first() {
+    fn a_gnome_session_is_told_about_the_shell_and_not_the_other_two() {
         let caps = resolve(
             env(Some("wayland-0"), None),
-            &connected(&["wl_compositor", "wl_shm", "xdg_wm_base"]),
+            &connected(&[
+                "wl_compositor",
+                "wl_shm",
+                "xdg_wm_base",
+                VIEWPORTER,
+                XDG_OUTPUT,
+            ]),
         );
 
         assert_eq!(
