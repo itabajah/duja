@@ -214,9 +214,19 @@ impl OutputDisplay {
 /// If the confirming round trip fails survivably — a `WouldBlock` flush — the
 /// `set_gamma` is already buffered and will be sent, so the compositor may apply
 /// the table for as long as it takes the `destroy` queued behind it to arrive.
-/// That is a flicker, not a state: what cannot happen is the caller being told the
-/// engage failed while the output stays dimmed and claimed, which is what this
-/// wording used to promise and did not deliver.
+/// Usually that is a flicker: `BufferedSocket::flush` writes what the kernel will
+/// take and keeps the rest, so a blocked flush normally leaves the whole batch
+/// queued and the compositor never sees the table at all.
+///
+/// **Normally, not always** — an earlier draft of this paragraph said "what cannot
+/// happen is the caller being told the engage failed while the output stays dimmed
+/// and claimed", which assumed that flush is all-or-nothing. It is not: it advances
+/// over the outgoing buffer per `send_msg` and retains only the unsent remainder,
+/// so a partial write can land the 8-byte `set_gamma` and not the `wl_display.sync`
+/// behind it. The compositor then has the table while this call reports failure.
+/// Every later call flushes before it does anything else, so the queued `destroy`
+/// goes out then; what is left is a session where no later call ever comes, and
+/// `docs/debt.md` carries that rather than this pretending it is impossible.
 pub fn set_gamma(display: &OutputDisplay, factor: f32) -> Result<(), DimmerError> {
     with_session(|session| session.write(&display.name, factor)).map_err(Into::into)
 }
@@ -357,9 +367,17 @@ pub fn restore_all() -> RestoreReport {
         .roundtrip("restore_all")
         .is_err_and(|fault| fault.connection_lost);
     // This is the one entry point that does not go through `with_session`, so it is
-    // also the one that has to throw a dead connection away itself. Leaving it
-    // `Open` would keep every later call failing against a socket that is already
-    // gone, when reconnecting would have worked.
+    // also the one that has to throw a dead connection away itself: it holds the
+    // slot by reference rather than taking it, so a lost connection would otherwise
+    // stay parked there as `Open`.
+    //
+    // What that costs without this is **one** call, not all of them —
+    // `with_session` opens with `std::mem::take`, so the next call would pick the
+    // dead session up, fail, decline to put it back, and leave the slot `Empty` for
+    // the call after that to reconnect from. The commit that added this line said
+    // "every later call would then fail", which is the self-healing that was
+    // already there. Worth keeping anyway: one spurious failure on a path whose
+    // whole job is to put the screen back is one too many.
     if lost {
         *guard = SessionSlot::Empty;
     }
@@ -738,10 +756,15 @@ impl Session {
     /// `destroy` stays queued, so the next call that reaches the compositor sends
     /// it. The residual is a session where that next call never comes — the write
     /// failed, the caller fell back to the overlay, and nothing touches the gamma
-    /// path again — in which the output stays claimed (though not dimmed, since the
-    /// `set_gamma` ahead of it is unsent too) until the process exits. `docs/debt.md`
-    /// carries it beside the read-side twin, which has the same root: on this
-    /// connection only a call drains, and only a call flushes.
+    /// path again — in which the output stays claimed until the process exits.
+    ///
+    /// Usually claimed but not dimmed, because a blocked flush normally leaves the
+    /// whole batch queued and the `set_gamma` never reached the compositor either.
+    /// Not reliably: `flush` retains only what it could not send, so a partial write
+    /// can deliver the `set_gamma` and stop before the sync behind it, leaving the
+    /// output dimmed as well as claimed. `docs/debt.md` carries both beside the
+    /// read-side twin, which has the same root: on this connection only a call
+    /// drains, and only a call flushes.
     fn give_up(&mut self, key: u32) {
         self.state.release(key);
         let _ = self.flush();

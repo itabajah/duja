@@ -182,11 +182,15 @@ impl GammaDisplay {
 /// knowing. On X11 it does **not** prove the ramp is not live — the write is
 /// confirmed with a round trip, and a connection that dies in between reports a
 /// failure for a table that is on the screen and **stays** there. On Wayland no
-/// residue can outlast the object: the dim exists only while that lives, and every
-/// failing path destroys it on the way out. The worst case is therefore a table
-/// applied and dropped again — a flicker, possibly a little after the call
-/// returned, because a send that blocked leaves both requests queued for whatever
-/// flushes next — rather than a dim left on the screen with nothing tracking it.
+/// residue can outlast the **object**, and every failing path destroys the object
+/// on the way out — so the usual worst case is a table applied and dropped again,
+/// a flicker, possibly a little after the call returned because a send that blocked
+/// leaves the requests queued for whatever flushes next.
+///
+/// The exception is narrow and worth naming rather than rounding away: a flush that
+/// blocks part-way can deliver the table and not the request behind it, and if
+/// nothing on this process ever calls the gamma path again, the queued release
+/// never goes out. `docs/debt.md` carries it.
 pub fn set_gamma(display: &GammaDisplay, factor: f32) -> Result<(), DimmerError> {
     match &display.0 {
         Channel::Crtc(crtc) => gamma::set_gamma(crtc, factor),
