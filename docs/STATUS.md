@@ -1588,11 +1588,21 @@ platforms. Which mechanism exists is a property of the session rather than the
 build, so `LinuxDimmer` picks when it starts. Since `#130` a Wayland session
 gets `WaylandDimmer` — a `zwlr_layer_shell_v1` surface per dimmed **output**,
 sized by the compositor and filled by scaling one pixel through a
-`wp_viewport`. It still reports `Unsupported` where the compositor offers none
-of the three interfaces `linux_caps` names, which on GNOME is the case, and
-that is the one place the `#122` mirror-pin consequence still bites; `debt.md`
-carries it, now narrowed from Wayland to a Wayland session without
-layer-shell.
+`wp_viewport`. It reports `Unsupported` when the compositor is missing **any
+one** of the three interfaces `linux_caps` names, not only when it has none of
+them: on GNOME that one is `zwlr_layer_shell_v1`, Mutter implementing the other
+two.
+
+`#130` also **retired** the `#122` mirror-pin consequence for Linux rather than
+narrowing it again. The pin needs a clone group with two members, and a Wayland
+session cannot produce one: the surface token is the `wl_output` name,
+`linux_outputs::resolve` refuses a contested connector↔output pair outright, so
+no two displays ever carry the same token, so `group_clones` only ever yields
+singletons and `fan_out_hardware` writes nothing for a lone software-only
+member. X11 *can* group — its token is the CRTC, which two outputs genuinely
+share — and X11 has had the overlay the pin assumes since wave 4b-3. `debt.md`
+carries the one consequence that survives, which is hypothetical rather than
+live.
 
 **A Wayland session is refused twice, by two gates that cover each other.** The
 environment check (`WAYLAND_DISPLAY` is set ⇒ not X11) is cheap and skips the
