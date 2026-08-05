@@ -678,10 +678,12 @@ impl Session {
     /// answered it. So the first pass reliably learns that an output exists and
     /// just as reliably does not learn its name.
     ///
-    /// The second pass is queued behind those binds and closes it. It is skipped
-    /// when every tracked output already has a name, so the ordinary case still
-    /// costs one round trip; a compositor too old to name its outputs at all pays
-    /// the extra one on these two cold paths and nowhere else.
+    /// The second pass closes it: the registry handler flushes the `bind` as it
+    /// makes it, so by the time this sync goes out the compositor has already been
+    /// asked and the `name` is on its way back. It is skipped when every tracked
+    /// output already has a name, so the ordinary case still costs one round trip;
+    /// a compositor too old to name its outputs at all pays the extra one on these
+    /// two cold paths and nowhere else.
     fn resync(&mut self, context: &str) -> Result<(), Fault> {
         self.roundtrip(context)?;
         if self.state.outputs.iter().any(|t| t.name.is_none()) {
@@ -1379,25 +1381,29 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
         // `track` would survive that: `resync`'s second pass would send the
         // `bind`, at the cost of a round trip. (It still has a second pass, but
         // now only to *read* the `name` events this flush's `bind` provokes.)
-        // `forget` would not. There is no later path that can help it — `write`'s
-        // "went away" arm returns without `give_up`, `release` misses `find` and
-        // returns before its own round trip, and `release_all` cannot see an entry
-        // `forget` has already removed — so the queued `destroy` would sit unsent
-        // while the compositor went on holding this client's control, exclusively,
-        // on an output nothing here can name any more.
+        // `forget` is the one that would not come out even, because a withdrawn
+        // output has no per-output path left to carry its `destroy`: `write`'s
+        // "went away" arm returns without `give_up`, `release` misses `find`, and
+        // `release_all` cannot see an entry `forget` has already removed.
         //
-        // **The dropped failure is a narrower version of that, not an absent one,
-        // and the first draft of this comment claimed otherwise.** It said the
-        // failure could be dropped "for the same reason `give_up` drops its own,
-        // and a connection too broken to flush is one whose teardown will release
-        // the output anyway" — which is doubly wrong: `give_up`'s doc retracts
-        // exactly that sentence, because a `WouldBlock` is a full buffer rather
-        // than a dying connection; and `give_up`'s residual is the milder one,
-        // since some later call flushes for it and nothing flushes for this. So a
-        // `WouldBlock` here reproduces the leak this flush exists to close,
-        // bounded only by process lifetime. It is dropped anyway because an event
-        // handler has nowhere to report to and blocking inside a dispatch is
-        // worse, and `docs/debt.md` records it beside its two siblings.
+        // **What that argument does *not* establish is a worse bound, and the
+        // first two drafts of this comment claimed one.** The buffer is per
+        // connection, not per object: `EventQueue::roundtrip` queues its sync and
+        // then loops `blocking_dispatch` until the answer arrives, and the answer
+        // cannot arrive before the sync is sent — so every round trip reaches the
+        // flush, and sends whatever else is sitting there, an orphaned `destroy`
+        // included. Any later `set_gamma`, `enumerate_gamma_displays`,
+        // `restore_all`, or `release` for a *tracked* name therefore rescues it.
+        //
+        // So a `WouldBlock` here has the same bound `give_up`'s does, and the two
+        // genuine escapes are the ones [`set_gamma`]'s own residual paragraph
+        // names: a `release` for a name this session no longer tracks, and
+        // `with_session`'s transport gate, which returns before touching the
+        // connection at all. The failure is dropped anyway — an event handler has
+        // nowhere to report to, and blocking inside a dispatch is worse than the
+        // residual — and `docs/debt.md` records it beside its siblings. What the
+        // flush buys is promptness, which for an exclusively-held output is worth
+        // having on its own.
         let _ = connection.flush();
     }
 }
