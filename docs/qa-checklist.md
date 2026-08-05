@@ -98,16 +98,21 @@ with the phases; keep entries as observable behaviors, not implementation.
       is legitimately larger than the number of screens: the walk deliberately includes
       CRTCs driving nothing, because a gamma table survives its CRTC being disabled.
       Individual CRTCs are named (`DP-1 (CRTC 63)`, or `CRTC-3` for an idle one) only
-      on the failure lines. This is the whole of Linux's gamma crash recovery today —
+      on the failure lines. This is the whole of **X11's** gamma crash recovery today —
       there is no marker and no automatic recovery until the tray lands — so if this
-      does not work, a user who ever hits a stuck ramp has nothing.
+      does not work, an X11 user who ever hits a stuck ramp has nothing. A Wayland
+      session needs none of it; see the `kill -9` row below for why, and for the
+      check that the compositor really does behave that way.
 - [ ] **`sudo duja --restore` does not lie.** sudo drops `XAUTHORITY`, so the X
       connection fails. The command must print the reason on a `failed:` line and exit
       **non-zero**, never "nothing to restore" with exit 0. Same check for `DISPLAY`
       pointed at a server that is not running. This is the one failure mode a user with
       a dark screen will actually hit, because sudo is what people try first.
-- [ ] **`duja --restore` on a Wayland session refuses rather than lying.** It must
-      print "nothing to restore" and exit 0, **not** a count. `DISPLAY` is set to
+- [ ] **`duja --restore` on a Wayland session has nothing to restore, and says so.**
+      It must print "nothing to restore" and exit 0, **not** a count. (The title used
+      to say "refuses"; since the `wlr-gamma-control` channel landed this is an
+      emptiness rather than a refusal — that channel cannot leave a ramp for a
+      separate process to find. The `XRandR` half below is still a refusal.) `DISPLAY` is set to
       Xwayland on almost every Wayland session, and Duja must refuse on two independent
       grounds: the environment (`WAYLAND_DISPLAY` is set) and the server itself (the
       `XWAYLAND` extension is present). Check the second in isolation by clearing
@@ -161,8 +166,67 @@ with the phases; keep entries as observable behaviors, not implementation.
 - [ ] Wayland session that advertises **neither** wlr protocol: software dimming reports itself
       unavailable *with the reason*, and hardware paths still work.
 - [ ] Wayland session advertising `zwlr_gamma_control_manager_v1` while another client
-      (`wlsunset`, `gammastep`) already holds it: the bind is refused and the report flips to
-      unavailable rather than claiming a gamma path Duja does not have.
+      (`wlsunset`, `gammastep`) already holds it: an attempt to take gamma is **refused**,
+      and Duja reports that refusal to whatever asked rather than claiming a dim it does
+      not have. Check the refusal, not the doctor line: this row used to say "the report
+      flips to unavailable", and it does not. `SurfaceCaps::refuse_gamma` exists for that
+      downgrade and has no caller — `dujactl doctor` reads the registry only, and a probe
+      that *bound* a control to find out would take the output away from `wlsunset` to
+      answer a read-only question. `docs/debt.md` carries the gap.
+      <!-- On wlroots 0.17+ the refusal arrives as `failed` on Duja's new object. On 0.16
+           and earlier (which includes the 0.15 in Debian bookworm and Ubuntu 22.04 LTS)
+           `get_gamma_control` instead
+           evicted the *incumbent* and answered the newcomer with nothing at all, so
+           Duja's object receives neither `gamma_size` nor `failed`. Both end in a
+           refusal; on the older ones, expect `wlsunset` to lose its tint as a side
+           effect, which is the compositor's behaviour and not Duja's. -->
+- [ ] **`duja --restore` on a Wayland session must not connect at all.** The row above
+      already pins the *answer* ("nothing to restore", exit 0); this one pins the
+      reason. A `zwlr_gamma_control_v1` ramp dies with the client that set it, so a
+      fresh process has nothing to find and opening a socket to discover that would
+      also mean binding a gamma manager for nothing. Watch with
+      `WAYLAND_DEBUG=1 duja --restore`: there must be **no** `zwlr_gamma_control`
+      traffic. (A `wl_display` connect from some other part of startup is fine; a
+      `get_gamma_control` is not.)
+- [ ] **A Wayland gamma dim survives being killed.** This is the property the whole
+      Wayland gamma design rests on and the one no CI lane can check. Once the tray
+      lands and a ramp can be engaged: dim a display through the gamma path on a
+      wlroots session, confirm the screen changed, then `kill -9` the process. The
+      screen must return to normal **immediately**, with no `duja --restore` and no
+      relaunch. If it stays dark, the compositor is not restoring on client
+      disconnect and the `#124` crash-guard debt row was narrowed to X11 wrongly.
+- [ ] **A Wayland gamma restore releases the output rather than parking on it.**
+      Not "the tint comes back": an earlier version of this row said that and it was
+      unrunnable, because stopping `gammastep` destroys `gammastep`'s own control and
+      the compositor drops its tint at that instant — there is nothing left for Duja
+      to restore, so the tester would have seen a neutral screen before Duja touched
+      anything and been told it was a bug. What the destroy actually buys is the
+      **release**, so check that instead. With `gammastep` stopped, dim through the
+      gamma path, undim, then start `gammastep` again: **it must acquire the output
+      and its tint must appear.**
+      <!-- One caveat on wlroots 0.16 and earlier, where a newcomer facing a held
+           output evicts the incumbent and is itself never registered: if the tool
+           under test retries after a failed acquire, its second attempt finds the
+           output free *because its first attempt evicted Duja*, and a tint would
+           appear over an output Duja never released. If it does appear, confirm
+           Duja is not still holding the control (`WAYLAND_DEBUG=1`, look for a
+           `zwlr_gamma_control_v1` this process has not destroyed) before passing
+           the row. Not an issue on 0.17+, which refuses the newcomer instead. --> Do not use "`gammastep` logs a gamma-control failure" as the signal:
+      that is what a still-holding Duja looks like on 0.17+, but on 0.16 and earlier
+      (which includes the 0.15 in Debian bookworm and Ubuntu 22.04 LTS)
+      `get_gamma_control` answers a newcomer
+      facing a held output with *nothing at all*, so `gammastep` would show no tint
+      and log nothing. Absent tint is the failure on both.
+- [ ] **(Not yet checkable) Nothing read-only steals gamma from a running
+      `gammastep`.** Marked so rather than dressed up as a gate, because **no shipped
+      command can fail it today**: the rule belongs to `enumerate_gamma_displays`,
+      which deliberately reports every named output *without* taking a control, and
+      nothing calls it. `dujactl doctor` goes through `probe_session`, which reads the
+      registry and binds no gamma manager; `dujactl list`, `duja --once` and
+      `duja --restore` never reach the enumeration either. An earlier version of this
+      row listed those four commands as the test, which reproduced the defect it was
+      written to fix. Becomes live the first time something on Linux enumerates gamma
+      displays: run `gammastep`, run that thing, and `gammastep` must keep its tint.
       <!-- Written by capability, not by compositor name, per ADR-0011: a name table would fail
            a correct implementation the day Mutter shipped either protocol. `dujactl doctor`
            prints which protocols the session offered, so these are checkable without guessing

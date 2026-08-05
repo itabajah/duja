@@ -60,10 +60,17 @@ pub fn gamma_support_from_hdr(hdr_active: Option<bool>) -> GammaSupport {
 /// see. Windows writes an identity ramp to each display it enumerated and can
 /// report a per-display failure. macOS makes one global
 /// `CGDisplayRestoreColorSyncSettings` call that returns `void`, so its `failed`
-/// is always empty and its "restored" means the profile, not identity. Linux
-/// writes identity to every `RandR` CRTC with a writable table — **including ones
-/// driving no output**, because a gamma table survives its CRTC being disabled —
-/// and can fail per CRTC like Windows.
+/// is always empty and its "restored" means the profile, not identity.
+///
+/// Linux gives one report built from two channels, because a process can be
+/// holding state on either. On **X11** it writes identity
+/// to every `RandR` CRTC with a writable table — **including ones driving no
+/// output**, because a gamma table survives its CRTC being disabled — and can fail
+/// per CRTC like Windows. On **Wayland** it is not a rescue at all and cannot be:
+/// an output's dim lasts only as long as the client's gamma-control object, and
+/// the compositor destroys every object a client holds when the socket closes, so
+/// there is never a stale ramp for a later process to find. It hands back the
+/// controls *this* process holds, names those outputs, and never fails.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RestoreReport {
     /// Names of the displays whose gamma was restored.

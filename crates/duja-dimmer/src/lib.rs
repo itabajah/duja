@@ -33,9 +33,11 @@
 //!   output rather than placed at a rectangle, and the compositor rather than Duja
 //!   decides how big it is. A session with no overlay mechanism reports
 //!   `Unsupported` and the app disables software dimming with hardware control
-//!   intact. The opt-in gamma channel is `RandR`'s per-CRTC transfer table, and
-//!   it is refused outright on a Wayland session rather than written to Xwayland,
-//!   where it would be accepted and change nothing.
+//!   intact. The opt-in gamma channel splits the same way and is chosen the same
+//!   way: `RandR`'s per-CRTC transfer table on X11, `zwlr_gamma_control_v1`'s
+//!   per-output table on Wayland. Neither is ever used on the other's session —
+//!   an `XRandR` ramp on a Wayland session would land on Xwayland's virtual CRTCs,
+//!   be accepted, and change nothing.
 //! - On other Unix targets, `StubDimmer` records-and-succeeds so higher layers
 //!   can run their logic unchanged (documented no-op).
 //!
@@ -65,15 +67,29 @@
 //! marker machinery and its `restore_all` is a single
 //! `CGDisplayRestoreColorSyncSettings` call.
 //!
-//! Linux splits the two. X11 overlay windows are owned by the connection and the
-//! server destroys them when it closes, so they need no marker. An X11 **gamma
-//! ramp** is the opposite: the server holds each CRTC's table and does not reset
-//! it when the client that wrote it disconnects, which is exactly why
-//! `xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command. So Linux sits with Windows on crash safety and
-//! needs the same guard — which it does not have yet, deliberately, because
-//! nothing on Linux engages a ramp until the tray does. `restore_all` and
-//! `duja --restore` are the manual rescue in the meantime; see
-//! `src/linux/gamma.rs` and `docs/debt.md`.
+//! Linux takes three answers rather than one, and which of the two gamma answers
+//! applies is a property of the session rather than of the build. Overlays need no
+//! marker on either transport:
+//! an X11 override-redirect window is owned by the connection and a
+//! `zwlr_layer_shell_v1` surface by the compositor, and both die with the socket.
+//! The **gamma** channels are where the two transports part company, and they land
+//! on opposite sides of Windows and macOS:
+//!
+//! - **X11 sits with Windows.** The X server holds each CRTC's table and does not
+//!   reset it when the client that wrote it disconnects, which is exactly why
+//!   `xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command. So it
+//!   needs the same guard Windows carries — which it does not have yet,
+//!   deliberately, because nothing on Linux engages a ramp until the tray does.
+//!   `restore_all` and `duja --restore` are the manual rescue in the meantime.
+//! - **Wayland sits with macOS.** A `zwlr_gamma_control_v1` ramp lives exactly as
+//!   long as the client's object, the compositor destroys every object a client
+//!   holds when its socket closes, and destroying the object drops the dim — so
+//!   the recovery is automatic and survives `SIGKILL`. There is nothing for a
+//!   rescue pass to find and no marker to write. What comes back is the output's
+//!   *default*, not some other client's curve: the compositor keeps no such table,
+//!   and this protocol cannot read one either.
+//!
+//! See `src/linux/gamma.rs`, `src/linux/wlr_gamma.rs` and `docs/debt.md`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
@@ -119,6 +135,15 @@ pub mod linux_gamma;
 // and with a sharper edge than most — two of these four are protocol errors,
 // which terminate the connection rather than degrading.
 pub mod linux_layer;
+
+// The four decisions a `zwlr_gamma_control_v1` ramp makes that are arithmetic
+// rather than Wayland: whether the session has this channel at all, how long the
+// table is, how many bytes that is, and what those bytes are. Unconditional for
+// the same reason as its neighbours, and with the sharpest edge of any of them —
+// the compositor reads a fixed byte count and answers a short one by **killing
+// the client connection**, which would take the layer-shell overlay down with the
+// ramp.
+pub mod linux_wlr_gamma;
 
 // Everything in this crate that talks to a Linux display server. Nothing it does
 // can run in CI, which is exactly why each of its modules is this small.
@@ -233,16 +258,22 @@ pub fn min_gamma_factor() -> f32 {
 ///   that is safe on macOS and not on Windows is crash behaviour, not validation:
 ///   the window server restores a process's transfer tables when it exits, so a
 ///   crashed ramp self-heals.)
-/// - **Linux**: `RandR`'s `SetCrtcGamma` validates nothing either — a table of
-///   zeroes is a legal request, because `ProcRRSetCrtcGamma` checks only that the
-///   table length matches the CRTC's — so [`GAMMA_FLOOR`] is the only floor there
-///   is and it is genuinely reachable. (An earlier draft cited `xgamma -gamma 0`
-///   here. That is the wrong evidence twice over: `xgamma` drives
-///   XFree86-VidModeExtension rather than this API, and it bounds its own argument
-///   below at 0.1.)
-///   Note this is **not** the macOS situation: an X11 ramp *does* outlive the
-///   process that set it (see the crate docs), so the absence of an OS clamp is
-///   not paired with an OS safety net. `clamp_gamma` is load-bearing here.
+/// - **Linux**: neither channel validates the values. `RandR`'s `SetCrtcGamma`
+///   accepts a table of zeroes, because `ProcRRSetCrtcGamma` checks only that the
+///   table length matches the CRTC's, and `zwlr_gamma_control_v1.set_gamma`
+///   likewise checks only the byte count. So [`GAMMA_FLOOR`] is the only floor
+///   there is on either, and it is genuinely reachable. (An earlier draft cited
+///   `xgamma -gamma 0` here. That is the wrong evidence twice over: `xgamma`
+///   drives XFree86-VidModeExtension rather than either API, and it bounds its own
+///   argument below at 0.1.)
+///
+///   Whether that is paired with an OS safety net depends on the transport, not on
+///   Linux. An **X11** ramp outlives the process that set it (see the crate docs),
+///   so there is no net and `clamp_gamma` is load-bearing. A **Wayland** ramp is
+///   undone when the client's gamma-control object dies, which the compositor does
+///   when the socket closes — that *is* the macOS situation, so a too-dark ramp
+///   there self-heals on exit. `clamp_gamma` still applies to both, because
+///   self-healing on exit is no comfort to someone looking at a black screen.
 /// - **Other targets**: there is no gamma backend at all, so the value is inert.
 #[cfg(not(windows))]
 #[must_use]
@@ -307,6 +338,27 @@ pub fn gamma_is_advisory() -> bool {
 ///   is on. No rule exists to comply with, and `CGGetDisplayTransferByTable`
 ///   returns the written values while the screen is unchanged, so verification by
 ///   readback does not detect it either.
+/// - **Linux (Wayland)**: `true`, and the companion bullet below says why X11 is
+///   too. The function cannot tell them apart, because it is chosen per target
+///   rather than per session. Here the reason is **timing rather than silence** — on
+///   the versions where it is a reason at all. A driver that refuses an
+///   otherwise-valid LUT *is* reported; an earlier draft of this bullet said it was
+///   not, and named an API (`wlr_output_set_gamma`) that wlroots removed in 0.18.
+///
+///   Where it is reported from moved. On wlroots **0.16 and earlier**,
+///   `gamma_control_handle_set_gamma` calls `gamma_control_apply` inline, which
+///   runs `wlr_output_test` and sends `failed` **before the request handler
+///   returns** — so the refusal precedes the `done` of Duja's confirming round trip
+///   and that round trip catches it. On **0.17 and later** the test moved to the
+///   scene layer (`scene_output_state_attempt_gamma`, which sends `failed` when
+///   `wlr_output_test_state` rejects the LUT) and runs on a later **output
+///   commit** — after `set_gamma` has already returned `Ok`. There the caller has
+///   recorded a live ramp by the time the refusal arrives, with no rule it could
+///   have satisfied to avoid it.
+///
+///   So `true` is right for current wlroots and conservative for older ones. The
+///   verdict does not turn on it either way: the X11 ground below is unconditional,
+///   and this function is chosen per target rather than per session.
 /// - **Linux (X11)**: `true`, and for a reason read out of the X server's source
 ///   rather than inferred. `ProcRRSetCrtcGamma` ends
 ///   `RRCrtcGammaSet(crtc, red, green, blue); return Success;` — it **discards**

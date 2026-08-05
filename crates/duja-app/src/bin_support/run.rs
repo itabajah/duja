@@ -240,9 +240,16 @@ fn wait_for_quit() {
 /// Windows writes a linear ramp per display (`restore_identity`); macOS asks the
 /// window server to reload each display's `ColorSync` profile
 /// (`CGDisplayRestoreColorSyncSettings`), which for a calibrated display is by
-/// definition *not* identity; Linux writes a linear ramp per `RandR` CRTC, which
+/// definition *not* identity; **X11** writes a linear ramp per `RandR` CRTC, which
 /// is the Windows shape — X11 has no server-side profile to reload, so identity
 /// is all there is to write back.
+///
+/// A **Wayland** session reaches neither wording, and the constant is per target
+/// rather than per transport, so this is a caveat rather than a bug: the Wayland
+/// channel hands its outputs back rather than writing anything, and the count it
+/// reports for a `duja --restore` process is always zero (that process holds no
+/// gamma controls), so the summary line never fires. It would be wrong the moment
+/// something on Linux restored a Wayland output through this path.
 #[cfg(windows)]
 const RESTORE_SUMMARY: &str = "restored identity gamma on";
 #[cfg(target_os = "macos")]
@@ -252,12 +259,16 @@ const RESTORE_SUMMARY: &str = "restored identity gamma on";
 
 /// What a restored row *is*, which is also not the same on all three.
 ///
-/// Windows and macOS enumerate displays. Linux enumerates **CRTCs**, and
+/// Windows and macOS enumerate displays. **X11** enumerates **CRTCs**, and
 /// deliberately includes ones that are driving no output: a `RandR` gamma table
 /// survives its CRTC being disabled, so a monitor unplugged between a crash and
 /// the rescue would otherwise be skipped and come back dark after the user had
 /// been told the rescue succeeded. That makes the count larger than the number of
 /// monitors on any multi-head GPU, so it must not call them displays.
+///
+/// Same caveat as [`RESTORE_SUMMARY`]: a Wayland session's rows would be outputs
+/// rather than CRTCs, and the constant cannot say so because it is chosen per
+/// target. Inert today for the same reason — the count is always zero there.
 #[cfg(any(windows, target_os = "macos"))]
 const RESTORE_UNIT: &str = "display(s)";
 #[cfg(target_os = "linux")]
@@ -319,9 +330,16 @@ const RESTORE_UNIT: &str = "CRTC(s)";
 /// update; `duja-dimmer`'s `src/linux/gamma.rs` documents the composition that fixes
 /// it, and `docs/debt.md` carries both.
 ///
-/// A Wayland session is refused rather than served: the ramp would land on
-/// Xwayland's virtual CRTCs and change nothing, so the command prints "nothing to
-/// restore" and exits 0 instead of claiming a restore it did not perform.
+/// **On a Wayland session there is genuinely nothing to rescue**, and the reason
+/// changed with the `wlr-gamma-control` backend. The old one was that Duja refused
+/// the channel: an `XRandR` ramp there would land on Xwayland's virtual CRTCs and
+/// change nothing. That is still true of *that* channel and it is still refused.
+/// But a Wayland session now has a gamma channel of its own, and it cannot leave a
+/// ramp behind at all — a `zwlr_gamma_control_v1` table lives only as long as the
+/// client's object, and the compositor destroys every object a client holds when
+/// its socket closes, so a crashed Duja's dim is undone before this command could
+/// run. So "nothing to restore" and exit 0 is now an emptiness rather than a
+/// refusal, and it is the honest answer rather than a shrug.
 ///
 // Deliberately not an intra-doc link: `bin_support::gamma::GammaBackend` is
 // `cfg`-gated to the platforms that have a tray, and this function is no longer.
@@ -361,8 +379,9 @@ pub(crate) fn restore() -> ExitCode {
 /// the main display when enumeration is empty, so `restored` is never empty and
 /// the "nothing to restore" line cannot fire — noted so nobody reads it as a
 /// macOS "Duja had nothing to clean up" signal. On Linux it is the ordinary
-/// answer for a session with no `XRandR` gamma channel at all (Wayland, or no
-/// display server), which is a refusal rather than an emptiness, but the line is
+/// answer for a session with no gamma ramp to reach: no display server, or a
+/// Wayland session, where the `XRandR` channel is refused *and* the
+/// `wlr-gamma-control` one has nothing a separate process could find. The line is
 /// right either way: there is nothing this command can reset.
 // RATIONALE (dead_code): the pure decision stays cross-platform so its tests run
 // on every CI OS, but it is only *called* from the gamma-capable arm above.

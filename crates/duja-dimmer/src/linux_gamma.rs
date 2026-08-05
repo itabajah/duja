@@ -22,8 +22,15 @@
 //!
 //! # An `XRandR` ramp outlives the process that set it
 //!
-//! Worth stating here rather than only in the backend, because it is the one
-//! property that separates Linux from macOS and puts it with Windows. The X
+//! Worth stating here rather than only in the backend, because it is the property
+//! that decides whether a crash guard is needed — and it separates the two Linux
+//! transports from each other rather than Linux from anything. **X11** is with
+//! Windows. **Wayland** is not: a `zwlr_gamma_control_v1` dim lives only as long as
+//! the client's object, and destroying that object — which the compositor does when
+//! the socket closes — drops the client's colour transform, so the output is back
+//! to its default with nothing left to rescue ([`crate::linux_wlr_gamma`]). Not
+//! "the compositor puts the original back": it keeps no earlier client's table, and
+//! saying otherwise is the misreading `#131` had to retract from six files. The X
 //! server holds each CRTC's gamma table as server state and does **not** reset it
 //! when the client that wrote it disconnects — which is exactly why
 //! `xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command that exits
@@ -34,7 +41,7 @@
 //! `duja --restore` is the manual rescue and exists today. The automatic one — a
 //! crash marker and an RAII guard, the machinery Windows carries — is owed to the
 //! wave that gives Linux a tray to engage gamma from; nothing engages a ramp on
-//! Linux until then. `docs/debt.md` carries it.
+//! Linux until then. `docs/debt.md` carries it, scoped to this transport.
 
 use duja_core::dimmer::clamp_gamma;
 
@@ -49,6 +56,15 @@ use crate::linux_caps::Transport;
 pub const MIN_RAMP_SIZE: u16 = 2;
 
 /// The largest gamma table `SetCrtcGamma` can carry over a core X11 connection.
+///
+/// **A property of the X11 transport, not of gamma tables**, which is why it is
+/// named for it and why [`ramp`] no longer enforces it. `zwlr_gamma_control_v1`
+/// sends its table over a **file descriptor** rather than in a request, so nothing
+/// on the Wayland side is bounded by a request length; a compositor that reports a
+/// larger `gamma_size` is asking for a table this crate must be able to build.
+/// Enforcing it in the pure builder would refuse a Wayland ramp for an X11 reason.
+/// [`writable_ramp_size`] is where the X11 writer and the X11 rescue walk both
+/// read it.
 ///
 /// Derived, not chosen, and the derivation is checked against x11rb's own
 /// serialiser rather than read off the spec alone. The core protocol caps a
@@ -116,8 +132,12 @@ const RAMP_MAX: f64 = 65_535.0;
 /// screen that never changed, and Duja would then record a ramp as live and later
 /// "restore" it. Refusing before the write is correct under either branch.
 ///
-/// A Wayland session's gamma channel is `wlr-gamma-control` (or the compositor's
-/// own night-light), which is a different backend and a later wave.
+/// A Wayland session's gamma channel is `wlr-gamma-control`, which is a different
+/// backend and lives in [`crate::linux_wlr_gamma`] and `linux::wlr_gamma`.
+/// [`crate::linux_wlr_gamma::wlr_gamma_refusal`] is this function's mirror image,
+/// and `every_session_has_at_most_one_gamma_channel_and_a_desktop_has_one` pins
+/// the pair against each other: no session may claim both, and every session with
+/// a display server must claim one.
 #[must_use]
 pub const fn xrandr_refusal(transport: Transport) -> Option<&'static str> {
     match transport {
@@ -206,12 +226,19 @@ pub fn crtc_token(crtc: u32) -> String {
 /// darken linearly. One channel is returned rather than three: the dim is neutral
 /// by construction, and the caller sends the same slice as red, green and blue.
 ///
-/// Returns `None` for a size outside [`MIN_RAMP_SIZE`]`..=`[`MAX_RAMP_SIZE`]
-/// rather than guessing — see both constants for why each bound exists. Total and
-/// never-panicking otherwise.
+/// Returns `None` below [`MIN_RAMP_SIZE`] rather than guessing: a one-entry table
+/// has no input axis and a zero-entry one is a CRTC reporting no gamma hardware,
+/// and neither is a table this could scale.
+///
+/// **There is no upper bound here.** [`MAX_RAMP_SIZE`] is what one *X11 request*
+/// can carry, which is a fact about that transport and not about gamma; the
+/// Wayland channel hands its table over a file descriptor and has no such
+/// ceiling. The X11 writer applies it, and [`writable_ramp_size`] is the shared
+/// predicate. Total and never-panicking either way — `size` is a `u16`, so the
+/// largest allocation this can be asked for is 64 Ki entries.
 #[must_use]
 pub fn ramp(factor: f32, size: u16) -> Option<Vec<u16>> {
-    if !(MIN_RAMP_SIZE..=MAX_RAMP_SIZE).contains(&size) {
+    if size < MIN_RAMP_SIZE {
         return None;
     }
     let f = f64::from(clamp_gamma(factor));
@@ -277,8 +304,17 @@ pub fn crtc_label(crtc: u32, outputs: &[String]) -> String {
 ///   [`GammaSupport::Unknown`](crate::GammaSupport::Unknown) ⇒ the caller plans an
 ///   overlay). Wayland is where Linux HDR actually happens — gamescope, `KWin`,
 ///   and `wp_color_management_v1` — and there is no way to ask from here. Unknown
-///   is the honest answer and it costs nothing, because a Wayland session has no
-///   `XRandR` gamma channel to use it with in the first place ([`xrandr_refusal`]).
+///   is the honest answer, and it is the **safe** one rather than the free one.
+///
+///   An earlier draft of this paragraph said it "costs nothing, because a Wayland
+///   session has no `XRandR` gamma channel to use it with in the first place". The
+///   premise was true and is not any more: that session has a
+///   `zwlr_gamma_control_v1` channel now ([`crate::linux_wlr_gamma`]), so this
+///   verdict is what refuses it. Refusing is still right — a ramp under HDR is at
+///   best ignored and at worst a display Duja believes it has dimmed and has not —
+///   but it is now a cost rather than a freebie, and `docs/debt.md` carries the
+///   remedy: `wp_color_management_v1`'s per-output `tf_named`, which answers the
+///   question instead of guessing at it.
 ///
 /// # The X11 answer has one documented exception, and it does not change it
 ///
@@ -408,12 +444,15 @@ pub const fn randr_lists_crtcs(major: u32, minor: u32) -> bool {
     major > 1 || (major == 1 && minor >= 3)
 }
 
-/// Whether a CRTC's reported gamma-table length is one this crate can write.
+/// Whether a CRTC's reported gamma-table length is one **X11** can write.
 ///
-/// The same bound [`ramp`] enforces, named so the walk and the writer cannot
-/// drift apart — and so the walk can tell the two reasons for failing it apart,
-/// which it must, because they are not the same thing to a rescue:
-/// [`ramp_size_is_absent`] says which.
+/// Both bounds, and it is now the only place the upper one is applied: [`ramp`]
+/// enforces the floor alone, because that is the half that is a property of gamma
+/// tables rather than of a transport. So this is what the X11 writer and the X11
+/// rescue walk share, and what stops them drifting apart.
+///
+/// The walk also has to tell the two failures apart, because they are not the same
+/// thing to a rescue: [`ramp_size_is_absent`] says which.
 #[must_use]
 pub const fn writable_ramp_size(size: u16) -> bool {
     MIN_RAMP_SIZE <= size && size <= MAX_RAMP_SIZE
@@ -642,13 +681,29 @@ mod tests {
     fn an_impossible_table_size_is_refused() {
         assert_eq!(ramp(0.5, 0), None, "a CRTC with no gamma table");
         assert_eq!(ramp(0.5, 1), None, "a table with no input axis");
-        assert_eq!(
-            ramp(0.5, MAX_RAMP_SIZE.saturating_add(1)),
-            None,
-            "a table larger than one request can carry"
-        );
-        assert_eq!(ramp(0.5, u16::MAX), None);
-        assert!(ramp(0.5, MAX_RAMP_SIZE).is_some(), "the bound is inclusive");
+        // And nothing above: a size only one transport cannot carry is still a
+        // table, which `a_table_too_large_for_an_x11_request_is_still_a_table`
+        // pins from the other side.
+        assert!(ramp(0.5, MIN_RAMP_SIZE).is_some(), "the floor is inclusive");
+        assert!(ramp(0.5, u16::MAX).is_some());
+        assert!(ramp(0.5, MAX_RAMP_SIZE).is_some());
+    }
+
+    /// **The bound `ramp` carried is X11's *request length*, not a property of
+    /// gamma tables.** `SetCrtcGamma` is a core request and so is capped by
+    /// `maximum_request_length`; a `zwlr_gamma_control_v1` ramp travels over a
+    /// **file descriptor**, which has no such ceiling. A compositor reporting a
+    /// `gamma_size` above it is asking for a table this module must be able to
+    /// build, and refusing it here would be refusing a Wayland ramp for an X11
+    /// reason. The transport's bound belongs to the transport.
+    #[test]
+    fn a_table_too_large_for_an_x11_request_is_still_a_table() {
+        let size = MAX_RAMP_SIZE.saturating_add(1);
+        let table = ramp(0.5, size).expect("a size only X11 cannot carry is still a table");
+        assert_eq!(table.len(), usize::from(size));
+        assert!(identity_ramp(size).is_some());
+        // ...and the X11 writer is what has to refuse it.
+        assert!(!writable_ramp_size(size));
     }
 
     /// The derivation in [`MAX_RAMP_SIZE`]'s docs, asserted rather than trusted:
@@ -742,11 +797,18 @@ mod tests {
         assert!(!randr_lists_crtcs(0, 9));
     }
 
-    /// The writable bound must be exactly `ramp`'s, or the walk and the writer
-    /// disagree about which CRTCs are addressable.
+    /// The X11 walk and the X11 writer must classify every size identically, or
+    /// the rescue reports a CRTC unreachable that the writer would have written,
+    /// or worse the other way round. They share [`writable_ramp_size`] for exactly
+    /// that reason.
+    ///
+    /// `ramp` is deliberately **not** the third party here: it is stricter than
+    /// nothing and looser than X11, because the ceiling is the transport's. Where
+    /// the two differ is asserted below rather than left implicit, so collapsing
+    /// them back together reds.
     #[test]
     fn the_walk_and_the_writer_agree_on_which_sizes_are_writable() {
-        for size in [
+        let sizes = [
             0u16,
             1,
             MIN_RAMP_SIZE,
@@ -754,14 +816,52 @@ mod tests {
             256,
             4096,
             MAX_RAMP_SIZE,
+            MAX_RAMP_SIZE.saturating_add(1),
             u16::MAX,
-        ] {
+        ];
+        // Written out rather than re-derived from the two constants, and that is
+        // the whole value of the assertion. Until `#131` this compared
+        // `writable_ramp_size` against `ramp`'s own bound — two independently
+        // written predicates. Moving the ceiling out of `ramp` left it comparing
+        // the function against `(MIN_RAMP_SIZE..=MAX_RAMP_SIZE).contains(..)`,
+        // which is a hand-copy of the body: it still reds if the *body* changes,
+        // but it can no longer catch a wrong **constant**, because both sides
+        // would move together. Literals are the only third party left.
+        //
+        // (An earlier version of this comment said that copy "cannot fail". It
+        // can — `#131`'s own first commit recorded the same mutation reddening two
+        // tests — and the weakening is the narrower one described above.)
+        let expected = [
+            (0_u16, false),
+            (1, false),
+            (2, true),
+            (256, true),
+            (4096, true),
+            (43_688, true),
+            (43_689, false),
+            (u16::MAX, false),
+        ];
+        for (size, writable) in expected {
             assert_eq!(
                 writable_ramp_size(size),
-                ramp(0.5, size).is_some(),
-                "size {size} is classified differently by the walk and the writer"
+                writable,
+                "size {size} is not the writability the walk and the writer share"
             );
         }
+        for size in sizes {
+            // And the builder answers the narrower question: is this a table at
+            // all, transport aside.
+            assert_eq!(
+                ramp(0.5, size).is_some(),
+                size >= MIN_RAMP_SIZE,
+                "size {size}: the builder must bound only the floor"
+            );
+        }
+
+        // The gap is the whole point of the split, so name it.
+        let beyond_x11 = MAX_RAMP_SIZE.saturating_add(1);
+        assert!(ramp(0.5, beyond_x11).is_some());
+        assert!(!writable_ramp_size(beyond_x11));
     }
 
     /// A CRTC with no gamma hardware holds nothing; one whose table is too large
@@ -818,6 +918,12 @@ mod tests {
     /// drive a ramp, and the two sessions with no `XRandR` channel are also the two
     /// that report `Unknown`. Reds a Wayland arm that answered `Some(false)` —
     /// which would advertise a gamma channel that silently writes to Xwayland.
+    ///
+    /// The **`XRandR`** channel, which is what the name means and is worth spelling
+    /// out now that it is no longer the only one. Since `#131` a Wayland session
+    /// has `wlr-gamma-control`, so "the one with a channel" would be two of them if
+    /// read literally — and this test would still be right, because that channel is
+    /// gated by the same `Unknown` verdict for a reason `docs/debt.md` carries.
     #[test]
     fn the_only_session_allowed_to_drive_a_ramp_is_the_one_with_a_channel() {
         for transport in [Transport::X11, Transport::Wayland, Transport::None] {
