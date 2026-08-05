@@ -210,23 +210,33 @@ impl OutputDisplay {
 /// transport's dim exists only while the object does, and every failing path
 /// destroys the object on the way out.
 ///
-/// "Behind" rather than "live", because one path is momentary rather than empty.
-/// If the confirming round trip fails survivably — a `WouldBlock` flush — the
-/// `set_gamma` is already buffered and will be sent, so the compositor may apply
-/// the table for as long as it takes the `destroy` queued behind it to arrive.
-/// Usually that is a flicker: `BufferedSocket::flush` writes what the kernel will
-/// take and keeps the rest, so a blocked flush normally leaves the whole batch
-/// queued and the compositor never sees the table at all.
+/// "Behind" rather than "live", because the residue is bounded by the object's
+/// lifetime rather than by this call's. If the confirming round trip fails
+/// survivably — a `WouldBlock` flush — the `set_gamma` is already buffered, the
+/// `destroy` is queued behind it, and both go out together whenever something
+/// next flushes. Two orderings follow, and the usual one is invisible: the
+/// compositor gets the table and the release in the same batch, so it applies and
+/// drops the transform without a frame in between.
 ///
-/// **Normally, not always** — an earlier draft of this paragraph said "what cannot
+/// The other ordering exists because `flush` is **not** all-or-nothing, which an
+/// earlier draft of this paragraph assumed when it promised that "what cannot
 /// happen is the caller being told the engage failed while the output stays dimmed
-/// and claimed", which assumed that flush is all-or-nothing. It is not: it advances
-/// over the outgoing buffer per `send_msg` and retains only the unsent remainder,
-/// so a partial write can land the 8-byte `set_gamma` and not the `wl_display.sync`
-/// behind it. The compositor then has the table while this call reports failure.
-/// Every later call flushes before it does anything else, so the queued `destroy`
-/// goes out then; what is left is a session where no later call ever comes, and
-/// `docs/debt.md` carries that rather than this pretending it is impossible.
+/// and claimed". `BufferedSocket::flush` advances over the outgoing buffer per
+/// `send_msg` and retains only the unsent remainder, so a partial write can land
+/// the 8-byte `set_gamma` and stop before the 12-byte `wl_display.sync` behind it.
+/// The compositor then has the table while this call reports failure, and it keeps
+/// it until the queued `destroy` is sent.
+///
+/// **What sends it is another call, and there is no guarantee one comes.** The
+/// obvious bound — "every later call flushes first" — is not true of this backend
+/// and its own neighbours say so: [`release`] returns before its round trip for an
+/// output this session never dimmed, and [`with_session`]'s transport gate returns
+/// before touching the connection at all, which is exactly the
+/// `WAYLAND_DISPLAY`-disappeared case [`super::restore_all`] is shaped around. So
+/// the residual is real rather than theoretical, it is bounded by the process
+/// lifetime (the compositor drops every transform when the socket closes), and
+/// `docs/debt.md` carries it beside the read-side twin instead of this claiming a
+/// bound it does not have.
 pub fn set_gamma(display: &OutputDisplay, factor: f32) -> Result<(), DimmerError> {
     with_session(|session| session.write(&display.name, factor)).map_err(Into::into)
 }
@@ -376,8 +386,10 @@ pub fn restore_all() -> RestoreReport {
     // dead session up, fail, decline to put it back, and leave the slot `Empty` for
     // the call after that to reconnect from. The commit that added this line said
     // "every later call would then fail", which is the self-healing that was
-    // already there. Worth keeping anyway: one spurious failure on a path whose
-    // whole job is to put the screen back is one too many.
+    // already there. Worth keeping anyway, and worth being exact about who pays:
+    // the spurious failure lands on the next call that goes through
+    // `with_session` — a dim or a release — not on another `restore_all`, which
+    // does not.
     if lost {
         *guard = SessionSlot::Empty;
     }
