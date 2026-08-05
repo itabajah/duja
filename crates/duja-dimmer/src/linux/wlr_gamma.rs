@@ -353,7 +353,16 @@ pub fn restore_all() -> RestoreReport {
     // A round trip rather than a flush, for the same reason [`release`] uses one:
     // it is also the only thing that reads the socket, and this is one of the four
     // paths that ever touch this connection.
-    let _ = session.roundtrip("restore_all");
+    let lost = session
+        .roundtrip("restore_all")
+        .is_err_and(|fault| fault.connection_lost);
+    // This is the one entry point that does not go through `with_session`, so it is
+    // also the one that has to throw a dead connection away itself. Leaving it
+    // `Open` would keep every later call failing against a socket that is already
+    // gone, when reconnecting would have worked.
+    if lost {
+        *guard = SessionSlot::Empty;
+    }
     RestoreReport {
         restored,
         failed: Vec::new(),
@@ -718,10 +727,21 @@ impl Session {
     /// and the protocol grants that claim exclusively — so the wait would be at a
     /// colour-temperature tool's expense.
     ///
-    /// The flush's own failure is dropped on purpose. This is already the error
-    /// path, the error being returned is the one worth reporting, and a connection
-    /// too broken to flush is one the compositor is about to tear down anyway —
-    /// which restores the table this was trying to hand back.
+    /// The flush's own failure is dropped, and the honest reason is narrower than
+    /// the one an earlier draft gave. It said "a connection too broken to flush is
+    /// one the compositor is about to tear down anyway", which is exactly what
+    /// [`survivable`] denies for the case this is most often reached from: a
+    /// `WouldBlock` is a full socket buffer, not a dying connection.
+    ///
+    /// What is true is that there is nothing better to do here. This is already an
+    /// error path; the fault being returned is the one worth reporting; and the
+    /// `destroy` stays queued, so the next call that reaches the compositor sends
+    /// it. The residual is a session where that next call never comes — the write
+    /// failed, the caller fell back to the overlay, and nothing touches the gamma
+    /// path again — in which the output stays claimed (though not dimmed, since the
+    /// `set_gamma` ahead of it is unsent too) until the process exits. `docs/debt.md`
+    /// carries it beside the read-side twin, which has the same root: on this
+    /// connection only a call drains, and only a call flushes.
     fn give_up(&mut self, key: u32) {
         self.state.release(key);
         let _ = self.flush();
@@ -833,9 +853,10 @@ impl Session {
             // connection, invisible to `release`, `release_all` and `forget` alike,
             // with the output claimed exclusively the whole time.
             control.destroy();
-            let _ = self.connection.flush();
+            let _ = self.flush();
             return Err(Fault::refused(format!(
-                "{name} went away as its gamma control was being taken"
+                "{name} went away between the lookup for its gamma control and \
+                 the request for one"
             )));
         };
         tracked.control = Some(Control {

@@ -174,7 +174,8 @@ with the phases; keep entries as observable behaviors, not implementation.
       that *bound* a control to find out would take the output away from `wlsunset` to
       answer a read-only question. `docs/debt.md` carries the gap.
       <!-- On wlroots 0.17+ the refusal arrives as `failed` on Duja's new object. On 0.16
-           and earlier (Debian bookworm, Ubuntu 22.04 LTS) `get_gamma_control` instead
+           and earlier (which includes the 0.15 in Debian bookworm and Ubuntu 22.04 LTS)
+           `get_gamma_control` instead
            evicted the *incumbent* and answered the newcomer with nothing at all, so
            Duja's object receives neither `gamma_size` nor `failed`. Both end in a
            refusal; on the older ones, expect `wlsunset` to lose its tint as a side
@@ -205,7 +206,8 @@ with the phases; keep entries as observable behaviors, not implementation.
       and its tint must appear.** That is the whole gate, and it is the same on every
       wlroots. Do not use "`gammastep` logs a gamma-control failure" as the signal:
       that is what a still-holding Duja looks like on 0.17+, but on 0.16 and earlier
-      (Debian bookworm, Ubuntu 22.04 LTS) `get_gamma_control` answers a newcomer
+      (which includes the 0.15 in Debian bookworm and Ubuntu 22.04 LTS)
+      `get_gamma_control` answers a newcomer
       facing a held output with *nothing at all*, so `gammastep` would show no tint
       and log nothing. Absent tint is the failure on both.
 - [ ] **(Not yet checkable) Nothing read-only steals gamma from a running

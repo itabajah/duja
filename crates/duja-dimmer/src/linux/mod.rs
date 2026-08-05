@@ -181,10 +181,12 @@ impl GammaDisplay {
 /// The two channels differ in what an `Err` proves, and the difference is worth
 /// knowing. On X11 it does **not** prove the ramp is not live — the write is
 /// confirmed with a round trip, and a connection that dies in between reports a
-/// failure for a table that is on the screen and **stays** there. On Wayland the
-/// residue cannot outlast the call: the dim exists only while the object does, and
-/// every failing path destroys the object on the way out, so the worst case is a
-/// table applied and dropped again rather than one left on the screen.
+/// failure for a table that is on the screen and **stays** there. On Wayland no
+/// residue can outlast the object: the dim exists only while that lives, and every
+/// failing path destroys it on the way out. The worst case is therefore a table
+/// applied and dropped again — a flicker, possibly a little after the call
+/// returned, because a send that blocked leaves both requests queued for whatever
+/// flushes next — rather than a dim left on the screen with nothing tracking it.
 pub fn set_gamma(display: &GammaDisplay, factor: f32) -> Result<(), DimmerError> {
     match &display.0 {
         Channel::Crtc(crtc) => gamma::set_gamma(crtc, factor),

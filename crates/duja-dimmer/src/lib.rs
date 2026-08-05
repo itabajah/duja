@@ -340,15 +340,25 @@ pub fn gamma_is_advisory() -> bool {
 ///   readback does not detect it either.
 /// - **Linux**: `true` on both transports, for two different reasons, and the
 ///   function cannot tell them apart because it is chosen per target rather than
-///   per session. On **Wayland** the reason is **timing rather than silence**, and
-///   an earlier draft of this bullet got that backwards. A driver that refuses an
-///   otherwise-valid LUT *is* reported: wlroots' `scene_output_state_attempt_gamma`
-///   calls `wlr_gamma_control_v1_send_failed_and_destroy` when `wlr_output_test_state`
-///   rejects it. But it does so on a later **output commit**, which is after
-///   `set_gamma`'s confirming round trip has already returned `Ok` — so the caller
-///   has recorded a live ramp by the time the refusal arrives, and there is no rule
-///   it could have satisfied to avoid that. That is the question this function
-///   asks, and the answer is still `true`.
+///   per session. On **Wayland** the reason is **timing rather than silence** — on
+///   the versions where it is a reason at all. A driver that refuses an
+///   otherwise-valid LUT *is* reported; an earlier draft of this bullet said it was
+///   not, and named an API (`wlr_output_set_gamma`) that wlroots removed in 0.18.
+///
+///   Where it is reported from moved. On wlroots **0.16 and earlier**,
+///   `gamma_control_handle_set_gamma` calls `gamma_control_apply` inline, which
+///   runs `wlr_output_test` and sends `failed` **before the request handler
+///   returns** — so the refusal precedes the `done` of Duja's confirming round trip
+///   and that round trip catches it. On **0.17 and later** the test moved to the
+///   scene layer (`scene_output_state_attempt_gamma`, which sends `failed` when
+///   `wlr_output_test_state` rejects the LUT) and runs on a later **output
+///   commit** — after `set_gamma` has already returned `Ok`. There the caller has
+///   recorded a live ramp by the time the refusal arrives, with no rule it could
+///   have satisfied to avoid it.
+///
+///   So `true` is right for current wlroots and conservative for older ones. The
+///   verdict does not turn on it either way: the X11 ground below is unconditional,
+///   and this function is chosen per target rather than per session.
 /// - **Linux (X11)**: `true`, and for a reason read out of the X server's source
 ///   rather than inferred. `ProcRRSetCrtcGamma` ends
 ///   `RRCrtcGammaSet(crtc, red, green, blue); return Success;` — it **discards**

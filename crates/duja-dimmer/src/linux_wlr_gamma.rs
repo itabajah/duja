@@ -61,10 +61,12 @@
 //! with no owner and survives the client that wrote it — which is why
 //! `xrandr --gamma` works as a one-shot command, and why Linux needs the crash
 //! marker Windows carries. A `zwlr_gamma_control_v1` ramp is the opposite: the
-//! protocol says destroying the object *"restores the original gamma tables"*, and
-//! the compositor destroys every object a client holds when its socket closes. So
-//! the guarantee survives `SIGKILL`, a panic, and a power-managed session teardown
-//! alike, and a Wayland session has **nothing for a rescue pass to find**.
+//! protocol says destroying the object *"restores the original gamma tables"* — by
+//! which it means the output's default, not an earlier client's curve, since the
+//! compositor keeps no such thing — and the compositor destroys every object a
+//! client holds when its socket closes. So the guarantee survives `SIGKILL`, a
+//! panic, and a power-managed session teardown alike, and a Wayland session has
+//! **nothing for a rescue pass to find**.
 //!
 //! That is also why there is no `identity_table` next to [`gamma_table`]. Writing
 //! the identity table would be the X11 restore, and on this transport it is the
