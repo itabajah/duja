@@ -737,9 +737,9 @@ impl Session {
     ///
     /// Current wlroots refuses the **newcomer**: `get_gamma_control` finds an
     /// existing control for the output and answers `failed` on the object it just
-    /// created, leaving the incumbent untouched. Before `9108717d`
-    /// (2023-03-06, so wlroots 0.16 and earlier — which is what Debian bookworm
-    /// and Ubuntu 22.04 LTS ship) it did the opposite: it sent `failed` to the
+    /// created, leaving the incumbent untouched. Before `9108717d` (2023-03-06, so
+    /// wlroots 0.16 and earlier — which includes the 0.15 that Debian bookworm and
+    /// Ubuntu 22.04 LTS ship) it did the opposite: it sent `failed` to the
     /// **incumbent**, destroyed it, and returned without registering or answering
     /// the newcomer at all. On those versions this object receives *neither*
     /// `gamma_size` nor `failed`.
@@ -910,9 +910,10 @@ impl Session {
 /// is what makes the rewind load-bearing rather than tidy. Since `15f2f664`
 /// (2023-06-05, so wlroots 0.17 onward) it is
 /// `pread(fd, table, table_size, 0)`, which ignores the file position entirely.
-/// Before that it was a plain `read(fd, table, table_size)`, which does not — and
-/// wlroots 0.15/0.16 is what Debian bookworm and Ubuntu 22.04 LTS ship, so that is
-/// a live configuration and not history.
+/// Before that it was a plain `read(fd, table, table_size)`, which does not, and
+/// the fix reached neither the 0.15 nor the 0.16 branch — both branch heads still
+/// `read`. **Debian bookworm and Ubuntu 22.04 LTS both ship 0.15**, so this is a
+/// live configuration rather than history.
 ///
 /// A descriptor sent over `SCM_RIGHTS` is a `dup`, so the compositor **shares this
 /// side's open file description and its offset**. An un-rewound memfd is at EOF

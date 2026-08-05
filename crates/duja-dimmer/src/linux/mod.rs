@@ -319,13 +319,21 @@ pub fn restore_all() -> RestoreReport {
 /// costs the Wayland gamma channel, because [`crate::GammaSupport::Unknown`] does
 /// not allow gamma and a caller that respects the verdict will plan an overlay.
 ///
-/// That is the safe direction and it is not the finished one. The remedy is a
-/// real probe rather than a better guess: `wp_color_management_v1` reports a
-/// per-output image description whose `tf_named` names the transfer function, so
-/// a PQ or HLG output is knowably HDR and anything else is knowably not. It is
-/// already in the `wayland-protocols` version this crate builds against.
-/// `docs/debt.md` carries it, owed by the wave that gives Linux a gamma sink to
-/// engage from.
+/// That is the safe direction and it is not the finished one. The remedy is a real
+/// probe rather than a better guess: the colour-management protocol hands each
+/// output an image description whose `tf_named` names the transfer function, so a
+/// `st2084_pq` or `hlg` output is knowably HDR.
+///
+/// Two caveats belong here rather than only in `docs/debt.md`, because this is the
+/// doc a maintainer implementing it will read. It does **not** answer for every
+/// output: the sibling `tf_power` event describes a pure power curve and names no
+/// function, so that case stays `Unknown` as surely as a compositor with no colour
+/// management at all. And while the XML ships in the `wayland-protocols` version
+/// this workspace already builds against, it is behind the **`staging`** feature,
+/// which neither the workspace manifest nor this crate enables — it resolves today
+/// only through feature unification with another dependency, which is not
+/// something to build on. `docs/debt.md` carries both, owed by the wave that gives
+/// Linux a gamma sink to engage from.
 #[must_use]
 pub fn is_hdr_active() -> Option<bool> {
     hdr_active_for(session_transport())

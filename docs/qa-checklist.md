@@ -108,8 +108,11 @@ with the phases; keep entries as observable behaviors, not implementation.
       **non-zero**, never "nothing to restore" with exit 0. Same check for `DISPLAY`
       pointed at a server that is not running. This is the one failure mode a user with
       a dark screen will actually hit, because sudo is what people try first.
-- [ ] **`duja --restore` on a Wayland session refuses rather than lying.** It must
-      print "nothing to restore" and exit 0, **not** a count. `DISPLAY` is set to
+- [ ] **`duja --restore` on a Wayland session has nothing to restore, and says so.**
+      It must print "nothing to restore" and exit 0, **not** a count. (The title used
+      to say "refuses"; since the `wlr-gamma-control` channel landed this is an
+      emptiness rather than a refusal — that channel cannot leave a ramp for a
+      separate process to find. The `XRandR` half below is still a refusal.) `DISPLAY` is set to
       Xwayland on almost every Wayland session, and Duja must refuse on two independent
       grounds: the environment (`WAYLAND_DISPLAY` is set) and the server itself (the
       `XWAYLAND` extension is present). Check the second in isolation by clearing

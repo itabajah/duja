@@ -145,12 +145,11 @@ pub fn table_bytes(size: u16) -> Option<usize> {
     }
     // Checked rather than `saturating`: a saturated length is a *wrong* length,
     // and a wrong length is the failure this whole module is shaped around. On
-    // every target this crate builds for the product is at most 393_210 and
-    // cannot overflow, so this is checked to say so rather than because it can —
-    // with one exception that makes it more than a formality. On a 16-bit `usize`
-    // target the multiplication genuinely does overflow, and `checked_mul` turns
-    // that into the `None` every caller already reads as "send no table";
-    // `saturating_mul` would hand back 65_535 and send one two thirds too short.
+    // every target this crate builds for — 32- and 64-bit desktop — the product is
+    // at most 393_210 and cannot overflow, so this cannot currently fire. It is
+    // `checked` rather than `saturating` to say what the right answer would be if
+    // it ever could: `None`, which every caller already reads as "send no table",
+    // rather than a truncated length that would be sent as if it were right.
     usize::from(size)
         .checked_mul(CHANNELS)
         .and_then(|entries| entries.checked_mul(ENTRY_BYTES))
