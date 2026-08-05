@@ -38,9 +38,11 @@
 //! that fails locally — getting it wrong takes down every other Wayland object the
 //! process holds with it.
 //!
-//! Three separate ways to get it wrong, and each of them is a decision here:
-//! [`ramp_size`] (a length that does not fit the builder), [`table_bytes`] (the
-//! byte count) and [`gamma_table`] (the bytes themselves).
+//! Three separate ways to get the **length** wrong, and each of them is a decision
+//! here: [`ramp_size`] (a length that does not fit the builder), [`table_bytes`]
+//! (the byte count) and [`gamma_table`] (the bytes themselves). With
+//! [`wlr_gamma_refusal`], which asks whether this session has the channel at all,
+//! that is the four this module exports.
 //!
 //! # The protocol's own prose says "16-byte", and it is wrong
 //!
@@ -388,8 +390,13 @@ mod tests {
         assert_eq!(Some(table.len()), table_bytes(size));
     }
 
-    /// Every size [`ramp_size`] accepts is one the other two can serve, and every
-    /// size it refuses is one they refuse too.
+    /// Every size [`ramp_size`] accepts is one the other two can serve.
+    ///
+    /// One direction only, deliberately. The converse — every size it refuses, the
+    /// others refuse too — is unstatable above `u16::MAX`, because the other two
+    /// take a `u16` and cannot be handed the value that was rejected; below it,
+    /// `a_table_is_three_ramps_of_two_byte_entries` and
+    /// `a_refused_size_produces_no_table` already pin both floors directly.
     ///
     /// The floor lives in three places — `ramp_size`, `table_bytes` and `ramp`
     /// underneath `gamma_table` — and nothing else ties them together. If they

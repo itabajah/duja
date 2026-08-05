@@ -181,9 +181,10 @@ impl GammaDisplay {
 /// The two channels differ in what an `Err` proves, and the difference is worth
 /// knowing. On X11 it does **not** prove the ramp is not live — the write is
 /// confirmed with a round trip, and a connection that dies in between reports a
-/// failure for a table that is on the screen and stays there. On Wayland it does:
-/// the ramp exists only while the object does, and every failing path destroys
-/// the object on the way out.
+/// failure for a table that is on the screen and **stays** there. On Wayland the
+/// residue cannot outlast the call: the dim exists only while the object does, and
+/// every failing path destroys the object on the way out, so the worst case is a
+/// table applied and dropped again rather than one left on the screen.
 pub fn set_gamma(display: &GammaDisplay, factor: f32) -> Result<(), DimmerError> {
     match &display.0 {
         Channel::Crtc(crtc) => gamma::set_gamma(crtc, factor),
@@ -277,8 +278,11 @@ pub fn enumerate_gamma_displays() -> Vec<GammaDisplay> {
 /// Unlike [`enumerate_gamma_displays`], this does not dispatch on the transport,
 /// and the difference is not an inconsistency. An enumeration is a question about
 /// *this* session, so asking the channel this session does not have would be
-/// asking the wrong thing. A restore is a question about what this **process** is
-/// holding — and each channel already refuses cleanly and without a syscall when
+/// asking the wrong thing. A restore is not the same question — on Wayland it asks
+/// what this **process** is holding, and on X11 it is deliberately wider, a
+/// whole-screen rescue that writes identity to CRTCs Duja never touched because an
+/// `XRandR` ramp outlives whoever set it. Asking both answers neither wrongly,
+/// because each channel refuses cleanly and without a syscall when
 /// it is not the one in play: `gamma::restore_all` stops at
 /// [`crate::linux_gamma::xrandr_refusal`] before it opens a socket, and
 /// `wlr_gamma::restore_all` returns an empty report unless it already has a live

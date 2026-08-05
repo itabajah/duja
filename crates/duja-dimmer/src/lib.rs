@@ -340,12 +340,15 @@ pub fn gamma_is_advisory() -> bool {
 ///   readback does not detect it either.
 /// - **Linux**: `true` on both transports, for two different reasons, and the
 ///   function cannot tell them apart because it is chosen per target rather than
-///   per session. On **Wayland** the compositor validates the table's length and
-///   then programs it through `wlr_output_set_gamma`, whose result is not reported
-///   back to the client on any path — there is a `failed` event, and this crate
-///   round-trips for it after every write, but it does not fire when the LUT is
-///   accepted and the driver later declines it. There is no rule a caller can
-///   satisfy to avoid that, which is the question this function asks.
+///   per session. On **Wayland** the reason is **timing rather than silence**, and
+///   an earlier draft of this bullet got that backwards. A driver that refuses an
+///   otherwise-valid LUT *is* reported: wlroots' `scene_output_state_attempt_gamma`
+///   calls `wlr_gamma_control_v1_send_failed_and_destroy` when `wlr_output_test_state`
+///   rejects it. But it does so on a later **output commit**, which is after
+///   `set_gamma`'s confirming round trip has already returned `Ok` — so the caller
+///   has recorded a live ramp by the time the refusal arrives, and there is no rule
+///   it could have satisfied to avoid that. That is the question this function
+///   asks, and the answer is still `true`.
 /// - **Linux (X11)**: `true`, and for a reason read out of the X server's source
 ///   rather than inferred. `ProcRRSetCrtcGamma` ends
 ///   `RRCrtcGammaSet(crtc, red, green, blue); return Success;` — it **discards**

@@ -62,7 +62,8 @@ pub fn gamma_support_from_hdr(hdr_active: Option<bool>) -> GammaSupport {
 /// `CGDisplayRestoreColorSyncSettings` call that returns `void`, so its `failed`
 /// is always empty and its "restored" means the profile, not identity.
 ///
-/// Linux is two answers, because it is two channels. On **X11** it writes identity
+/// Linux gives one report built from two channels, because a process can be
+/// holding state on either. On **X11** it writes identity
 /// to every `RandR` CRTC with a writable table — **including ones driving no
 /// output**, because a gamma table survives its CRTC being disabled — and can fail
 /// per CRTC like Windows. On **Wayland** it is not a rescue at all and cannot be:

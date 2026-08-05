@@ -1658,7 +1658,9 @@ a *second* Wayland connection so a fatal gamma bug cannot take the layer-shell
 overlay down with it. The table is also handed over on a **rewound** descriptor,
 which is not fastidiousness: `SCM_RIGHTS` shares the sender's file offset, and
 wlroots read this fd with a plain `read()` until `15f2f664` (2023-06-05, so 0.17),
-which is after the 0.15/0.16 that Debian bookworm and Ubuntu 22.04 LTS ship. An
+which is after the wlroots 0.15 that Debian bookworm and Ubuntu 22.04 LTS both
+ship — and after every 0.16 too, since the fix was not backported to either
+branch. An
 un-rewound memfd is at EOF, so on those the session's *first* dim would have
 killed the connection. The first draft argued from the newer `pread` alone that
 rewinding "would be a no-op dressed as care".
@@ -1704,11 +1706,13 @@ guard now would have no caller and its tests would pin a lifecycle nothing drive
 the guard as owed to the ksni wave, together with the baseline-composition that
 would stop a restore flattening a running `gammastep`'s tint.
 
-**Wayland sits with macOS, and with a stronger guarantee than macOS has.** A
-`zwlr_gamma_control_v1` ramp lives exactly as long as the client's object, the
-compositor destroys every object a client holds when its socket closes, and
-destroying restores the original table — so the recovery is automatic, survives
-`SIGKILL`. There is nothing for a rescue pass to find, so `restore_all` on that
+**Wayland sits with macOS.** A `zwlr_gamma_control_v1` dim lives exactly as long
+as the client's object, the compositor destroys every object a client holds when
+its socket closes, and destroying drops this client's colour transform — so the
+recovery is automatic and survives `SIGKILL`. What comes back is the output's
+*default*: an earlier draft called this "a stronger guarantee than macOS has" on
+the strength of a curve-restoration that does not happen, and the phrase went when
+its justification did. There is nothing for a rescue pass to find, so `restore_all` on that
 transport does not even open a connection: a `duja --restore` process holds no
 controls, and an empty clean report is the truth rather than a shrug. `#131`
 narrowed the `#124` debt row to X11 for exactly this, and checked the property

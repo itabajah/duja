@@ -25,11 +25,13 @@
 //! Worth stating here rather than only in the backend, because it is the property
 //! that decides whether a crash guard is needed — and it separates the two Linux
 //! transports from each other rather than Linux from anything. **X11** is with
-//! Windows. **Wayland** is not: a `zwlr_gamma_control_v1` ramp lives only as long
-//! as the client's object and the compositor puts the original back when it dies,
-//! which it does when the socket closes, so that transport needs no guard at all
-//! ([`crate::linux_wlr_gamma`]). The X server holds each CRTC's gamma table as
-//! server state and does **not** reset it
+//! Windows. **Wayland** is not: a `zwlr_gamma_control_v1` dim lives only as long as
+//! the client's object, and destroying that object — which the compositor does when
+//! the socket closes — drops the client's colour transform, so the output is back
+//! to its default with nothing left to rescue ([`crate::linux_wlr_gamma`]). Not
+//! "the compositor puts the original back": it keeps no earlier client's table, and
+//! saying otherwise is the misreading `#131` had to retract from six files. The X
+//! server holds each CRTC's gamma table as server state and does **not** reset it
 //! when the client that wrote it disconnects — which is exactly why
 //! `xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command that exits
 //! immediately. (Not `xgamma`, which drives XFree86-VidModeExtension, and not

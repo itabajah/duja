@@ -88,8 +88,10 @@
 //! on Wayland, so [`crate::GammaSupport`] is `Unknown` and a caller that respects
 //! it will plan an overlay instead. That is the honest answer today — Wayland is
 //! where Linux HDR actually happens and this protocol has no query for it — and
-//! `docs/debt.md` carries the remedy, which is `wp_color_management_v1`'s
-//! per-output `tf_named`.
+//! `docs/debt.md` carries the remedy, which is the colour-management protocol's
+//! per-output `tf_named` (and its limits: `tf_power` names no function, so that
+//! case stays unknown, and the XML is behind a cargo feature this workspace does
+//! not enable). [`super::is_hdr_active`] is where that is spelled out.
 
 use std::io::{Seek as _, Write as _};
 use std::os::fd::{AsFd as _, OwnedFd};
@@ -125,15 +127,21 @@ const GAMMA_CONTROL_VERSION: std::ops::RangeInclusive<u32> = 1..=1;
 ///
 /// **The floor is 2, and it is not the 1 its two neighbours use.** `xdg_output`'s
 /// `name` event is `since="2"`, and a name is the only thing this backend reads
-/// from the protocol at all — so a v1 manager would bind, produce a
-/// `zxdg_output_v1` that never sends `name`, and leave every output on a
-/// `wl_output` older than 4 with no address, which is precisely the failure the
-/// fallback exists to prevent. Asking for 2 turns that into a clean
-/// `UnsupportedVersion` and `xdg: None`.
+/// from the protocol at all — so against a v1 manager every `zxdg_output_v1` this
+/// created would be an object that can never answer the one question it was made
+/// for. Asking for 2 turns that into a clean `UnsupportedVersion` and `xdg: None`.
 ///
-/// [`super::outputs`] and [`super::layer`] correctly ask for 1, because what they
-/// read — `logical_position` and `logical_size` — has been there since 1. Only the
-/// ceiling is shared.
+/// **It changes no output's addressability**, and an earlier draft of this comment
+/// claimed it did. An output that has neither `wl_output` v4 nor `xdg_output` v2
+/// has no name either way, so [`State::named`] skips it and [`State::find`] misses
+/// it whichever floor is asked for. What the floor buys is not creating the
+/// objects.
+///
+/// [`super::layer`] asks for 1 because it reads only `logical_position` and
+/// `logical_size`, both there since 1. [`super::outputs`] also asks for 1, and it
+/// **does** read `name` — opportunistically, because it needs the geometry from
+/// v1 regardless and a name from `wl_output` when it can get one. Different needs,
+/// not a disagreement; only the ceiling is genuinely shared.
 const XDG_OUTPUT_VERSIONS: std::ops::RangeInclusive<u32> = 2..=3;
 
 /// The `wl_output` version that added the `name` event.
@@ -198,9 +206,17 @@ impl OutputDisplay {
 /// holds it, or the output has no gamma table), or if it reported a table length
 /// nothing can be built for. The caller falls back to overlay dimming.
 ///
-/// Unlike its X11 sibling, an `Err` here proves no ramp of Duja's is live: this
-/// transport's ramp exists only while the object does, and every path that fails
+/// Unlike its X11 sibling, an `Err` here leaves **no ramp of Duja's behind**: this
+/// transport's dim exists only while the object does, and every failing path
 /// destroys the object on the way out.
+///
+/// "Behind" rather than "live", because one path is momentary rather than empty.
+/// If the confirming round trip fails survivably — a `WouldBlock` flush — the
+/// `set_gamma` is already buffered and will be sent, so the compositor may apply
+/// the table for as long as it takes the `destroy` queued behind it to arrive.
+/// That is a flicker, not a state: what cannot happen is the caller being told the
+/// engage failed while the output stays dimmed and claimed, which is what this
+/// wording used to promise and did not deliver.
 pub fn set_gamma(display: &OutputDisplay, factor: f32) -> Result<(), DimmerError> {
     with_session(|session| session.write(&display.name, factor)).map_err(Into::into)
 }
@@ -277,14 +293,18 @@ pub fn release(display: &OutputDisplay) -> Result<(), DimmerError> {
 /// output with no name is skipped, because a name is the only address this
 /// protocol has and it is the token a display would be joined by.
 ///
-/// It **round-trips first**, and that is not a formality. The session outlives
+/// It **resynchronises first**, and that is not a formality. The session outlives
 /// every call and only advances when something dispatches, so a monitor plugged in
 /// after it opened is invisible to [`State::track`]'s registry handler until some
-/// call happens to talk to the compositor. Every other entry point either writes
-/// (and round-trips as part of that) or only flushes, so without this an
-/// enumeration could answer from a picture of the outputs that is arbitrarily old
-/// — which would make the hot-plug handling this connection carries decorative on
-/// the one path whose entire job is to say what is there.
+/// call happens to talk to the compositor. Without this, the one path whose entire
+/// job is to say what is there could answer from a picture of the outputs that is
+/// arbitrarily old, and the hot-plug handling this connection carries would be
+/// decorative exactly where it is most visible.
+///
+/// A transient send failure therefore makes this answer **empty** rather than
+/// stale, which is a change from the first draft: the session may know about live,
+/// named outputs and still report none. Empty is the contract this call already
+/// has for every other failure, and a stale list is the answer it exists to avoid.
 ///
 /// Returns an empty vector (never an error) when this session has no gamma
 /// channel or the connection failed, which is the graceful-degradation contract
@@ -292,7 +312,7 @@ pub fn release(display: &OutputDisplay) -> Result<(), DimmerError> {
 #[must_use]
 pub fn enumerate_gamma_displays() -> Vec<OutputDisplay> {
     match with_session(|session| {
-        session.roundtrip("enumerate")?;
+        session.resync("enumerate")?;
         Ok(session.state.named())
     }) {
         Ok(displays) => displays,
@@ -524,21 +544,47 @@ impl Session {
             .map_err(|e| Fault::dispatch(context, &e))
     }
 
-    /// The key of the output with this connector name, asking the compositor once
+    /// Bring the output list up to date, including any output that has only just
+    /// appeared.
+    ///
+    /// **One round trip is not enough here, and it is enough in [`open`]** — the
+    /// difference is what was queued before the `wl_display.sync`. In `open` the
+    /// `bind`s go out first, so the sync is answered only after the events they
+    /// generated. Here the `bind` does not exist yet: the first round trip is what
+    /// *delivers* the `wl_registry.global` for the new monitor, and
+    /// [`State::track`] queues its `bind` from inside that dispatch — after the
+    /// sync was already sent, and normally after the compositor has already
+    /// answered it. So the first pass reliably learns that an output exists and
+    /// just as reliably does not learn its name.
+    ///
+    /// The second pass is queued behind those binds and closes it. It is skipped
+    /// when every tracked output already has a name, so the ordinary case still
+    /// costs one round trip; a compositor too old to name its outputs at all pays
+    /// the extra one on these two cold paths and nowhere else.
+    fn resync(&mut self, context: &str) -> Result<(), Fault> {
+        self.roundtrip(context)?;
+        if self.state.outputs.iter().any(|t| t.name.is_none()) {
+            self.roundtrip(context)?;
+        }
+        Ok(())
+    }
+
+    /// The key of the output with this connector name, asking the compositor
     /// before giving up.
     ///
     /// The retry is the point. This session outlives every call and its output list
     /// only grows when the queue is dispatched, so a monitor plugged in after the
     /// session opened is unknown to [`State::find`] until *something* talks to the
-    /// compositor. Without the round trip below, a display that appeared after
-    /// startup would answer "no Wayland output is named DP-3" on every call for the
-    /// life of the process — and the caller is documented to address displays by
-    /// token rather than by enumerating first, so nothing else would ever heal it.
+    /// compositor. Without the resynchronisation below, a display that appeared
+    /// after startup would answer "no Wayland output is named DP-3" on every call
+    /// for the life of the process — and the caller is documented to address
+    /// displays by token rather than by enumerating first, so nothing else would
+    /// ever heal it.
     fn key_for(&mut self, name: &str) -> Result<u32, Fault> {
         if let Some(key) = self.state.find(name).map(|tracked| tracked.key) {
             return Ok(key);
         }
-        self.roundtrip("output lookup")?;
+        self.resync("output lookup")?;
         self.state
             .find(name)
             .map(|tracked| tracked.key)
@@ -548,10 +594,21 @@ impl Session {
     /// Write one output's gamma table.
     ///
     /// The length comes from the `gamma_size` event, which is sent once when the
-    /// control is created and never again — so a control reused across writes
-    /// carries a cached length, and that is safe for a reason worth stating: a
-    /// change of gamma size means a different `wlr_output`, and losing the output
-    /// makes the control inert rather than silently re-sizing it.
+    /// control is created and never again, so a control reused across writes
+    /// carries a cached length. There is no way to re-read it: the protocol has no
+    /// request for the size and no second event.
+    ///
+    /// On current wlroots that is safe, because the compositor writes against the
+    /// `ramp_size` it stored when it created the control — the same number it
+    /// advertised. On **0.16 and earlier** it is not quite: that version re-queries
+    /// `wlr_output_get_gamma_size(output)` at write time, and LUT size is a
+    /// property of the CRTC rather than the output, so an output moved to a CRTC
+    /// with a larger table would make this send a short one — which is the
+    /// `INVALID_GAMMA` connection kill this whole module is shaped around. Narrow
+    /// (it needs a CRTC reassignment *and* a hardware size difference between the
+    /// two), unfixable from the client side, and bounded by a decision already
+    /// made: this connection carries nothing but gamma, so the blast radius is one
+    /// reconnect rather than the layer-shell overlay.
     fn write(&mut self, name: &str, factor: f32) -> Result<(), Fault> {
         let key = self.key_for(name)?;
         let advertised = self.acquire(key, name)?;
@@ -611,7 +668,19 @@ impl Session {
         // protocol error that ends the connection. Without it, a refused ramp
         // would be reported to the caller as a live one — which is the failure
         // this crate's whole gamma path is shaped to avoid.
-        self.roundtrip("set_gamma")?;
+        //
+        // A *survivable* failure of this round trip — a `WouldBlock` flush — is the
+        // one case where returning `Err` would not be the whole truth, because
+        // `set_gamma` is already in the outgoing buffer and `BufferedSocket::flush`
+        // keeps what it could not send. Some later call would deliver it, and the
+        // caller, having been told the engage failed, would have planned an overlay
+        // and would never release the output. So the control is handed back on the
+        // way out: the `destroy` is queued behind the `set_gamma`, and the
+        // compositor applies the table and drops it again in the same breath.
+        if let Err(fault) = self.roundtrip("set_gamma") {
+            self.give_up(key);
+            return Err(fault);
+        }
         // Success is the control still being **there** and still healthy, not
         // merely the absence of a `failed` flag. An earlier draft asked only the
         // second question, through a helper that answered `false` for a control
@@ -723,7 +792,9 @@ impl Session {
                 return Ok(size);
             }
             // A control that failed, or that never answered, is dead weight: give
-            // it back so the next attempt starts clean.
+            // it back so the next attempt starts clean. Queued rather than flushed
+            // here on purpose — unlike the paths that return, this one goes on to
+            // create a replacement, and both requests leave together.
             //
             // Not cached, and the cost of that is real rather than notional. Two
             // of the protocol's four reasons for `failed` are another program's
@@ -753,17 +824,37 @@ impl Session {
             .state
             .manager
             .get_gamma_control(&output, &self.queue.handle(), key);
-        if let Some(tracked) = self.state.entry(key) {
-            tracked.control = Some(Control {
-                object: control,
-                size: None,
-                failed: false,
-            });
-        }
+        let Some(tracked) = self.state.entry(key) else {
+            // Nothing between the lookup above and here dispatches, so the entry
+            // cannot actually have gone in between — but if it ever could, dropping
+            // `control` here would be the one leak nothing else can reach. A
+            // `wayland-client` proxy sends no destructor on drop, so the compositor
+            // would hold that `zwlr_gamma_control_v1` for the life of the
+            // connection, invisible to `release`, `release_all` and `forget` alike,
+            // with the output claimed exclusively the whole time.
+            control.destroy();
+            let _ = self.connection.flush();
+            return Err(Fault::refused(format!(
+                "{name} went away as its gamma control was being taken"
+            )));
+        };
+        tracked.control = Some(Control {
+            object: control,
+            size: None,
+            failed: false,
+        });
         // `gamma_size` is sent the moment the object is created, so one round trip
         // settles it — and so does `failed`, which is what the compositor sends
         // instead when another client already holds this output.
-        self.roundtrip("get_gamma_control")?;
+        //
+        // Handed back on failure for the same reason the write is: a survivable
+        // fault leaves the session open with a control this call is about to stop
+        // tracking the meaning of, and an output claimed exclusively for a dim that
+        // is not going to happen.
+        if let Err(fault) = self.roundtrip("get_gamma_control") {
+            self.give_up(key);
+            return Err(fault);
+        }
         let Some(tracked) = self.state.entry(key) else {
             return Err(Fault::refused(format!(
                 "{name} went away while its gamma control was being taken"
@@ -789,9 +880,12 @@ impl Session {
         // 0.16 and earlier its user data is live, so an object left lying around
         // there is one a later edit could write through without ever having been
         // granted the output.
-        if let Some(held) = tracked.control.take() {
-            held.object.destroy();
-        }
+        //
+        // Flushed, not merely queued: this arm returns to the caller, and
+        // `give_up`'s own documentation is about exactly this — a `destroy` that
+        // sits in the outgoing buffer leaves the output claimed until something
+        // else happens to send.
+        self.give_up(key);
         Err(Fault::refused(if failed {
             format!(
                 "{name} refused a gamma control: another client holds it, or the \

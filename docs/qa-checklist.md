@@ -198,21 +198,23 @@ with the phases; keep entries as observable behaviors, not implementation.
       to restore, so the tester would have seen a neutral screen before Duja touched
       anything and been told it was a bug. What the destroy actually buys is the
       **release**, so check that instead. With `gammastep` stopped, dim through the
-      gamma path, undim, then start `gammastep` again: it must acquire the output and
-      its tint must appear. If it logs a gamma-control failure, Duja's restore wrote a
-      table instead of destroying the control, and is still holding the output.
-- [ ] **Nothing read-only steals gamma from a running `gammastep`.** Run
-      `gammastep` and leave it running, then exercise every Duja path that does not
-      deliberately engage a ramp: `dujactl doctor`, `dujactl list`, `duja --once`,
-      `duja --restore`. `gammastep` must keep its tint and must not log a
-      gamma-control failure throughout.
-      <!-- `dujactl doctor` cannot fail this one by construction today: it calls
-           `probe_session`, which reads the Wayland registry and binds no gamma
-           manager, so it never enumerates. The row is aimed at the enumeration path
-           (`enumerate_gamma_displays`), which deliberately reports every named output
-           WITHOUT taking a control, and at any future caller tempted to make it
-           truthful by binding one. Re-check this row the first time something on
-           Linux calls it. -->
+      gamma path, undim, then start `gammastep` again: **it must acquire the output
+      and its tint must appear.** That is the whole gate, and it is the same on every
+      wlroots. Do not use "`gammastep` logs a gamma-control failure" as the signal:
+      that is what a still-holding Duja looks like on 0.17+, but on 0.16 and earlier
+      (Debian bookworm, Ubuntu 22.04 LTS) `get_gamma_control` answers a newcomer
+      facing a held output with *nothing at all*, so `gammastep` would show no tint
+      and log nothing. Absent tint is the failure on both.
+- [ ] **(Not yet checkable) Nothing read-only steals gamma from a running
+      `gammastep`.** Marked so rather than dressed up as a gate, because **no shipped
+      command can fail it today**: the rule belongs to `enumerate_gamma_displays`,
+      which deliberately reports every named output *without* taking a control, and
+      nothing calls it. `dujactl doctor` goes through `probe_session`, which reads the
+      registry and binds no gamma manager; `dujactl list`, `duja --once` and
+      `duja --restore` never reach the enumeration either. An earlier version of this
+      row listed those four commands as the test, which reproduced the defect it was
+      written to fix. Becomes live the first time something on Linux enumerates gamma
+      displays: run `gammastep`, run that thing, and `gammastep` must keep its tint.
       <!-- Written by capability, not by compositor name, per ADR-0011: a name table would fail
            a correct implementation the day Mutter shipped either protocol. `dujactl doctor`
            prints which protocols the session offered, so these are checkable without guessing
