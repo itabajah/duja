@@ -819,13 +819,30 @@ mod tests {
             MAX_RAMP_SIZE.saturating_add(1),
             u16::MAX,
         ];
-        for size in sizes {
-            // The walk's predicate is the writer's, by construction and by name.
+        // Written out rather than re-derived from the two constants, and that is
+        // the whole value of the assertion. Until `#131` this compared
+        // `writable_ramp_size` against `ramp`'s own bound — two independently
+        // written predicates — and moving the ceiling out of `ramp` left it
+        // comparing the function against a restatement of its own body, which
+        // cannot fail. Literals are the only third party left.
+        let expected = [
+            (0_u16, false),
+            (1, false),
+            (2, true),
+            (256, true),
+            (4096, true),
+            (43_688, true),
+            (43_689, false),
+            (u16::MAX, false),
+        ];
+        for (size, writable) in expected {
             assert_eq!(
                 writable_ramp_size(size),
-                (MIN_RAMP_SIZE..=MAX_RAMP_SIZE).contains(&size),
+                writable,
                 "size {size} is classified differently by the walk and the writer"
             );
+        }
+        for size in sizes {
             // And the builder answers the narrower question: is this a table at
             // all, transport aside.
             assert_eq!(

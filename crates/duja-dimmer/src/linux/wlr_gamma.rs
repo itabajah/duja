@@ -239,10 +239,13 @@ impl OutputDisplay {
 /// obvious bound — "every later call flushes first" — is not true of this backend:
 /// [`with_session`]'s transport gate returns before touching the connection at
 /// all, which is exactly the `WAYLAND_DISPLAY`-disappeared case
-/// [`super::restore_all`] is shaped around. So the residual is real rather than
-/// theoretical, it is bounded by the process lifetime (the compositor drops every
-/// transform when the socket closes), and `docs/debt.md` carries it beside the
-/// read-side twin instead of this claiming a bound it does not have.
+/// [`super::restore_all`] is shaped around.
+///
+/// So the bound is "until a call that reaches the compositor" — the buffer is per
+/// connection, and every round trip flushes all of it — and process lifetime only
+/// when no such call comes. That is the same bound `Session::give_up`'s residual
+/// has, and `docs/debt.md` states it once for all three faces rather than each of
+/// them reaching for its own.
 ///
 /// It is *narrower* than the previous draft implied, though, and the correction
 /// runs the other way for once. That draft also offered [`release`] as a
@@ -283,8 +286,13 @@ pub fn set_gamma(display: &OutputDisplay, factor: f32) -> Result<(), DimmerError
     with_session(|session| session.write(&display.name, factor)).map_err(Into::into)
 }
 
-/// Give `display`'s output back to the compositor, which restores whatever gamma
-/// table it had before Duja took it.
+/// Hand `display`'s output back to the compositor, which drops this client's
+/// gamma table and leaves the output at its default.
+///
+/// (That summary carried the retraction below for eleven review rounds. Every
+/// correction rewrote the paragraph and left the first sentence — which is the one
+/// rustdoc puts in the item list, the sidebar and search results, so it was both
+/// the most-read version of the claim and the last to be fixed.)
 ///
 /// The Wayland spelling of the crate's `restore_identity`, and it reaches the same
 /// *screen* by a different mechanism: destroying the control makes the compositor
@@ -1395,11 +1403,12 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
         // included. Any later `set_gamma`, `enumerate_gamma_displays`,
         // `restore_all`, or `release` for a *tracked* name therefore rescues it.
         //
-        // So a `WouldBlock` here has the same bound `give_up`'s does, and the two
-        // genuine escapes are the ones [`set_gamma`]'s own residual paragraph
-        // names: a `release` for a name this session no longer tracks, and
-        // `with_session`'s transport gate, which returns before touching the
-        // connection at all. The failure is dropped anyway — an event handler has
+        // So a `WouldBlock` here has the same bound `give_up`'s does. Two calls
+        // still cannot rescue it: `with_session`'s transport gate, which returns
+        // before touching the connection at all, and a `release` for a name this
+        // session no longer tracks — which for *this* residual is not the corner
+        // case [`set_gamma`]'s paragraph downgrades it to, but the certain one,
+        // since `forget` has already removed the entry that `release` looks for. The failure is dropped anyway — an event handler has
         // nowhere to report to, and blocking inside a dispatch is worse than the
         // residual — and `docs/debt.md` records it beside its siblings. What the
         // flush buys is promptness, which for an exclusively-held output is worth
