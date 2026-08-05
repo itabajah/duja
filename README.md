@@ -140,9 +140,10 @@ manager with no `picom` or equivalent, Duja reports overlay dimming as unavailab
 and hardware control is unaffected. `dujactl doctor` prints which of these your
 session actually offers, so you never have to guess.
 There is also a gamma channel, which is what a display set to
-`dim_mode = "gamma"` uses to go below its hardware floor. An X11 session always
-has one; a Wayland session has one only if its compositor offers
-`wlr-gamma-control`, which the two largest desktops do not. It is opt-in per display
+`dim_mode = "gamma"` uses to go below its hardware floor. An X11 session has one
+wherever the X server offers the RandR extension, which every modern one does; a
+Wayland session has one only if its compositor offers `wlr-gamma-control`, which
+the two largest desktops do not. It is opt-in per display
 rather than an automatic fallback, and no Duja build engages it on Linux yet
 because that runs through the tray, which is the row above. The two are different
 protocols: X11 uses XRandR's per-CRTC transfer table, and a Wayland compositor

@@ -1408,7 +1408,9 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
         // before touching the connection at all, and a `release` for a name this
         // session no longer tracks — which for *this* residual is not the corner
         // case [`set_gamma`]'s paragraph downgrades it to, but the certain one,
-        // since `forget` has already removed the entry that `release` looks for. The failure is dropped anyway — an event handler has
+        // since `forget` has already removed the entry that `release` looks for.
+        //
+        // The failure is dropped anyway — an event handler has
         // nowhere to report to, and blocking inside a dispatch is worse than the
         // residual — and `docs/debt.md` records it beside its siblings. What the
         // flush buys is promptness, which for an exclusively-held output is worth

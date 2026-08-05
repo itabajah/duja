@@ -822,9 +822,15 @@ mod tests {
         // Written out rather than re-derived from the two constants, and that is
         // the whole value of the assertion. Until `#131` this compared
         // `writable_ramp_size` against `ramp`'s own bound — two independently
-        // written predicates — and moving the ceiling out of `ramp` left it
-        // comparing the function against a restatement of its own body, which
-        // cannot fail. Literals are the only third party left.
+        // written predicates. Moving the ceiling out of `ramp` left it comparing
+        // the function against `(MIN_RAMP_SIZE..=MAX_RAMP_SIZE).contains(..)`,
+        // which is a hand-copy of the body: it still reds if the *body* changes,
+        // but it can no longer catch a wrong **constant**, because both sides
+        // would move together. Literals are the only third party left.
+        //
+        // (An earlier version of this comment said that copy "cannot fail". It
+        // can — `#131`'s own first commit recorded the same mutation reddening two
+        // tests — and the weakening is the narrower one described above.)
         let expected = [
             (0_u16, false),
             (1, false),
@@ -839,7 +845,7 @@ mod tests {
             assert_eq!(
                 writable_ramp_size(size),
                 writable,
-                "size {size} is classified differently by the walk and the writer"
+                "size {size} is not the writability the walk and the writer share"
             );
         }
         for size in sizes {

@@ -203,8 +203,15 @@ with the phases; keep entries as observable behaviors, not implementation.
       anything and been told it was a bug. What the destroy actually buys is the
       **release**, so check that instead. With `gammastep` stopped, dim through the
       gamma path, undim, then start `gammastep` again: **it must acquire the output
-      and its tint must appear.** That is the whole gate, and it is the same on every
-      wlroots. Do not use "`gammastep` logs a gamma-control failure" as the signal:
+      and its tint must appear.**
+      <!-- One caveat on wlroots 0.16 and earlier, where a newcomer facing a held
+           output evicts the incumbent and is itself never registered: if the tool
+           under test retries after a failed acquire, its second attempt finds the
+           output free *because its first attempt evicted Duja*, and a tint would
+           appear over an output Duja never released. If it does appear, confirm
+           Duja is not still holding the control (`WAYLAND_DEBUG=1`, look for a
+           `zwlr_gamma_control_v1` this process has not destroyed) before passing
+           the row. Not an issue on 0.17+, which refuses the newcomer instead. --> Do not use "`gammastep` logs a gamma-control failure" as the signal:
       that is what a still-holding Duja looks like on 0.17+, but on 0.16 and earlier
       (which includes the 0.15 in Debian bookworm and Ubuntu 22.04 LTS)
       `get_gamma_control` answers a newcomer

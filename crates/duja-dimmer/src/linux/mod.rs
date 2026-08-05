@@ -294,11 +294,22 @@ pub fn enumerate_gamma_displays() -> Vec<GammaDisplay> {
 /// `wlr_gamma::restore_all` returns an empty report unless it already has a live
 /// session.
 ///
-/// What that buys is the case where the environment moved under a running process,
-/// which `session_transport`'s own documentation is at pains to say can happen. A
-/// process that engaged Wayland gamma and then saw `WAYLAND_DISPLAY` disappear
-/// would, under a transport switch, never hand those outputs back — and would
-/// report a clean rescue for work it did not do.
+/// What that buys is one direction of the case where the environment moved under a
+/// running process, which `session_transport`'s own documentation is at pains to
+/// say can happen. A process that engaged Wayland gamma and then saw
+/// `WAYLAND_DISPLAY` disappear would, under a transport switch, never hand those
+/// outputs back — and would report a clean rescue for work it did not do.
+///
+/// **The other direction is not bought, and is worse.** `wlr_gamma::restore_all`
+/// works after a drift because it bypasses `with_session` and reads its slot
+/// directly; `gamma::restore_all` has no such escape — it stops at
+/// [`crate::linux_gamma::xrandr_refusal`], which answers from the *current*
+/// environment, so a process that engaged `XRandR` ramps and then acquired a
+/// `WAYLAND_DISPLAY` gets an empty clean report over CRTCs it left dark. And an
+/// X11 ramp outlives the process, so unlike the Wayland residual this paragraph
+/// exists to justify, that one is permanent. Unreachable while nothing on Linux
+/// engages a ramp, and not closable without the X11-side guard `docs/debt.md`
+/// already owes; recorded there rather than implied away here.
 #[must_use]
 pub fn restore_all() -> RestoreReport {
     let mut report = wlr_gamma::restore_all();
