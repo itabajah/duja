@@ -22,6 +22,13 @@
 //!   `wl_surface` input region. Forget it and the overlay swallows every click,
 //!   which is the Wayland shape of the same hazard
 //!   [`crate::linux_overlay::XFIXES_INPUT_SHAPE_VERSION`] guards on X11.
+//! - **What the surface is actually filled with.** A dim is one translucent black
+//!   rectangle, so every level it can ever show fits in [`dim_pool`] — a kilobyte
+//!   written once, indexed by [`dim_pool_offset`]. An offset past the end is not a
+//!   wrong colour, it is a `wl_shm` error, and those are fatal too.
+//! - **What size the compositor said to be.** [`viewport_destination`] turns a
+//!   `configure` into a `wp_viewport.set_destination`, and refuses the sizes that
+//!   request would answer with `bad_value`.
 //!
 //! So they live here, as plain data and plain arithmetic, tested on all three
 //! lanes — the same split [`crate::linux_caps`], [`crate::linux_overlay`] and
@@ -32,6 +39,8 @@
 //! [`crate::linux_caps`] already answers that from the registry, and already
 //! records that layer-shell and `zwlr_gamma_control_v1` are independent — a
 //! Plasma session has the first and not the second.
+
+use duja_core::dimmer::DisplayBounds;
 
 /// The `zwlr_layer_shell_v1` layer a dimming overlay belongs in.
 ///
@@ -134,11 +143,160 @@ pub const fn dimmer_surface() -> LayerSurface {
     }
 }
 
+/// Bytes per pixel in `wl_shm`'s `argb8888`, where a slice index needs it.
+pub const ARGB_BYTES: usize = 4;
+
+/// The same number as [`ARGB_BYTES`], where the wire needs it: the offset and the
+/// stride of `wl_shm_pool.create_buffer` are both `int`, and this buffer is one
+/// pixel wide, so its stride is one pixel.
+///
+/// Written out rather than cast from its twin. Every conversion between the two
+/// would trip a pedantic cast lint and need an `#[allow]`, and the test that pins
+/// them to each other is the stronger statement in any case — it fails if either
+/// one moves, which a cast by construction cannot.
+pub const ARGB_STRIDE: i32 = 4;
+
+/// How many dim levels there are: one per `u8` alpha, which is the whole range
+/// [`duja_core::dimmer::DimCommand`] can ask for.
+pub const DIM_LEVELS: usize = u8::MAX as usize + 1;
+
+/// The size of the pool [`dim_pool`] fills. A kilobyte.
+pub const DIM_POOL_BYTES: usize = DIM_LEVELS * ARGB_BYTES;
+
+/// Every dim level a Wayland overlay can ever show, as one `wl_shm` pool.
+///
+/// One 1x1 `argb8888` pixel per alpha, in ascending order, so the pool is written
+/// **once** at startup and never again. That is not an optimisation, it is what
+/// removes the only shared-memory hazard this backend would otherwise have: a
+/// pool the client rewrites while the compositor may be sampling it is a data race
+/// across a process boundary that no `wl_buffer.release` handling makes safe for a
+/// buffer still attached elsewhere. Nothing here is ever rewritten, so there is
+/// nothing to race, and changing a dim level is an attach of a different
+/// pre-existing buffer rather than a write.
+///
+/// One pixel per level is enough because a `wp_viewport` scales it to the output;
+/// see [`viewport_destination`]. Without that the pool would have to hold a full
+/// framebuffer per output — tens of megabytes, re-rendered per slider sample.
+///
+/// The pixel is [`crate::linux_overlay::premultiplied_black`], the same value the
+/// X11 backend puts in a window's background: `argb8888` is defined as
+/// *"\[31:0\] A:R:G:B 8:8:8:8 little endian"*, so its bytes are exactly that `u32`
+/// in little-endian order, on any host. Premultiplied is what the compositor
+/// expects, and black premultiplies to zero in all three colour channels, which is
+/// why the alpha byte is the only one that ever varies here.
+#[must_use]
+pub fn dim_pool() -> [u8; DIM_POOL_BYTES] {
+    let mut pool = [0_u8; DIM_POOL_BYTES];
+    for alpha in 0..=u8::MAX {
+        let at = usize::from(alpha).saturating_mul(ARGB_BYTES);
+        if let Some(slot) = pool.get_mut(at..at.saturating_add(ARGB_BYTES)) {
+            slot.copy_from_slice(&crate::linux_overlay::premultiplied_black(alpha).to_le_bytes());
+        }
+    }
+    pool
+}
+
+/// Where `alpha`'s pixel starts in [`dim_pool`], as `wl_shm_pool.create_buffer`
+/// counts.
+///
+/// `i32` because that is the request's type, and the arithmetic cannot overflow
+/// it: the largest offset is `255 * 4`. An offset that ran past the end of the pool
+/// would not be a wrong shade — the compositor answers `wl_shm.error.invalid_fd`
+/// or refuses the buffer outright, and either way the connection dies — which is
+/// why this and [`dim_pool`] are pinned against each other by a test rather than
+/// each against its own arithmetic.
+/// Not `const`: `i32::from` is not a const trait method yet, and widening with an
+/// `as` cast instead would trade a compile-time guarantee nothing here needs for a
+/// pedantic-lint `#[allow]`.
+#[must_use]
+pub fn dim_pool_offset(alpha: u8) -> i32 {
+    // Cannot saturate: the largest product is `255 * 4`. Spelled this way because
+    // the crate denies bare arithmetic, and a `#[allow]` here would be a standing
+    // exemption on the one expression whose overflow is a protocol error.
+    i32::from(alpha).saturating_mul(ARGB_STRIDE)
+}
+
+/// Which of the compositor's outputs a display's rectangle names, if any is still
+/// free.
+///
+/// `zwlr_layer_shell_v1.get_layer_surface` takes a `wl_output`, so a Wayland
+/// overlay is **bound to an output** rather than placed at a rectangle on a root
+/// window the way the X11 one is. Everything above this layer speaks in
+/// [`DisplayBounds`], so something has to turn one into the other, and this is it —
+/// it is what the Wayland backend passes as `placeable` to
+/// [`crate::linux_overlay::plan_record`].
+///
+/// # Equality, not containment
+///
+/// The rectangle is compared exactly, which is only correct because both sides
+/// come from the same place: `logical` is each output's `zxdg_output_v1` logical
+/// geometry, and a [`DimCommand`](duja_core::dimmer::DimCommand)'s bounds reached
+/// the caller through [`crate::linux_outputs::join`], which took them from that
+/// same event. A near-match would mean the two have diverged, and dimming the
+/// nearest output would then be a guess about which monitor the user meant.
+///
+/// # `taken` is what makes mirroring work
+///
+/// Two mirrored outputs are two `wl_output`s at one logical rectangle, and the
+/// layer above sends one command per *display*, so both commands carry the same
+/// bounds. Without excluding what is already dimmed, both overlays would land on
+/// the first output: one monitor dimmed twice, the other not at all, and no error
+/// anywhere. `taken` is the indices the caller's live overlays already hold.
+///
+/// An output whose `zxdg_output_v1` geometry has not arrived yet is `None` and is
+/// never chosen. That is a display left undimmed for one apply rather than an
+/// overlay on the wrong monitor, and the next apply has the geometry.
+#[must_use]
+pub fn take_output(
+    wanted: DisplayBounds,
+    logical: &[Option<DisplayBounds>],
+    taken: &[usize],
+) -> Option<usize> {
+    logical
+        .iter()
+        .enumerate()
+        .find(|(index, bounds)| **bounds == Some(wanted) && !taken.contains(index))
+        .map(|(index, _)| index)
+}
+
+/// The `wp_viewport.set_destination` a `zwlr_layer_surface_v1.configure` implies,
+/// or `None` when there is no legal one.
+///
+/// The surface is a single pixel scaled to the whole output, so the destination is
+/// the size the compositor just assigned. Two of those are not requestable:
+///
+/// - **Zero.** `configure` states outright that *"if the width or height arguments
+///   are zero, it means the client should decide its own window dimension"*, and
+///   Duja cannot — that is the entire reason [`dimmer_surface`] delegates sizing.
+///   Passing it on anyway is `wp_viewport.error.bad_value` (*"negative or zero
+///   values in width or height"*), which is a protocol error and kills the
+///   connection, taking every other output's overlay with it.
+/// - **Above `i32::MAX`.** `configure` carries `uint` and `set_destination` takes
+///   `int`, so the wire itself cannot express the top half of the range. No
+///   compositor sends it, and the zero check below would catch a wrapped one
+///   anyway — an `as` cast turns every such width into a negative. Converting
+///   instead of casting is here to say which of the two rules refused it, so a
+///   later edit to either cannot quietly leave the other doing both jobs.
+///
+/// `None` means the surface stays unmapped rather than that the connection ends:
+/// an output nobody can size is one output not dimmed, and the rest keep working.
+#[must_use]
+pub fn viewport_destination(width: u32, height: u32) -> Option<(i32, i32)> {
+    let width = i32::try_from(width).ok()?;
+    let height = i32::try_from(height).ok()?;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    Some((width, height))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ANCHOR_ALL, ANCHOR_BOTTOM, ANCHOR_LEFT, ANCHOR_RIGHT, ANCHOR_TOP, DIMMER_EXCLUSIVE_ZONE,
-        LAYER_OVERLAY, PointerInput, dimmer_surface, size_is_legal,
+        ANCHOR_ALL, ANCHOR_BOTTOM, ANCHOR_LEFT, ANCHOR_RIGHT, ANCHOR_TOP, ARGB_BYTES, ARGB_STRIDE,
+        DIM_POOL_BYTES, DIMMER_EXCLUSIVE_ZONE, DisplayBounds, LAYER_OVERLAY, PointerInput,
+        dim_pool, dim_pool_offset, dimmer_surface, size_is_legal, take_output,
+        viewport_destination,
     };
 
     /// The wire values, pinned against `wlr-layer-shell-unstable-v1.xml`. These
@@ -237,5 +395,145 @@ mod tests {
     fn a_dimmer_lets_the_compositor_size_it() {
         let surface = dimmer_surface();
         assert_eq!((surface.width, surface.height), (0, 0));
+    }
+
+    /// One pixel's worth of bytes, counted two ways because the wire and a slice
+    /// index disagree about the type. A drift between them puts every level at
+    /// the wrong offset.
+    #[test]
+    fn a_pixel_is_the_same_size_on_the_wire_as_in_the_pool() {
+        assert_eq!(usize::try_from(ARGB_STRIDE).unwrap(), ARGB_BYTES);
+    }
+
+    /// The two halves of the pool scheme, pinned against **each other**. Either
+    /// alone is self-consistent while being wrong: a builder that strides by 3 and
+    /// an offset that strides by 3 agree with themselves and hand the compositor
+    /// a shade nobody asked for.
+    #[test]
+    fn a_level_is_black_at_exactly_its_own_alpha() {
+        let pool = dim_pool();
+        for alpha in 0..=u8::MAX {
+            let at = usize::try_from(dim_pool_offset(alpha)).unwrap();
+            let pixel = pool.get(at..at + ARGB_BYTES).unwrap();
+            assert_eq!(
+                pixel,
+                [0, 0, 0, alpha],
+                "argb8888 is A:R:G:B little endian, so black premultiplies to \
+                 three zero bytes and the alpha byte is the level, at {alpha}"
+            );
+        }
+    }
+
+    /// The off-by-one that is a protocol error rather than a wrong colour: a
+    /// `create_buffer` whose offset plus stride runs past the pool is refused and
+    /// the connection dies.
+    #[test]
+    fn the_last_level_ends_exactly_at_the_end_of_the_pool() {
+        let pool = dim_pool();
+        assert_eq!(pool.len(), DIM_POOL_BYTES);
+        let last = usize::try_from(dim_pool_offset(u8::MAX)).unwrap();
+        assert_eq!(
+            last + ARGB_BYTES,
+            pool.len(),
+            "the brightest level's pixel is the final four bytes; anything else \
+             either wastes the pool or reads off the end of it"
+        );
+    }
+
+    /// `configure` is allowed to say "you decide", and this backend cannot — the
+    /// whole reason it delegates sizing. Passing the zero on to `set_destination`
+    /// is `bad_value`, which is fatal to the connection rather than to one output.
+    #[test]
+    fn a_configure_that_states_no_size_is_not_a_viewport_destination() {
+        assert_eq!(viewport_destination(0, 1080), None);
+        assert_eq!(viewport_destination(1920, 0), None);
+        assert_eq!(viewport_destination(0, 0), None);
+    }
+
+    /// `configure` carries `uint` and `set_destination` takes `int`, so the top
+    /// half of the range has no representation. Converting rather than casting is
+    /// what keeps that from wrapping into a negative, which is the same protocol
+    /// error by a longer route.
+    #[test]
+    fn a_size_the_wire_cannot_carry_is_refused() {
+        assert_eq!(viewport_destination(u32::MAX, 1080), None);
+        assert_eq!(viewport_destination(1920, u32::MAX), None);
+        let too_wide = u32::try_from(i32::MAX).unwrap() + 1;
+        assert_eq!(viewport_destination(too_wide, 1080), None);
+        assert_eq!(
+            viewport_destination(too_wide - 1, 1080),
+            Some((i32::MAX, 1080)),
+            "the boundary itself is representable and must not be refused"
+        );
+    }
+
+    #[test]
+    fn a_stated_configure_size_is_the_destination() {
+        assert_eq!(viewport_destination(1920, 1080), Some((1920, 1080)));
+        assert_eq!(viewport_destination(1, 1), Some((1, 1)));
+    }
+
+    fn at(x: i32) -> DisplayBounds {
+        DisplayBounds::new(x, 0, 1920, 1080)
+    }
+
+    #[test]
+    fn a_display_is_dimmed_on_the_output_whose_rectangle_it_is() {
+        let outputs = [Some(at(0)), Some(at(1920)), Some(at(3840))];
+        assert_eq!(
+            take_output(DisplayBounds::new(1920, 0, 1920, 1080), &outputs, &[]),
+            Some(1)
+        );
+    }
+
+    /// The mirroring case, which is the whole reason `taken` exists. Two outputs
+    /// at one rectangle receive one overlay each; without this both commands
+    /// resolve to output 0 and the second monitor is never dimmed.
+    #[test]
+    fn two_outputs_mirroring_one_rectangle_get_one_overlay_each() {
+        let outputs = [Some(at(0)), Some(at(0))];
+        let wanted = DisplayBounds::new(0, 0, 1920, 1080);
+
+        let first = take_output(wanted, &outputs, &[]).unwrap();
+        let second = take_output(wanted, &outputs, &[first]).unwrap();
+
+        assert_ne!(first, second);
+        // And a third display at the same rectangle has nowhere left to go, which
+        // is a display undimmed rather than a second overlay stacked on one
+        // monitor.
+        assert_eq!(take_output(wanted, &outputs, &[first, second]), None);
+    }
+
+    /// A rectangle no output has is not rounded to the nearest one. Both sides of
+    /// the comparison come from the same `zxdg_output_v1` event, so a near-match
+    /// means they have diverged, and picking the closest monitor would be a guess
+    /// about which screen the user asked for.
+    #[test]
+    fn a_rectangle_no_output_has_is_not_matched_to_the_closest() {
+        let outputs = [Some(at(0)), Some(at(1920))];
+        assert_eq!(
+            take_output(DisplayBounds::new(1919, 0, 1920, 1080), &outputs, &[]),
+            None
+        );
+        assert_eq!(
+            take_output(DisplayBounds::new(0, 0, 1920, 1081), &outputs, &[]),
+            None
+        );
+    }
+
+    /// Geometry arrives as an event, so an output can be bound and not yet
+    /// placed. Dimming it anyway would put an overlay on a monitor chosen by
+    /// registry order.
+    #[test]
+    fn an_output_that_has_not_said_where_it_is_yet_is_never_chosen() {
+        let outputs = [None, Some(at(0))];
+        assert_eq!(
+            take_output(DisplayBounds::new(0, 0, 1920, 1080), &outputs, &[]),
+            Some(1)
+        );
+        assert_eq!(
+            take_output(DisplayBounds::new(0, 0, 1920, 1080), &[None], &[]),
+            None
+        );
     }
 }

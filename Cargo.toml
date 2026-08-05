@@ -162,6 +162,14 @@ wayland-client = "0.31"
 # occupies. Same story as the other two: already in `Cargo.lock` through winit, so
 # this declares no new package.
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+# `zwlr_layer_shell_v1` (P7 wave 4b): the only protocol on Wayland that lets an
+# ordinary client put a surface above every window on a chosen output, which is
+# what ADR-0003's overlay *is*. Not in `wayland-protocols` — it is a wlroots
+# extension rather than a freedesktop one — but it is in `Cargo.lock` already, via
+# `smithay-client-toolkit` under winit and under `smithay-clipboard`, so this
+# declares no new package either. `wp_viewporter`, the other half of the overlay,
+# is stable and comes from the line above.
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # Linux D-Bus (duja-panel's logind backlight writer, P7). The version is pinned
 # to what `i-slint-backend-winit` already resolves and `async-io` matches its
 # executor selection, so the Linux graph gains no second async runtime — see
