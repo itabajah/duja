@@ -766,11 +766,15 @@ fn distance_squared(rect: WorkRect, (x, y): (i32, i32)) -> i64 {
 /// own suite drives it with `i32::MIN` and `u32::MAX`.
 ///
 /// Measuring the extent from the **clamped** origin rather than from `left` is
-/// the other half of that first fix, and it is inert: in [`work_area`] the left
-/// edge only ever moves up, so `clamp_to_i32` never lowers it, and where it
-/// raises it the headroom is zero and the width is zero either way. It is kept
-/// for a future caller that could pass a left edge below `i32::MIN`, and named
-/// here rather than left to look load-bearing — the same treatment
+/// the other half of that first fix, and it is inert. [`work_area`]'s left edge
+/// starts inside the `i32` range and only ever moves up, so `clamp_to_i32` can
+/// never **raise** it; the one thing it can do is **lower** an edge that a `u32`
+/// strut depth pushed past `i32::MAX`, and there the headroom is zero, so the
+/// width is zero measured from either edge. (An earlier version of this sentence
+/// had those two verbs the other way round. The conclusion was right and the
+/// argument for it described an unreachable case.) It is kept for a future caller
+/// that could pass a left edge below `i32::MIN`, and named here rather than left
+/// to look load-bearing — the same treatment
 /// [`randr_scale`]'s zero-millimetre guard and [`monitor_for_cursor`]'s
 /// containment fast path get, for the same reason.
 fn rect_from_edges(left: i64, top: i64, right: i64, bottom: i64) -> WorkRect {
@@ -784,8 +788,13 @@ fn rect_from_edges(left: i64, top: i64, right: i64, bottom: i64) -> WorkRect {
     }
 }
 
-/// The extent from a saturated origin to `far`, capped so `origin + extent` is
-/// still an `i32`.
+/// The extent from `origin` to `far`, capped so `origin + extent` is still an
+/// `i32`.
+///
+/// ("From a *saturated* origin" until a review pointed out that the word had
+/// survived here, four lines from a paragraph explaining that no saturation is
+/// involved. The origin is simply an `i32`; whether it got there by clamping is
+/// this function's caller's business.)
 fn extent_from(origin: i32, far: i64) -> u32 {
     let origin = i64::from(origin);
     let headroom = i64::from(i32::MAX).saturating_sub(origin);
@@ -1437,7 +1446,10 @@ mod tests {
             i64::from(i32::MAX)
         );
 
-        // And an origin that saturates exactly at the end has no room at all.
+        // And an origin sitting exactly at the end has no room at all. (Not
+        // "saturates": `clamp_to_i32` is the identity on `i32::MAX` too. That
+        // word survived here for a commit after the paragraph above was written
+        // to retire it.)
         let pinned = WorkRect {
             x: i32::MAX,
             y: 0,

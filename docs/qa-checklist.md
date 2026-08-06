@@ -258,7 +258,8 @@ with the phases; keep entries as observable behaviors, not implementation.
 - [ ] **Flyout size on a HiDPI X11 session.** *Blocked on the ksni wave, like the
       row above and the row below - there is no flyout on Linux until the tray
       lands.* Set `Xft.dpi: 144` (or let the desktop set it), restart, and compare
-      the flyout against any GTK or Qt dialog: same apparent size. Then check `WINIT_X11_SCALE_FACTOR=2` scales it further, and
+      the flyout against any GTK or Qt dialog: same apparent size. Then check
+      that `WINIT_X11_SCALE_FACTOR=2` scales it further, and that
       `WINIT_X11_SCALE_FACTOR=randr` falls back to the display measurement.
       <!-- Duja re-implements winit's scale chain rather than asking for it, because the
            anchor has to be computed before the window exists. The failure mode is not a
