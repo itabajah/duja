@@ -1299,6 +1299,58 @@ mod tests {
             off_origin,
             "a zero depth must not pull an edge up to the screen's origin"
         );
+
+        // The right and bottom guards need the mirror shape: a monitor extending
+        // past the recorded screen, which is the hot-plug race between
+        // `GetGeometry` and the CRTC walk that `work_area`'s docs name. There a
+        // zero-depth `min` against the screen edge would shrink the monitor.
+        let past_the_screen = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let idle_ranges = X11Strut {
+            left_end_y: 4000,
+            right_end_y: 4000,
+            top_end_x: 4000,
+            bottom_end_x: 4000,
+            ..X11Strut::default()
+        };
+        assert_eq!(
+            work_area(past_the_screen, screen(1000, 500), &[idle_ranges]),
+            past_the_screen,
+            "a zero depth must not pull an edge back to a stale screen extent"
+        );
+    }
+
+    #[test]
+    fn an_edge_beyond_the_coordinate_space_saturates_the_origin_not_the_width() {
+        // `clamp_to_i32`'s clamp is what `rect_from_edges`' docs spend a paragraph
+        // on — a `u32` strut depth pushing an edge past `i32::MAX` — and deleting
+        // it left the suite green, because no fixture reached that edge with a
+        // surviving axis.
+        //
+        // This one does: the monitor's right edge is already past `i32::MAX`, so a
+        // left strut just beyond it leaves `right > left` and the axis is not
+        // given back. Without the clamp the origin falls to 0 and the width
+        // becomes `MAX_EXTENT` — a rectangle two billion pixels wide starting at
+        // the origin, which is as wrong as an answer gets.
+        let far = WorkRect {
+            x: i32::MAX - 100,
+            y: 0,
+            w: 4000,
+            h: 1080,
+        };
+        let past_the_end = X11Strut {
+            left: 2_147_484_647,
+            left_start_y: 0,
+            left_end_y: 1079,
+            ..X11Strut::default()
+        };
+        let work = work_area(far, screen(u32::MAX, u32::MAX), &[past_the_end]);
+        assert_eq!(work.x, i32::MAX, "the origin saturates");
+        assert_eq!(work.w, 0, "and takes the width with it");
     }
 
     #[test]
@@ -1620,6 +1672,27 @@ mod tests {
             work_area(bounds, screen(1920, 1080), &[half, other_half]),
             bounds,
             "an exactly-emptied axis is emptied"
+        );
+
+        // And the same boundary on the other axis, because the two `if`s are
+        // separate lines and the x one was pinned first: `bottom <= top` weakened
+        // to `<` survived every fixture until this existed.
+        let upper_half = X11Strut {
+            top: 540,
+            top_start_x: 0,
+            top_end_x: 1919,
+            ..X11Strut::default()
+        };
+        let lower_half = X11Strut {
+            bottom: 540,
+            bottom_start_x: 0,
+            bottom_end_x: 1919,
+            ..X11Strut::default()
+        };
+        assert_eq!(
+            work_area(bounds, screen(1920, 1080), &[upper_half, lower_half]),
+            bounds,
+            "the y axis has its own boundary and its own `if`"
         );
         // One dock alone is well inside the bound and reserves normally, which is
         // what makes the pair the interesting case rather than either half.

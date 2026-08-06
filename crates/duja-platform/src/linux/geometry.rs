@@ -18,10 +18,11 @@
 //! same file a paragraph later, because a summary of rules is a second copy of
 //! each — in the one place nothing checks it against the code. The rules live in
 //! [`cursor_anchor`], [`monitors`], [`crtcs`], [`struts`], [`intern`] and on
-//! [`WHOLE_PROPERTY`]; read them there. (That list named `atom` until rustdoc
-//! refused it — the function was split into [`intern`] and [`resolve`] in this
-//! same PR, and a link is the only kind of cross-reference here that a tool can
-//! check.)
+//! [`STRUT_WORDS`], [`CLIENT_LIST_WORDS`] and [`XSETTINGS_WORDS`]; read them
+//! there. (This list has now named two items that no longer existed — `atom`,
+//! split into [`intern`] and [`resolve`], and `WHOLE_PROPERTY`, split into the
+//! three bounds above. Both times rustdoc refused the link, which is why the
+//! list is links rather than prose.)
 //!
 //! # What it reads
 //!
@@ -83,24 +84,45 @@ use crate::geometry::TrayAnchor;
 use crate::linux_geometry::{DpiSources, X11Monitor, X11Screen, X11Strut, anchor_from_x11};
 use crate::linux_xsettings;
 
-/// How much of a property to ask for, in the four-byte units `GetProperty`
-/// counts in: two gigabytes, so every read here is a single round trip and the
-/// server returns whatever actually exists.
+/// The most a strut property can legitimately hold, in the four-byte units
+/// `GetProperty` counts in.
 ///
-/// The ceiling is `i32::MAX / 4` rather than `u32::MAX` or `u32::MAX / 4`, and
-/// the reason is the server's arithmetic rather than ours. `GetProperty` returns
-/// `MINIMUM(remaining, 4 * long_length)`, and Xorg computes that `4 *` into a
-/// `long` — 64-bit on the servers anyone runs, but 32-bit on an ILP32 build,
-/// where `u32::MAX / 4` multiplies to `0xFFFFFFFC` and lands on the wrong side of
-/// zero. Quartering `i32::MAX` instead keeps the product at `0x7FFFFFFC`, which is
-/// positive in either width.
+/// `_NET_WM_STRUT_PARTIAL` is twelve `CARDINAL`s; the reply parser here rejects
+/// anything that is not exactly twelve, so asking for more can only allocate
+/// memory nothing will read.
+const STRUT_WORDS: u32 = 12;
+
+/// The most `_NET_CLIENT_LIST` is asked for: 8192 windows, 32 KB.
 ///
-/// winit reads the same properties in 4 KB chunks and loops on `bytes_after`.
-/// One shot is equivalent here only because the bound is far past what these
-/// properties can hold — a `_NET_CLIENT_LIST` is four bytes per managed window
-/// and an `_XSETTINGS_SETTINGS` blob is a few kilobytes — and it is one round trip
-/// instead of two on a path that runs when the user clicks the tray.
-const WHOLE_PROPERTY: u32 = i32::MAX.unsigned_abs() / 4;
+/// A desktop session has tens of managed windows and a busy one has hundreds. The
+/// cap exists because the property lives on the **root window**, which every
+/// client on the display can write: without one, a single hostile or broken
+/// client turns a tray click into a multi-gigabyte allocation, and then into two
+/// `GetProperty` requests *per listed entry*, all queued before the first reply
+/// is read. A list this long is not a session, and truncating it costs at worst
+/// a strut from a window beyond the eight-thousandth.
+const CLIENT_LIST_WORDS: u32 = 8192;
+
+/// The most `_XSETTINGS_SETTINGS` is asked for: 256 KB.
+///
+/// GNOME publishes a few kilobytes. The owner of that selection is another
+/// client, so the same argument as [`CLIENT_LIST_WORDS`] applies — and the parser
+/// this feeds is explicitly written for a blob "written by another process". A
+/// blob past this cap is truncated, the parser stops where the bytes stop, and
+/// the scale chain falls through to the `Xft.dpi` resource, which is what it does
+/// for a malformed blob anyway. winit reads the same property in 4 KB chunks with
+/// no ceiling at all; matching that would mean matching its unboundedness.
+const XSETTINGS_WORDS: u32 = 65_536;
+
+// Why none of those is `u32::MAX`, beyond the sizes themselves: `GetProperty`
+// returns `MINIMUM(remaining, 4 * long_length)`, and Xorg computes that `4 *`
+// into a `long` — 64-bit on the servers anyone runs, but 32-bit on an ILP32
+// build, where a `long_length` above `i32::MAX / 4` multiplies to a negative
+// number. All three constants are far below that, so the arithmetic is safe in
+// either width. Noted because the first version of this module used
+// `i32::MAX / 4` for every read and justified it on exactly that ground — a real
+// hazard, but not the one that mattered, which is that two of these properties
+// live on windows this process does not control.
 
 /// The `RandR` version whose `GetScreenResourcesCurrent` this module prefers.
 ///
@@ -325,7 +347,14 @@ fn struts(connection: &RustConnection, root: xproto::Window, screen: X11Screen) 
         return Vec::new();
     }
 
-    let clients = cardinals(connection, root, client_list, AtomEnum::WINDOW).unwrap_or_default();
+    let clients = cardinals(
+        connection,
+        root,
+        client_list,
+        AtomEnum::WINDOW,
+        CLIENT_LIST_WORDS,
+    )
+    .unwrap_or_default();
 
     // Both properties for every client, all in flight before the first reply is
     // read. A desktop session has tens of managed windows and almost none of them
@@ -334,10 +363,12 @@ fn struts(connection: &RustConnection, root: xproto::Window, screen: X11Screen) 
     let pending: Vec<_> = clients
         .iter()
         .map(|&client| {
-            let partial = partial_atom
-                .and_then(|name| property(connection, client, name, AtomEnum::CARDINAL));
-            let legacy =
-                legacy_atom.and_then(|name| property(connection, client, name, AtomEnum::CARDINAL));
+            let partial = partial_atom.and_then(|name| {
+                property(connection, client, name, AtomEnum::CARDINAL, STRUT_WORDS)
+            });
+            let legacy = legacy_atom.and_then(|name| {
+                property(connection, client, name, AtomEnum::CARDINAL, STRUT_WORDS)
+            });
             (partial, legacy)
         })
         .collect();
@@ -399,7 +430,7 @@ fn xsettings_dpi(connection: &RustConnection, screen_index: usize) -> Option<f64
     // the specification says and what winit asks for.
     let settings = settings?;
     let reply = connection
-        .get_property(false, owner.owner, settings, settings, 0, WHOLE_PROPERTY)
+        .get_property(false, owner.owner, settings, settings, 0, XSETTINGS_WORDS)
         .ok()?
         .reply()
         .ok()?;
@@ -429,27 +460,35 @@ fn resolve(
     Some(cookie?.reply().ok()?.atom).filter(|&atom| atom != x11rb::NONE)
 }
 
-/// Send a `GetProperty` for a whole 32-bit property, returning the cookie so the
-/// caller can pipeline.
+/// Send a `GetProperty` for at most `words` four-byte units, returning the cookie
+/// so the caller can pipeline.
+///
+/// The bound is a parameter rather than a constant because each caller knows a
+/// different one, and the difference matters: two of these properties live on
+/// windows this process does not control.
 fn property(
     connection: &RustConnection,
     window: xproto::Window,
     property: xproto::Atom,
     kind: AtomEnum,
+    words: u32,
 ) -> Option<x11rb::cookie::Cookie<'_, RustConnection, xproto::GetPropertyReply>> {
     connection
-        .get_property(false, window, property, kind, 0, WHOLE_PROPERTY)
+        .get_property(false, window, property, kind, 0, words)
         .ok()
 }
 
-/// Read a whole 32-bit property in one round trip.
+/// Read at most `words` four-byte units of a 32-bit property, in one round trip.
 fn cardinals(
     connection: &RustConnection,
     window: xproto::Window,
     name: xproto::Atom,
     kind: AtomEnum,
+    words: u32,
 ) -> Option<Vec<u32>> {
-    let reply = property(connection, window, name, kind)?.reply().ok()?;
+    let reply = property(connection, window, name, kind, words)?
+        .reply()
+        .ok()?;
     values(&reply)
 }
 

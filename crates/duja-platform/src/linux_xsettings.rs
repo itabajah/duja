@@ -491,14 +491,23 @@ mod tests {
     fn a_dpi_published_as_a_string_is_not_read_as_a_number() {
         // The type tag decides how the payload is laid out; reading a string's
         // length prefix as an integer would report a DPI of 4/1024.
+        // A second, well-formed `Xft/DPI` follows, and it is what makes this a
+        // test of *stopping* rather than of the type check alone. winit's `find`
+        // matches the first `Xft/DPI` and errors on its type, so a blob carrying a
+        // string one ahead of an integer one must answer `None` here too — and
+        // with only the string setting present, a parser that skipped it and kept
+        // looking would run out and also answer `None`, seeing no difference.
         let bytes = blob(
             LITTLE_ENDIAN,
-            &[(b"Xft/DPI", 1, {
-                let mut v = 2_u32.to_le_bytes().to_vec();
-                v.extend_from_slice(b"96");
-                v.extend_from_slice(&[0, 0]);
-                v
-            })],
+            &[
+                (b"Xft/DPI", 1, {
+                    let mut v = 2_u32.to_le_bytes().to_vec();
+                    v.extend_from_slice(b"96");
+                    v.extend_from_slice(&[0, 0]);
+                    v
+                }),
+                integer(b"Xft/DPI", 98_304),
+            ],
         );
         assert_eq!(xft_dpi(&bytes), None);
     }
