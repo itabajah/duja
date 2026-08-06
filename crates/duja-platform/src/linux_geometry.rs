@@ -664,6 +664,43 @@ pub(crate) fn anchor_from_x11(
     })
 }
 
+/// Which of a window's two strut properties to believe, if either.
+///
+/// The rule EWMH states and the rule window managers implement differ, and this
+/// is where that is decided rather than in the module that fetched the bytes.
+/// Both arguments are the raw `CARDINAL` lists as they came off the wire, because
+/// "is this the right length" is part of the decision: EWMH's partial form is
+/// exactly twelve values and the legacy form exactly four, and anything else is
+/// not the property it claims to be.
+///
+/// The partial form wins when it reserves something. **When it reserves nothing
+/// the legacy form is consulted anyway**, which is a deliberate departure from
+/// EWMH's "the Window Manager MUST ignore `_NET_WM_STRUT`" — see
+/// [`X11Strut::reserves_anything`] and Mutter's `meta_window_x11_update_struts`,
+/// which falls back whenever the partial form produced no strut at all. On GNOME,
+/// obeying the letter of the rule is what would disagree with the shell.
+///
+/// This lived in the X11 backend until a review pointed out that it is the one
+/// consequential rule in that module which is a pure function of its inputs — and
+/// that the module's own opening sentence claims nothing there subtracts a strut.
+/// Here it is four cases on every CI lane.
+pub(crate) fn choose_strut(
+    partial: Option<&[u32]>,
+    legacy: Option<&[u32]>,
+    screen: X11Screen,
+) -> Option<X11Strut> {
+    let twelve = partial
+        .and_then(|values| <[u32; 12]>::try_from(values).ok())
+        .map(X11Strut::from_partial)
+        .filter(X11Strut::reserves_anything);
+    if twelve.is_some() {
+        return twelve;
+    }
+    <[u32; 4]>::try_from(legacy?)
+        .ok()
+        .map(|four| X11Strut::from_legacy(four, screen))
+}
+
 /// The windowing system winit will put the flyout on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WindowSystem {
@@ -830,7 +867,7 @@ fn clamp_extent(value: i64) -> u32 {
 mod tests {
     use super::{
         DisplayEnv, DpiSources, MAX_EXTENT, WindowSystem, X11Monitor, X11Screen, X11Strut,
-        anchor_from_x11, monitor_for_cursor, scale_factor, window_system, work_area,
+        anchor_from_x11, choose_strut, monitor_for_cursor, scale_factor, window_system, work_area,
     };
     use crate::geometry::{AnchorUnit, WorkRect};
 
@@ -1305,6 +1342,81 @@ mod tests {
             work_area(upper, screen(1920, 2160), &[bottom_panel(160, 0, 1919)]),
             upper,
             "a monitor cannot grow past its own bottom edge"
+        );
+    }
+
+    #[test]
+    fn a_band_is_matched_against_the_monitors_own_edges_to_the_pixel() {
+        // The span `work_area` tests bands against has four endpoints and only one
+        // of them was pinned. Each case below moves a band to sit exactly on one
+        // edge, so a span off by a pixel in either direction changes the answer.
+        //
+        // This is the behaviour the module docs single out as the chosen cost — "a
+        // band touching one column of a monitor reserves that monitor's whole
+        // edge" — and every other fixture in this file either spans a monitor's
+        // full height or misses it by hundreds of pixels.
+        let stacked = screen(1920, 2160);
+        let lower = WorkRect {
+            x: 0,
+            y: 1080,
+            w: 1920,
+            h: 1080,
+        };
+        let dock = |start: u32, end: u32| X11Strut {
+            left: 60,
+            left_start_y: start,
+            left_end_y: end,
+            ..X11Strut::default()
+        };
+
+        // Ends exactly on the monitor's first row: inclusive, so it applies.
+        assert_eq!(work_area(lower, stacked, &[dock(0, 1080)]).x, 60);
+        // Ends one row short: it does not.
+        assert_eq!(work_area(lower, stacked, &[dock(0, 1079)]).x, 0);
+        // Starts on the monitor's last row: applies. One past it: does not.
+        assert_eq!(work_area(lower, stacked, &[dock(2159, 3000)]).x, 60);
+        assert_eq!(work_area(lower, stacked, &[dock(2160, 3000)]).x, 0);
+
+        // And the same two endpoints on the column axis, with a bottom panel
+        // overhanging its neighbour by exactly one column.
+        let side_by_side = screen(3840, 1080);
+        let left_monitor = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        assert_eq!(
+            work_area(left_monitor, side_by_side, &[bottom_panel(40, 1919, 3839)]).h,
+            1040,
+            "one shared column is enough to reserve the whole edge"
+        );
+        assert_eq!(
+            work_area(left_monitor, side_by_side, &[bottom_panel(40, 1920, 3839)]).h,
+            1080,
+            "and one column past it is not"
+        );
+    }
+
+    #[test]
+    fn a_zero_extent_monitor_does_not_panic_the_nearest_search() {
+        // `distance_squared` clamps the cursor into the monitor's last pixel, and
+        // `Ord::clamp` panics when its bounds are inverted — which a zero-extent
+        // rectangle produces, since the last pixel is one before the first. The
+        // `.max(left)`/`.max(top)` there are what stop it, and they are the only
+        // load-bearing guard in this module without a test: removing either left
+        // the suite green while `cursor_anchor`, which promises never to fail,
+        // panicked on a rectangle its own backend can produce.
+        //
+        // Unreachable through the X11 backend, which filters `width > 0 &&
+        // height > 0` — but that filter lives in the half no CI lane compiles, and
+        // is not mentioned within sight of the guard.
+        let degenerate = [monitor(10, 10, 0, 0), monitor(100, 100, 1920, 1080)];
+        assert_eq!(monitor_for_cursor((0, 0), &degenerate), Some(0));
+        assert_eq!(monitor_for_cursor((500, 500), &degenerate), Some(1));
+        assert_eq!(
+            monitor_for_cursor((10, 10), &[monitor(10, 10, 0, 0)]),
+            Some(0)
         );
     }
 
@@ -2195,10 +2307,33 @@ mod tests {
 
     #[test]
     fn the_measured_fallback_quantises_to_twelfths_the_way_winit_does() {
-        // Two real displays. The 15.6-inch 1080p panel lands on 1.5 only because
-        // the factor is quantised: the raw ratio is 1.4748, and rounding it to
-        // anything else — nearest half, nearest quarter, no quantisation at all —
-        // gives a window winit will draw at a different size.
+        // A 3:2 panel, and the only fixture in this file that separates twelfths
+        // from its neighbours: 2256x1504 at 285x190 mm measures 2.0944 raw, which
+        // is 2.0833 in twelfths, 2.1667 in sixths, and 2.0 in quarters or halves.
+        //
+        // Every other fixture here agrees across all four step sizes, which is why
+        // replacing `12.0` with 6, 4 or 2 survived the whole suite — on the one
+        // constant this module exists to keep bit-identical to winit's
+        // `calc_dpi_factor`. This test's comment used to assert the opposite in
+        // as many words ("rounding it to anything else — nearest half, nearest
+        // quarter — gives a window winit will draw at a different size"); nearest
+        // half of 1.4748 is 1.5, the same answer, which is exactly the claim a
+        // fixture should have been made to check rather than a sentence to make.
+        let three_by_two = X11Monitor {
+            bounds: WorkRect {
+                x: 0,
+                y: 0,
+                w: 2256,
+                h: 1504,
+            },
+            mm_width: 285,
+            mm_height: 190,
+        };
+        approx(scale_factor(&NO_DPI, &three_by_two), 25.0 / 12.0);
+
+        // Two real displays. The 15.6-inch 1080p panel lands on 1.5, and pins the
+        // quantisation's *existence* rather than its step: the raw ratio is
+        // 1.4748 and every step size above rounds it there.
         let laptop = X11Monitor {
             bounds: WorkRect {
                 x: 0,
@@ -2477,6 +2612,41 @@ mod tests {
         // gets, not a distinction from it.
         approx(anchor.anchor_to_physical(), 1.0);
         approx(anchor.logical_to_anchor(), 1.5);
+    }
+
+    #[test]
+    fn the_partial_strut_wins_unless_it_reserves_nothing() {
+        // The rule that deliberately disobeys EWMH's MUST, in the four shapes a
+        // window can present. It was unreachable from any test until it moved out
+        // of the X11 backend.
+        let root = screen(1920, 1080);
+        let partial = [40, 0, 0, 0, 0, 1079, 0, 0, 0, 0, 0, 0];
+        let empty_partial = [0_u32; 12];
+        let legacy = [0, 0, 60, 0];
+
+        // A conformant partial wins outright.
+        assert_eq!(
+            choose_strut(Some(&partial), Some(&legacy), root),
+            Some(X11Strut::from_partial(partial)),
+            "the partial form is preferred"
+        );
+        // One that reserves nothing lets the legacy form through, which is
+        // Mutter's behaviour rather than EWMH's.
+        assert_eq!(
+            choose_strut(Some(&empty_partial), Some(&legacy), root),
+            Some(X11Strut::from_legacy(legacy, root)),
+            "an all-zero partial is not a reservation"
+        );
+        // A partial of the wrong length is not the property it claims to be.
+        assert_eq!(
+            choose_strut(Some(&partial[..11]), Some(&legacy), root),
+            Some(X11Strut::from_legacy(legacy, root))
+        );
+        assert_eq!(choose_strut(Some(&partial[..11]), None, root), None);
+        // As is a legacy value of the wrong length.
+        assert_eq!(choose_strut(None, Some(&legacy[..3]), root), None);
+        // And neither is nothing at all.
+        assert_eq!(choose_strut(None, None, root), None);
     }
 
     // -- which windowing system --------------------------------------------

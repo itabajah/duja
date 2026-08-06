@@ -84,7 +84,9 @@ use x11rb::resource_manager;
 use x11rb::rust_connection::RustConnection;
 
 use crate::geometry::TrayAnchor;
-use crate::linux_geometry::{DpiSources, X11Monitor, X11Screen, X11Strut, anchor_from_x11};
+use crate::linux_geometry::{
+    DpiSources, X11Monitor, X11Screen, X11Strut, anchor_from_x11, choose_strut,
+};
 use crate::linux_xsettings;
 
 /// The most a strut property is asked for: thirteen four-byte units, one more
@@ -334,16 +336,9 @@ fn crtcs(connection: &RustConnection, root: xproto::Window) -> Option<Vec<randr:
 /// without one nothing is honouring struts anyway and the whole monitor really is
 /// available.
 ///
-/// A window that publishes both properties contributes only the partial one,
-/// **unless the partial one reserves nothing**. EWMH's rule is that the window
-/// manager MUST ignore `_NET_WM_STRUT` when `_NET_WM_STRUT_PARTIAL` is present,
-/// and a client computing the same work area has to make the same choice or it
-/// disagrees with the shell about where a window fits. Mutter is more forgiving
-/// than the rule it implements — `meta_window_x11_update_struts` falls back to the
-/// legacy property whenever the partial one produced no strut at all, which
-/// includes twelve zeroes — and that is the behaviour copied here. It can only
-/// ever add a reservation, and adding one costs a flyout that sits further from
-/// an edge than it had to, where missing one costs a flyout under a panel.
+/// Which of a window's two properties to believe is not decided here: that is
+/// [`choose_strut`], in the pure module, where its four cases are tested on every
+/// lane. This function fetches both and hands them over.
 ///
 /// The two strut atoms are looked up **independently**, which is not a detail: a
 /// session whose panels use only the partial form may never have interned
@@ -404,24 +399,16 @@ fn struts(connection: &RustConnection, root: xproto::Window, screen: X11Screen) 
     pending
         .into_iter()
         .filter_map(|(partial, legacy)| {
-            let twelve = partial
+            // Both replies are read and neither is interpreted here. Which of the
+            // two to believe — including what counts as the right length — is
+            // `choose_strut`, next door, where every lane can test it.
+            let partial = partial
                 .and_then(|cookie| cookie.reply().ok())
-                .and_then(|reply| values(&reply))
-                .and_then(|values| <[u32; 12]>::try_from(values.as_slice()).ok())
-                .map(X11Strut::from_partial)
-                .filter(X11Strut::reserves_anything);
-            if twelve.is_some() {
-                // The unused `legacy` cookie goes out of scope unread, which is
-                // safe rather than merely tidy: x11rb's cookie `Drop` issues a
-                // `discard_reply` for that sequence number, so the connection
-                // stays in step and a later reply cannot be mistaken for this one.
-                return twelve;
-            }
-            let four = values(&legacy?.reply().ok()?)?;
-            Some(X11Strut::from_legacy(
-                <[u32; 4]>::try_from(four.as_slice()).ok()?,
-                screen,
-            ))
+                .and_then(|reply| values(&reply));
+            let legacy = legacy
+                .and_then(|cookie| cookie.reply().ok())
+                .and_then(|reply| values(&reply));
+            choose_strut(partial.as_deref(), legacy.as_deref(), screen)
         })
         .collect()
 }
