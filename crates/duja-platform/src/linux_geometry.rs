@@ -223,7 +223,7 @@ use crate::geometry::{AnchorUnit, TrayAnchor, WorkRect, sane_scale};
 /// **The extra word is the whole point, and asking for twelve is a live bug.**
 /// `GetProperty` returns `MINIMUM(remaining, 4 * long_length)`, so a property
 /// carrying thirteen `CARDINAL`s answers a twelve-word request with exactly
-/// twelve values and a `bytes_after` nothing here reads â€” and
+/// twelve values and a `bytes_after` nothing here reads — and
 /// `<[u32; 12]>::try_from` then *succeeds*, honouring a malformed property that
 /// an unbounded read rejected. Any client on the display could publish thirteen
 /// values and have Duja reserve space a conformant window manager ignores.
@@ -232,7 +232,7 @@ use crate::geometry::{AnchorUnit, TrayAnchor, WorkRect, sane_scale};
 /// returns twelve and is accepted, an over-long one returns thirteen and fails
 /// the conversion, and the cost of the guard is four bytes per window. (The first
 /// version of this constant was twelve, and its doc said the cap "can only
-/// allocate memory nothing will read" â€” true of the memory and false of the
+/// allocate memory nothing will read" — true of the memory and false of the
 /// behaviour.)
 pub(crate) const STRUT_WORDS: u32 = 13;
 
@@ -250,7 +250,7 @@ pub(crate) const CLIENT_LIST_WORDS: u32 = 8192;
 /// The most `_XSETTINGS_SETTINGS` is asked for: 256 KB.
 ///
 /// GNOME publishes a few kilobytes. The owner of that selection is another
-/// client, so the same argument as [`CLIENT_LIST_WORDS`] applies â€” and the parser
+/// client, so the same argument as [`CLIENT_LIST_WORDS`] applies — and the parser
 /// this feeds is explicitly written for a blob "written by another process". A
 /// blob past this cap is truncated, the parser stops where the bytes stop, and
 /// the scale chain falls through to the `Xft.dpi` resource, which is what it does
@@ -416,13 +416,17 @@ impl X11Strut {
     /// matter: the extra row is `screen.height`, and no monitor's rows begin
     /// there", and "widening to `height - 1` instead would be equally correct".
     /// Both are false on an input this module documents elsewhere as reachable: a
-    /// monitor whose rows begin *at or past* a stale screen's height, which is what
-    /// [`work_area`]'s own doc describes and what its fixtures exercise. On a
-    /// `1000x500` screen with a monitor at `y = 500`, a legacy left strut widens to
-    /// `left_end_y = 500`, `band_meets(0, 500, (500, 1580))` is true, and the edge
-    /// is reserved; with `height - 1` it is `499 >= 500`, false, and it is not. The
-    /// two widenings differ on exactly the monitor the old sentence said could not
-    /// exist.
+    /// monitor whose first row **equals** a stale screen's height, which is the
+    /// race [`work_area`]'s own doc describes. On a `1000x500` screen with a
+    /// monitor at `y = 500`, a legacy left strut widens to `left_end_y = 500`,
+    /// `band_meets(0, 500, (500, 1580))` is true, and the edge is reserved; with
+    /// `height - 1` it is `499 >= 500`, false, and it is not.
+    ///
+    /// *Equals*, not "at or past" — a phrase an earlier version used, and the one
+    /// that would send someone writing the regression test to `y = 501`, where
+    /// both widenings agree and the test passes either way.
+    /// `the_legacy_bands_end_on_the_screen_extent_not_one_before_it` drives all
+    /// four ranges from that single row; nothing did until it existed.
     ///
     /// A caller that has both properties prefers the partial one — EWMH says the
     /// window manager MUST ignore `_NET_WM_STRUT` when `_NET_WM_STRUT_PARTIAL` is
@@ -2454,6 +2458,72 @@ mod tests {
     }
 
     #[test]
+    fn the_legacy_bands_end_on_the_screen_extent_not_one_before_it() {
+        // The exclusive-looking `_end` in `from_legacy`, which the specification
+        // words as "the height or width of the logical screen" while the field
+        // docs call both ends inclusive. Its note used to say the choice "cannot
+        // matter"; it does, and until this test nothing pinned it — widening to
+        // `height - 1` or `width - 1` left the whole suite green.
+        //
+        // The two differ on exactly one input: a monitor whose top row *equals* a
+        // stale screen's height. `work_area`'s own doc describes that race (RandR
+        // reports the new CRTC layout before the root window's size catches up),
+        // and one row earlier or later the two widenings agree, which is why no
+        // other fixture in this file reaches it.
+        let stale = screen(1000, 500);
+        let below = WorkRect {
+            x: 0,
+            y: 500,
+            w: 1920,
+            h: 1080,
+        };
+        assert_eq!(
+            work_area(below, stale, &[X11Strut::from_legacy([60, 0, 0, 0], stale)]).x,
+            60,
+            "a band ending on the screen's last row still meets a monitor starting there"
+        );
+        // `from_legacy` widens **four** ranges, and pinning one per axis is this
+        // branch's most common defect: the first version of this test covered
+        // `left_end_y` and `top_end_x`, and `right_end_y` and `bottom_end_x` both
+        // survived being narrowed by one. All four are driven below.
+        assert_eq!(
+            work_area(below, stale, &[X11Strut::from_legacy([0, 60, 0, 0], stale)]).w,
+            940,
+            "the right band ends on the screen's last row too"
+        );
+
+        // Then the column axis, where the monitor's first column is the stale
+        // screen's width.
+        let narrow = screen(500, 1000);
+        let beside = WorkRect {
+            x: 500,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        assert_eq!(
+            work_area(
+                beside,
+                narrow,
+                &[X11Strut::from_legacy([0, 0, 40, 0], narrow)]
+            )
+            .y,
+            40,
+            "and the top band ends on the screen's last column"
+        );
+        assert_eq!(
+            work_area(
+                beside,
+                narrow,
+                &[X11Strut::from_legacy([0, 0, 0, 40], narrow)]
+            )
+            .h,
+            960,
+            "as does the bottom band"
+        );
+    }
+
+    #[test]
     fn the_legacy_strut_reaches_a_monitor_that_touches_no_screen_corner() {
         // The other three widened ranges, which the bottom-edge case above
         // cannot reach. Widening `left_end_y` to zero instead of the screen
@@ -3054,9 +3124,16 @@ mod tests {
     fn a_strut_request_asks_for_one_word_more_than_a_strut_can_hold() {
         // `STRUT_WORDS` used to live in the X11 backend, which is
         // `cfg(target_os = "linux")`, so no test on any lane referenced it: setting
-        // it back to twelve — the value whose own doc calls it "a live bug" —
-        // left every lane green. The strut grid below pins what `choose_strut`
-        // does with thirteen values; this pins that thirteen is what arrives.
+        // it back to twelve — the value whose own doc calls it "a live bug" — left
+        // every lane green. The strut grid below pins what `choose_strut` does with
+        // thirteen values; this pins the constant those requests are made with.
+        //
+        // Not what *arrives*: the two `property(..., STRUT_WORDS)` call sites are
+        // in the `cfg(target_os = "linux")` half, so replacing either with a
+        // literal `12` still leaves every lane green. That is the same shape of gap
+        // the move closed for the constant, one step further out, and it is the
+        // reason the wire half's reads are listed in `docs/qa-checklist.md` rather
+        // than claimed as covered.
         //
         // `GetProperty` returns `MINIMUM(remaining, 4 * long_length)`, so asking
         // for exactly twelve makes a thirteen-`CARDINAL` property answer with

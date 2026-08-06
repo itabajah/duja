@@ -53,7 +53,7 @@ end from day one. Distribution is a tag-triggered
 portable zip, and — from `v0.2.0` — a macOS universal disk image, all under one
 `SHA256SUMS`, each with a minisign signature and a build-provenance attestation.
 
-Health: **1,325 tests on the Windows CI lane plus 11 doctests (1,336 in a local `cargo test --workspace --all-features`), green on 3 OSes** — the
+Health: **1,327 tests on the Windows CI lane plus 11 doctests (1,338 in a local `cargo test --workspace --all-features`), green on 3 OSes** — the
 per-OS count differs because the `#![cfg(windows)]` and `#![cfg(unix)]`
 integration suites compile out on the other lanes, and so do the per-OS unit
 tests spread across roughly two dozen modules — deliberately not enumerated
