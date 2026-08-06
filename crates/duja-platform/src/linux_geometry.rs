@@ -1611,11 +1611,17 @@ mod tests {
         // is caught, which is why neither parser invents a floor of its own.
         //
         // Both *read* sources, which is what this test's name now claims. The
-        // override is a third source and does **not** belong here: it is rejected
-        // a step earlier, by winit's `validate_scale_factor`, and never reaches
-        // `sane_scale` at all — a distinction the next test pins, and one this
-        // test used to blur by asserting the override case against a fixture whose
-        // every route ended at 1.0 anyway.
+        // remaining source — `WINIT_X11_SCALE_FACTOR`, which the chain consults
+        // **first** — does not belong here: it is rejected a step earlier, by
+        // winit's `validate_scale_factor`, and never reaches `sane_scale` at all.
+        // The next test pins that distinction, and this one used to blur it by
+        // asserting the override case against a fixture whose every route ended
+        // at 1.0 anyway.
+        //
+        // ("Remaining", not "third". This PR has already had to correct two
+        // comments that called XSETTINGS the chain's *first* source when it is
+        // the second; numbering the override by elimination rather than by its
+        // position in the chain is the same slip pointing the other way.)
         for raw in DEGENERATE {
             let parsed: f64 = raw.parse().expect("the fixture is a float");
             let from_xsettings = DpiSources {
@@ -1642,7 +1648,8 @@ mod tests {
 
     #[test]
     fn a_degenerate_override_hands_the_chain_on_rather_than_being_substituted() {
-        // The third source, and the one that behaves differently. winit's
+        // `WINIT_X11_SCALE_FACTOR`: the source the chain consults first, and the
+        // one that behaves differently when it is degenerate. winit's
         // `validate_scale_factor` rejects these before the chain resumes, so the
         // answer is *the next source's*, not `sane_scale`'s 1.0.
         //

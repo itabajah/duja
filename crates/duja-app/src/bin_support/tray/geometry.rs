@@ -23,8 +23,10 @@
 //! # Units
 //!
 //! Everything the placement kernel sees is in **anchor units** — physical pixels
-//! on Windows, points on macOS, per [`duja_platform::geometry`]'s contract. Two
-//! factors bridge that to the units either side of it:
+//! on Windows and on X11, points on macOS, per [`duja_platform::geometry`]'s
+//! contract. This module is `cfg`-gated to Windows and macOS until the ksni wave
+//! un-gates the tray, so X11 is named here for the contract rather than for a
+//! path that runs. Two factors bridge that to the units either side of it:
 //!
 //! - [`Placement::logical_to_anchor`] turns the flyout's logical (`.slint` design
 //!   unit) size into anchor units, so the placement clamp measures the box the

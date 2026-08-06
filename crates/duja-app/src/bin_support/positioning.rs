@@ -15,7 +15,12 @@
 //!
 //! Every coordinate and extent here is in **anchor units**: the unit
 //! `duja_platform::geometry` hands out, which is physical device pixels on
-//! Windows and points on macOS. This module never learns which; it only ever
+//! Windows and on X11, and points on macOS. (X11 since P7. This module is
+//! reached only from the Windows and macOS tray today, so that third case is
+//! listed for the contract's sake rather than because anything here can see it —
+//! but the paragraph below records what happened the last time this enumeration
+//! was left describing one fewer backend than existed.) This module never learns
+//! which; it only ever
 //! compares the cursor against the work area, clamps inside it, and returns an
 //! origin in the same space it was given — an operation that is unit-agnostic by
 //! construction, provided the caller does not mix units. That is what
@@ -177,8 +182,8 @@ pub(crate) fn anchor_window_size(
 ///
 /// The arithmetic is [`duja_core::scale::scale_extent`], shared with
 /// `duja-ui`'s `dpi` module. **The unit is not shared**, which is why this
-/// wrapper stays: an anchor unit is physical pixels on Windows and points on
-/// macOS (ADR-0021), where `dpi`'s output is always physical pixels. Calling the
+/// wrapper stays: an anchor unit is physical pixels on Windows and X11 and
+/// points on macOS (ADR-0021), where `dpi`'s output is always physical pixels. Calling the
 /// core helper directly at the call sites would erase that distinction at
 /// exactly the layer the ADR exists to keep it explicit.
 fn anchor_dim(logical: f32, logical_to_anchor: f32) -> u32 {
