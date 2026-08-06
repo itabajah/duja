@@ -13,12 +13,28 @@
 # TDD spec commits ("test(core): debounce specs") are noun phrases by
 # convention, so the imperative-mood heuristic is off.
 style = "conventional"
-# Measured, not read from a doc: this counts the DESCRIPTION, not the whole
-# subject line. Five data points on #132 agree, including the one that failed -
-# 76-char subjects with 61-char descriptions pass, and an 82-char subject with a
-# 77-char description does not. Worth stating because the natural check
-# (`awk 'length > 72'` over `git log --format=%s`) flags four conforming commits
-# on that branch and would send someone rewriting them.
+# Read from the source, after a "measured" guess got it wrong. `committed`
+# v1.1.11's `check_subject_length` (crates/committed/src/checks.rs:118-145) takes
+# the subject line, drops everything from the LAST SPACE onward, and compares the
+# grapheme count of what remains. So the budget is the subject minus its final
+# word - a soft-wrap allowance - and a 76-character subject ending in a long word
+# passes while an 82-character one ending in a short word does not.
+#
+# Two traps worth carrying:
+#
+# 1. The error message reports the FULL length while the comparison used the
+#    shortened one. #132's failure printed "82 exceeds the max length of 72" for
+#    a line whose compared value was 77, which is what sent the first
+#    investigation down the wrong path.
+# 2. The obvious local check disagrees with the gate in both directions.
+#    `git log --format=%s | awk 'length > 72'` flags four conforming commits on
+#    that branch, and would miss a non-conforming one ending in a long word.
+#    `line[..line.rfind(' ')]` is the check that agrees.
+#
+# The wrong rule that stood here briefly - "it counts the description" - fit
+# every data point on that branch, because the one failing subject had a 5-char
+# prefix and a 5-char final word, making the two hypotheses numerically identical
+# on the only case that could have separated them.
 subject_length = 72
 subject_capitalized = false
 imperative_subject = false
