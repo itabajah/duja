@@ -859,12 +859,12 @@ fn contains(rect: WorkRect, (x, y): (i32, i32)) -> bool {
 ///
 /// - **The three that can.** `dx.saturating_mul(dx)`, `dy.saturating_mul(dy)` and
 ///   the `saturating_add` that combines them. A 1×1 monitor at `i32::MAX` probed
-///   from `i32::MIN` gives a gap of 4_294_967_295 on that axis, whose square is
-///   twice `i64::MAX` and wraps to **negative** 8_589_934_591 — which beats every
+///   from `i32::MIN` gives a gap of `4_294_967_295` on that axis, whose square is
+///   twice `i64::MAX` and wraps to **negative** `8_589_934_591` — which beats every
 ///   real monitor, so the nearest-monitor search returns the rectangle *furthest*
 ///   from the cursor. The sum overflows on a smaller input still: a 1×1 rectangle
 ///   probed from `(i32::MIN, i32::MAX)` gives components summing to
-///   9_223_372_049_739_677_761, about 13 billion past `i64::MAX`.
+///   `9_223_372_049_739_677_761`, about 13 billion past `i64::MAX`.
 /// - **The six that cannot.** Computing `right` and `bottom` adds an extent
 ///   (`u32`, so under 2³²) to an origin (`i32`, so under 2³¹) and subtracts one:
 ///   under 2³³ in an `i64`, with no reachable edge. Computing `dx` and `dy`
