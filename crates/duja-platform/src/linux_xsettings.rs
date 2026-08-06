@@ -218,17 +218,25 @@ impl<'a> Parser<'a> {
     ///
     /// The refusal is the contract, not an implementation detail. Handing back a
     /// *short* slice instead survives every test that goes through [`xft_dpi`],
-    /// by a route that has nothing to do with this function: a short read is only
-    /// possible when `n` exceeds what is left, which means it consumes the rest,
-    /// and every path out of [`Parser::setting`] then reaches a
-    /// [`Parser::byte`], [`Parser::card16`] or [`Parser::card32`] on an empty
-    /// buffer — and those three fail, because they need a first element or an
-    /// exact array rather than however many bytes arrived.
+    /// by a route that has nothing to do with this function.
     ///
-    /// [`Parser::setting`]'s own five direct calls do **not** re-check; they are
-    /// covered by whichever of those three comes next. So the masking is a
-    /// property of the walk's shape rather than of its callers, which is exactly
-    /// the kind of thing that stops being true when the walk changes.
+    /// A short read is only possible when `n` exceeds what is left, which means it
+    /// consumes the rest. From an empty buffer [`Parser::byte`] finds no first
+    /// element and [`Parser::card16`] and [`Parser::card32`] cannot fill an exact
+    /// array, so **the only value that can reach the caller is `None` or a
+    /// [`Value::Other`]**: the two arms that read a payload with a bare `take`
+    /// (`TYPE_STRING` and `TYPE_COLOR`) do return `Some` under the mutation, but
+    /// [`xft_dpi`] answers `Some` only through [`Value::Integer`], and that arm
+    /// goes through [`Parser::card32`].
+    ///
+    /// Two earlier versions of this paragraph each got that wrong in a different
+    /// direction: the first said "each caller re-checks", when
+    /// [`Parser::setting`]'s five direct calls re-check nothing; the second said
+    /// every path reaches one of the three accessors, when the colour arm can
+    /// return a `Setting` without touching any of them. The conclusion survived
+    /// both, which is the point — it is a property of how the walk happens to be
+    /// arranged, and rearranging it so a short read is the last thing a setting
+    /// does would break it silently.
     /// `a_short_read_is_refused_rather_than_shortened` pins the contract here
     /// instead.
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
@@ -675,10 +683,14 @@ mod tests {
     #[test]
     fn a_short_read_is_refused_rather_than_shortened() {
         // Every accessor is built on `take`, and `take` returning a short slice
-        // rather than `None` is invisible from `xft_dpi`: the callers that matter
-        // all re-check the length themselves, so the whole suite stays green while
-        // the cursor primitive silently reads what is not there. Pinned directly,
-        // because "the callers happen to cover it" is a property of the callers.
+        // rather than `None` is invisible from `xft_dpi` — see `take`'s own docs
+        // for why, which is a property of how the walk is arranged rather than of
+        // any caller. Pinned here rather than argued about there, because an
+        // argument of that shape stops being true when the walk changes and a
+        // test does not.
+        //
+        // This comment gave the *reason* the commit two above it retracted, for
+        // one commit, in the half of the pair that correction did not touch.
         let bytes = [1_u8, 2, 3];
         let mut parser = super::Parser {
             bytes: &bytes,

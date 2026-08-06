@@ -347,7 +347,7 @@ impl X11Strut {
     /// falls back to the legacy property whenever the partial one produced no
     /// strut at all, so on GNOME, obeying the MUST is precisely what would
     /// disagree with the shell about where a window fits. [`choose_strut`]
-    /// documents the trade and its tests pin all four cases.
+    /// documents the trade, and its tests pin every shape a window can present.
     pub(crate) const fn from_legacy(values: [u32; 4], screen: X11Screen) -> Self {
         let [left, right, top, bottom] = values;
         X11Strut {
@@ -713,7 +713,12 @@ pub(crate) fn anchor_from_x11(
 /// This lived in the X11 backend until a review pointed out that it is the one
 /// consequential rule in that module which is a pure function of its inputs — and
 /// that the module's own opening sentence claims nothing there subtracts a strut.
-/// Here it is four cases on every CI lane.
+/// Here it is tested on every CI lane, in every shape a window can present:
+/// a conformant partial, one that reserves nothing, a legacy property standing
+/// alone, either at the wrong length in either direction, and neither present.
+/// The count was "four cases" until a review noticed that the legacy-only
+/// shape - the ordinary one for a panel that publishes only `_NET_WM_STRUT` -
+/// was the shape not among them.
 pub(crate) fn choose_strut(
     partial: Option<&[u32]>,
     legacy: Option<&[u32]>,
@@ -813,6 +818,28 @@ fn contains(rect: WorkRect, (x, y): (i32, i32)) -> bool {
 ///
 /// Squared because only the ordering matters and a square root would introduce a
 /// rounding difference between two monitors that are genuinely equidistant.
+///
+/// # The two `.max()` calls are the only genuinely load-bearing guard here
+///
+/// `Ord::clamp` **panics** when its bounds are inverted, and a zero-extent
+/// rectangle inverts them: `left + 0 - 1` is one below `left`. Without the
+/// `.max(left)` and `.max(top)`, a CRTC reporting a zero width or height would
+/// panic inside a call chain that [`crate::geometry::cursor_anchor`] promises
+/// never to fail.
+///
+/// Unreachable today only because `linux::geometry::monitors` filters zero
+/// extents out — which is in the half no CI lane compiles, so "unreachable" rests
+/// on code no test on this machine's lanes ever runs. That is why the guard is
+/// pinned by `a_zero_extent_monitor_does_not_panic_the_nearest_search` rather
+/// than trusted.
+///
+/// The same degeneracy is why [`monitor_for_cursor`]'s containment check is not
+/// redundant: pulling the last pixel back to the first is what makes this
+/// function answer zero for a point [`contains`] rejects, and that disagreement
+/// is the whole reason the early return is load-bearing. This note is the one
+/// [`monitor_for_cursor`] refers to; for one commit it referred to a note that
+/// had never been written, because the round that added the test above added no
+/// paragraph here.
 fn distance_squared(rect: WorkRect, (x, y): (i32, i32)) -> i64 {
     let left = i64::from(rect.x);
     let top = i64::from(rect.y);
@@ -1473,8 +1500,12 @@ mod tests {
         assert_eq!(work_area(lower, stacked, &[dock(2159, 3000)]).x, 60);
         assert_eq!(work_area(lower, stacked, &[dock(2160, 3000)]).x, 0);
 
-        // And the same two endpoints on the column axis, with a bottom panel
-        // overhanging its neighbour by exactly one column.
+        // And both endpoints again on the column axis, with a bottom panel
+        // overhanging its neighbour by exactly one column. `band_meets` is one
+        // shared function, so the row half above already kills every mutation of
+        // it — but an earlier version of this comment claimed "the same two
+        // endpoints" while driving only `start < high`, with `end` at 3839 against
+        // a low of 0 in both rows. The two cases below close that.
         let side_by_side = screen(3840, 1080);
         let left_monitor = WorkRect {
             x: 0,
@@ -1491,6 +1522,26 @@ mod tests {
             work_area(left_monitor, side_by_side, &[bottom_panel(40, 1920, 3839)]).h,
             1080,
             "and one column past it is not"
+        );
+
+        // The far end of the span, which is the endpoint the two rows above hold
+        // fixed: a panel ending exactly on the monitor's first column reserves the
+        // edge, and one ending a column short of it does not.
+        let right_monitor = WorkRect {
+            x: 1920,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        assert_eq!(
+            work_area(right_monitor, side_by_side, &[bottom_panel(40, 0, 1920)]).h,
+            1040,
+            "ending on the monitor's first column is inclusive"
+        );
+        assert_eq!(
+            work_area(right_monitor, side_by_side, &[bottom_panel(40, 0, 1919)]).h,
+            1080,
+            "and ending one column short of it is not"
         );
     }
 
@@ -2723,9 +2774,15 @@ mod tests {
 
     #[test]
     fn the_partial_strut_wins_unless_it_reserves_nothing() {
-        // The rule that deliberately disobeys EWMH's MUST, in the four shapes a
-        // window can present. It was unreachable from any test until it moved out
-        // of the X11 backend.
+        // The rule that deliberately disobeys EWMH's MUST, in every shape a window
+        // can present: a conformant partial, one that reserves nothing, a legacy
+        // property with no partial beside it, either property at the wrong length
+        // in either direction, and neither present. It was unreachable from any
+        // test until it moved out of the X11 backend.
+        //
+        // "Four shapes" is what this said while the legacy-only row was missing.
+        // Four call sites describe the trade as a four-case rule, so the count was
+        // load-bearing prose rather than throat-clearing.
         let root = screen(1920, 1080);
         let partial = [40, 0, 0, 0, 0, 1079, 0, 0, 0, 0, 0, 0];
         let empty_partial = [0_u32; 12];
@@ -2743,6 +2800,17 @@ mod tests {
             choose_strut(Some(&empty_partial), Some(&legacy), root),
             Some(X11Strut::from_legacy(legacy, root)),
             "an all-zero partial is not a reservation"
+        );
+        // No partial property at all, and a well-formed legacy one: the ordinary
+        // shape for a panel that publishes only `_NET_WM_STRUT`, and the one this
+        // test's "four shapes" did not include. Every other row that drives the
+        // legacy branch reaches it through a *partial* that was rejected, so a
+        // reader could reasonably have taken the legacy form for a fallback rather
+        // than a source in its own right.
+        assert_eq!(
+            choose_strut(None, Some(&legacy), root),
+            Some(X11Strut::from_legacy(legacy, root)),
+            "a legacy-only panel reserves its edge"
         );
         // A partial of the wrong length is not the property it claims to be.
         assert_eq!(

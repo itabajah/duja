@@ -405,21 +405,31 @@ mod tests {
         // to read. A walk plus a floor cannot rot the same way.
         //
         // Both floors are tripwires rather than rules, and neither can be pinned
-        // by a test: lowering `200` to `0` leaves every test in this file green,
+        // by a test: lowering `100` to `0` leaves every test in this file green,
         // because the only thing that would notice is this assertion. The `panic!`
         // above is the same shape — the corpus has no mismatched row, so deleting
         // the reaction survives everything. Both are written down so the next
         // mutation census does not read the survivors as evidence that either is
         // pointless; what a fixture *can* pin is the decision, and
-        // [`table_mismatches`] now takes it. The numbers are roughly half of what
-        // the corpus carries today, so ordinary pruning does not trip them.
+        // [`table_mismatches`] now takes it.
+        //
+        // The numbers are measured rather than guessed, because the first version
+        // of this comment guessed: it put the row floor at 200 and called that
+        // "roughly half of what the corpus carries", when the corpus carries 258
+        // rows across 31 files and 200 is 78 % of them. `docs/debt.md` alone holds
+        // 119, and its own preamble says to delete entries when they are drained —
+        // so draining half of one document would have failed this test, which is
+        // precisely the "ordinary pruning" that same sentence promised was safe. A
+        // floor is only a tripwire if the thing it trips on is a broken walk, and a
+        // broken walk reports approximately zero. 100 rows and 10 files sit well
+        // under any plausible pruning and well over that.
         assert!(
             files.len() >= 10,
             "only {} markdown files under docs/ — the walk is not walking",
             files.len()
         );
         assert!(
-            rows_checked >= 200,
+            rows_checked >= 100,
             "only {rows_checked} table rows checked — the tables are no longer being found"
         );
     }
