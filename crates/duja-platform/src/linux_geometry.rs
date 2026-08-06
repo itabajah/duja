@@ -1598,31 +1598,36 @@ mod tests {
         approx(scale_factor(&NO_DPI, &nonsense), 1.0);
     }
 
+    /// The five values a source can carry that a layout cannot multiply by.
+    ///
+    /// Written as strings because two of the three sources are unparsed text; the
+    /// XSETTINGS loop parses them back, which keeps one list behind all three.
+    const DEGENERATE: [&str; 5] = ["0", "-96", "nan", "inf", "0.0"];
+
     #[test]
-    fn a_degenerate_dpi_from_any_source_is_neutralised_once_at_the_end() {
-        // A settings manager can publish zero or a negative; `sane_scale` is the
-        // single place that is caught, which is why the parsers pass it through
-        // instead of each inventing a floor.
+    fn a_degenerate_dpi_from_either_read_source_is_neutralised_at_the_end() {
+        // A settings manager can publish zero or a negative, and a hand-written
+        // `.Xresources` can carry the same; `sane_scale` is the single place that
+        // is caught, which is why neither parser invents a floor of its own.
         //
-        // "Any source" means all three, and it used to mean XSETTINGS alone. The
-        // `Xft.dpi` resource reaches the same divide through `f64::from_str`, so
-        // `"0"` and `"nan"` are as reachable as the parsed values — and the
-        // override is checked before either, by a *different* predicate
-        // (`validate_scale_factor`, winit's), which rejects them one step earlier
-        // and hands the chain on rather than substituting. All three must arrive
-        // at 1.0 and only two of the routes are the same route.
-        for dpi in [0.0, -96.0, f64::NAN, f64::INFINITY] {
+        // Both *read* sources, which is what this test's name now claims. The
+        // override is a third source and does **not** belong here: it is rejected
+        // a step earlier, by winit's `validate_scale_factor`, and never reaches
+        // `sane_scale` at all — a distinction the next test pins, and one this
+        // test used to blur by asserting the override case against a fixture whose
+        // every route ended at 1.0 anyway.
+        for raw in DEGENERATE {
+            let parsed: f64 = raw.parse().expect("the fixture is a float");
             let from_xsettings = DpiSources {
                 scale_override: None,
-                xsettings_dpi: Some(dpi),
+                xsettings_dpi: Some(parsed),
                 xft_dpi: None,
             };
             approx(
                 scale_factor(&from_xsettings, &monitor(0, 0, 1920, 1080)),
                 1.0,
             );
-        }
-        for raw in ["0", "-96", "nan", "inf", "0.0"] {
+
             let from_resource = DpiSources {
                 scale_override: None,
                 xsettings_dpi: None,
@@ -1632,17 +1637,55 @@ mod tests {
                 scale_factor(&from_resource, &monitor(0, 0, 1920, 1080)),
                 1.0,
             );
-            // And as an override, where winit's own validation rejects it first:
-            // the chain falls through to the next source, which here is the
-            // measurement of a display reporting no physical size — also 1.0, by
-            // a different route.
-            let as_override = DpiSources {
+        }
+    }
+
+    #[test]
+    fn a_degenerate_override_hands_the_chain_on_rather_than_being_substituted() {
+        // The third source, and the one that behaves differently. winit's
+        // `validate_scale_factor` rejects these before the chain resumes, so the
+        // answer is *the next source's*, not `sane_scale`'s 1.0.
+        //
+        // The fixture is what makes that observable: a display measuring 1.5, so a
+        // pass-through and a substitution give different numbers. Asserting this
+        // against a 0mm display — where the fall-through also yields 1.0 — is a
+        // test no mutation can fail, which is exactly what an earlier version of
+        // it was.
+        let laptop = X11Monitor {
+            bounds: WorkRect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+            mm_width: 344,
+            mm_height: 194,
+        };
+        for raw in DEGENERATE {
+            let rejected = DpiSources {
                 scale_override: Some(raw),
                 xsettings_dpi: None,
                 xft_dpi: None,
             };
-            approx(scale_factor(&as_override, &monitor(0, 0, 1920, 1080)), 1.0);
+            approx(scale_factor(&rejected, &laptop), 1.5);
+            // And with a source behind it, the fall-through lands there instead —
+            // which is the half that distinguishes "rejected" from "clamped".
+            let with_xsettings = DpiSources {
+                scale_override: Some(raw),
+                xsettings_dpi: Some(192.0),
+                xft_dpi: None,
+            };
+            approx(scale_factor(&with_xsettings, &laptop), 2.0);
         }
+        // A *valid* override is used rather than handed on, which is what stops
+        // the assertions above from passing for a `parse_override` that rejects
+        // everything.
+        let honoured = DpiSources {
+            scale_override: Some("1.25"),
+            xsettings_dpi: Some(192.0),
+            xft_dpi: None,
+        };
+        approx(scale_factor(&honoured, &laptop), 1.25);
     }
 
     // -- the assembled anchor ----------------------------------------------

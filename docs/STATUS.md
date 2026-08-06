@@ -1846,14 +1846,23 @@ live divergence rather than a latent one.** Only the chain's last step is
 per-monitor, and there Duja reads the cursor's monitor while winit reads
 `monitors[0]` — not by choice: `x11/window.rs` guesses a new window's monitor from
 `XIQueryPointer`, whose `root_x` is `Fp1616` fixed point, and casts it to `i64`
-without the `>> 16`, so nothing ever contains the pointer and the guess falls
-through to the first enabled CRTC. That guess is a transient winit corrects on the
-first synthetic `ConfigureNotify`, so the cursor's monitor is what it settles on,
-and reproducing the upstream bug to match would be wrong the day it is fixed.
-Reaching the divergence at all needs the chain to get to step 4, which is either
-`WINIT_X11_SCALE_FACTOR=randr` or a session with no XSETTINGS manager and no
-`Xft.dpi`. `debt.md` carries it, with the note to re-read `x11/window.rs` when a
-Slint bump moves winit.
+without the `>> 16`, so no rectangle contains the pointer — except at the root
+origin, where `0 << 16` is still `0` and winit's inclusive `contains_point`
+matches — and the guess falls through to the first enabled CRTC. That guess is a
+transient winit corrects on the first synthetic `ConfigureNotify`, so the cursor's
+monitor is what it settles on, and reproducing the upstream bug to match would be
+wrong the day it is fixed.
+
+Reaching the divergence needs the chain to get to step 4 — either
+`WINIT_X11_SCALE_FACTOR=randr`, or no override *and* no XSETTINGS manager *and* no
+`Xft.dpi` resource — **and**, either way, two CRTCs of different densities with the
+cursor not on the first. `debt.md` carries it, with the note to re-read
+`x11/window.rs` when a Slint bump moves winit.
+
+(Both qualifications were missing from the first draft of this paragraph, which is
+the fourth copy of a claim three review rounds had already retracted elsewhere.
+STATUS is the orientation document, so it was also the copy most likely to be read
+as unconditional.)
 
 **Wayland is not a port of any of that, and cannot be.** There is no global cursor
 position for a client to ask for, a client cannot position its own toplevel at all

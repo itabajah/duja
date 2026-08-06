@@ -103,19 +103,32 @@ mod tests {
     fn cell_count(line: &str) -> usize {
         let mut fields: usize = 1;
         let mut escaped = false;
+        let mut ends_on_separator = false;
         for byte in line.bytes() {
-            match byte {
-                _ if escaped => escaped = false,
-                b'\\' => escaped = true,
-                b'|' => fields = fields.saturating_add(1),
-                _ => {}
+            // Both decisions read the state as it was on *entry*: a `|` counts
+            // when the byte before it did not escape it, and a `\` escapes the
+            // next byte only when it was not itself escaped. Testing the updated
+            // flag instead — which the first version of this loop did — counts an
+            // escaped pipe as a delimiter, because the backslash has already
+            // cleared the flag by the time the pipe is looked at.
+            let was_escaped = escaped;
+            escaped = !was_escaped && byte == b'\\';
+            ends_on_separator = byte == b'|' && !was_escaped;
+            if ends_on_separator {
+                fields = fields.saturating_add(1);
             }
         }
         // A leading pipe contributes an empty first field and a trailing one an
-        // empty last; `saturating_sub` rather than `-` so a pipe-less line (which
-        // the caller never passes, but which a future one might) cannot underflow.
+        // empty last. Both discounts come from the same state machine that
+        // counted the fields — an earlier version tested the tail with
+        // `!line.ends_with("\\|")`, which disagrees with the loop on a row ending
+        // in an escaped backslash followed by a real delimiter, and a checker
+        // whose two halves can disagree is worth less than the bug it looks for.
+        // `saturating_sub` rather than `-` so a pipe-less line (which the caller
+        // never passes, but a future one might) cannot underflow, and the length
+        // guard stops a lone `"|"` being discounted twice.
         let lead = usize::from(line.starts_with('|'));
-        let trail = usize::from(line.len() > 1 && line.ends_with('|') && !line.ends_with("\\|"));
+        let trail = usize::from(ends_on_separator && line.len() > 1);
         fields.saturating_sub(lead).saturating_sub(trail)
     }
 
@@ -156,13 +169,18 @@ mod tests {
     /// Fenced code blocks are skipped: a table drawn inside one is illustration,
     /// not data.
     ///
-    /// Three things it deliberately does not model, none of which any file under
+    /// Four things it deliberately does not model, none of which any file under
     /// `docs/` uses today: `~~~` fences (only backticks toggle), indented code
-    /// blocks, and the requirement that a delimiter row actually follow the
-    /// presumed header — so a `|`-wrapped prose line would be taken for a header
-    /// and could fail the real table beneath it. Each is a line of code and a
-    /// class of false alarm; they are named here so that a future false alarm is
-    /// diagnosable rather than mysterious.
+    /// blocks, raw HTML blocks (`docs/qa-checklist.md` has multi-line `<!-- -->`
+    /// comments, though none with a pipe in it), and the requirement that a
+    /// delimiter row actually follow the presumed header — so a `|`-wrapped prose
+    /// line would be taken for a header and could fail the real table beneath it.
+    /// Each is a line of code and a class of false alarm; they are named here so
+    /// that a future false alarm is diagnosable rather than mysterious.
+    ///
+    /// A row with **no leading pipe** is a fifth, and a different shape: those are
+    /// not scanned at all rather than scanned wrongly, so such a table is silently
+    /// unchecked. GFM allows it; nothing under `docs/` writes it.
     #[test]
     fn every_docs_table_row_matches_its_header() {
         let mut docs = crate::repo_root().expect("repo root");

@@ -4,8 +4,11 @@
 //! An XSETTINGS manager (`gnome-settings-daemon`, `xfsettingsd`, `xsettingsd`)
 //! owns the `_XSETTINGS_S<screen>` selection and publishes every desktop setting
 //! as a single binary property on its own window. Exactly one of those settings
-//! matters here: `Xft/DPI`, the first source winit consults for a window's scale
-//! factor on X11. See [`linux_geometry`](crate::linux_geometry)'s
+//! matters here: `Xft/DPI`, the **second** source winit consults for a window's
+//! scale factor on X11 — the first is the `WINIT_X11_SCALE_FACTOR` environment
+//! variable, and this one is the first that has to be *read from anywhere*, which
+//! is presumably how an earlier version of this sentence lost the distinction. See
+//! [`linux_geometry`](crate::linux_geometry)'s
 //! `scale_factor` for what the number is then used for and why this crate has to
 //! read the same sources winit does.
 //!
