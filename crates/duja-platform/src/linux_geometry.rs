@@ -114,20 +114,24 @@
 //!
 //! Every coordinate here is an `i32` or a `u32` widened to `i64` before anything
 //! is done to it, so a sum or difference of two of them is under 2³³ and an `i64`
-//! has room to spare. That single fact settles most of the `saturating_*` calls in
-//! this file: `work_area`'s monitor edges (`i32` origin plus `u32` extent),
-//! its two strut subtractions (`u32` screen extent minus `u32` depth),
-//! `extent_from`'s headroom and span, and `distance_squared`'s edges and gaps —
-//! **none of them can reach a bound**. Replacing any with the wrapping form
-//! changes no answer, and a mutation run confirms it.
+//! has room to spare. That single fact settles fourteen of the seventeen
+//! `saturating_*` calls outside this file's test module: `work_area`'s two
+//! monitor edges (`i32` origin plus `u32` extent) and two strut subtractions
+//! (`u32` screen extent minus `u32` depth), `contains`'s two right-and-bottom
+//! edges, `extent_from`'s headroom and span, and `distance_squared`'s four edge
+//! steps and two gaps — **none of them can reach a bound**. Rewriting all
+//! fourteen to the wrapping form at once leaves the suite green.
+//!
+//! The first version of this paragraph listed twelve of the fourteen, omitting
+//! `contains`, under a heading that is a claim about all of them.
 //!
 //! The exceptions are the three in [`distance_squared`]'s last line, because
 //! squaring leaves that range: two gaps that each fit in an `i64` have squares
 //! that do not, and a sum that does not. Those are documented and pinned there.
 //!
-//! This is written once, here, rather than nine times: the alternative was a note
-//! on each call, and a note on each call is how a claim of unreachability ends up
-//! true of eight of them.
+//! This is written once, here, rather than seventeen times: the alternative was a
+//! note on each call, and a note on each call is how a claim of unreachability
+//! ends up true of thirteen of fourteen.
 //!
 //! # Work area
 //!
@@ -756,6 +760,14 @@ pub(crate) fn choose_strut(
     if twelve.is_some() {
         return twelve;
     }
+    // Deliberately **not** `.filter(X11Strut::reserves_anything)`, unlike the arm
+    // above. That filter is not a validity check — it is the fallback decision,
+    // and there is nothing after this one to fall back to. An all-zero legacy
+    // therefore comes back as a strut that reserves nothing rather than as
+    // `None`, which `work_area` treats identically because it skips every zero
+    // depth. Adding the filter here changes no work area; it went untested for
+    // exactly that reason, and it is written down because the asymmetry between
+    // the two arms otherwise reads as an omission.
     <[u32; 4]>::try_from(legacy?)
         .ok()
         .map(|four| X11Strut::from_legacy(four, screen))
@@ -869,9 +881,9 @@ fn contains(rect: WorkRect, (x, y): (i32, i32)) -> bool {
 ///   (`u32`, so under 2³²) to an origin (`i32`, so under 2³¹) and subtracts one:
 ///   under 2³³ in an `i64`, with no reachable edge. Computing `dx` and `dy`
 ///   subtracts one `i32`-ranged value from another, so under 2³². They are
-///   saturating for uniformity, not for a case — which is true of every other
-///   `saturating_*` call in this module too, for the same reason. The module
-///   docs state it once, and these three are the exceptions it names.
+///   saturating for uniformity, not for a case — which is true of the eight
+///   others in this module too, for the same reason. The module docs state it
+///   once over all seventeen, and these three are the exceptions they name.
 ///
 /// Two facts about how that list was arrived at, both worth more than the list.
 /// An earlier version offered "the `saturating_add` already saturates on every run
@@ -2924,6 +2936,11 @@ mod tests {
         approx(anchor.logical_to_anchor(), 1.5);
     }
 
+    /// A partial-strut fixture: its name, its bytes, and whether it wins outright.
+    type PartialCase<'a> = (&'a str, Option<&'a [u32]>, bool);
+    /// A legacy-strut fixture: its name, its bytes, and what it decodes to.
+    type LegacyCase<'a> = (&'a str, Option<&'a [u32]>, Option<[u32; 4]>);
+
     #[test]
     fn the_partial_strut_wins_unless_it_reserves_nothing() {
         // The rule that deliberately disobeys EWMH's MUST, over the product of
@@ -3025,38 +3042,55 @@ mod tests {
         // whole product is walked. The expectation is the rule itself, stated once:
         // a conformant partial wins whatever the legacy is; otherwise a valid
         // legacy wins; otherwise nothing.
-        let partials: [(&str, Option<&[u32]>); 5] = [
-            ("absent", None),
-            ("conformant", Some(&partial)),
-            ("all zero", Some(&empty_partial)),
-            ("too short", Some(&partial[..11])),
-            ("too long", Some(&thirteen)),
+        // The third column is the expectation, not a restatement of the code: for
+        // a partial, whether it wins outright; for a legacy, what it decodes to if
+        // anything. The rule is then one line, and it keys on those rather than on
+        // the labels — an oracle that matched on the string "valid" could not tell
+        // a well-formed empty legacy from a malformed one.
+        let zero_legacy = [0_u32; 4];
+        let partials: [PartialCase<'_>; 5] = [
+            ("absent", None, false),
+            ("conformant", Some(&partial), true),
+            ("all zero", Some(&empty_partial), false),
+            ("too short", Some(&partial[..11]), false),
+            ("too long", Some(&thirteen), false),
         ];
-        let legacies: [(&str, Option<&[u32]>); 4] = [
-            ("absent", None),
-            ("valid", Some(&legacy)),
-            ("too short", Some(&legacy[..3])),
-            ("too long", Some(&five)),
+        // Five values, not four. The first version of this grid gave the partial
+        // axis an "all zero" row and the legacy axis none, which made it the
+        // product of the *implementation's* equivalence classes rather than of
+        // what the two properties can be — the difference being precisely that the
+        // partial arm filters and the legacy arm does not. Adding
+        // `.filter(X11Strut::reserves_anything)` to the legacy arm survived all
+        // twenty cells and the whole file.
+        let legacies: [LegacyCase<'_>; 5] = [
+            ("absent", None, None),
+            ("valid", Some(&legacy), Some(legacy)),
+            ("all zero", Some(&zero_legacy), Some(zero_legacy)),
+            ("too short", Some(&legacy[..3]), None),
+            ("too long", Some(&five), None),
         ];
-        let mut cells = 0_usize;
-        for (partial_name, partial_value) in partials {
-            for (legacy_name, legacy_value) in legacies {
-                let expected = if partial_name == "conformant" {
+        for (partial_name, partial_value, partial_wins) in partials {
+            for (legacy_name, legacy_value, decoded) in legacies {
+                let expected = if partial_wins {
                     Some(X11Strut::from_partial(partial))
-                } else if legacy_name == "valid" {
-                    Some(X11Strut::from_legacy(legacy, root))
                 } else {
-                    None
+                    decoded.map(|four| X11Strut::from_legacy(four, root))
                 };
                 assert_eq!(
                     choose_strut(partial_value, legacy_value, root),
                     expected,
                     "partial {partial_name}, legacy {legacy_name}"
                 );
-                cells = cells.saturating_add(1);
             }
         }
-        assert_eq!(cells, 20, "the product the comment above claims");
+        // No `assert_eq!(cells, 25)` here. The first version of this loop counted
+        // its iterations and asserted the total, presented as the check that made
+        // the comment's cell count verified rather than claimed. It is a
+        // compile-time tautology: the two arrays have fixed-length types, the body
+        // is unconditional, so the count is 25 on every possible execution and
+        // shrinking an array is a compiler error rather than a test failure. The
+        // grid's size is checked by the type system; what this loop checks is the
+        // rule.
     }
 
     // -- which windowing system --------------------------------------------

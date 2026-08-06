@@ -429,14 +429,20 @@ mod tests {
         //   `markdown_files` and it finds 7 files but still 211 rows, 82 % of the
         //   corpus, clearing any row floor worth setting. Only the file floor
         //   catches this.
-        // - **the scan stops recognising rows.** Invert the fence state, or break
-        //   the leading-pipe test, and all 31 files are still walked while 0 rows
-        //   are compared. Only the row floor catches this.
+        // - **the scan stops recognising rows.** Invert the fence state and all 31
+        //   files are still walked while 0 rows are compared. Only the row floor
+        //   catches this.
         //
-        // An earlier version of this comment paired the first with "delete the
-        // `push` and it finds 24 files and 47 rows", a figure that does not
-        // reproduce: deleting the push arm pushes nothing at any depth, so it finds
-        // 0 files and 0 rows and both floors fire. The pair above is measured.
+        // Two figures have been struck from this comment for not reproducing, so
+        // both above were measured against the live corpus rather than reasoned
+        // about. The first was "delete the `push` and it finds 24 files and 47
+        // rows": deleting that arm pushes nothing at any depth, so it finds 0 and 0
+        // and both floors fire. The second was this bullet's own "or break the
+        // leading-pipe test" — dropping the `!` from `if !line.starts_with('|')`
+        // inverts which lines are rows and compares roughly 4,800 of them, clearing
+        // the row floor by nearly fifty times. It is caught, but by the mismatch
+        // `panic!` rather than by either floor, which is a different claim than the
+        // one this bullet is making.
         //
         // 100 rows and 10 files sit well under any plausible pruning and well over
         // both failure modes.
