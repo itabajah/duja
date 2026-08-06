@@ -127,9 +127,12 @@
 //! edges past every band that meets the monitor at all. What that buys, stated
 //! per axis because the two axes fail independently:
 //!
-//! Both are scoped to the bands this module **accepts**, which is exactly the
-//! ones [`band_meets`] answers true for, and that scope is not a formality —
-//! see below.
+//! Both are scoped to the bands this module **accepts**: a non-zero depth *and*
+//! [`band_meets`] answering true. The depth half is vacuous — a zero-depth band
+//! reserves the empty region, which every span excludes — so the scope that does
+//! work is `band_meets`, and it is not a formality; see below. (Naming only
+//! `band_meets` here was the fourth version of this paragraph and the first to be
+//! merely imprecise rather than false.)
 //!
 //! - **On an axis the struts did not empty, the result's span on that axis
 //!   excludes every accepted band reserved from that axis's edges.** `left` is at
