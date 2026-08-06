@@ -518,11 +518,79 @@ mod platform {
     // `mac_geometry`; a test here could only assert that a struct copy copies.
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+mod platform {
+    use super::{AnchorUnit, DEFAULT_WORK, TrayAnchor};
+    use crate::linux_geometry::{DisplayEnv, WindowSystem, window_system};
+
+    /// The anchor used when the session is not one this backend can measure.
+    ///
+    /// [`AnchorUnit::PhysicalPixels`] with a 1.0 scale, so both conversion
+    /// factors are 1.0 and it behaves identically to the Windows and macOS
+    /// fallbacks.
+    const FALLBACK: TrayAnchor = TrayAnchor {
+        cursor: (0, 0),
+        work_area: DEFAULT_WORK,
+        scale: 1.0,
+        unit: AnchorUnit::PhysicalPixels,
+    };
+
+    /// The Linux anchor: a real measurement on X11, the fallback on Wayland.
+    ///
+    /// # Why Wayland is not a port of this
+    ///
+    /// The X11 path here is close to the Windows one — ask where the pointer is,
+    /// find the display under it, take that display's work area and scale. Every
+    /// step of that is unavailable on Wayland, and not by omission:
+    ///
+    /// - **There is no global cursor position.** A Wayland client learns pointer
+    ///   coordinates only from events delivered to its own surfaces, in that
+    ///   surface's coordinates. There is no request that answers "where is the
+    ///   pointer", by design.
+    /// - **A client cannot position its own toplevel.** `set_outer_position` is a
+    ///   no-op on winit's Wayland backend, because `xdg_toplevel` has no request
+    ///   for it. So even a correct anchor would not move the flyout.
+    /// - **There is no work area to read.** A layer-shell panel's exclusive zone
+    ///   is known to the compositor and to no one else.
+    ///
+    /// The Wayland answer is therefore a different mechanism rather than a second
+    /// implementation of this one: the screen coordinates the tray host passes to
+    /// `StatusNotifierItem.Activate(x, y)`, which ksni surfaces, feeding a
+    /// compositor-side positioner. ADR-0010 records that, wave 5b builds it, and
+    /// `docs/debt.md` carries the gap until then. Returning [`FALLBACK`] in the
+    /// meantime is honest: the flyout lands where the compositor puts it, which
+    /// is what would happen whatever this function returned.
+    ///
+    /// A session with neither display server — a TTY launch, a service unit —
+    /// takes the same path, and has no tray to click in the first place.
+    pub(super) fn cursor_anchor() -> TrayAnchor {
+        let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
+        let wayland_socket = std::env::var("WAYLAND_SOCKET").ok();
+        let display = std::env::var("DISPLAY").ok();
+        let env = DisplayEnv {
+            wayland_display: wayland_display.as_deref(),
+            wayland_socket: wayland_socket.as_deref(),
+            display: display.as_deref(),
+        };
+        match window_system(env) {
+            WindowSystem::X11 => crate::linux::geometry::cursor_anchor().unwrap_or(FALLBACK),
+            WindowSystem::Wayland | WindowSystem::None => FALLBACK,
+        }
+    }
+
+    // No unit tests here, deliberately, and for the reason the macOS backend
+    // gives: every line above is an environment read, a `match` on a rule that is
+    // tested in `linux_geometry`, or a call into the X11 module that needs a
+    // server. A test here could only assert that `std::env::var` reads the
+    // environment — and would have to mutate the process's environment to do it,
+    // which is unsound in a threaded test harness.
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod platform {
     use super::{AnchorUnit, DEFAULT_WORK, TrayAnchor};
 
-    /// No screen-geometry backend on this platform yet (Linux, P7).
+    /// No screen-geometry backend on this platform.
     ///
     /// **This is a placeholder, not a supported configuration**, and it is
     /// documented as such rather than presented as a query that succeeded. It
@@ -530,10 +598,12 @@ mod platform {
     /// caller gets a usable anchor and a flyout lands *somewhere* plausible
     /// instead of not at all.
     ///
-    /// The Linux backend (P7) has to answer the same two questions the Windows
-    /// and macOS ones did: which unit its window-positioning API takes (which
-    /// picks the [`AnchorUnit`]), and whether its y axis needs flipping. It is
-    /// declared [`AnchorUnit::PhysicalPixels`] here purely because the scale is a
+    /// Nothing Duja ships reaches this. The three targets with a tray each have a
+    /// backend above, and this arm exists so the crate still compiles on a
+    /// fourth — a BSD, say, where the X11 module would very nearly work and has
+    /// simply never been built or run.
+    ///
+    /// It is declared [`AnchorUnit::PhysicalPixels`] purely because the scale is a
     /// flat 1.0, so both conversion factors are 1.0 and the choice cannot affect
     /// anything until a real backend replaces it.
     pub(super) fn cursor_anchor() -> TrayAnchor {

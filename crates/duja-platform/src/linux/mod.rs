@@ -35,6 +35,11 @@
 //! re-applies on `Resumed` and on `DisplaysChanged`, and an unlock that changes
 //! neither is a screen that nothing disturbed.
 
+// The X11 reads behind `crate::geometry`'s Linux backend. Not part of the event
+// pump this module is otherwise about; it lives here because this is where the
+// crate keeps code that only compiles on Linux, and its decisions live in the
+// pure `crate::linux_geometry` beside the pump's own `crate::linux_events`.
+pub(crate) mod geometry;
 mod sleep;
 mod uevent;
 

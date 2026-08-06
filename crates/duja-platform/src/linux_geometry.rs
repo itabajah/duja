@@ -441,6 +441,61 @@ pub(crate) fn anchor_from_x11(
     })
 }
 
+/// The windowing system winit will put the flyout on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowSystem {
+    /// An X server, reachable through `DISPLAY`.
+    X11,
+    /// A Wayland compositor, reachable through `WAYLAND_DISPLAY` or an inherited
+    /// `WAYLAND_SOCKET`.
+    Wayland,
+    /// Neither: a TTY, a service unit, or an `ssh` session with no forwarding.
+    None,
+}
+
+/// The environment variables that decide it.
+///
+/// Borrowed rather than read here so the rule is a pure function of three
+/// strings, which is what lets the table below be a unit test instead of a
+/// process-environment fixture.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DisplayEnv<'a> {
+    /// `WAYLAND_DISPLAY`.
+    pub(crate) wayland_display: Option<&'a str>,
+    /// `WAYLAND_SOCKET`: a compositor handing a connected file descriptor to a
+    /// client it launched itself.
+    pub(crate) wayland_socket: Option<&'a str>,
+    /// `DISPLAY`.
+    pub(crate) display: Option<&'a str>,
+}
+
+/// Which windowing system a flyout would be created on.
+///
+/// **This is winit's rule, not `duja-dimmer`'s, and the difference is
+/// deliberate.** `duja_dimmer::linux_caps::transport` answers a different
+/// question — which display server to *drive dimming through* — and consults
+/// `WAYLAND_DISPLAY` and `DISPLAY` only. This one has to predict which backend
+/// winit's `EventLoop` will pick, because the anchor describes the window winit
+/// is about to place, so it consults `WAYLAND_SOCKET` as well. A session with a
+/// handed-over socket and a stale `DISPLAY` is the case where the two disagree,
+/// and each is right about its own question. `docs/debt.md` carries the half of
+/// that which is arguably a gap on the dimmer's side.
+///
+/// Wayland wins when both are set, for the reason it wins everywhere: nearly
+/// every Wayland session also runs Xwayland and sets `DISPLAY`. An **empty**
+/// value is treated as unset, which is what a session script that cleared one
+/// leaves behind — and, again, what winit does.
+pub(crate) fn window_system(env: DisplayEnv<'_>) -> WindowSystem {
+    let set = |value: Option<&str>| value.is_some_and(|value| !value.is_empty());
+    if set(env.wayland_display) || set(env.wayland_socket) {
+        WindowSystem::Wayland
+    } else if set(env.display) {
+        WindowSystem::X11
+    } else {
+        WindowSystem::None
+    }
+}
+
 /// Whether a strut's inclusive `[start, end]` band overlaps the half-open span
 /// `[low, high)` of the monitor's opposite axis.
 ///
@@ -513,8 +568,8 @@ fn clamp_extent(value: i64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DpiSources, MAX_EXTENT, X11Monitor, X11Screen, X11Strut, anchor_from_x11,
-        monitor_for_cursor, scale_factor, work_area,
+        DisplayEnv, DpiSources, MAX_EXTENT, WindowSystem, X11Monitor, X11Screen, X11Strut,
+        anchor_from_x11, monitor_for_cursor, scale_factor, window_system, work_area,
     };
     use crate::geometry::{AnchorUnit, WorkRect};
 
@@ -1268,6 +1323,76 @@ mod tests {
         // is already the space `set_outer_position` takes.
         approx(anchor.anchor_to_physical(), 1.0);
         approx(anchor.logical_to_anchor(), 1.5);
+    }
+
+    // -- which windowing system --------------------------------------------
+
+    fn display_env(
+        wayland_display: Option<&'static str>,
+        wayland_socket: Option<&'static str>,
+        display: Option<&'static str>,
+    ) -> DisplayEnv<'static> {
+        DisplayEnv {
+            wayland_display,
+            wayland_socket,
+            display,
+        }
+    }
+
+    #[test]
+    fn wayland_wins_over_a_display_that_xwayland_also_set() {
+        // Almost every Wayland session runs Xwayland and sets `DISPLAY`, so
+        // preferring X11 when both are present would take Xwayland's view of the
+        // screen — and, worse, would build an anchor for a window winit is going
+        // to create on Wayland, where nothing can position it.
+        assert_eq!(
+            window_system(display_env(Some("wayland-1"), None, Some(":0"))),
+            WindowSystem::Wayland
+        );
+        assert_eq!(
+            window_system(display_env(None, None, Some(":0"))),
+            WindowSystem::X11
+        );
+        assert_eq!(
+            window_system(display_env(None, None, None)),
+            WindowSystem::None
+        );
+    }
+
+    #[test]
+    fn an_inherited_wayland_socket_counts_as_a_wayland_session() {
+        // The rule this shares with winit and not with the dimmer's own
+        // transport check: a compositor that launches a client with a connected
+        // file descriptor sets `WAYLAND_SOCKET` and need not set
+        // `WAYLAND_DISPLAY`. Missing it would build an X11 anchor for a Wayland
+        // window whenever a stale `DISPLAY` was also in the environment.
+        assert_eq!(
+            window_system(display_env(None, Some("12"), None)),
+            WindowSystem::Wayland
+        );
+        assert_eq!(
+            window_system(display_env(None, Some("12"), Some(":0"))),
+            WindowSystem::Wayland
+        );
+    }
+
+    #[test]
+    fn an_empty_variable_is_treated_as_unset() {
+        // `DISPLAY=` is what a login shell is left with when a session script
+        // clears it; reading it as a server name produces a connect failure where
+        // the truth is that there is no server.
+        assert_eq!(
+            window_system(display_env(Some(""), Some(""), Some(""))),
+            WindowSystem::None
+        );
+        assert_eq!(
+            window_system(display_env(Some(""), None, Some(":0"))),
+            WindowSystem::X11
+        );
+        assert_eq!(
+            window_system(display_env(Some(""), Some("12"), Some(":0"))),
+            WindowSystem::Wayland
+        );
     }
 
     #[test]

@@ -1,0 +1,344 @@
+//! The X11 half of the Linux tray anchor: five reads and no decisions.
+//!
+//! Every question this module asks the X server has its answer copied into one
+//! of [`crate::linux_geometry`]'s plain structs and handed straight back out
+//! again. Nothing here chooses a monitor, subtracts a strut or resolves a scale
+//! factor — that all lives next door, where it is unit-tested on every CI lane.
+//! What is left is the part no lane can run: the connection, the round trips,
+//! and the property decoding.
+//!
+//! # Five reads
+//!
+//! 1. `QueryPointer` on the root — where the cursor is.
+//! 2. `GetGeometry` on the root — how big the screen is, which is the space
+//!    struts are measured in.
+//! 3. `RandR`'s CRTC list, each CRTC's rectangle, and the physical size of the
+//!    first output it drives.
+//! 4. `_NET_CLIENT_LIST` and each managed window's `_NET_WM_STRUT_PARTIAL` (or
+//!    the legacy `_NET_WM_STRUT`) — what the panels have reserved.
+//! 5. The three DPI sources: `WINIT_X11_SCALE_FACTOR`, the XSETTINGS manager's
+//!    `Xft/DPI`, and the `Xft.dpi` X resource.
+//!
+//! # A connection per call
+//!
+//! The connection is opened and dropped inside [`cursor_anchor`], the same shape
+//! and for the same reason as `duja-dimmer`'s X11 probe: this runs when the user
+//! clicks the tray icon, and a connection kept open between clicks is a file
+//! descriptor and a wakeup source earning nothing. The cost is a socket connect
+//! and a handful of round trips on a unix socket, against a click that is about
+//! to spend far longer laying out a window.
+//!
+//! Requests are pipelined wherever there is more than one of a kind — every
+//! `GetCrtcInfo` is sent before the first reply is read, and so is every strut
+//! property — so the round-trip count grows with the *kinds* of question, not
+//! with the number of monitors or windows.
+//!
+//! # Every failure is the fallback, not an error
+//!
+//! [`cursor_anchor`] returns [`Option`] and its caller substitutes the same
+//! fallback anchor Windows uses when its own calls fail. There is nothing else to
+//! do with an error here: [`crate::geometry::cursor_anchor`] promises never to
+//! fail, and a flyout on a guessed work area is a cosmetic problem where no
+//! flyout is a broken app.
+
+use x11rb::connection::Connection;
+use x11rb::protocol::randr::{self, ConnectionExt as _};
+use x11rb::protocol::xproto::{self, AtomEnum, ConnectionExt as _};
+use x11rb::resource_manager;
+use x11rb::rust_connection::RustConnection;
+
+use crate::geometry::TrayAnchor;
+use crate::linux_geometry::{DpiSources, X11Monitor, X11Screen, X11Strut, anchor_from_x11};
+use crate::linux_xsettings;
+
+/// `GetProperty`'s length is in four-byte units, so this asks for a gigabyte —
+/// more than any of these properties can be, and the server returns only what
+/// exists.
+///
+/// Deliberately not `u32::MAX`: that is four times larger again and would ask a
+/// server to compute a byte count that overflows the 32-bit arithmetic the
+/// protocol describes it with.
+const WHOLE_PROPERTY: u32 = u32::MAX / 4;
+
+/// The `RandR` version whose `GetScreenResourcesCurrent` this module prefers.
+///
+/// 1.3 introduced it, and the difference from `GetScreenResources` is not
+/// cosmetic: the older request re-polls every output's connection state, which
+/// takes tens of milliseconds per connected display on some drivers. A server
+/// older than 1.3 falls back to it, because a slow anchor beats no anchor.
+const CURRENT_RESOURCES_SINCE: (u32, u32) = (1, 3);
+
+/// The anchor for this X11 session, or [`None`] if the server would not answer.
+///
+/// [`None`] covers everything from "there is no `DISPLAY`" to "`RandR` reported no
+/// enabled CRTC", because the caller does the same thing with all of them.
+pub(crate) fn cursor_anchor() -> Option<TrayAnchor> {
+    let (connection, screen_index) = x11rb::connect(None).ok()?;
+    let root = connection.setup().roots.get(screen_index)?.root;
+
+    // Both of these are one round trip and neither depends on the other, so they
+    // are sent together.
+    let pointer = connection.query_pointer(root).ok()?;
+    let geometry = connection.get_geometry(root).ok()?;
+    let pointer = pointer.reply().ok()?;
+    let geometry = geometry.reply().ok()?;
+
+    // The root's *live* size, not `setup().roots[..]`'s. The setup is a snapshot
+    // from connect time, and a `RandR` reconfiguration since then would leave it
+    // describing a screen that no longer exists — which would misplace every
+    // strut, since a strut is a depth measured from this rectangle's edge.
+    let screen = X11Screen {
+        width: u32::from(geometry.width),
+        height: u32::from(geometry.height),
+    };
+
+    let monitors = monitors(&connection, root);
+    let struts = struts(&connection, root, screen);
+    let xsettings_dpi = xsettings_dpi(&connection, screen_index);
+    // Held in a binding because `get_string` borrows from it.
+    let database = resource_manager::new_from_default(&connection).ok();
+    let scale_override = std::env::var("WINIT_X11_SCALE_FACTOR").ok();
+
+    anchor_from_x11(
+        (i32::from(pointer.root_x), i32::from(pointer.root_y)),
+        &monitors,
+        screen,
+        &struts,
+        &DpiSources {
+            scale_override: scale_override.as_deref(),
+            xsettings_dpi,
+            xft_dpi: database
+                .as_ref()
+                .and_then(|db| db.get_string("Xft.dpi", "")),
+        },
+    )
+}
+
+/// Every enabled CRTC, with the physical size of the first output it drives.
+///
+/// The filter is winit's: a CRTC with a zero extent or no connected output is
+/// switched off, and including one would let the cursor land on a monitor that is
+/// not displaying anything. Keeping the same filter is what makes this module's
+/// scale factor the one winit computes for the same display.
+///
+/// An empty vector on any failure. `RandR` is not optional here the way it is for
+/// the dimmer's probe: without it there is no monitor list at all, and the caller
+/// falls back rather than placing a flyout against a screen rectangle that may
+/// span several displays.
+fn monitors(connection: &RustConnection, root: xproto::Window) -> Vec<X11Monitor> {
+    let Some(crtcs) = crtcs(connection, root) else {
+        return Vec::new();
+    };
+
+    // Pipelined: every `GetCrtcInfo` goes out before the first reply is read, so
+    // a six-monitor desktop costs one round trip rather than six.
+    let pending: Vec<_> = crtcs
+        .iter()
+        .filter_map(|&crtc| {
+            connection
+                .randr_get_crtc_info(crtc, x11rb::CURRENT_TIME)
+                .ok()
+        })
+        .collect();
+    let infos: Vec<_> = pending
+        .into_iter()
+        .filter_map(|cookie| cookie.reply().ok())
+        .filter(|info| info.width > 0 && info.height > 0 && !info.outputs.is_empty())
+        .collect();
+
+    // Then the same trick for the output sizes, which cannot be requested until
+    // the CRTC replies have named the outputs. Sending and reading are two passes
+    // for the same reason as above: folding them into one closure would turn a
+    // single round trip back into one per monitor.
+    let pending: Vec<_> = infos
+        .iter()
+        .map(|info| {
+            info.outputs.first().and_then(|&output| {
+                connection
+                    .randr_get_output_info(output, x11rb::CURRENT_TIME)
+                    .ok()
+            })
+        })
+        .collect();
+    let sizes: Vec<_> = pending
+        .into_iter()
+        .map(|cookie| cookie.and_then(|cookie| cookie.reply().ok()))
+        .collect();
+
+    infos
+        .iter()
+        .zip(sizes)
+        .map(|(info, size)| X11Monitor {
+            bounds: crate::geometry::WorkRect {
+                x: i32::from(info.x),
+                y: i32::from(info.y),
+                w: u32::from(info.width),
+                h: u32::from(info.height),
+            },
+            // A failed output query leaves zero, which the scale chain reads as
+            // "this display would not say how big it is" and answers 1.0 for.
+            mm_width: size.as_ref().map_or(0, |size| size.mm_width),
+            mm_height: size.as_ref().map_or(0, |size| size.mm_height),
+        })
+        .collect()
+}
+
+/// The CRTC list, from whichever request this server supports.
+fn crtcs(connection: &RustConnection, root: xproto::Window) -> Option<Vec<randr::Crtc>> {
+    let version = connection
+        .randr_query_version(CURRENT_RESOURCES_SINCE.0, CURRENT_RESOURCES_SINCE.1)
+        .ok()?
+        .reply()
+        .ok()?;
+    // The reply is the lower of what was asked for and what the server has, so
+    // getting back what we asked for means the server has at least that.
+    if (version.major_version, version.minor_version) >= CURRENT_RESOURCES_SINCE {
+        let reply = connection
+            .randr_get_screen_resources_current(root)
+            .ok()?
+            .reply()
+            .ok()?;
+        Some(reply.crtcs)
+    } else {
+        let reply = connection
+            .randr_get_screen_resources(root)
+            .ok()?
+            .reply()
+            .ok()?;
+        Some(reply.crtcs)
+    }
+}
+
+/// Every managed window's reserved space.
+///
+/// The window list is `_NET_CLIENT_LIST`, which the window manager maintains and
+/// which is therefore empty when there is no window manager — correctly, since
+/// without one nothing is honouring struts anyway and the whole monitor really is
+/// available.
+///
+/// A window that publishes both properties contributes only the partial one.
+/// EWMH says the window manager MUST ignore `_NET_WM_STRUT` in that case, and a
+/// client computing the same work area has to make the same choice or it will
+/// disagree with the shell about where a window fits.
+fn struts(connection: &RustConnection, root: xproto::Window, screen: X11Screen) -> Vec<X11Strut> {
+    let Some(client_list) = atom(connection, b"_NET_CLIENT_LIST") else {
+        return Vec::new();
+    };
+    let Some(partial_atom) = atom(connection, b"_NET_WM_STRUT_PARTIAL") else {
+        return Vec::new();
+    };
+    let Some(legacy_atom) = atom(connection, b"_NET_WM_STRUT") else {
+        return Vec::new();
+    };
+
+    let clients = cardinals(connection, root, client_list, AtomEnum::WINDOW).unwrap_or_default();
+
+    // Both properties for every client, all in flight before the first reply is
+    // read. A desktop session has tens of managed windows and almost none of them
+    // has a strut, so asking serially would be tens of round trips to find two
+    // panels.
+    let pending: Vec<_> = clients
+        .iter()
+        .filter_map(|&client| {
+            let partial = property(connection, client, partial_atom, AtomEnum::CARDINAL)?;
+            let legacy = property(connection, client, legacy_atom, AtomEnum::CARDINAL)?;
+            Some((partial, legacy))
+        })
+        .collect();
+
+    pending
+        .into_iter()
+        .filter_map(|(partial, legacy)| {
+            let twelve = partial
+                .reply()
+                .ok()
+                .and_then(|reply| values(&reply))
+                .and_then(|values| <[u32; 12]>::try_from(values.as_slice()).ok());
+            if let Some(values) = twelve {
+                // `legacy` goes out of scope unread, which is safe rather than
+                // merely tidy: x11rb's cookie `Drop` issues a `discard_reply` for
+                // that sequence number, so the connection stays in step and a
+                // later reply cannot be mistaken for this one.
+                return Some(X11Strut::from_partial(values));
+            }
+            let four = values(&legacy.reply().ok()?)?;
+            Some(X11Strut::from_legacy(
+                <[u32; 4]>::try_from(four.as_slice()).ok()?,
+                screen,
+            ))
+        })
+        .collect()
+}
+
+/// `Xft/DPI` from whichever window owns this screen's XSETTINGS selection.
+///
+/// The selection name carries the **X screen** number — a separate root window,
+/// as in `DISPLAY=:0.1` — not a monitor. It is 0 in almost every session, but
+/// hard-coding it would read another screen's settings in the ones where it is
+/// not.
+fn xsettings_dpi(connection: &RustConnection, screen_index: usize) -> Option<f64> {
+    let selection = atom(connection, format!("_XSETTINGS_S{screen_index}").as_bytes())?;
+    let owner = connection
+        .get_selection_owner(selection)
+        .ok()?
+        .reply()
+        .ok()?;
+    if owner.owner == x11rb::NONE {
+        return None;
+    }
+    // The property's type is the `_XSETTINGS_SETTINGS` atom itself, which is what
+    // the specification says and what winit asks for.
+    let settings = atom(connection, b"_XSETTINGS_SETTINGS")?;
+    let reply = connection
+        .get_property(false, owner.owner, settings, settings, 0, WHOLE_PROPERTY)
+        .ok()?
+        .reply()
+        .ok()?;
+    linux_xsettings::xft_dpi(&reply.value)
+}
+
+/// Look up an **existing** atom, or [`None`].
+///
+/// `only_if_exists` is true, and every atom this module wants is one someone else
+/// creates: `_NET_CLIENT_LIST` by the window manager, the strut atoms by the
+/// panels, the XSETTINGS pair by the settings manager. So "no such atom" and "no
+/// window has ever published this" are the same answer, and asking this way gets
+/// it in the same round trip without interning a name into a server where atoms
+/// live until it exits.
+fn atom(connection: &RustConnection, name: &[u8]) -> Option<xproto::Atom> {
+    Some(connection.intern_atom(true, name).ok()?.reply().ok()?.atom)
+        .filter(|&atom| atom != x11rb::NONE)
+}
+
+/// Send a `GetProperty` for a whole 32-bit property, returning the cookie so the
+/// caller can pipeline.
+fn property(
+    connection: &RustConnection,
+    window: xproto::Window,
+    property: xproto::Atom,
+    kind: AtomEnum,
+) -> Option<x11rb::cookie::Cookie<'_, RustConnection, xproto::GetPropertyReply>> {
+    connection
+        .get_property(false, window, property, kind, 0, WHOLE_PROPERTY)
+        .ok()
+}
+
+/// Read a whole 32-bit property in one round trip.
+fn cardinals(
+    connection: &RustConnection,
+    window: xproto::Window,
+    name: xproto::Atom,
+    kind: AtomEnum,
+) -> Option<Vec<u32>> {
+    let reply = property(connection, window, name, kind)?.reply().ok()?;
+    values(&reply)
+}
+
+/// A property reply's 32-bit values, or [`None`] if it is not 32-bit at all.
+///
+/// A property that exists with the wrong format is not an error worth
+/// distinguishing from one that does not exist: both mean this window said
+/// nothing this module can use.
+fn values(reply: &xproto::GetPropertyReply) -> Option<Vec<u32>> {
+    reply.value32().map(Iterator::collect)
+}
