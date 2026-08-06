@@ -337,8 +337,9 @@ fn crtcs(connection: &RustConnection, root: xproto::Window) -> Option<Vec<randr:
 /// available.
 ///
 /// Which of a window's two properties to believe is not decided here: that is
-/// [`choose_strut`], in the pure module, where every shape a window can present
-/// is tested on every lane. This function fetches both and hands them over.
+/// [`choose_strut`], in the pure module, where the whole product of what the two
+/// properties can be is walked on every lane. This function fetches both and
+/// hands them over.
 ///
 /// The two strut atoms are looked up **independently**, which is not a detail: a
 /// session whose panels use only the partial form may never have interned

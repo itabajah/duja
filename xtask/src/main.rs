@@ -421,12 +421,25 @@ mod tests {
         // so draining half of one document would have failed this test, which is
         // precisely the "ordinary pruning" that same sentence promised was safe. A
         // floor is only a tripwire if the thing it trips on is a broken walk, and a
-        // broken walk reports approximately zero — with one break that does not,
-        // which is why both floors are here rather than just the row one: delete
-        // the recursion from `markdown_files` and the walk still finds 211 rows,
-        // 82 % of the corpus, and sails over any row floor worth setting. It finds
-        // 7 files, and the file floor is what catches it. 100 rows and 10 files
-        // sit well under any plausible pruning and well over both failure modes.
+        // broken walk reports approximately zero — with one exception, which is
+        // why there are two floors rather than one. Measured against this corpus
+        // (31 files, 258 rows):
+        //
+        // - **the walk stops descending.** Delete the recursion from
+        //   `markdown_files` and it finds 7 files but still 211 rows, 82 % of the
+        //   corpus, clearing any row floor worth setting. Only the file floor
+        //   catches this.
+        // - **the scan stops recognising rows.** Invert the fence state, or break
+        //   the leading-pipe test, and all 31 files are still walked while 0 rows
+        //   are compared. Only the row floor catches this.
+        //
+        // An earlier version of this comment paired the first with "delete the
+        // `push` and it finds 24 files and 47 rows", a figure that does not
+        // reproduce: deleting the push arm pushes nothing at any depth, so it finds
+        // 0 files and 0 rows and both floors fire. The pair above is measured.
+        //
+        // 100 rows and 10 files sit well under any plausible pruning and well over
+        // both failure modes.
         assert!(
             files.len() >= 10,
             "only {} markdown files under docs/ — the walk is not walking",

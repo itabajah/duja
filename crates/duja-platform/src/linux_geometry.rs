@@ -110,6 +110,25 @@
 //! `docs/debt.md` carries what a mirror costs: it is pinned to a version of
 //! winit, and an upstream change to that chain becomes a silent mis-size here.
 //!
+//! # Saturating arithmetic: three calls can fire, the rest cannot
+//!
+//! Every coordinate here is an `i32` or a `u32` widened to `i64` before anything
+//! is done to it, so a sum or difference of two of them is under 2³³ and an `i64`
+//! has room to spare. That single fact settles most of the `saturating_*` calls in
+//! this file: `work_area`'s monitor edges (`i32` origin plus `u32` extent),
+//! its two strut subtractions (`u32` screen extent minus `u32` depth),
+//! `extent_from`'s headroom and span, and `distance_squared`'s edges and gaps —
+//! **none of them can reach a bound**. Replacing any with the wrapping form
+//! changes no answer, and a mutation run confirms it.
+//!
+//! The exceptions are the three in [`distance_squared`]'s last line, because
+//! squaring leaves that range: two gaps that each fit in an `i64` have squares
+//! that do not, and a sum that does not. Those are documented and pinned there.
+//!
+//! This is written once, here, rather than nine times: the alternative was a note
+//! on each call, and a note on each call is how a claim of unreachability ends up
+//! true of eight of them.
+//!
 //! # Work area
 //!
 //! X11 has no per-monitor work area to ask for. `_NET_WORKAREA` is one rectangle
@@ -347,7 +366,8 @@ impl X11Strut {
     /// falls back to the legacy property whenever the partial one produced no
     /// strut at all, so on GNOME, obeying the MUST is precisely what would
     /// disagree with the shell about where a window fits. [`choose_strut`]
-    /// documents the trade, and its tests pin every shape a window can present.
+    /// documents the trade, and its tests walk the whole product of what the two
+    /// properties can be.
     pub(crate) const fn from_legacy(values: [u32; 4], screen: X11Screen) -> Self {
         let [left, right, top, bottom] = values;
         X11Strut {
@@ -713,12 +733,17 @@ pub(crate) fn anchor_from_x11(
 /// This lived in the X11 backend until a review pointed out that it is the one
 /// consequential rule in that module which is a pure function of its inputs — and
 /// that the module's own opening sentence claims nothing there subtracts a strut.
-/// Here it is tested on every CI lane, in every shape a window can present:
-/// a conformant partial, one that reserves nothing, a legacy property standing
-/// alone, either at the wrong length in either direction, and neither present.
-/// The count was "four cases" until a review noticed that the legacy-only
-/// shape - the ordinary one for a panel that publishes only `_NET_WM_STRUT` -
-/// was the shape not among them.
+/// Here it is tested on every CI lane, over the whole product of what the two
+/// properties can be: a partial that is absent, conformant, all zero, too short
+/// or too long, against a legacy that is absent, valid, too short or too long.
+///
+/// That is twenty cells and the test walks all twenty, which is the third
+/// description this paragraph has carried. It said "four cases" while the
+/// legacy-only shape was missing; the round that added that shape wrote "every
+/// shape a window can present" and left out the partial-only one, which is the
+/// commoner of the two; the round that added *that* named the axes and then
+/// claimed their product without covering it. Walking the product is what makes
+/// the sentence checkable instead of a fourth claim.
 pub(crate) fn choose_strut(
     partial: Option<&[u32]>,
     legacy: Option<&[u32]>,
@@ -819,7 +844,7 @@ fn contains(rect: WorkRect, (x, y): (i32, i32)) -> bool {
 /// Squared because only the ordering matters and a square root would introduce a
 /// rounding difference between two monitors that are genuinely equidistant.
 ///
-/// # Three guards here are load-bearing, not one
+/// # Which of these guards can fire, and which cannot
 ///
 /// `Ord::clamp` **panics** when its bounds are inverted, and a zero-extent
 /// rectangle inverts them: `left + 0 - 1` is one below `left`. Without the
@@ -827,28 +852,35 @@ fn contains(rect: WorkRect, (x, y): (i32, i32)) -> bool {
 /// panic inside a call chain that [`crate::geometry::cursor_anchor`] promises
 /// never to fail.
 ///
-/// The saturating arithmetic on the last line is the other two, and the heading
-/// above said "the only" for one commit. Both are reachable by the same standard
-/// the `.max()` calls are judged by — beyond `RandR`'s `i16` origin and `u16`
-/// extent, but well inside what a `pub(crate)` caller can pass:
+/// The saturating arithmetic is the rest of the answer, and this paragraph has
+/// been rewritten twice for getting the *count* wrong — first "the only guard",
+/// then "three". There are nine saturating calls and two `.max()` calls here, so
+/// the useful question is not how many are guards but which can fire:
 ///
-/// - `saturating_mul` changes the **answer**, not merely the failure mode. A
-///   1×1 monitor at `i32::MAX` probed from `i32::MIN` gives `dx = 4_294_967_295`,
-///   and `dx * dx` wraps to **negative** 8_589_934_591 — which beats every real
-///   monitor's distance, so the nearest-monitor search picks the rectangle
-///   furthest from the cursor.
-/// - the final `saturating_add` overflows too, on a case the suite has always
-///   run: `containment_and_a_zero_distance_agree_on_every_real_rectangle` probes
-///   a 1×1 rectangle from `(i32::MIN, i32::MAX)`, whose two squared components
-///   sum to 9_223_372_049_739_677_761, about 13 billion past `i64::MAX`.
+/// - **The three that can.** `dx.saturating_mul(dx)`, `dy.saturating_mul(dy)` and
+///   the `saturating_add` that combines them. A 1×1 monitor at `i32::MAX` probed
+///   from `i32::MIN` gives a gap of 4_294_967_295 on that axis, whose square is
+///   twice `i64::MAX` and wraps to **negative** 8_589_934_591 — which beats every
+///   real monitor, so the nearest-monitor search returns the rectangle *furthest*
+///   from the cursor. The sum overflows on a smaller input still: a 1×1 rectangle
+///   probed from `(i32::MIN, i32::MAX)` gives components summing to
+///   9_223_372_049_739_677_761, about 13 billion past `i64::MAX`.
+/// - **The six that cannot.** Computing `right` and `bottom` adds an extent
+///   (`u32`, so under 2³²) to an origin (`i32`, so under 2³¹) and subtracts one:
+///   under 2³³ in an `i64`, with no reachable edge. Computing `dx` and `dy`
+///   subtracts one `i32`-ranged value from another, so under 2³². They are
+///   saturating for uniformity, not for a case — which is true of every other
+///   `saturating_*` call in this module too, for the same reason. The module
+///   docs state it once, and these three are the exceptions it names.
 ///
-/// That second one is the more useful of the two, because the first version of
-/// this list offered "it already saturates on every run of the suite" as though
-/// that were coverage. It is not: `wrapping_add` there survived the entire file,
-/// since no assertion looked at the result. A line that executes is not a guard
-/// that is exercised — the same conflation this module has already had to retract
-/// once, about reading a surviving mutation as proof of redundancy. Both are now
-/// asserted directly, in `a_wrapping_distance_would_pick_the_furthest_monitor`.
+/// Two facts about how that list was arrived at, both worth more than the list.
+/// An earlier version offered "the `saturating_add` already saturates on every run
+/// of the suite" as though execution were coverage; `wrapping_add` there survived
+/// the entire file, because no assertion looked at the result. And the version
+/// that fixed *that* pinned `dx`'s multiplication and not `dy`'s — a fix landing
+/// on one of a symmetric pair, inside the very note written to correct a fix that
+/// landed on one of a symmetric pair. Both axes and the sum are now asserted in
+/// `a_wrapping_distance_would_pick_the_furthest_monitor`.
 ///
 /// Unreachable today only because `linux::geometry::monitors` filters zero
 /// extents out — which is in the half **no lane can run**. The Ubuntu lane
@@ -1599,21 +1631,45 @@ mod tests {
             "the cursor is at the opposite end of the space from monitor 0"
         );
 
-        // And the same gap measured directly, so the saturation is asserted rather
-        // than inferred from which monitor won.
+        // And the same layout rotated, because there are two multiplications and
+        // the first version of this test asserted one of them. `dy.wrapping_mul`
+        // survived the whole file — a fix landing on one of a symmetric pair,
+        // written inside the note that exists because an earlier fix landed on one
+        // of a symmetric pair.
+        let far_down = [monitor(0, i32::MAX, 1, 1), monitor(0, 0, 1920, 1080)];
         assert_eq!(
-            super::distance_squared(
-                WorkRect {
-                    x: i32::MAX,
-                    y: 0,
-                    w: 1,
-                    h: 1
-                },
-                (i32::MIN, 0)
-            ),
-            i64::MAX,
-            "the square of the widest possible gap saturates"
+            monitor_for_cursor((0, i32::MIN), &far_down),
+            Some(1),
+            "and the vertical axis is a separate multiplication"
         );
+
+        // The same gaps measured directly, so the saturation is asserted rather
+        // than inferred from which monitor won.
+        for rect in [
+            WorkRect {
+                x: i32::MAX,
+                y: 0,
+                w: 1,
+                h: 1,
+            },
+            WorkRect {
+                x: 0,
+                y: i32::MAX,
+                w: 1,
+                h: 1,
+            },
+        ] {
+            let probe = if rect.x == 0 {
+                (0, i32::MIN)
+            } else {
+                (i32::MIN, 0)
+            };
+            assert_eq!(
+                super::distance_squared(rect, probe),
+                i64::MAX,
+                "the square of the widest possible gap saturates on either axis"
+            );
+        }
 
         // The `saturating_add` needs its own case, and the reason is worth stating
         // because the first version of this test did not have one. That addition
@@ -2876,12 +2932,13 @@ mod tests {
         // short or too long. It was unreachable from any test until it moved out
         // of the X11 backend.
         //
-        // The count in this comment has been wrong twice, in opposite directions,
-        // and both times the missing row was a real panel's output. It said "four
-        // shapes" while the legacy-only case was absent; the round that added that
-        // case promoted it to "every shape a window can present" without checking,
-        // and left out the partial-only case — the commoner of the two. Naming the
-        // axes instead of counting the rows is what stops a third version.
+        // This comment has been wrong three times, each in a new direction. It said
+        // "four shapes" while the legacy-only case was absent; the round that added
+        // that case promoted it to "every shape a window can present" and left out
+        // the partial-only case, the commoner of the two; the round that added
+        // *that* named the axes and claimed their product while asserting twelve of
+        // its twenty cells. Naming the axes was not enough — the rows are walked at
+        // the end of this test, so the claim is checked rather than made.
         let root = screen(1920, 1080);
         let partial = [40, 0, 0, 0, 0, 1079, 0, 0, 0, 0, 0, 0];
         let empty_partial = [0_u32; 12];
@@ -2957,6 +3014,49 @@ mod tests {
         assert_eq!(choose_strut(None, Some(&five), root), None);
         // And neither is nothing at all.
         assert_eq!(choose_strut(None, None, root), None);
+
+        // The twelve rows above are the ones worth reading, each with the reason
+        // it exists. They are also twelve of the twenty cells this test's opening
+        // sentence claims, and every one of the eight it left out pairs a *present*
+        // partial with a *malformed* legacy — because every present-partial row
+        // above carries either a valid legacy or none.
+        //
+        // Rather than let the sentence outrun the assertions a third time, the
+        // whole product is walked. The expectation is the rule itself, stated once:
+        // a conformant partial wins whatever the legacy is; otherwise a valid
+        // legacy wins; otherwise nothing.
+        let partials: [(&str, Option<&[u32]>); 5] = [
+            ("absent", None),
+            ("conformant", Some(&partial)),
+            ("all zero", Some(&empty_partial)),
+            ("too short", Some(&partial[..11])),
+            ("too long", Some(&thirteen)),
+        ];
+        let legacies: [(&str, Option<&[u32]>); 4] = [
+            ("absent", None),
+            ("valid", Some(&legacy)),
+            ("too short", Some(&legacy[..3])),
+            ("too long", Some(&five)),
+        ];
+        let mut cells = 0_usize;
+        for (partial_name, partial_value) in partials {
+            for (legacy_name, legacy_value) in legacies {
+                let expected = if partial_name == "conformant" {
+                    Some(X11Strut::from_partial(partial))
+                } else if legacy_name == "valid" {
+                    Some(X11Strut::from_legacy(legacy, root))
+                } else {
+                    None
+                };
+                assert_eq!(
+                    choose_strut(partial_value, legacy_value, root),
+                    expected,
+                    "partial {partial_name}, legacy {legacy_name}"
+                );
+                cells = cells.saturating_add(1);
+            }
+        }
+        assert_eq!(cells, 20, "the product the comment above claims");
     }
 
     // -- which windowing system --------------------------------------------
