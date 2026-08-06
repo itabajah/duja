@@ -676,6 +676,75 @@ mod tests {
     }
 
     #[test]
+    fn a_mirrored_pair_resolves_to_the_first_crtc() {
+        // `xrandr --same-as` can leave two CRTCs at one rectangle. Both contain
+        // the cursor, and which one is picked has to be stable rather than
+        // right — the work area is identical either way, and the scale differs
+        // only if the two outputs report different physical sizes, which is
+        // exactly when a mirrored pair has no single correct answer.
+        let mirrored = [monitor(0, 0, 1920, 1080), monitor(0, 0, 1920, 1080)];
+        assert_eq!(monitor_for_cursor((960, 540), &mirrored), Some(0));
+    }
+
+    #[test]
+    fn containment_and_a_zero_distance_are_the_same_predicate() {
+        // The fast path in `monitor_for_cursor` returns early on containment,
+        // and the fallback picks the first strictly-nearest monitor. Those agree
+        // only because "inside" and "distance zero" describe the same set of
+        // points — `distance_squared` clamps to the last pixel, not to the
+        // exclusive edge, which is what makes them coincide.
+        //
+        // Worth pinning because the consequence is asymmetric, and a reader
+        // could otherwise take the fast path for the whole rule: an edge that is
+        // too *narrow* is silently rescued by the fallback, so only an edge that
+        // is too *wide* changes an answer. That is why the test above pins the
+        // shared column from the over-inclusive side.
+        let rects = [
+            WorkRect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+            WorkRect {
+                x: -1920,
+                y: -180,
+                w: 1920,
+                h: 1200,
+            },
+            WorkRect {
+                x: 7,
+                y: 3,
+                w: 1,
+                h: 1,
+            },
+        ];
+        let probes = [
+            (0, 0),
+            (-1, 0),
+            (0, -1),
+            (1919, 1079),
+            (1920, 1079),
+            (1919, 1080),
+            (-1920, -180),
+            (-1921, -180),
+            (7, 3),
+            (8, 3),
+            (7, 4),
+            (i32::MIN, i32::MAX),
+        ];
+        for rect in rects {
+            for probe in probes {
+                assert_eq!(
+                    super::contains(rect, probe),
+                    super::distance_squared(rect, probe) == 0,
+                    "{rect:?} and {probe:?} disagree about inside"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn no_monitors_is_none_rather_than_a_guess() {
         // RandR reporting nothing enabled is a real state (every output asleep),
         // and it is the backend's cue to use the documented fallback anchor
