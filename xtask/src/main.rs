@@ -421,8 +421,12 @@ mod tests {
         // so draining half of one document would have failed this test, which is
         // precisely the "ordinary pruning" that same sentence promised was safe. A
         // floor is only a tripwire if the thing it trips on is a broken walk, and a
-        // broken walk reports approximately zero. 100 rows and 10 files sit well
-        // under any plausible pruning and well over that.
+        // broken walk reports approximately zero — with one break that does not,
+        // which is why both floors are here rather than just the row one: delete
+        // the recursion from `markdown_files` and the walk still finds 211 rows,
+        // 82 % of the corpus, and sails over any row floor worth setting. It finds
+        // 7 files, and the file floor is what catches it. 100 rows and 10 files
+        // sit well under any plausible pruning and well over both failure modes.
         assert!(
             files.len() >= 10,
             "only {} markdown files under docs/ — the walk is not walking",

@@ -554,7 +554,7 @@ fn randr_scale(monitor: &X11Monitor) -> f64 {
 /// test.
 ///
 /// Reachable only through a zero-extent CRTC, which `linux::geometry::monitors`
-/// filters out — in the half no CI lane compiles, which is exactly the argument
+/// filters out — in the half no CI lane can *run*, which is exactly the argument
 /// [`distance_squared`]'s own guard is documented under.
 ///
 /// One asymmetry is worth keeping from those earlier versions, because it is
@@ -819,7 +819,7 @@ fn contains(rect: WorkRect, (x, y): (i32, i32)) -> bool {
 /// Squared because only the ordering matters and a square root would introduce a
 /// rounding difference between two monitors that are genuinely equidistant.
 ///
-/// # The two `.max()` calls are the only genuinely load-bearing guard here
+/// # Three guards here are load-bearing, not one
 ///
 /// `Ord::clamp` **panics** when its bounds are inverted, and a zero-extent
 /// rectangle inverts them: `left + 0 - 1` is one below `left`. Without the
@@ -827,11 +827,39 @@ fn contains(rect: WorkRect, (x, y): (i32, i32)) -> bool {
 /// panic inside a call chain that [`crate::geometry::cursor_anchor`] promises
 /// never to fail.
 ///
+/// The saturating arithmetic on the last line is the other two, and the heading
+/// above said "the only" for one commit. Both are reachable by the same standard
+/// the `.max()` calls are judged by — beyond `RandR`'s `i16` origin and `u16`
+/// extent, but well inside what a `pub(crate)` caller can pass:
+///
+/// - `saturating_mul` changes the **answer**, not merely the failure mode. A
+///   1×1 monitor at `i32::MAX` probed from `i32::MIN` gives `dx = 4_294_967_295`,
+///   and `dx * dx` wraps to **negative** 8_589_934_591 — which beats every real
+///   monitor's distance, so the nearest-monitor search picks the rectangle
+///   furthest from the cursor.
+/// - the final `saturating_add` overflows too, on a case the suite has always
+///   run: `containment_and_a_zero_distance_agree_on_every_real_rectangle` probes
+///   a 1×1 rectangle from `(i32::MIN, i32::MAX)`, whose two squared components
+///   sum to 9_223_372_049_739_677_761, about 13 billion past `i64::MAX`.
+///
+/// That second one is the more useful of the two, because the first version of
+/// this list offered "it already saturates on every run of the suite" as though
+/// that were coverage. It is not: `wrapping_add` there survived the entire file,
+/// since no assertion looked at the result. A line that executes is not a guard
+/// that is exercised — the same conflation this module has already had to retract
+/// once, about reading a surviving mutation as proof of redundancy. Both are now
+/// asserted directly, in `a_wrapping_distance_would_pick_the_furthest_monitor`.
+///
 /// Unreachable today only because `linux::geometry::monitors` filters zero
-/// extents out — which is in the half no CI lane compiles, so "unreachable" rests
-/// on code no test on this machine's lanes ever runs. That is why the guard is
-/// pinned by `a_zero_extent_monitor_does_not_panic_the_nearest_search` rather
-/// than trusted.
+/// extents out — which is in the half **no lane can run**. The Ubuntu lane
+/// compiles and lints that filter, and the `docs` job doc-checks it; what no lane
+/// has is an X server, so nothing ever executes it. (Four comments in this file
+/// said "no CI lane compiles", which is a different and false claim — the CI
+/// workflow's own comment states the rule the other way round, for the
+/// `cfg(windows)` and `cfg(target_os = "macos")` halves that really are
+/// uncompiled here.) That is why the guard is pinned by
+/// `a_zero_extent_monitor_does_not_panic_the_nearest_search` rather than
+/// trusted.
 ///
 /// The same degeneracy is why [`monitor_for_cursor`]'s containment check is not
 /// redundant: pulling the last pixel back to the first is what makes this
@@ -1142,7 +1170,8 @@ mod tests {
         // inside the second one.
         //
         // Unreachable while `linux::geometry::monitors` filters zero extents, in
-        // the half no CI lane compiles. That is the same footing the guard in
+        // the half no lane can run — compiled and linted on Ubuntu, executed
+        // nowhere, for want of an X server. That is the same footing the guard in
         // `distance_squared` stands on, and the reason both are pinned here.
         let monitors = [monitor(10, 10, 0, 0), monitor(0, 0, 1920, 1080)];
         assert_eq!(monitor_for_cursor((10, 10), &monitors), Some(1));
@@ -1503,9 +1532,13 @@ mod tests {
         // And both endpoints again on the column axis, with a bottom panel
         // overhanging its neighbour by exactly one column. `band_meets` is one
         // shared function, so the row half above already kills every mutation of
-        // it — but an earlier version of this comment claimed "the same two
-        // endpoints" while driving only `start < high`, with `end` at 3839 against
-        // a low of 0 in both rows. The two cases below close that.
+        // its two *endpoint* clauses — though not of `start <= end`, which no row
+        // here violates and which
+        // `a_band_whose_end_precedes_its_start_is_ignored` pins instead. (An
+        // earlier version of this sentence said "every mutation of it", which a
+        // one-line deletion falsifies.) An earlier version also claimed "the same
+        // two endpoints" while driving only `start < high`, with `end` at 3839
+        // against a low of 0 in both rows. The two cases below close that.
         let side_by_side = screen(3840, 1080);
         let left_monitor = WorkRect {
             x: 0,
@@ -1546,18 +1579,81 @@ mod tests {
     }
 
     #[test]
+    fn a_wrapping_distance_would_pick_the_furthest_monitor() {
+        // The other load-bearing guard in `distance_squared`, and the one that
+        // changes an *answer* rather than a failure mode. Its docs called the two
+        // `.max()` calls "the only genuinely load-bearing guard here" for one
+        // commit; the saturating arithmetic below them is judged by the same
+        // standard and meets it.
+        //
+        // A 1x1 monitor at `i32::MAX` probed from `i32::MIN` gives a horizontal
+        // gap of 4_294_967_295. Squared, that is about 18.4 quintillion — twice
+        // `i64::MAX` — and wrapping turns it into *negative* 8_589_934_591. A
+        // negative distance beats every real monitor, so the nearest search would
+        // answer with the rectangle furthest from the cursor. Saturating gives
+        // `i64::MAX`, and the real monitor at 4_611_686_018_427_387_904 wins.
+        let far = [monitor(i32::MAX, 0, 1, 1), monitor(0, 0, 1920, 1080)];
+        assert_eq!(
+            monitor_for_cursor((i32::MIN, 0), &far),
+            Some(1),
+            "the cursor is at the opposite end of the space from monitor 0"
+        );
+
+        // And the same gap measured directly, so the saturation is asserted rather
+        // than inferred from which monitor won.
+        assert_eq!(
+            super::distance_squared(
+                WorkRect {
+                    x: i32::MAX,
+                    y: 0,
+                    w: 1,
+                    h: 1
+                },
+                (i32::MIN, 0)
+            ),
+            i64::MAX,
+            "the square of the widest possible gap saturates"
+        );
+
+        // The `saturating_add` needs its own case, and the reason is worth stating
+        // because the first version of this test did not have one. That addition
+        // already overflows on every run of the suite — a 1x1 rectangle probed
+        // from `(i32::MIN, i32::MAX)` sums to 9_223_372_049_739_677_761, about 13
+        // billion past `i64::MAX` — and `wrapping_add` there survived the whole
+        // file anyway, because nothing asserted the result. A line that executes
+        // is not a guard that is exercised, which is the same confusion this
+        // module has already had to retract about a surviving mutation.
+        assert_eq!(
+            super::distance_squared(
+                WorkRect {
+                    x: 7,
+                    y: 3,
+                    w: 1,
+                    h: 1
+                },
+                (i32::MIN, i32::MAX)
+            ),
+            i64::MAX,
+            "two components that each fit still saturate when summed"
+        );
+    }
+
+    #[test]
     fn a_zero_extent_monitor_does_not_panic_the_nearest_search() {
         // `distance_squared` clamps the cursor into the monitor's last pixel, and
         // `Ord::clamp` panics when its bounds are inverted — which a zero-extent
         // rectangle produces, since the last pixel is one before the first. The
-        // `.max(left)`/`.max(top)` there are what stop it, and they are the only
-        // load-bearing guard in this module without a test: removing either left
-        // the suite green while `cursor_anchor`, which promises never to fail,
-        // panicked on a rectangle its own backend can produce.
+        // `.max(left)`/`.max(top)` there are what stop it, and until this test
+        // existed they were a load-bearing guard with nothing pinning them:
+        // removing either left the suite green while `cursor_anchor`, which
+        // promises never to fail, panicked on a rectangle its own backend can
+        // produce.
         //
         // Unreachable through the X11 backend, which filters `width > 0 &&
-        // height > 0` — but that filter lives in the half no CI lane compiles, and
-        // is not mentioned within sight of the guard.
+        // height > 0` — in the half no lane can run. That filter *is* now named
+        // within sight of the guard, in `distance_squared`'s own docs; this
+        // comment went on saying it was not for one commit after the note landed,
+        // which is the half-of-a-pair the same commit was fixing elsewhere.
         let degenerate = [monitor(10, 10, 0, 0), monitor(100, 100, 1920, 1080)];
         assert_eq!(monitor_for_cursor((0, 0), &degenerate), Some(0));
         assert_eq!(monitor_for_cursor((500, 500), &degenerate), Some(1));
@@ -2774,15 +2870,18 @@ mod tests {
 
     #[test]
     fn the_partial_strut_wins_unless_it_reserves_nothing() {
-        // The rule that deliberately disobeys EWMH's MUST, in every shape a window
-        // can present: a conformant partial, one that reserves nothing, a legacy
-        // property with no partial beside it, either property at the wrong length
-        // in either direction, and neither present. It was unreachable from any
-        // test until it moved out of the X11 backend.
+        // The rule that deliberately disobeys EWMH's MUST, over the product of
+        // what each property can be: a partial that is absent, conformant, all
+        // zero, too short or too long, against a legacy that is absent, valid, too
+        // short or too long. It was unreachable from any test until it moved out
+        // of the X11 backend.
         //
-        // "Four shapes" is what this said while the legacy-only row was missing.
-        // Four call sites describe the trade as a four-case rule, so the count was
-        // load-bearing prose rather than throat-clearing.
+        // The count in this comment has been wrong twice, in opposite directions,
+        // and both times the missing row was a real panel's output. It said "four
+        // shapes" while the legacy-only case was absent; the round that added that
+        // case promoted it to "every shape a window can present" without checking,
+        // and left out the partial-only case — the commoner of the two. Naming the
+        // axes instead of counting the rows is what stops a third version.
         let root = screen(1920, 1080);
         let partial = [40, 0, 0, 0, 0, 1079, 0, 0, 0, 0, 0, 0];
         let empty_partial = [0_u32; 12];
@@ -2802,15 +2901,36 @@ mod tests {
             "an all-zero partial is not a reservation"
         );
         // No partial property at all, and a well-formed legacy one: the ordinary
-        // shape for a panel that publishes only `_NET_WM_STRUT`, and the one this
-        // test's "four shapes" did not include. Every other row that drives the
-        // legacy branch reaches it through a *partial* that was rejected, so a
-        // reader could reasonably have taken the legacy form for a fallback rather
-        // than a source in its own right.
+        // shape for a panel that publishes only `_NET_WM_STRUT`. Every other row
+        // that drives the legacy branch reaches it through a *partial* that was
+        // rejected, so a reader could reasonably have taken the legacy form for a
+        // fallback rather than a source in its own right.
         assert_eq!(
             choose_strut(None, Some(&legacy), root),
             Some(X11Strut::from_legacy(legacy, root)),
             "a legacy-only panel reserves its edge"
+        );
+        // And its mirror image, which is the *more* ordinary of the two and was
+        // missing from the round that added the one above. Every row with a valid
+        // twelve-word partial also carried a valid legacy beside it, so nothing
+        // asserted what a modern panel — one that publishes only
+        // `_NET_WM_STRUT_PARTIAL` — actually gets. `struts` reads the two atoms
+        // independently precisely so that shape arrives here as `(Some, None)`.
+        //
+        // The surviving mutation was the natural simplification: compute the
+        // legacy candidate with `legacy?` up front and end with
+        // `twelve.or(legacy)`. Every assertion in this test passed, while a modern
+        // panel's reservation was silently discarded and the flyout opened
+        // underneath it.
+        assert_eq!(
+            choose_strut(Some(&partial), None, root),
+            Some(X11Strut::from_partial(partial)),
+            "a partial-only panel reserves its edge with no legacy to fall back to"
+        );
+        assert_eq!(
+            choose_strut(Some(&empty_partial), None, root),
+            None,
+            "and one that reserves nothing has nothing to fall back to"
         );
         // A partial of the wrong length is not the property it claims to be.
         assert_eq!(
