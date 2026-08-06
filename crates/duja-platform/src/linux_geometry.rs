@@ -739,16 +739,21 @@ pub(crate) fn anchor_from_x11(
 /// that the module's own opening sentence claims nothing there subtracts a strut.
 /// Here it is tested on every CI lane, over the whole product of what the two
 /// properties can be: each of them absent, well formed and reserving, well formed
-/// and all zero, too short, or too long. Five values on each axis, and the test
-/// walks all twenty-five.
+/// and all zero, too short, or too long. The test walks that grid in full.
 ///
-/// This paragraph has been wrong four times, in four directions, and the count is
-/// what keeps going wrong: "four cases" while the legacy-only shape was missing;
-/// "every shape a window can present" while the partial-only one was; "twenty
-/// cells" for a grid whose legacy axis was short an all-zero row; and then
-/// "twenty" again after that row was added. The description above is derived from
-/// the two arrays in the test rather than restated, which is the only version of
-/// this sentence that cannot rot on its own.
+/// **There is deliberately no number in that sentence.** This paragraph has been
+/// wrong five times, in five directions, and the count is what keeps going wrong:
+/// "four cases" while the legacy-only shape was missing; "every shape a window can
+/// present" while the partial-only one was; "twenty cells" for a grid whose legacy
+/// axis was short an all-zero row; "twenty" again after that row was added; and
+/// then "five values on each axis, and the test walks all twenty-five" over a
+/// sentence claiming in its next breath to be *derived* from the two arrays rather
+/// than restated. It was two hand-written numerals. Growing either array leaves
+/// the suite green and the prose silently wrong, because the arrays' fixed-length
+/// types guard only against shrinking.
+///
+/// A count that no code produces cannot be kept true by being careful. Naming the
+/// kinds and omitting the arithmetic is the version that has nothing to rot.
 pub(crate) fn choose_strut(
     partial: Option<&[u32]>,
     legacy: Option<&[u32]>,
@@ -2946,25 +2951,38 @@ mod tests {
         approx(anchor.logical_to_anchor(), 1.5);
     }
 
-    /// A partial-strut fixture: its name, its bytes, and whether it wins outright.
-    type PartialCase<'a> = (&'a str, Option<&'a [u32]>, bool);
+    /// A partial-strut fixture: its name, its bytes, and the strut it wins with —
+    /// [`None`] when it does not win, in which case the legacy value decides.
+    ///
+    /// The third column was a `bool` for one commit, which made the oracle reach
+    /// outside the row for `X11Strut::from_partial(partial)` and hard-code the
+    /// fixture that happens to be the only winning one. Correct only because both
+    /// outcomes coincide there; a second conformant row with different bytes would
+    /// have been asserted against the first row's answer.
+    type PartialCase<'a> = (&'a str, Option<&'a [u32]>, Option<X11Strut>);
     /// A legacy-strut fixture: its name, its bytes, and what it decodes to.
     type LegacyCase<'a> = (&'a str, Option<&'a [u32]>, Option<[u32; 4]>);
 
     #[test]
     fn the_partial_strut_wins_unless_it_reserves_nothing() {
         // The rule that deliberately disobeys EWMH's MUST, over the product of
-        // what each property can be — five values on each axis, listed in the two
-        // arrays at the end of this test. It was unreachable from any test until it
-        // moved out of the X11 backend.
+        // what each property can be — the kinds are listed in the two arrays at the
+        // end of this test. It was unreachable from any test until it moved out of
+        // the X11 backend.
         //
-        // This comment has been wrong four times, each in a new direction. It said
+        // This comment has been wrong five times, each in a new direction. It said
         // "four shapes" while the legacy-only case was absent; the round that added
         // that case promoted it to "every shape a window can present" and left out
         // the partial-only case, the commoner of the two; the round that added
         // *that* named the axes and claimed their product while asserting twelve of
-        // its twenty cells. Naming the axes was not enough — the rows are walked at
-        // the end of this test, so the claim is checked rather than made.
+        // its twenty cells; the round that added the missing all-zero legacy row
+        // updated the loop and left three copies describing a four-value axis; and
+        // the round that fixed *those* bumped this sentence's count from three to
+        // four without adding the fourth item to this list.
+        //
+        // Walking the rows did not catch any of it, and an earlier version of this
+        // paragraph claimed it would. The grid checks the *rule*; nothing checks a
+        // number written beside it, which is why there is no longer one.
         let root = screen(1920, 1080);
         let partial = [40, 0, 0, 0, 0, 1079, 0, 0, 0, 0, 0, 0];
         let empty_partial = [0_u32; 12];
@@ -3048,25 +3066,36 @@ mod tests {
         // said the omissions were "eight" and all of them a present partial against
         // a malformed legacy, when adding the all-zero legacy row made them
         // thirteen, five of those against a *well-formed* legacy, and one of the
-        // five against no partial at all. That last cell is the one the round-24
-        // mutation reddens.
+        // five against no partial at all. Round 24's mutation — adding
+        // `.filter(X11Strut::reserves_anything)` to the legacy arm — reddens
+        // *four* of them: every all-zero-legacy cell whose partial does not win.
+        // Only `(conformant, all zero)` survives it, because there the partial
+        // wins before the legacy arm is reached. An earlier version of this
+        // sentence said "that last cell is the one", which named one of four and
+        // used a definite article to do it.
         //
         // Rather than let the sentence outrun the assertions again, the whole
         // product is walked. The expectation is the rule itself, stated once:
         // a conformant partial wins whatever the legacy is; otherwise a valid
         // legacy wins; otherwise nothing.
-        // The third column is the expectation, not a restatement of the code: for
-        // a partial, whether it wins outright; for a legacy, what it decodes to if
-        // anything. The rule is then one line, and it keys on those rather than on
-        // the labels — an oracle that matched on the string "valid" could not tell
-        // a well-formed empty legacy from a malformed one.
+        // The third column of each row is that row's expectation, written out
+        // rather than computed: for a partial, the strut it wins with or `None`;
+        // for a legacy, what it decodes to. The rule is then one line — take the
+        // partial's answer, else the legacy's — and it reads only the row in front
+        // of it. Two earlier versions did not: one keyed on the label "valid",
+        // which cannot tell a well-formed empty legacy from a malformed one, and
+        // one carried a `bool` and reached outside the row for the winner's value.
         let zero_legacy = [0_u32; 4];
         let partials: [PartialCase<'_>; 5] = [
-            ("absent", None, false),
-            ("conformant", Some(&partial), true),
-            ("all zero", Some(&empty_partial), false),
-            ("too short", Some(&partial[..11]), false),
-            ("too long", Some(&thirteen), false),
+            ("absent", None, None),
+            (
+                "conformant",
+                Some(&partial),
+                Some(X11Strut::from_partial(partial)),
+            ),
+            ("all zero", Some(&empty_partial), None),
+            ("too short", Some(&partial[..11]), None),
+            ("too long", Some(&thirteen), None),
         ];
         // Five values, not four. The first version of this grid gave the partial
         // axis an "all zero" row and the legacy axis none, which made it the
@@ -3082,13 +3111,10 @@ mod tests {
             ("too short", Some(&legacy[..3]), None),
             ("too long", Some(&five), None),
         ];
-        for (partial_name, partial_value, partial_wins) in partials {
+        for (partial_name, partial_value, wins_with) in partials {
             for (legacy_name, legacy_value, decoded) in legacies {
-                let expected = if partial_wins {
-                    Some(X11Strut::from_partial(partial))
-                } else {
-                    decoded.map(|four| X11Strut::from_legacy(four, root))
-                };
+                let expected =
+                    wins_with.or_else(|| decoded.map(|four| X11Strut::from_legacy(four, root)));
                 assert_eq!(
                     choose_strut(partial_value, legacy_value, root),
                     expected,

@@ -56,7 +56,7 @@ portable zip, and — from `v0.2.0` — a macOS universal disk image, all under 
 Health: **1,325 tests on the Windows CI lane plus 11 doctests (1,336 in a local `cargo test --workspace --all-features`), green on 3 OSes** — the
 per-OS count differs because the `#![cfg(windows)]` and `#![cfg(unix)]`
 integration suites compile out on the other lanes, and so do the per-OS unit
-tests spread across roughly two dozen modules -- deliberately not enumerated
+tests spread across roughly two dozen modules — deliberately not enumerated
 here, because a closed list of three was wrong within a day of being written; clippy `-D warnings` clean,
 `cargo-deny` clean (advisories/bans/licenses/sources), 5 fuzz targets building
 on stable, adversarial gate reviews at **P2, P3, P4, P5, P6** plus a full
