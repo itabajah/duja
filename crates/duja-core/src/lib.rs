@@ -48,9 +48,9 @@
 //! - [`scale`] — the one logical→device-unit extent calculation `duja-ui` (to
 //!   physical pixels) and `duja-app` (to tray anchor units) both need; unit
 //!   **agnostic** on purpose, because an anchor unit is physical pixels on
-//!   Windows but **points** on macOS (ADR-0021), so the two callers coincide on
-//!   one platform and diverge on the other — folding either unit into the
-//!   signature would blur exactly that
+//!   Windows and X11 but **points** on macOS (ADR-0021), so the two callers
+//!   coincide on two platforms and diverge on the third — folding either unit
+//!   into the signature would blur exactly that
 //! - `testing` (feature `test-support`) — fakes + the controller contract suite
 //!
 //! # Example

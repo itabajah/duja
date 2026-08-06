@@ -39,11 +39,15 @@
 //! spelled out per factor rather than with a "respectively" that a reader has to
 //! bind back to the bullets above:
 //!
-//! - **Windows** (anchor units are physical pixels): `logical_to_anchor` is the
-//!   monitor's `scale`, `anchor_to_physical` is `1.0`. The `1.0` is what makes
-//!   [`to_physical_position`] a bit-for-bit identity — see its own docs.
+//! - **Windows and X11** (anchor units are physical pixels): `logical_to_anchor`
+//!   is the monitor's `scale`, `anchor_to_physical` is `1.0`. The `1.0` is what
+//!   makes [`to_physical_position`] a bit-for-bit identity — see its own docs.
 //! - **macOS** (anchor units are points, i.e. already logical):
 //!   `logical_to_anchor` is `1.0`, `anchor_to_physical` is the monitor's `scale`.
+//!
+//! Two rows, three platforms: X11 lands on the Windows row, which ADR-0021's
+//! amendment records and which is why this list is by *unit* rather than by
+//! operating system.
 
 use duja_platform::WorkRect;
 

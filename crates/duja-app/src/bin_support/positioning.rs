@@ -15,12 +15,12 @@
 //!
 //! Every coordinate and extent here is in **anchor units**: the unit
 //! `duja_platform::geometry` hands out, which is physical device pixels on
-//! Windows and on X11, and points on macOS. (X11 since P7. This module is
-//! reached only from the Windows and macOS tray today, so that third case is
-//! listed for the contract's sake rather than because anything here can see it —
-//! but the paragraph below records what happened the last time this enumeration
-//! was left describing one fewer backend than existed.) This module never learns
-//! which; it only ever
+//! Windows and on X11, and points on macOS. X11 joined that list at P7, and is
+//! named here for the contract rather than for a path that runs — this module is
+//! reached only from the tray, which is still Windows and macOS. Listing it
+//! anyway is what the paragraph below is about.
+//!
+//! This module never learns which unit it has; it only ever
 //! compares the cursor against the work area, clamps inside it, and returns an
 //! origin in the same space it was given — an operation that is unit-agnostic by
 //! construction, provided the caller does not mix units. That is what
@@ -161,9 +161,9 @@ fn clamp(value: i32, lo: i32, hi: i32) -> i32 {
 /// while the real, larger window overflows the work-area edge (P0 live-QA bug 4).
 ///
 /// `logical_to_anchor` is the factor `duja_platform::TrayAnchor` derives for that
-/// conversion: the monitor's scale on Windows (anchor units are physical pixels,
-/// so a logical size must grow), and `1.0` on macOS (anchor units are points,
-/// which already *are* logical). The height is content-driven (`f32`), so this
+/// conversion: the monitor's scale on Windows and X11 (anchor units are physical
+/// pixels, so a logical size must grow), and `1.0` on macOS (anchor units are
+/// points, which already *are* logical). The height is content-driven (`f32`), so this
 /// takes `f32` inputs. A non-finite/degenerate factor falls back to the unscaled
 /// dimension.
 pub(crate) fn anchor_window_size(

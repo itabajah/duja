@@ -113,12 +113,17 @@ pub enum AnchorUnit {
     /// one unit; an earlier version of this sentence said "every fallback anchor"
     /// and listed only the two that are not.
     ///
-    /// "Declared" is doing work: Windows has no fallback *constant*, but a
-    /// fully-degraded Windows query returns this unit with a 1.0 scale and the
-    /// default work area, which is value-identical to the Linux one — which is why
-    /// three other comments in this file speak of "the Windows fallback" as though
-    /// it were a fourth. Counting declarations rather than reachable values is the
-    /// distinction between those two sentences.
+    /// "Declared" is doing work, and not the work an earlier version of this
+    /// paragraph claimed. It is *not* "has a `const`" — only macOS and Linux have
+    /// one; the placeholder builds its `TrayAnchor` inline, and counting by
+    /// constants would make the total two. It is "spells out a whole anchor as
+    /// **the** answer when the query cannot run", which the placeholder does and
+    /// Windows does not: a fully-degraded Windows query assembles its value from
+    /// `DEFAULT_WORK` and the 96-DPI seed, arriving at something value-identical
+    /// to the Linux fallback without ever naming it. That is why three other
+    /// comments in this file speak of "the Windows fallback" as though it were a
+    /// fourth, and they are describing a reachable value rather than a declared
+    /// one.
     PhysicalPixels,
     /// Points: macOS's backing-independent unit, and the one every
     /// window-positioning API there takes.

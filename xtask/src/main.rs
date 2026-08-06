@@ -96,8 +96,16 @@ mod tests {
     ///   cell — which is how a `` `O_NOFOLLOW | O_DIRECTORY` `` in `debt.md`
     ///   silently shunted a row's cells one column left and dropped its last one.
     /// - **A leading and trailing pipe is optional.** Discounting one of each
-    ///   means both styles count the same, so a table written without them cannot
-    ///   raise a false alarm here.
+    ///   means both styles count the same, so a row written without a trailing
+    ///   pipe cannot raise a false alarm here. (A row written without a *leading*
+    ///   one never reaches this function — see the test's own docs.)
+    ///
+    /// One shape is knowingly not GFM's: a line that is a bare `|` answers 1
+    /// here, where cmark-gfm's row parser consumes the leading pipe and ends with
+    /// no columns at all. Unreachable — no line under `docs/` is a bare pipe, and
+    /// such a line is not a table row in any case — and named so that "counts
+    /// cells the way GitHub counts them" is read as the near-identity it is
+    /// rather than as an equivalence.
     ///
     /// [GFM tables extension]: https://github.github.com/gfm/#tables-extension-
     fn cell_count(line: &str) -> usize {
@@ -148,8 +156,14 @@ mod tests {
         found
     }
 
-    /// Every row of every Markdown table under `docs/` must have exactly as many
-    /// cells as its own header.
+    /// Every row of every Markdown table under `docs/` **that this check can
+    /// see** must have exactly as many cells as its own header.
+    ///
+    /// The qualification is not throat-clearing: a table whose rows omit the
+    /// leading pipe is skipped rather than checked, so "every" would be an
+    /// over-claim in a coverage sense rather than a false-alarm one. The
+    /// paragraph below lists that with the four constructs that would produce a
+    /// *wrong* answer rather than no answer.
     ///
     /// GFM does not require this — "if there are a number of cells fewer than the
     /// number of cells in the header row, empty cells are inserted; if there are

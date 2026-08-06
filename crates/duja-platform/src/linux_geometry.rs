@@ -1604,19 +1604,46 @@ mod tests {
     /// XSETTINGS loop parses them back, which keeps one list behind all three.
     const DEGENERATE: [&str; 5] = ["0", "-96", "nan", "inf", "0.0"];
 
+    /// A 15.6-inch 1080p laptop panel, which [`randr_scale`] measures at 1.5.
+    ///
+    /// The fixture every test about the *chain* wants, as opposed to a test about
+    /// one link of it. A display reporting no physical size measures 1.0, which is
+    /// also what `sane_scale` substitutes — so against that fixture "the value was
+    /// clamped" and "the chain fell through to the measurement" are the same
+    /// number, and no assertion can tell them apart. This one measures something,
+    /// so they can.
+    fn measured_monitor() -> X11Monitor {
+        X11Monitor {
+            bounds: WorkRect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+            mm_width: 344,
+            mm_height: 194,
+        }
+    }
+
     #[test]
     fn a_degenerate_dpi_from_either_read_source_is_neutralised_at_the_end() {
         // A settings manager can publish zero or a negative, and a hand-written
         // `.Xresources` can carry the same; `sane_scale` is the single place that
         // is caught, which is why neither parser invents a floor of its own.
         //
-        // Both *read* sources, which is what this test's name now claims. The
+        // That second half is the claim the fixture has to make checkable, and
+        // `measured_monitor` is why it is. A parser that filtered a degenerate
+        // value at the source — returning `None` instead of passing it through —
+        // would hand the chain on to the measurement, and against a 0 mm display
+        // the measurement is also 1.0, so the test would stay green while the
+        // property it names had been broken. Against a display that measures 1.5,
+        // that mutation reddens.
+        //
+        // Both *read* sources, which is what this test's name claims. The
         // remaining source — `WINIT_X11_SCALE_FACTOR`, which the chain consults
         // **first** — does not belong here: it is rejected a step earlier, by
         // winit's `validate_scale_factor`, and never reaches `sane_scale` at all.
-        // The next test pins that distinction, and this one used to blur it by
-        // asserting the override case against a fixture whose every route ended
-        // at 1.0 anyway.
+        // The next test pins that distinction.
         //
         // ("Remaining", not "third". This PR has already had to correct two
         // comments that called XSETTINGS the chain's *first* source when it is
@@ -1629,20 +1656,14 @@ mod tests {
                 xsettings_dpi: Some(parsed),
                 xft_dpi: None,
             };
-            approx(
-                scale_factor(&from_xsettings, &monitor(0, 0, 1920, 1080)),
-                1.0,
-            );
+            approx(scale_factor(&from_xsettings, &measured_monitor()), 1.0);
 
             let from_resource = DpiSources {
                 scale_override: None,
                 xsettings_dpi: None,
                 xft_dpi: Some(raw),
             };
-            approx(
-                scale_factor(&from_resource, &monitor(0, 0, 1920, 1080)),
-                1.0,
-            );
+            approx(scale_factor(&from_resource, &measured_monitor()), 1.0);
         }
     }
 
@@ -1658,16 +1679,7 @@ mod tests {
         // against a 0mm display — where the fall-through also yields 1.0 — is a
         // test no mutation can fail, which is exactly what an earlier version of
         // it was.
-        let laptop = X11Monitor {
-            bounds: WorkRect {
-                x: 0,
-                y: 0,
-                w: 1920,
-                h: 1080,
-            },
-            mm_width: 344,
-            mm_height: 194,
-        };
+        let laptop = measured_monitor();
         for raw in DEGENERATE {
             let rejected = DpiSources {
                 scale_override: Some(raw),
