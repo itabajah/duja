@@ -569,6 +569,7 @@ pub(crate) fn monitor_for_cursor(cursor: (i32, i32), monitors: &[X11Monitor]) ->
 /// exceptions. (This paragraph said "the one case" for two commits, and before
 /// that pointed at a "never overlaps" property the module docs now quote only in
 /// order to call it false.)
+///
 /// Giving the axis back is an overlap wherever the reservations that emptied it
 /// actually lie on this monitor, which is the case worth planning for and not
 /// quite the same as "always": the two round trips behind a strut and a monitor
@@ -750,17 +751,28 @@ fn distance_squared(rect: WorkRect, (x, y): (i32, i32)) -> i64 {
 /// Build a [`WorkRect`] from four edges, saturating rather than wrapping.
 ///
 /// The origin saturates into `i32` and each extent is then capped **twice**: at
-/// [`MAX_EXTENT`], and at the room left between the saturated origin and
-/// `i32::MAX`. So `x + w` stays representable however absurd the inputs were,
-/// which is the promise [`MAX_EXTENT`]'s own doc makes.
+/// [`MAX_EXTENT`], and at the room left between the origin and `i32::MAX`. So
+/// `x + w` stays representable however absurd the inputs were, which is the
+/// promise [`MAX_EXTENT`]'s own doc makes and did not keep: until a review
+/// constructed the case, the extent was capped only at [`MAX_EXTENT`] and never
+/// against the origin, so a monitor near the top of the coordinate space reported
+/// its full width and the sum ran off the end.
 ///
-/// The second cap is not decoration. Measuring the extent from the *unclamped*
-/// left edge — which this did until a review constructed the case — lets a
-/// rectangle whose origin saturated at `i32::MAX` still report a positive width,
-/// so `x + w` overflows and the span reaches back across coordinates the
-/// subtraction had already excluded. Unreachable from `RandR`, whose CRTC origin
-/// is an `i16` and extent a `u16`, but `work_area` is `pub(crate)` and its own
-/// suite drives it with `i32::MIN` and `u32::MAX`.
+/// **No saturation is needed to reach that**, which is worth stating because the
+/// first fix and its test both said otherwise. `x = i32::MAX - 100` with a width
+/// of 4000 is entirely representable, `clamp_to_i32` is the identity on it, and
+/// the old expression still returned 4000. Unreachable from `RandR`, whose CRTC
+/// origin is an `i16` and extent a `u16` — but `work_area` is `pub(crate)` and its
+/// own suite drives it with `i32::MIN` and `u32::MAX`.
+///
+/// Measuring the extent from the **clamped** origin rather than from `left` is
+/// the other half of that first fix, and it is inert: in [`work_area`] the left
+/// edge only ever moves up, so `clamp_to_i32` never lowers it, and where it
+/// raises it the headroom is zero and the width is zero either way. It is kept
+/// for a future caller that could pass a left edge below `i32::MIN`, and named
+/// here rather than left to look load-bearing — the same treatment
+/// [`randr_scale`]'s zero-millimetre guard and [`monitor_for_cursor`]'s
+/// containment fast path get, for the same reason.
 fn rect_from_edges(left: i64, top: i64, right: i64, bottom: i64) -> WorkRect {
     let x = clamp_to_i32(left);
     let y = clamp_to_i32(top);
@@ -1392,12 +1404,17 @@ mod tests {
     }
 
     #[test]
-    fn a_saturated_origin_leaves_no_width_to_overflow_with() {
-        // `MAX_EXTENT`'s doc promises `x + w` stays inside `i32`, and measuring
-        // the extent from the unclamped left edge broke that promise: a monitor
-        // whose origin saturates at `i32::MAX` still reported a positive width, so
-        // the span ran past the end of the coordinate space and back across
-        // columns an accepted strut had already excluded.
+    fn an_extent_is_capped_against_its_own_origin_not_only_at_max_extent() {
+        // `MAX_EXTENT`'s doc promises `x + w` stays inside `i32`, and capping the
+        // extent only at `MAX_EXTENT` broke that promise: a monitor near the top
+        // of the coordinate space reported its full width, so the span ran past
+        // the end of it and back across columns an accepted strut had excluded.
+        //
+        // **Neither fixture saturates anything**, and the first version of this
+        // test was named and commented as though both did. `i32::MAX - 100` is a
+        // perfectly ordinary coordinate; `clamp_to_i32` is the identity on it. The
+        // defect needed no saturation at all, which is precisely what made the
+        // first diagnosis of it comfortable and wrong.
         //
         // Unreachable from RandR — a CRTC origin is `i16` and its extent `u16` —
         // which is exactly why it needs a test rather than a comment: nothing else
