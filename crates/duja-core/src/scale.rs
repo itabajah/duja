@@ -26,8 +26,7 @@
 //! The two callers do **not** share a unit, and that is not an accident to be
 //! tidied away: ADR-0021 makes the anchor unit platform-dependent — physical
 //! pixels on Windows and X11, points on macOS — while `duja-ui`'s conversion is
-//! always
-//! to physical pixels. Only the *arithmetic* is common, so [`scale_extent`] is
+//! always to physical pixels. Only the *arithmetic* is common, so [`scale_extent`] is
 //! named for what it computes rather than for what either caller means by it,
 //! and each caller keeps its own unit contract in its own docs.
 //!

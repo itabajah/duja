@@ -1,15 +1,25 @@
-//! The X11 half of the Linux tray anchor: five reads and no decisions.
+//! The X11 half of the Linux tray anchor: the reads, and only the decisions that
+//! cannot be made without them.
 //!
-//! Every question this module asks the X server has its answer copied into one
-//! of [`crate::linux_geometry`]'s plain structs and handed straight back out
-//! again. Nothing here chooses a monitor, subtracts a strut or resolves a scale
-//! factor — that all lives next door, where it is unit-tested on every CI lane.
-//! What is left is the part no lane can run: the connection, the round trips,
-//! and the property decoding.
+//! Every *value* this module obtains is copied into one of
+//! [`crate::linux_geometry`]'s plain structs and handed straight back out again.
+//! Nothing here chooses a monitor, subtracts a strut or resolves a scale factor —
+//! that all lives next door, where it is unit-tested on every CI lane. What is
+//! left is the part no lane can run: the connection, the round trips, the
+//! property decoding, and a small number of rules that are *about* the fetching
+//! rather than about the geometry.
+//!
+//! Those rules are named where they are made, because they are the code in this
+//! crate with the least test coverage and the most bug history: which strut
+//! property wins when a window publishes both ([`struts`]), whether a pointer on
+//! another X screen can be used at all ([`cursor_anchor`]), and which `RandR`
+//! request this server supports ([`crtcs`]). An earlier version of this sentence
+//! said "five reads and no decisions", which is the claim the paragraph below it
+//! already contradicted.
 //!
 //! # What it reads
 //!
-//! Four questions for the X server, and one that is not:
+//! Five sources, of which four are X requests:
 //!
 //! 1. `QueryPointer` on the root — where the cursor is.
 //! 2. `GetGeometry` on the root — how big the screen is, which is the space

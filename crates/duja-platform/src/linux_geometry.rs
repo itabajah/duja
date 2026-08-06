@@ -125,16 +125,22 @@
 //! over the strut-subtracted region and clips to the best rectangle in it
 //! (`meta_workspace_ensure_work_areas_validated`); this pushes each of the four
 //! edges past every band that meets the monitor at all. What that buys is the
-//! property placement needs — **a non-degenerate result never overlaps a reserved
-//! band** — and what it costs is that a band touching one column of a monitor
-//! reserves that monitor's whole edge, where Mutter would have kept the
+//! property placement needs, stated per axis because that is the only form of it
+//! that is true — **on an axis the struts did not empty, neither edge ever lies
+//! inside a reserved band**. What it costs is that a band touching one column of
+//! a monitor reserves that monitor's whole edge, where Mutter would have kept the
 //! full-height rectangle beside it. Both agree for a panel that spans its monitor,
 //! which is every panel anyone actually runs.
 //!
-//! "Non-degenerate" is load-bearing rather than a hedge, and [`work_area`]'s own
-//! docs carry the exception: a strut set that consumes an axis entirely gets that
-//! axis back in full, which is an overlap, chosen because an empty rectangle pins
-//! the flyout to a corner and an overlapping one merely sits under a panel.
+//! The per-axis phrasing is not a hedge, and the alternative is not merely weaker
+//! but false: an emptied axis is given back **in full**, which produces a
+//! perfectly non-degenerate rectangle lying across the very bands that emptied it.
+//! `two_conformant_panels_can_empty_an_axis_between_them` is that rectangle — a
+//! whole 1920×1080 monitor, overlapping two 1000 px docks. Saying "a
+//! non-degenerate result never overlaps" would be contradicted by this module's
+//! own test suite. [`work_area`] documents why the exception is chosen: an empty
+//! rectangle pins the flyout to a corner, an overlapping one merely sits under a
+//! panel.
 //! Struts are in **root-window**
 //! coordinates and the specification is explicit that they are *not* relative to
 //! a Xinerama monitor, which is what makes the arithmetic non-obvious: a panel
@@ -300,6 +306,7 @@ impl X11Strut {
     /// extra row is `screen.height`, and no monitor's rows begin there. Widening
     /// to `height - 1` instead would be equally correct and would stop agreeing
     /// with the sentence it is quoting.
+    ///
     /// A caller that has both properties must prefer the partial one; the
     /// specification says the window manager MUST ignore `_NET_WM_STRUT` when
     /// `_NET_WM_STRUT_PARTIAL` is present, and a client computing the same work

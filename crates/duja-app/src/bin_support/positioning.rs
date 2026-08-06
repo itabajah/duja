@@ -18,7 +18,7 @@
 //! Windows and on X11, and points on macOS. X11 joined that list at P7, and is
 //! named here for the contract rather than for a path that runs — this module is
 //! reached only from the tray, which is still Windows and macOS. Listing it
-//! anyway is what the paragraph below is about.
+//! anyway is what the closing paragraph of these docs is about.
 //!
 //! This module never learns which unit it has; it only ever
 //! compares the cursor against the work area, clamps inside it, and returns an

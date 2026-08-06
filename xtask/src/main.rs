@@ -90,51 +90,53 @@ mod tests {
     ///
     /// Two rules from the [GFM tables extension], both load-bearing:
     ///
-    /// - **`\|` is content, not a separator, *including inside other inline
-    ///   spans*.** The spec says exactly that, and gives `` b `\|` az `` as its
-    ///   example. So an unescaped `|` inside backticks really does split the
-    ///   cell — which is how a `` `O_NOFOLLOW | O_DIRECTORY` `` in `debt.md`
-    ///   silently shunted a row's cells one column left and dropped its last one.
+    /// - **A `|` preceded by a backslash is content, not a separator, *including
+    ///   inside other inline spans*.** The spec says exactly that, and gives
+    ///   `` b `\|` az `` as its example. So an unescaped `|` inside backticks
+    ///   really does split the cell — which is how a
+    ///   `` `O_NOFOLLOW | O_DIRECTORY` `` in `debt.md` silently shunted a row's
+    ///   cells one column left and dropped its last one.
     /// - **A leading and trailing pipe is optional.** Discounting one of each
     ///   means both styles count the same, so a row written without a trailing
     ///   pipe cannot raise a false alarm here. (A row written without a *leading*
     ///   one never reaches this function — see the test's own docs.)
     ///
-    /// One shape is knowingly not GFM's: a line that is a bare `|` answers 1
-    /// here, where cmark-gfm's row parser consumes the leading pipe and ends with
-    /// no columns at all. Unreachable — no line under `docs/` is a bare pipe, and
-    /// such a line is not a table row in any case — and named so that "counts
-    /// cells the way GitHub counts them" is read as the near-identity it is
-    /// rather than as an equivalence.
+    /// "Preceded by a backslash" is the whole escape rule, and it is deliberately
+    /// **not** a `CommonMark` escape state machine. cmark-gfm scans a cell with
+    /// `table_cell = (escaped_char|[^|\r\n])+` where
+    /// `escaped_char = [\\][|!"#…\\\]…]` — the escapable set contains the
+    /// backslash — and re2c takes the longest match. So in `a\\|b` the longest
+    /// parse is `a`, `\`, `\|`, `b`: the pipe is **absorbed**, not a delimiter.
+    /// An escape-state machine says the opposite (the first `\` escapes the
+    /// second, leaving the pipe bare), and two versions of this function said it
+    /// before the scanner source was read. Whenever a `|` follows a backslash,
+    /// some longest parse absorbs it, so the one-byte lookbehind *is* the rule.
+    ///
+    /// One shape is still knowingly not GFM's: a line that is a bare `|` answers
+    /// 1 here, where cmark-gfm's row parser consumes the leading pipe and ends
+    /// with no columns at all. Unreachable — no line under `docs/` is a bare
+    /// pipe, and such a line is not a table row in any case.
     ///
     /// [GFM tables extension]: https://github.github.com/gfm/#tables-extension-
     fn cell_count(line: &str) -> usize {
         let mut fields: usize = 1;
-        let mut escaped = false;
+        let mut previous = 0_u8;
         let mut ends_on_separator = false;
         for byte in line.bytes() {
-            // Both decisions read the state as it was on *entry*: a `|` counts
-            // when the byte before it did not escape it, and a `\` escapes the
-            // next byte only when it was not itself escaped. Testing the updated
-            // flag instead — which the first version of this loop did — counts an
-            // escaped pipe as a delimiter, because the backslash has already
-            // cleared the flag by the time the pipe is looked at.
-            let was_escaped = escaped;
-            escaped = !was_escaped && byte == b'\\';
-            ends_on_separator = byte == b'|' && !was_escaped;
+            ends_on_separator = byte == b'|' && previous != b'\\';
             if ends_on_separator {
                 fields = fields.saturating_add(1);
             }
+            previous = byte;
         }
         // A leading pipe contributes an empty first field and a trailing one an
-        // empty last. Both discounts come from the same state machine that
-        // counted the fields — an earlier version tested the tail with
-        // `!line.ends_with("\\|")`, which disagrees with the loop on a row ending
-        // in an escaped backslash followed by a real delimiter, and a checker
-        // whose two halves can disagree is worth less than the bug it looks for.
-        // `saturating_sub` rather than `-` so a pipe-less line (which the caller
-        // never passes, but a future one might) cannot underflow, and the length
-        // guard stops a lone `"|"` being discounted twice.
+        // empty last, and both discounts read the same `ends_on_separator` the
+        // loop set — an earlier version tested the tail with a separate
+        // `ends_with` suffix check, and a checker whose two halves can disagree is
+        // worth less than the bug it looks for. `saturating_sub` rather than `-`
+        // so a pipe-less line (which the caller never passes, but a future one
+        // might) cannot underflow, and the length guard stops a lone `"|"` being
+        // discounted twice.
         let lead = usize::from(line.starts_with('|'));
         let trail = usize::from(ends_on_separator && line.len() > 1);
         fields.saturating_sub(lead).saturating_sub(trail)
