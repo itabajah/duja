@@ -13,6 +13,12 @@
 # TDD spec commits ("test(core): debounce specs") are noun phrases by
 # convention, so the imperative-mood heuristic is off.
 style = "conventional"
+# Measured, not read from a doc: this counts the DESCRIPTION, not the whole
+# subject line. Five data points on #132 agree, including the one that failed -
+# 76-char subjects with 61-char descriptions pass, and an 82-char subject with a
+# 77-char description does not. Worth stating because the natural check
+# (`awk 'length > 72'` over `git log --format=%s`) flags four conforming commits
+# on that branch and would send someone rewriting them.
 subject_length = 72
 subject_capitalized = false
 imperative_subject = false
