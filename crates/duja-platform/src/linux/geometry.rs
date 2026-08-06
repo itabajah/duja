@@ -24,9 +24,19 @@
 //! The connection is opened and dropped inside [`cursor_anchor`], the same shape
 //! and for the same reason as `duja-dimmer`'s X11 probe: this runs when the user
 //! clicks the tray icon, and a connection kept open between clicks is a file
-//! descriptor and a wakeup source earning nothing. The cost is a socket connect
-//! and a handful of round trips on a unix socket, against a click that is about
-//! to spend far longer laying out a window.
+//! descriptor and a wakeup source earning nothing.
+//!
+//! The cost is a socket connect, a handful of round trips, **and blocking file
+//! I/O**: `resource_manager::new_from_default` reads `$XENVIRONMENT` or
+//! `$HOME/.Xdefaults-<hostname>` on every call (and `$HOME/.Xresources` or
+//! `$HOME/.Xdefaults` too when `RESOURCE_MANAGER` is unset), plus a `gethostname`.
+//! winit loads the same database once and caches it behind an `RwLock`, reloading
+//! on `PropertyNotify`. Naming that rather than pricing this at "a few round
+//! trips": it is the part of the per-call cost that is not obvious from the
+//! request list, and it is the first thing to cache if the tray path ever needs
+//! to be cheaper. The narrower `new_from_resource_manager` would skip the files,
+//! and is deliberately not used — winit reads them, so a bare `startx` session
+//! whose only `Xft.dpi` lives in `.Xresources` has to be visible here too.
 //!
 //! Requests are pipelined wherever there is more than one of a kind — every
 //! `GetCrtcInfo` is sent before the first reply is read, and so is every strut
@@ -142,10 +152,15 @@ pub(crate) fn cursor_anchor() -> Option<TrayAnchor> {
 
 /// Every enabled CRTC, with the physical size of the first output it drives.
 ///
-/// The filter is winit's: a CRTC with a zero extent or no connected output is
-/// switched off, and including one would let the cursor land on a monitor that is
-/// not displaying anything. Keeping the same filter is what makes this module's
-/// scale factor the one winit computes for the same display.
+/// The filter is winit's — `width == 0 || height == 0 || outputs.is_empty()` —
+/// and it means "this CRTC drives nothing", not "its output is disconnected".
+/// Neither this nor winit reads `RandR`'s `connection` field, so a CRTC still
+/// driving a `Disconnected` output passes both. Including a CRTC that drives
+/// nothing would let the cursor land on a monitor that is displaying nothing.
+///
+/// Sharing the filter is what makes this module's list *comparable* to winit's,
+/// which the scale chain's last step depends on; it does not make the two lists
+/// identical, and `linux_geometry`'s module docs say where they part company.
 ///
 /// An empty vector on any failure. `RandR` is not optional here the way it is for
 /// the dimmer's probe: without it there is no monitor list at all, and the caller

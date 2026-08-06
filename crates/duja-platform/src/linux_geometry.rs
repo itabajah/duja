@@ -44,7 +44,42 @@
 //!
 //! Only step 4 is per-monitor; the first three are session-wide, which is why an
 //! X11 session usually reports the same scale for every display no matter how
-//! their densities differ.
+//! their densities differ. That is also what keeps the mirror honest in practice:
+//! wherever a source above step 4 answers, *which* monitor the chain is evaluated
+//! on cannot matter.
+//!
+//! ## Where it is evaluated, when step 4 is reached
+//!
+//! [`scale_factor`] is evaluated on the monitor under the cursor. winit is not,
+//! and the difference is worth stating precisely because it is a live divergence
+//! rather than a hypothetical one.
+//!
+//! winit picks a new X11 window's monitor in `x11/window.rs`, by querying the
+//! pointer and taking the first monitor rectangle containing it — except that
+//! `XIQueryPointer` reports `Fp1616`, 16.16 fixed point, and winit casts
+//! `root_x`/`root_y` to `i64` without the `>> 16`. Every coordinate is therefore
+//! 65536× too large, no rectangle ever contains it, and the guess falls through to
+//! `monitors[0]`: the first enabled CRTC, whatever the pointer is doing. (winit's
+//! CRTC list is also one entry shorter than this module's wherever
+//! `GetOutputInfo` failed or an output name was not UTF-8, which it drops and this
+//! keeps — so even "the first CRTC" is not always the same CRTC.)
+//!
+//! **That guess is a transient, not the settled value.** On the first synthetic
+//! `ConfigureNotify` — the absolute-coordinate one an ICCCM reparenting window
+//! manager sends after placing the window — winit recomputes the scale from
+//! `get_monitor_for_window`, largest overlap with the window rectangle, and emits
+//! `ScaleFactorChanged`. Since the flyout is placed on the cursor's monitor, the
+//! settled scale is the one computed here.
+//!
+//! So the divergence needs four things at once: no `WINIT_X11_SCALE_FACTOR`, no
+//! XSETTINGS manager, no `Xft.dpi` resource, and two CRTCs of different densities
+//! with the cursor not on the first — i.e. a bare window manager on a mixed-DPI
+//! desktop. There it costs a clamp box computed for the settled size while the
+//! window is briefly created at another, and on a non-reparenting window manager
+//! that sends no synthetic `ConfigureNotify`, for longer than briefly.
+//! Reproducing winit's fixed-point bug to match it is the one thing not worth
+//! doing — it would be wrong in the other direction the day upstream fixes it —
+//! so `docs/debt.md` carries it instead.
 //!
 //! Two traps are worth naming because both look like omissions:
 //!
@@ -66,10 +101,19 @@
 //! docks — so on a two-monitor session a panel on either one shrinks the single
 //! global rectangle and the other monitor inherits a gap it does not have.
 //!
-//! The per-monitor answer is the one window managers compute for themselves:
-//! take every managed window's `_NET_WM_STRUT_PARTIAL` (or the legacy
-//! `_NET_WM_STRUT`), and subtract the reserved bands that actually touch this
-//! monitor. [`work_area`] is that subtraction. Struts are in **root-window**
+//! The per-monitor answer has to be computed, from the same inputs a window
+//! manager uses: every managed window's `_NET_WM_STRUT_PARTIAL` (or the legacy
+//! `_NET_WM_STRUT`), minus the reserved bands that touch this monitor.
+//! [`work_area`] is a **conservative** version of that, and the difference is
+//! worth stating rather than claiming parity. Mutter builds a minimal spanning set
+//! over the strut-subtracted region and clips to the best rectangle in it
+//! (`meta_workspace_ensure_work_areas_validated`); this pushes each of the four
+//! edges past every band that meets the monitor at all. The guarantee that gives
+//! is the one placement needs — **the result never overlaps a reserved band** —
+//! and what it costs is that a band touching one column of a monitor reserves that
+//! monitor's whole edge, where Mutter would have kept the full-height rectangle
+//! beside it. Both agree for a panel that spans its monitor, which is every panel
+//! anyone actually runs. Struts are in **root-window**
 //! coordinates and the specification is explicit that they are *not* relative to
 //! a Xinerama monitor, which is what makes the arithmetic non-obvious: a panel
 //! along the bottom of a short monitor beside a taller one reserves a band
@@ -222,6 +266,13 @@ impl X11Strut {
     /// EWMH defines the short property as the partial one "where all start
     /// values are 0 and all end values are the height or width of the logical
     /// screen", so the ranges come from `screen` rather than from the window.
+    ///
+    /// Note that this puts the `_end` fields one past the last row or column,
+    /// where the field docs above call both ends inclusive. That is the
+    /// specification's own wording rather than a slip, and it cannot matter: the
+    /// extra row is `screen.height`, and no monitor's rows begin there. Widening
+    /// to `height - 1` instead would be equally correct and would stop agreeing
+    /// with the sentence it is quoting.
     /// A caller that has both properties must prefer the partial one; the
     /// specification says the window manager MUST ignore `_NET_WM_STRUT` when
     /// `_NET_WM_STRUT_PARTIAL` is present, and a client computing the same work
@@ -361,12 +412,20 @@ fn randr_scale(monitor: &X11Monitor) -> f64 {
 
 /// Index of the monitor the cursor is on, or of the nearest one.
 ///
+/// **This is Duja's choice, not a mirror of winit's.** The two questions are
+/// separate and only one of them has to agree with anything: [`scale_factor`] has
+/// to be the number winit sizes the window by, because the consumer multiplies a
+/// logical size by it; *which monitor's work area to clamp into* is a placement
+/// decision with no winit counterpart at all — winit never computes a work area.
+/// So the precedent here is Win32's `MONITOR_DEFAULTTONEAREST`, which is the same
+/// decision on a platform that ships an answer for it, and the module docs cover
+/// separately what it means that the scale is then read off this monitor.
+///
 /// Containment is half-open on the right and bottom edges, so two abutting
 /// monitors never both claim the pixel column between them. A cursor that is on
 /// no monitor at all — the gap in an L-shaped layout, or a stale pointer report
 /// during a hot-plug — falls back to the nearest rectangle by squared distance,
-/// which is what Win32's `MONITOR_DEFAULTTONEAREST` does and what keeps the
-/// flyout on a screen rather than at the fallback rectangle.
+/// which keeps the flyout on a screen rather than at the fallback rectangle.
 ///
 /// [`None`] only for an empty list, which means `RandR` reported no enabled CRTC.
 ///
@@ -416,11 +475,14 @@ pub(crate) fn monitor_for_cursor(cursor: (i32, i32), monitors: &[X11Monitor]) ->
 /// range stop overlapping, and the left panel would then be ignored on a screen
 /// it really covers.
 ///
-/// A strut set that consumes the monitor entirely yields `bounds` rather than an
-/// empty rectangle. That is the module's standing preference for a
-/// wrong-but-usable answer: placement clamps the flyout into whatever it is
-/// given, so a zero rectangle pins the window to a corner, while the full monitor
-/// merely risks overlapping a panel.
+/// A strut set that consumes the monitor **along one axis** gives that axis back
+/// its full extent and keeps the other. That is the module's standing preference
+/// for a wrong-but-usable answer — placement clamps the flyout into whatever it is
+/// given, so a zero rectangle pins the window to a corner while the full extent
+/// merely risks overlapping a panel — applied per axis rather than to the whole
+/// rectangle, because the two axes fail independently. Falling back wholesale
+/// would let one malformed `left` value throw away a perfectly good top panel's
+/// reservation and open the flyout underneath it.
 pub(crate) fn work_area(bounds: WorkRect, screen: X11Screen, struts: &[X11Strut]) -> WorkRect {
     let monitor_left = i64::from(bounds.x);
     let monitor_top = i64::from(bounds.y);
@@ -451,8 +513,15 @@ pub(crate) fn work_area(bounds: WorkRect, screen: X11Screen, struts: &[X11Strut]
         }
     }
 
-    if right <= left || bottom <= top {
-        return bounds;
+    // Per axis, not per rectangle: see the note above. A monitor that was already
+    // degenerate comes back degenerate, which is the same answer `bounds` gave.
+    if right <= left {
+        left = monitor_left;
+        right = monitor_right;
+    }
+    if bottom <= top {
+        top = monitor_top;
+        bottom = monitor_bottom;
     }
     rect_from_edges(left, top, right, bottom)
 }
@@ -1032,6 +1101,65 @@ mod tests {
             ..X11Strut::default()
         };
         assert_eq!(work_area(bounds, screen(1920, 1080), &[absurd]), bounds);
+    }
+
+    #[test]
+    fn one_swallowed_axis_does_not_discard_the_other_axis_reservations() {
+        // The fallback is per axis, not per rectangle. A real 30px top panel plus
+        // one window publishing a `left` deeper than the monitor is wide must
+        // still keep the top panel's reservation — falling back wholesale would
+        // open the flyout underneath a panel that reserved space correctly,
+        // because of an unrelated window's malformed property.
+        let bounds = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let panel = X11Strut {
+            top: 30,
+            top_start_x: 0,
+            top_end_x: 1919,
+            ..X11Strut::default()
+        };
+        let nonsense = X11Strut {
+            left: 4000,
+            left_start_y: 0,
+            left_end_y: 1079,
+            ..X11Strut::default()
+        };
+        assert_eq!(
+            work_area(bounds, screen(1920, 1080), &[panel, nonsense]),
+            WorkRect {
+                x: 0,
+                y: 30,
+                w: 1920,
+                h: 1050
+            },
+            "the x axis is given back in full; the y axis keeps its panel"
+        );
+        // And the same the other way round, so neither axis is the special case.
+        let side = X11Strut {
+            left: 60,
+            left_start_y: 0,
+            left_end_y: 1079,
+            ..X11Strut::default()
+        };
+        let tall_nonsense = X11Strut {
+            bottom: 4000,
+            bottom_start_x: 0,
+            bottom_end_x: 1919,
+            ..X11Strut::default()
+        };
+        assert_eq!(
+            work_area(bounds, screen(1920, 1080), &[side, tall_nonsense]),
+            WorkRect {
+                x: 60,
+                y: 0,
+                w: 1860,
+                h: 1080
+            }
+        );
     }
 
     #[test]

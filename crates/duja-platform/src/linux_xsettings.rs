@@ -469,11 +469,12 @@ mod tests {
 
     #[test]
     fn a_negative_dpi_survives_as_a_negative_number() {
-        // The wire type is INT32. Reading it unsigned would turn a settings
-        // manager's nonsense into a scale factor of forty-three million, which
-        // `sane_scale` does *not* reject (it guards the low end only) and which
-        // would size the flyout into oblivion. Passing the negative through is
-        // what lets the guard at the end of the chain see it for what it is.
+        // The wire type is INT32. Reading it unsigned turns a settings manager's
+        // nonsense into 4_294_868_992, which is 4_194_208 dpi and a scale factor
+        // of roughly forty-three *thousand* — `sane_scale` does not reject it (it
+        // guards the low end only) and it would size the flyout into oblivion.
+        // Passing the negative through is what lets the guard at the end of the
+        // chain see it for what it is.
         let bytes = blob(LITTLE_ENDIAN, &[integer(b"Xft/DPI", -98_304)]);
         assert_eq!(xft_dpi(&bytes), Some(-96.0));
     }
