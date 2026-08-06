@@ -1,0 +1,1307 @@
+//! Pure X11 → tray-anchor geometry for the Linux [`geometry`](crate::geometry)
+//! backend: which monitor the cursor is on, what a panel has reserved on it, and
+//! what scale factor the window will be drawn at.
+//!
+//! Not one line here talks to an X server. The backend runs `QueryPointer`, walks
+//! `RandR`'s CRTCs, reads the EWMH strut properties off every managed window and
+//! fetches the three DPI sources, copies them into the plain structs below, and
+//! hands them to [`anchor_from_x11`] — so every *decision* is unit-tested on
+//! **every** CI lane, and only the reads themselves need an X server. Same shape
+//! and same reason as `mac_geometry`.
+//!
+//! # Coordinate space
+//!
+//! X11 needs no conversion, and it is the only one of the three backends that
+//! needs neither half of one:
+//!
+//! - **Orientation.** Root-window coordinates are top-left origin, y **down** —
+//!   already [`geometry`](crate::geometry)'s contract, so there is no flip to get
+//!   wrong (`mac_geometry` carries one because Cocoa is y-up).
+//! - **Unit.** X11 has no notion of a logical pixel. CRTC rectangles, the pointer
+//!   position, struts and window positions are all in device pixels, and winit's
+//!   `set_outer_position` hands a `PhysicalPosition` straight through on X11 — so
+//!   the anchor is [`AnchorUnit::PhysicalPixels`], exactly as on Windows, and
+//!   `anchor_to_physical` is `1.0`.
+//!
+//! # The scale factor is a mirror of winit's, deliberately
+//!
+//! The other two fields describe the screen; `scale` describes something else —
+//! how big the flyout is going to be — and it is only useful if it is the number
+//! **winit** will size that window by. The consumer multiplies a logical
+//! (`.slint` design-unit) size by it to get the box it then clamps into the work
+//! area, so a scale this crate invents independently would clamp the wrong
+//! rectangle and let the flyout overhang the panel it was placed to avoid.
+//!
+//! So [`scale_factor`] reproduces winit 0.30's X11 chain rather than choosing its
+//! own, in winit's order:
+//!
+//! 1. `WINIT_X11_SCALE_FACTOR`, which is either the literal `randr` or a float;
+//! 2. `Xft/DPI` from the XSETTINGS manager (see
+//!    [`linux_xsettings`](crate::linux_xsettings)), divided by 96;
+//! 3. `Xft.dpi` from the root window's `RESOURCE_MANAGER`, divided by 96;
+//! 4. [`randr_scale`] — pixels per millimetre from the CRTC's size and the
+//!    output's physical dimensions.
+//!
+//! Only step 4 is per-monitor; the first three are session-wide, which is why an
+//! X11 session usually reports the same scale for every display no matter how
+//! their densities differ.
+//!
+//! Two traps are worth naming because both look like omissions:
+//!
+//! - **`WINIT_HIDPI_FACTOR` is not consulted.** winit reads it only to emit a
+//!   deprecation warning and then ignores it, so honouring it here would be this
+//!   crate scaling by a number the window is not scaled by.
+//! - **An invalid `WINIT_X11_SCALE_FACTOR` falls through instead of panicking.**
+//!   winit panics on one; [`crate::geometry::cursor_anchor`] promises never to
+//!   fail, and the divergence is unobservable in the shipping binary because
+//!   winit reaches its own panic while creating the first window.
+//!
+//! `docs/debt.md` carries what a mirror costs: it is pinned to a version of
+//! winit, and an upstream change to that chain becomes a silent mis-size here.
+//!
+//! # Work area
+//!
+//! X11 has no per-monitor work area to ask for. `_NET_WORKAREA` is one rectangle
+//! **per desktop**, not per monitor — EWMH defines it as the current page minus
+//! docks — so on a two-monitor session a panel on either one shrinks the single
+//! global rectangle and the other monitor inherits a gap it does not have.
+//!
+//! The per-monitor answer is the one window managers compute for themselves:
+//! take every managed window's `_NET_WM_STRUT_PARTIAL` (or the legacy
+//! `_NET_WM_STRUT`), and subtract the reserved bands that actually touch this
+//! monitor. [`work_area`] is that subtraction. Struts are in **root-window**
+//! coordinates and the specification is explicit that they are *not* relative to
+//! a Xinerama monitor, which is what makes the arithmetic non-obvious: a panel
+//! along the bottom of a short monitor beside a taller one reserves a band
+//! measured from the bottom of the whole screen, so its `bottom` value is much
+//! larger than the panel is tall.
+
+use std::str::FromStr;
+
+use crate::geometry::{AnchorUnit, TrayAnchor, WorkRect, sane_scale};
+
+/// The largest extent a [`WorkRect`] produced here reports.
+///
+/// `i32::MAX`, the same ceiling `mac_geometry::MAX_EXTENT` names and the Windows
+/// backend's saturating `right - left` produces, so `x + w` stays inside the
+/// `i32` space the anchor contract is expressed in on all three backends. Not
+/// reachable from real `RandR` data — a CRTC's extent is a `u16` — but the
+/// conversion back out of the 64-bit strut arithmetic has to be total, and
+/// picking a *different* cap would be the one way to make the downstream
+/// placement kernel see a width it has no substitute for.
+const MAX_EXTENT: u32 = i32::MAX.unsigned_abs();
+
+/// The reference DPI a scale factor of 1.0 corresponds to, on X11 as everywhere
+/// else.
+const BASELINE_DPI: f64 = 96.0;
+
+/// One enabled `RandR` CRTC, as the X11 backend reads it.
+///
+/// A CRTC rather than a `RandR` 1.5 "monitor" because that is what winit walks,
+/// and the scale factor has to agree with winit's per-CRTC one. The backend
+/// applies winit's own filter before building these — a CRTC with a zero extent
+/// or no connected output is not a monitor — so every entry here is displaying
+/// something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct X11Monitor {
+    /// The CRTC's rectangle in root-window coordinates, device pixels.
+    pub(crate) bounds: WorkRect,
+    /// Physical width in millimetres of the first output this CRTC drives, or
+    /// `0` when `RandR` would not say.
+    ///
+    /// Read only by [`randr_scale`], the last resort of the scale chain. Zero is
+    /// common enough to be the reason that function has a guard rather than a
+    /// division: a virtual output, a projector and a KVM all report it.
+    pub(crate) mm_width: u32,
+    /// Physical height in millimetres, with the same caveats as
+    /// [`mm_width`](Self::mm_width).
+    pub(crate) mm_height: u32,
+}
+
+/// The root window's dimensions, which is the space struts are measured in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct X11Screen {
+    /// Root window width in pixels.
+    pub(crate) width: u32,
+    /// Root window height in pixels.
+    pub(crate) height: u32,
+}
+
+/// One window's reserved space, normalised to EWMH's twelve-field partial form.
+///
+/// Every field is in **root-window** coordinates. The four widths say how deep
+/// the reservation is from the corresponding edge **of the screen**; the eight
+/// range fields say the span along that edge over which it applies, and both
+/// ends are inclusive (which is how window managers read them — Mutter builds the
+/// band's width as `end - start + 1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct X11Strut {
+    /// Pixels reserved inward from the screen's left edge.
+    pub(crate) left: u32,
+    /// Pixels reserved inward from the screen's right edge.
+    pub(crate) right: u32,
+    /// Pixels reserved downward from the screen's top edge.
+    pub(crate) top: u32,
+    /// Pixels reserved upward from the screen's bottom edge.
+    pub(crate) bottom: u32,
+    /// First row the left reservation covers.
+    pub(crate) left_start_y: u32,
+    /// Last row the left reservation covers, inclusive.
+    pub(crate) left_end_y: u32,
+    /// First row the right reservation covers.
+    pub(crate) right_start_y: u32,
+    /// Last row the right reservation covers, inclusive.
+    pub(crate) right_end_y: u32,
+    /// First column the top reservation covers.
+    pub(crate) top_start_x: u32,
+    /// Last column the top reservation covers, inclusive.
+    pub(crate) top_end_x: u32,
+    /// First column the bottom reservation covers.
+    pub(crate) bottom_start_x: u32,
+    /// Last column the bottom reservation covers, inclusive.
+    pub(crate) bottom_end_x: u32,
+}
+
+impl X11Strut {
+    /// A `_NET_WM_STRUT_PARTIAL` value, which is already this shape.
+    ///
+    /// The array is ordered as the property is: `left`, `right`, `top`,
+    /// `bottom`, then the four `_start`/`_end` pairs in the same edge order. A
+    /// fixed-size array rather than twelve arguments precisely because they are
+    /// all `u32` and a transposed pair is a silent wrong answer.
+    pub(crate) const fn from_partial(values: [u32; 12]) -> Self {
+        let [
+            left,
+            right,
+            top,
+            bottom,
+            left_start_y,
+            left_end_y,
+            right_start_y,
+            right_end_y,
+            top_start_x,
+            top_end_x,
+            bottom_start_x,
+            bottom_end_x,
+        ] = values;
+        X11Strut {
+            left,
+            right,
+            top,
+            bottom,
+            left_start_y,
+            left_end_y,
+            right_start_y,
+            right_end_y,
+            top_start_x,
+            top_end_x,
+            bottom_start_x,
+            bottom_end_x,
+        }
+    }
+
+    /// The legacy four-field `_NET_WM_STRUT`, widened to the partial form.
+    ///
+    /// EWMH defines the short property as the partial one "where all start
+    /// values are 0 and all end values are the height or width of the logical
+    /// screen", so the ranges come from `screen` rather than from the window.
+    /// A caller that has both properties must prefer the partial one; the
+    /// specification says the window manager MUST ignore `_NET_WM_STRUT` when
+    /// `_NET_WM_STRUT_PARTIAL` is present, and a client computing the same work
+    /// area has to make the same choice or it will disagree with the shell about
+    /// where a window fits.
+    pub(crate) const fn from_legacy(values: [u32; 4], screen: X11Screen) -> Self {
+        let [left, right, top, bottom] = values;
+        X11Strut {
+            left,
+            right,
+            top,
+            bottom,
+            left_start_y: 0,
+            left_end_y: screen.height,
+            right_start_y: 0,
+            right_end_y: screen.height,
+            top_start_x: 0,
+            top_end_x: screen.width,
+            bottom_start_x: 0,
+            bottom_end_x: screen.width,
+        }
+    }
+}
+
+/// The three session-wide DPI sources winit consults, in the order it consults
+/// them.
+///
+/// Two of the three are held as **unparsed strings**, and that is deliberate:
+/// winit parses them with `f64::from_str` and treats a parse failure as "this
+/// source said nothing". Parsing them in the backend would put that decision in
+/// the half no CI lane can run.
+pub(crate) struct DpiSources<'a> {
+    /// `WINIT_X11_SCALE_FACTOR`, verbatim. Either the literal `randr` or a
+    /// float; see [`scale_factor`] for what an invalid value does here versus in
+    /// winit.
+    pub(crate) scale_override: Option<&'a str>,
+    /// `Xft/DPI` from the XSETTINGS manager, already divided out of its 1024ths
+    /// by [`crate::linux_xsettings::xft_dpi`] — so this is a DPI, not a scale.
+    pub(crate) xsettings_dpi: Option<f64>,
+    /// `Xft.dpi` from the root window's `RESOURCE_MANAGER`, verbatim.
+    pub(crate) xft_dpi: Option<&'a str>,
+}
+
+/// What `WINIT_X11_SCALE_FACTOR` asked for.
+enum ScaleOverride {
+    /// The literal `randr`: skip the DPI sources and measure the display.
+    Randr,
+    /// An explicit scale factor.
+    Fixed(f64),
+}
+
+/// Whether winit would accept `factor` as a scale factor.
+///
+/// winit's own `validate_scale_factor`, reproduced: positive **and normal**, so
+/// zero, negatives, infinities, NaN and subnormals are all rejected. Distinct
+/// from [`sane_scale`], which is this crate's floor for a factor a layout will
+/// multiply by; this one exists to answer "would winit have taken this", which is
+/// the question the override needs.
+fn validate_scale_factor(factor: f64) -> bool {
+    factor.is_sign_positive() && factor.is_normal()
+}
+
+/// Parse `WINIT_X11_SCALE_FACTOR`.
+///
+/// [`None`] means "no usable override, take the next source", which covers the
+/// unset variable, the empty string (winit's own `NotSet`), and the two cases
+/// winit **panics** on: a value that is neither `randr` nor a float, and a float
+/// that fails [`validate_scale_factor`].
+///
+/// The `randr` comparison is ASCII-case-insensitive where winit lowercases the
+/// whole string first. They cannot disagree: no non-ASCII character lowercases
+/// into any of `r`, `a`, `n` or `d`, so the set of strings matching either form
+/// is the same set.
+fn parse_override(raw: Option<&str>) -> Option<ScaleOverride> {
+    let raw = raw?;
+    if raw.eq_ignore_ascii_case("randr") {
+        return Some(ScaleOverride::Randr);
+    }
+    let parsed = f64::from_str(raw).ok()?;
+    validate_scale_factor(parsed).then_some(ScaleOverride::Fixed(parsed))
+}
+
+/// The scale factor winit will apply to a window on `monitor`.
+///
+/// Never returns a factor a layout cannot multiply by: every branch ends at
+/// [`sane_scale`], which is where a settings manager's zero or a negative
+/// `Xft.dpi` is neutralised. The individual sources deliberately do **not**
+/// clamp — see [`crate::linux_xsettings::xft_dpi`] for why one guard at the end
+/// of the chain beats four along it.
+pub(crate) fn scale_factor(sources: &DpiSources<'_>, monitor: &X11Monitor) -> f32 {
+    let resolved = match parse_override(sources.scale_override) {
+        Some(ScaleOverride::Randr) => randr_scale(monitor),
+        Some(ScaleOverride::Fixed(factor)) => factor,
+        None => sources
+            .xsettings_dpi
+            .or_else(|| sources.xft_dpi.and_then(|raw| f64::from_str(raw).ok()))
+            .map_or_else(|| randr_scale(monitor), |dpi| dpi / BASELINE_DPI),
+    };
+    // RATIONALE (cast_possible_truncation): the anchor carries an `f32`, and
+    // every value that reaches here is either a plausible scale factor or
+    // something `sane_scale` is about to replace with 1.0. A value too large for
+    // `f32` becomes an infinity, which `sane_scale` rejects — so the narrowing
+    // cannot manufacture a finite wrong answer.
+    #[allow(clippy::cast_possible_truncation)]
+    let narrowed = resolved as f32;
+    sane_scale(narrowed)
+}
+
+/// The scale factor measured from the display itself: pixels per millimetre,
+/// quantised to twelfths.
+///
+/// winit's `calc_dpi_factor`, reproduced including its two escape hatches — a
+/// display claiming zero physical size answers 1.0, and so does one whose
+/// computed factor exceeds 20, which is how a bogus millimetre reading is
+/// stopped from scaling a window off the screen.
+///
+/// The first of those two is **belt and braces rather than load-bearing**, and
+/// saying so is what stops a later reader deleting the second by mistake:
+/// dividing by a zero millimetre reading gives an infinity that survives `round`
+/// and `max` unchanged and is then caught by the ceiling, so removing the guard
+/// changes no answer. It is kept because winit has it, and because an answer that
+/// depends on three floating-point edge cases lining up is not one to rely on.
+fn randr_scale(monitor: &X11Monitor) -> f64 {
+    if monitor.mm_width == 0 || monitor.mm_height == 0 {
+        return 1.0;
+    }
+    let pixels = f64::from(monitor.bounds.w) * f64::from(monitor.bounds.h);
+    let millimetres = f64::from(monitor.mm_width) * f64::from(monitor.mm_height);
+    let per_mm = (pixels / millimetres).sqrt();
+    // 25.4 mm to the inch, over the 96 dpi baseline, times 12 to quantise to
+    // twelfths — winit's constant folded exactly as winit writes it, because a
+    // re-associated version of the same expression can round differently.
+    let quantised = (per_mm * (12.0 * 25.4 / BASELINE_DPI)).round() / 12.0;
+    let factor = quantised.max(1.0);
+    if factor <= 20.0 { factor } else { 1.0 }
+}
+
+/// Index of the monitor the cursor is on, or of the nearest one.
+///
+/// Containment is half-open on the right and bottom edges, so two abutting
+/// monitors never both claim the pixel column between them. A cursor that is on
+/// no monitor at all — the gap in an L-shaped layout, or a stale pointer report
+/// during a hot-plug — falls back to the nearest rectangle by squared distance,
+/// which is what Win32's `MONITOR_DEFAULTTONEAREST` does and what keeps the
+/// flyout on a screen rather than at the fallback rectangle.
+///
+/// [`None`] only for an empty list, which means `RandR` reported no enabled CRTC.
+pub(crate) fn monitor_for_cursor(cursor: (i32, i32), monitors: &[X11Monitor]) -> Option<usize> {
+    let mut nearest: Option<(usize, i64)> = None;
+    for (index, monitor) in monitors.iter().enumerate() {
+        if contains(monitor.bounds, cursor) {
+            return Some(index);
+        }
+        let distance = distance_squared(monitor.bounds, cursor);
+        // Strictly less, so ties go to the earlier monitor. RandR reports CRTCs
+        // in a stable order, so an equidistant cursor picks the same screen every
+        // time rather than alternating between two.
+        if nearest.is_none_or(|(_, best)| distance < best) {
+            nearest = Some((index, distance));
+        }
+    }
+    nearest.map(|(index, _)| index)
+}
+
+/// `bounds` minus every strut band that reaches onto it.
+///
+/// The reservation an edge suffers is capped at the screen edge's, not summed:
+/// two panels stacked on the same edge reserve as much as the deeper one, which
+/// is what `max`/`min` across the list gives.
+///
+/// **Every overlap test is against `bounds`, never against the partially reduced
+/// result.** Testing against the running value would make the answer depend on
+/// the order the windows happen to appear in `_NET_CLIENT_LIST`: a top panel that
+/// had already lowered the work area's top edge could make a left panel's row
+/// range stop overlapping, and the left panel would then be ignored on a screen
+/// it really covers.
+///
+/// A strut set that consumes the monitor entirely yields `bounds` rather than an
+/// empty rectangle. That is the module's standing preference for a
+/// wrong-but-usable answer: placement clamps the flyout into whatever it is
+/// given, so a zero rectangle pins the window to a corner, while the full monitor
+/// merely risks overlapping a panel.
+pub(crate) fn work_area(bounds: WorkRect, screen: X11Screen, struts: &[X11Strut]) -> WorkRect {
+    let monitor_left = i64::from(bounds.x);
+    let monitor_top = i64::from(bounds.y);
+    let monitor_right = monitor_left.saturating_add(i64::from(bounds.w));
+    let monitor_bottom = monitor_top.saturating_add(i64::from(bounds.h));
+    let screen_right = i64::from(screen.width);
+    let screen_bottom = i64::from(screen.height);
+
+    let mut left = monitor_left;
+    let mut top = monitor_top;
+    let mut right = monitor_right;
+    let mut bottom = monitor_bottom;
+
+    for strut in struts {
+        let rows = (monitor_top, monitor_bottom);
+        let columns = (monitor_left, monitor_right);
+        if strut.left > 0 && band_meets(strut.left_start_y, strut.left_end_y, rows) {
+            left = left.max(i64::from(strut.left));
+        }
+        if strut.right > 0 && band_meets(strut.right_start_y, strut.right_end_y, rows) {
+            right = right.min(screen_right.saturating_sub(i64::from(strut.right)));
+        }
+        if strut.top > 0 && band_meets(strut.top_start_x, strut.top_end_x, columns) {
+            top = top.max(i64::from(strut.top));
+        }
+        if strut.bottom > 0 && band_meets(strut.bottom_start_x, strut.bottom_end_x, columns) {
+            bottom = bottom.min(screen_bottom.saturating_sub(i64::from(strut.bottom)));
+        }
+    }
+
+    if right <= left || bottom <= top {
+        return bounds;
+    }
+    rect_from_edges(left, top, right, bottom)
+}
+
+/// The anchor for an X11 session, or [`None`] when `RandR` reported no monitor to
+/// place a flyout on.
+pub(crate) fn anchor_from_x11(
+    cursor: (i32, i32),
+    monitors: &[X11Monitor],
+    screen: X11Screen,
+    struts: &[X11Strut],
+    dpi: &DpiSources<'_>,
+) -> Option<TrayAnchor> {
+    let monitor = monitors.get(monitor_for_cursor(cursor, monitors)?)?;
+    Some(TrayAnchor {
+        cursor,
+        work_area: work_area(monitor.bounds, screen, struts),
+        scale: scale_factor(dpi, monitor),
+        unit: AnchorUnit::PhysicalPixels,
+    })
+}
+
+/// Whether a strut's inclusive `[start, end]` band overlaps the half-open span
+/// `[low, high)` of the monitor's opposite axis.
+///
+/// `start > end` is treated as no band at all. EWMH does not define it, and the
+/// safe direction for a malformed property is to reserve nothing: an ignored
+/// panel costs an overlapping flyout, while a band read backwards could shrink an
+/// unrelated monitor to nothing.
+fn band_meets(start: u32, end: u32, (low, high): (i64, i64)) -> bool {
+    let (start, end) = (i64::from(start), i64::from(end));
+    start <= end && start < high && end >= low
+}
+
+/// Whether `point` is inside `rect`, right and bottom edges exclusive.
+fn contains(rect: WorkRect, (x, y): (i32, i32)) -> bool {
+    let (x, y) = (i64::from(x), i64::from(y));
+    let left = i64::from(rect.x);
+    let top = i64::from(rect.y);
+    x >= left
+        && x < left.saturating_add(i64::from(rect.w))
+        && y >= top
+        && y < top.saturating_add(i64::from(rect.h))
+}
+
+/// Squared distance from `point` to the nearest pixel of `rect`, zero inside it.
+///
+/// Squared because only the ordering matters and a square root would introduce a
+/// rounding difference between two monitors that are genuinely equidistant.
+fn distance_squared(rect: WorkRect, (x, y): (i32, i32)) -> i64 {
+    let left = i64::from(rect.x);
+    let top = i64::from(rect.y);
+    // The last pixel, not the exclusive edge: clamping to the edge would report a
+    // one-pixel distance for a cursor sitting on the far column of a rectangle it
+    // is arguably inside.
+    let right = left
+        .saturating_add(i64::from(rect.w))
+        .saturating_sub(1)
+        .max(left);
+    let bottom = top
+        .saturating_add(i64::from(rect.h))
+        .saturating_sub(1)
+        .max(top);
+    let dx = i64::from(x).clamp(left, right).saturating_sub(i64::from(x));
+    let dy = i64::from(y).clamp(top, bottom).saturating_sub(i64::from(y));
+    dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
+}
+
+/// Build a [`WorkRect`] from four edges, saturating rather than wrapping.
+///
+/// The origin saturates into `i32` and each extent is capped at [`MAX_EXTENT`],
+/// so `x + w` stays representable however absurd the inputs were.
+fn rect_from_edges(left: i64, top: i64, right: i64, bottom: i64) -> WorkRect {
+    WorkRect {
+        x: clamp_to_i32(left),
+        y: clamp_to_i32(top),
+        w: clamp_extent(right.saturating_sub(left)),
+        h: clamp_extent(bottom.saturating_sub(top)),
+    }
+}
+
+/// Saturate an `i64` coordinate into the `i32` the anchor contract uses.
+fn clamp_to_i32(value: i64) -> i32 {
+    i32::try_from(value.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0)
+}
+
+/// Saturate an `i64` extent into a `u32` no larger than [`MAX_EXTENT`].
+fn clamp_extent(value: i64) -> u32 {
+    u32::try_from(value.clamp(0, i64::from(MAX_EXTENT))).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DpiSources, MAX_EXTENT, X11Monitor, X11Screen, X11Strut, anchor_from_x11,
+        monitor_for_cursor, scale_factor, work_area,
+    };
+    use crate::geometry::{AnchorUnit, WorkRect};
+
+    /// A monitor with no physical size reported, so [`super::randr_scale`]
+    /// answers 1.0 and the tests that are about geometry are not also about DPI.
+    fn monitor(x: i32, y: i32, w: u32, h: u32) -> X11Monitor {
+        X11Monitor {
+            bounds: WorkRect { x, y, w, h },
+            mm_width: 0,
+            mm_height: 0,
+        }
+    }
+
+    /// The three DPI sources all silent, so the chain falls to the display
+    /// measurement.
+    const NO_DPI: DpiSources<'static> = DpiSources {
+        scale_override: None,
+        xsettings_dpi: None,
+        xft_dpi: None,
+    };
+
+    fn approx(got: f32, want: f32) {
+        assert!((got - want).abs() < 1e-6, "expected ~{want}, got {got}");
+    }
+
+    // -- which monitor -----------------------------------------------------
+
+    #[test]
+    fn the_cursor_picks_the_monitor_it_is_inside() {
+        let monitors = [monitor(0, 0, 1920, 1080), monitor(1920, 0, 2560, 1440)];
+        assert_eq!(monitor_for_cursor((10, 10), &monitors), Some(0));
+        assert_eq!(monitor_for_cursor((2000, 900), &monitors), Some(1));
+    }
+
+    #[test]
+    fn the_shared_column_between_two_monitors_belongs_to_the_right_hand_one() {
+        // Half-open containment is the whole point: with an inclusive right edge
+        // both monitors claim x = 1920, and which one wins depends on iteration
+        // order — so a flyout opened from the seam would land on a different
+        // screen depending on the order RandR happened to list the CRTCs.
+        let monitors = [monitor(0, 0, 1920, 1080), monitor(1920, 0, 1920, 1080)];
+        assert_eq!(monitor_for_cursor((1919, 0), &monitors), Some(0));
+        assert_eq!(monitor_for_cursor((1920, 0), &monitors), Some(1));
+        // The same rule on the other axis, for a stacked layout.
+        let stacked = [monitor(0, 0, 1920, 1080), monitor(0, 1080, 1920, 1080)];
+        assert_eq!(monitor_for_cursor((0, 1079), &stacked), Some(0));
+        assert_eq!(monitor_for_cursor((0, 1080), &stacked), Some(1));
+    }
+
+    #[test]
+    fn a_monitor_left_of_the_primary_keeps_its_negative_origin() {
+        // RandR puts the root origin at the top-left of the bounding box, so a
+        // negative CRTC origin is not the norm on X11 the way it is on Win32 —
+        // but a cursor report can arrive mid-reconfiguration, and dropping the
+        // sign would fold the left monitor onto the right one.
+        let monitors = [monitor(-1920, -180, 1920, 1200), monitor(0, 0, 1920, 1080)];
+        assert_eq!(monitor_for_cursor((-1000, -100), &monitors), Some(0));
+        assert_eq!(monitor_for_cursor((-1, 0), &monitors), Some(0));
+        assert_eq!(monitor_for_cursor((0, 0), &monitors), Some(1));
+    }
+
+    #[test]
+    fn a_cursor_on_no_monitor_falls_to_the_nearest_rather_than_the_first() {
+        // The gap in an L-shaped layout, and a pointer report that outlived the
+        // CRTC it was on. Returning the first monitor unconditionally would put
+        // the flyout on the wrong screen whenever the tray is on the second one.
+        let monitors = [monitor(0, 0, 1920, 1080), monitor(1920, 1080, 1920, 1080)];
+        assert_eq!(
+            monitor_for_cursor((3800, 2000), &monitors),
+            Some(1),
+            "far past the second monitor's bottom-right"
+        );
+        assert_eq!(
+            monitor_for_cursor((-500, -500), &monitors),
+            Some(0),
+            "off the top-left of the first"
+        );
+        // Just outside monitor 1's left edge but level with it: nearer to 1 than
+        // to 0, which is only true if the distance is measured to the rectangle
+        // rather than to its origin.
+        assert_eq!(monitor_for_cursor((1910, 1500), &monitors), Some(1));
+    }
+
+    #[test]
+    fn an_equidistant_cursor_picks_the_earlier_monitor_every_time() {
+        // Two monitors with a gap between them and a cursor exactly in the
+        // middle. A `<=` comparison would hand this to the later one, and the
+        // choice would look arbitrary; what matters is that repeated calls agree,
+        // because the flyout must not hop screens between one open and the next.
+        //
+        // The gap is 101 wide rather than 100 so that a tie exists at all:
+        // distance is measured to the nearest *pixel*, so the left monitor's
+        // closest column is 99 and the right one's is 201, and x = 150 is 51 from
+        // each. With an even gap no integer coordinate is equidistant and this
+        // test would pass without exercising the comparison.
+        let monitors = [monitor(0, 0, 100, 100), monitor(201, 0, 100, 100)];
+        let picked = monitor_for_cursor((150, 50), &monitors);
+        assert_eq!(picked, Some(0));
+        assert_eq!(picked, monitor_for_cursor((150, 50), &monitors));
+        // One pixel either way still goes to the nearer monitor, which is what
+        // makes the case above a genuine tie rather than a left-hand bias.
+        assert_eq!(monitor_for_cursor((149, 50), &monitors), Some(0));
+        assert_eq!(monitor_for_cursor((151, 50), &monitors), Some(1));
+    }
+
+    #[test]
+    fn no_monitors_is_none_rather_than_a_guess() {
+        // RandR reporting nothing enabled is a real state (every output asleep),
+        // and it is the backend's cue to use the documented fallback anchor
+        // instead of inventing a rectangle here.
+        assert_eq!(monitor_for_cursor((0, 0), &[]), None);
+        assert!(anchor_from_x11((0, 0), &[], screen(1920, 1080), &[], &NO_DPI).is_none());
+    }
+
+    // -- work area ---------------------------------------------------------
+
+    const fn screen(width: u32, height: u32) -> X11Screen {
+        X11Screen { width, height }
+    }
+
+    /// A bottom panel `depth` deep, spanning columns `from..=to`.
+    fn bottom_panel(depth: u32, from: u32, to: u32) -> X11Strut {
+        X11Strut {
+            bottom: depth,
+            bottom_start_x: from,
+            bottom_end_x: to,
+            ..X11Strut::default()
+        }
+    }
+
+    #[test]
+    fn a_bottom_panel_lifts_only_the_bottom_edge() {
+        let bounds = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        // A 40px panel on a single-monitor screen: the strut and the panel's own
+        // height coincide only because the monitor reaches the screen's bottom.
+        let work = work_area(bounds, screen(1920, 1080), &[bottom_panel(40, 0, 1919)]);
+        assert_eq!(
+            work,
+            WorkRect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1040
+            }
+        );
+    }
+
+    #[test]
+    fn a_panel_on_one_monitor_leaves_the_other_alone() {
+        // The case `_NET_WORKAREA` cannot express, and the reason this function
+        // exists. A 40px panel along the bottom of the short right-hand monitor
+        // reserves its band from the bottom of the *screen*, so the raw strut is
+        // 160 rather than 40 — and the taller left monitor, whose columns the
+        // band never touches, must keep its full height.
+        let tall = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1200,
+        };
+        let short = WorkRect {
+            x: 1920,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let root = screen(3840, 1200);
+        // 160, not 40: the band runs from the screen's bottom edge at 1200 up to
+        // the panel's top at 1040.
+        let panel = bottom_panel(160, 1920, 3839);
+
+        assert_eq!(
+            work_area(short, root, &[panel]),
+            WorkRect {
+                x: 1920,
+                y: 0,
+                w: 1920,
+                h: 1040
+            },
+            "the monitor the panel is on loses exactly the panel's 40 pixels"
+        );
+        assert_eq!(
+            work_area(tall, root, &[panel]),
+            tall,
+            "the monitor the panel's columns never reach is untouched"
+        );
+    }
+
+    #[test]
+    fn a_left_panel_does_not_reach_the_monitor_to_its_right() {
+        let left = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let right = WorkRect {
+            x: 1920,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let panel = X11Strut {
+            left: 60,
+            left_start_y: 0,
+            left_end_y: 1079,
+            ..X11Strut::default()
+        };
+        assert_eq!(
+            work_area(left, screen(3840, 1080), &[panel]),
+            WorkRect {
+                x: 60,
+                y: 0,
+                w: 1860,
+                h: 1080
+            }
+        );
+        assert_eq!(
+            work_area(right, screen(3840, 1080), &[panel]),
+            right,
+            "clamping the right monitor's left edge up to 60 would be a no-op \
+             only by accident; it must stay at 1920"
+        );
+    }
+
+    #[test]
+    fn the_result_does_not_depend_on_the_order_the_windows_were_listed_in() {
+        // The trap this pins: if each strut's overlap test ran against the
+        // *running* work area instead of the monitor, a top panel processed first
+        // would lift the top edge past a left panel's row range, and the left
+        // panel would then be skipped on a screen it genuinely covers. Struts
+        // arrive in `_NET_CLIENT_LIST` order, which is mapping order, so that bug
+        // would show up as "the flyout is fine until you restart the panel".
+        let bounds = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let top = X11Strut {
+            top: 30,
+            top_start_x: 0,
+            top_end_x: 1919,
+            ..X11Strut::default()
+        };
+        let left = X11Strut {
+            left: 60,
+            left_start_y: 0,
+            left_end_y: 20,
+            ..X11Strut::default()
+        };
+        let expected = WorkRect {
+            x: 60,
+            y: 30,
+            w: 1860,
+            h: 1050,
+        };
+        assert_eq!(
+            work_area(bounds, screen(1920, 1080), &[top, left]),
+            expected
+        );
+        assert_eq!(
+            work_area(bounds, screen(1920, 1080), &[left, top]),
+            expected
+        );
+    }
+
+    #[test]
+    fn two_panels_on_one_edge_reserve_the_deeper_one_not_their_sum() {
+        // A dock and a taskbar on the same edge overlap each other; adding them
+        // would leave a strip of work area no window ever occupies.
+        let bounds = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let work = work_area(
+            bounds,
+            screen(1920, 1080),
+            &[bottom_panel(40, 0, 1919), bottom_panel(60, 0, 1919)],
+        );
+        assert_eq!(work.h, 1020, "1080 - 60, not 1080 - 100");
+    }
+
+    #[test]
+    fn a_zero_width_strut_reserves_nothing_however_its_ranges_are_set() {
+        // A window that publishes the property with all four depths zero is
+        // saying "I reserve nothing"; the ranges are then meaningless and must
+        // not move an edge.
+        let bounds = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let idle = X11Strut {
+            left_end_y: 1079,
+            top_end_x: 1919,
+            right_end_y: 1079,
+            bottom_end_x: 1919,
+            ..X11Strut::default()
+        };
+        assert_eq!(work_area(bounds, screen(1920, 1080), &[idle]), bounds);
+    }
+
+    #[test]
+    fn a_band_whose_end_precedes_its_start_is_ignored() {
+        // Undefined by EWMH. Reserving nothing costs an overlapping flyout;
+        // reading the range backwards could take a whole edge off a monitor the
+        // panel is not on.
+        let bounds = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let backwards = bottom_panel(40, 1919, 0);
+        assert_eq!(work_area(bounds, screen(1920, 1080), &[backwards]), bounds);
+    }
+
+    #[test]
+    fn a_single_row_band_still_counts() {
+        // `start == end` is a one-pixel band, not an empty one — the inclusive
+        // reading. A half-open reading would drop it, and with it every panel
+        // that happens to report a degenerate range.
+        let bounds = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let sliver = bottom_panel(40, 0, 0);
+        assert_eq!(work_area(bounds, screen(1920, 1080), &[sliver]).h, 1040);
+    }
+
+    #[test]
+    fn a_strut_that_swallows_the_monitor_yields_the_monitor_not_an_empty_rect() {
+        // Placement clamps into whatever it is handed, so an empty rectangle
+        // pins the flyout to a corner — a worse failure than overlapping a panel,
+        // and one that looks deliberate.
+        let bounds = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let absurd = X11Strut {
+            top: 2000,
+            top_start_x: 0,
+            top_end_x: 1919,
+            ..X11Strut::default()
+        };
+        assert_eq!(work_area(bounds, screen(1920, 1080), &[absurd]), bounds);
+    }
+
+    #[test]
+    fn the_legacy_strut_is_widened_to_the_whole_screen() {
+        // `_NET_WM_STRUT` carries no ranges, and EWMH defines it as the partial
+        // form with start 0 and end at the screen's extent. Widening it to
+        // anything narrower would silently ignore older panels — tint2 and
+        // several window-manager-provided bars still publish only this one.
+        let root = screen(3840, 1200);
+        let widened = X11Strut::from_legacy([0, 0, 0, 160], root);
+        let short = WorkRect {
+            x: 1920,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        assert_eq!(work_area(short, root, &[widened]).h, 1040);
+        // And, unlike the partial form, it reaches every monitor - which is
+        // exactly the imprecision the partial property was introduced to fix.
+        let tall = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1200,
+        };
+        assert_eq!(work_area(tall, root, &[widened]).h, 1040);
+    }
+
+    #[test]
+    fn the_legacy_strut_reaches_a_monitor_that_touches_no_screen_corner() {
+        // The other three widened ranges, which the bottom-edge case above
+        // cannot reach. Widening `left_end_y` to zero instead of the screen
+        // height still *looks* right on any monitor whose top row is 0 — the
+        // degenerate band `[0, 0]` overlaps it — so the mistake only shows on a
+        // monitor stacked below one, which is where this layout comes from.
+        let root = screen(1920, 2160);
+        let lower = WorkRect {
+            x: 0,
+            y: 1080,
+            w: 1920,
+            h: 1080,
+        };
+        let widened = X11Strut::from_legacy([60, 80, 30, 160], root);
+        assert_eq!(
+            work_area(lower, root, &[widened]),
+            WorkRect {
+                x: 60,
+                y: 1080,
+                w: 1780,
+                h: 920
+            },
+            "left and right bands must span the whole screen height"
+        );
+        // And the top band, on a monitor whose columns start past zero.
+        let right_of_origin = WorkRect {
+            x: 1920,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let wide_root = screen(3840, 1080);
+        let full_width = X11Strut::from_legacy([0, 0, 30, 0], wide_root);
+        assert_eq!(
+            work_area(right_of_origin, wide_root, &[full_width]).y,
+            30,
+            "the top band must span the whole screen width"
+        );
+    }
+
+    #[test]
+    fn the_partial_field_order_matches_the_property() {
+        // Twelve `u32`s in one array: a transposed pair compiles, and the only
+        // thing standing between the property's order and this struct is this
+        // assertion.
+        let strut = X11Strut::from_partial([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(
+            strut,
+            X11Strut {
+                left: 1,
+                right: 2,
+                top: 3,
+                bottom: 4,
+                left_start_y: 5,
+                left_end_y: 6,
+                right_start_y: 7,
+                right_end_y: 8,
+                top_start_x: 9,
+                top_end_x: 10,
+                bottom_start_x: 11,
+                bottom_end_x: 12,
+            }
+        );
+    }
+
+    #[test]
+    fn a_right_edge_panel_is_measured_from_the_screens_right_edge() {
+        // The mirror image of the bottom-panel case, and the one an
+        // implementation is most likely to get wrong by subtracting from the
+        // monitor's own width instead of the screen's.
+        //
+        // The monitor the panel is on cannot show that mistake: its right edge
+        // *is* the screen's, so both arithmetics agree. The **left** monitor is
+        // where they diverge — measuring from its own right edge would take 80
+        // pixels off a screen the panel is nowhere near, and a full-height band
+        // means the row test does not save it either.
+        let left_monitor = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let right_monitor = WorkRect {
+            x: 1920,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let panel = X11Strut {
+            right: 80,
+            right_start_y: 0,
+            right_end_y: 1079,
+            ..X11Strut::default()
+        };
+        assert_eq!(
+            work_area(right_monitor, screen(3840, 1080), &[panel]),
+            WorkRect {
+                x: 1920,
+                y: 0,
+                w: 1840,
+                h: 1080
+            }
+        );
+        assert_eq!(
+            work_area(left_monitor, screen(3840, 1080), &[panel]),
+            left_monitor,
+            "the panel is 1920 pixels away from this monitor's right edge"
+        );
+    }
+
+    // -- scale -------------------------------------------------------------
+
+    #[test]
+    fn a_numeric_override_wins_over_every_other_source() {
+        let sources = DpiSources {
+            scale_override: Some("1.75"),
+            xsettings_dpi: Some(192.0),
+            xft_dpi: Some("144"),
+        };
+        approx(scale_factor(&sources, &monitor(0, 0, 1920, 1080)), 1.75);
+    }
+
+    #[test]
+    fn the_randr_override_skips_the_dpi_sources_and_measures_the_display() {
+        // `WINIT_X11_SCALE_FACTOR=randr` exists precisely to ignore a desktop's
+        // Xft.dpi. Letting XSETTINGS through here would make the escape hatch do
+        // nothing.
+        let laptop = X11Monitor {
+            bounds: WorkRect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+            mm_width: 344,
+            mm_height: 194,
+        };
+        let sources = DpiSources {
+            scale_override: Some("randr"),
+            xsettings_dpi: Some(192.0),
+            xft_dpi: Some("144"),
+        };
+        approx(scale_factor(&sources, &laptop), 1.5);
+        // Case-insensitively, as winit lowercases the variable first.
+        let shouty = DpiSources {
+            scale_override: Some("RandR"),
+            ..sources
+        };
+        approx(scale_factor(&shouty, &laptop), 1.5);
+    }
+
+    #[test]
+    fn an_override_winit_would_reject_falls_through_instead_of_being_used() {
+        // winit panics on the first five; this crate may not, because
+        // `cursor_anchor` promises never to fail. What it must not do is *use*
+        // them — a scale of zero or NaN reaching the layout is the failure mode
+        // `sane_scale` exists for, and falling through gets a real number instead
+        // of a substituted one. The empty string is the one winit treats as
+        // unset, and it takes the same route here.
+        for bad in ["garbage", "0", "-1.5", "nan", "inf", ""] {
+            let sources = DpiSources {
+                scale_override: Some(bad),
+                xsettings_dpi: Some(144.0),
+                xft_dpi: None,
+            };
+            approx(scale_factor(&sources, &monitor(0, 0, 1920, 1080)), 1.5);
+        }
+    }
+
+    #[test]
+    fn xsettings_outranks_the_x_resource() {
+        // winit's order. A desktop that changes its DPI at runtime updates
+        // XSETTINGS immediately and the resource database on its own schedule, so
+        // reading them the other way round means scaling by a stale number for as
+        // long as the two disagree.
+        let sources = DpiSources {
+            scale_override: None,
+            xsettings_dpi: Some(192.0),
+            xft_dpi: Some("96"),
+        };
+        approx(scale_factor(&sources, &monitor(0, 0, 1920, 1080)), 2.0);
+    }
+
+    #[test]
+    fn the_x_resource_is_used_when_no_settings_manager_is_running() {
+        let sources = DpiSources {
+            scale_override: None,
+            xsettings_dpi: None,
+            xft_dpi: Some("120"),
+        };
+        approx(scale_factor(&sources, &monitor(0, 0, 1920, 1080)), 1.25);
+    }
+
+    #[test]
+    fn an_unparseable_x_resource_is_the_same_as_none() {
+        // `Xft.dpi: 96dpi` is a real thing to find in a hand-written
+        // `.Xresources`. winit's `f64::from_str` rejects it and measures the
+        // display instead.
+        let laptop = X11Monitor {
+            bounds: WorkRect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+            mm_width: 344,
+            mm_height: 194,
+        };
+        let sources = DpiSources {
+            scale_override: None,
+            xsettings_dpi: None,
+            xft_dpi: Some("96dpi"),
+        };
+        approx(scale_factor(&sources, &laptop), 1.5);
+    }
+
+    #[test]
+    fn the_measured_fallback_quantises_to_twelfths_the_way_winit_does() {
+        // Two real displays. The 15.6-inch 1080p panel lands on 1.5 only because
+        // the factor is quantised: the raw ratio is 1.4748, and rounding it to
+        // anything else — nearest half, nearest quarter, no quantisation at all —
+        // gives a window winit will draw at a different size.
+        let laptop = X11Monitor {
+            bounds: WorkRect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+            mm_width: 344,
+            mm_height: 194,
+        };
+        approx(scale_factor(&NO_DPI, &laptop), 1.5);
+
+        // A 24-inch 1080p desktop monitor: 91 dpi, below the baseline, and the
+        // `max(1.0)` is what stops it reporting a factor under 1.
+        let desktop = X11Monitor {
+            bounds: WorkRect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+            mm_width: 531,
+            mm_height: 299,
+        };
+        approx(scale_factor(&NO_DPI, &desktop), 1.0);
+    }
+
+    #[test]
+    fn a_display_that_reports_no_physical_size_measures_as_one() {
+        // Virtual outputs, projectors and several KVMs report 0 mm.
+        //
+        // This pins the *property*, not the guard that delivers it, and the
+        // distinction is worth stating because deleting the guard does not redden
+        // this test: the division yields an infinity, `round` and `max` leave it
+        // one, and the `> 20` ceiling below turns it into the same 1.0. The guard
+        // is kept for the reason it exists in winit — so the answer comes from a
+        // decision rather than from three float edge cases agreeing — and no test
+        // can distinguish the two, which is why one is not claimed here.
+        for (mm_width, mm_height) in [(0, 194), (344, 0), (0, 0)] {
+            let odd = X11Monitor {
+                bounds: WorkRect {
+                    x: 0,
+                    y: 0,
+                    w: 1920,
+                    h: 1080,
+                },
+                mm_width,
+                mm_height,
+            };
+            approx(scale_factor(&NO_DPI, &odd), 1.0);
+        }
+    }
+
+    #[test]
+    fn an_absurd_measurement_is_discarded_rather_than_scaled_by() {
+        // winit's ceiling: a 4K display claiming to be one millimetre across
+        // computes a factor of 762, and a window scaled by that is not merely
+        // wrong, it is unmappable. Above 20 the measurement is treated as noise.
+        let nonsense = X11Monitor {
+            bounds: WorkRect {
+                x: 0,
+                y: 0,
+                w: 3840,
+                h: 2160,
+            },
+            mm_width: 1,
+            mm_height: 1,
+        };
+        approx(scale_factor(&NO_DPI, &nonsense), 1.0);
+    }
+
+    #[test]
+    fn a_degenerate_dpi_from_any_source_is_neutralised_once_at_the_end() {
+        // A settings manager can publish zero or a negative; `sane_scale` is the
+        // single place that is caught, which is why the parsers pass it through
+        // instead of each inventing a floor.
+        for dpi in [0.0, -96.0, f64::NAN, f64::INFINITY] {
+            let sources = DpiSources {
+                scale_override: None,
+                xsettings_dpi: Some(dpi),
+                xft_dpi: None,
+            };
+            approx(scale_factor(&sources, &monitor(0, 0, 1920, 1080)), 1.0);
+        }
+    }
+
+    // -- the assembled anchor ----------------------------------------------
+
+    #[test]
+    fn the_anchor_describes_the_cursors_monitor_and_declares_physical_pixels() {
+        let monitors = [
+            X11Monitor {
+                bounds: WorkRect {
+                    x: 0,
+                    y: 0,
+                    w: 1920,
+                    h: 1080,
+                },
+                mm_width: 531,
+                mm_height: 299,
+            },
+            X11Monitor {
+                bounds: WorkRect {
+                    x: 1920,
+                    y: 0,
+                    w: 1920,
+                    h: 1080,
+                },
+                mm_width: 531,
+                mm_height: 299,
+            },
+        ];
+        let sources = DpiSources {
+            scale_override: None,
+            xsettings_dpi: Some(144.0),
+            xft_dpi: None,
+        };
+        let anchor = anchor_from_x11(
+            (2500, 900),
+            &monitors,
+            screen(3840, 1080),
+            &[bottom_panel(40, 1920, 3839)],
+            &sources,
+        )
+        .expect("two enabled monitors");
+
+        assert_eq!(anchor.cursor, (2500, 900));
+        assert_eq!(
+            anchor.work_area,
+            WorkRect {
+                x: 1920,
+                y: 0,
+                w: 1920,
+                h: 1040
+            },
+            "the second monitor's work area, not the first monitor's"
+        );
+        assert_eq!(anchor.unit, AnchorUnit::PhysicalPixels);
+        approx(anchor.scale, 1.5);
+        // X11 is the one backend that converts in neither direction: the anchor
+        // is already the space `set_outer_position` takes.
+        approx(anchor.anchor_to_physical(), 1.0);
+        approx(anchor.logical_to_anchor(), 1.5);
+    }
+
+    #[test]
+    fn both_backends_cap_an_absurd_extent_at_the_same_value() {
+        // `mac_geometry` is compiled under `cfg(test)` on every lane, so unlike
+        // the Windows-side version of this claim, this one can be checked
+        // everywhere. Two different ceilings would mean `x + w` overflows `i32`
+        // on one backend and not the other, and the placement kernel downstream
+        // is written against a single space.
+        assert_eq!(MAX_EXTENT, crate::mac_geometry::MAX_EXTENT);
+    }
+
+    #[test]
+    fn an_extreme_layout_saturates_instead_of_wrapping() {
+        // Not reachable from RandR, whose extents are `u16` — but the strut
+        // arithmetic runs in `i64` and has to come back into the anchor's `i32`
+        // space totally, whatever it was handed.
+        let huge = WorkRect {
+            x: i32::MIN,
+            y: i32::MIN,
+            w: u32::MAX,
+            h: u32::MAX,
+        };
+        let work = work_area(huge, screen(u32::MAX, u32::MAX), &[]);
+        assert_eq!(work.x, i32::MIN);
+        assert_eq!(work.y, i32::MIN);
+        assert_eq!(work.w, MAX_EXTENT);
+        assert_eq!(work.h, MAX_EXTENT);
+        // And the selection arithmetic survives the same rectangle.
+        let monitors = [X11Monitor {
+            bounds: huge,
+            mm_width: u32::MAX,
+            mm_height: u32::MAX,
+        }];
+        assert_eq!(monitor_for_cursor((i32::MAX, i32::MAX), &monitors), Some(0));
+    }
+}
