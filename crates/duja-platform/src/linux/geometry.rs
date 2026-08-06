@@ -11,14 +11,17 @@
 //!
 //! Each such rule is documented where it is made, because between them they are
 //! the code in this crate with the least test coverage and the most bug history.
-//! No count is given here on purpose — the two attempts before this one said "no
-//! decisions" and then named three, and both were contradicted by the same file a
-//! paragraph later. What is true is that every one of them is stated at its own
-//! definition: [`struts`] carries which strut property wins when a window
-//! publishes both, and that every managed window counts rather than the current
-//! workspace's; [`monitors`] carries winit's filter for which CRTCs are monitors
-//! at all; [`cursor_anchor`] carries whether a pointer on another X screen can be
-//! used; [`crtcs`] carries which `RandR` request this server supports.
+//!
+//! Neither a count nor a list is given here, and that is the third attempt at this
+//! paragraph rather than laziness. The first said "no decisions" and the second
+//! named three as though that were all of them; both were contradicted by this
+//! same file a paragraph later, because a summary of rules is a second copy of
+//! each — in the one place nothing checks it against the code. The rules live in
+//! [`cursor_anchor`], [`monitors`], [`crtcs`], [`struts`], [`intern`] and on
+//! [`WHOLE_PROPERTY`]; read them there. (That list named `atom` until rustdoc
+//! refused it — the function was split into [`intern`] and [`resolve`] in this
+//! same PR, and a link is the only kind of cross-reference here that a tool can
+//! check.)
 //!
 //! # What it reads
 //!
