@@ -29,7 +29,13 @@ style = "conventional"
 # 2. The obvious local check disagrees with the gate in both directions.
 #    `git log --format=%s | awk 'length > 72'` flags four conforming commits on
 #    that branch, and would miss a non-conforming one ending in a long word.
-#    `line[..line.rfind(' ')]` is the check that agrees.
+#    `line[..line.rfind(' ')]` is close, and two details separate it from the
+#    real check. `rfind` is `unwrap_or(0)`, so a subject containing **no space
+#    at all** compares as the empty string and passes at any length. And the
+#    count is *graphemes*, not bytes or chars, so a subject carrying an emoji or
+#    a combining mark is budgeted by what a reader sees rather than by what
+#    `len()` returns. Neither matters for a conventional subject in English,
+#    which is why they are recorded rather than guarded.
 #
 # The wrong rule that stood here briefly - "it counts the description" - fit
 # every data point on that branch, because the one failing subject had a 5-char
