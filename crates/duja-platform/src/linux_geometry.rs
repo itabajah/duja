@@ -124,20 +124,31 @@
 //! worth stating rather than claiming parity. Mutter builds a minimal spanning set
 //! over the strut-subtracted region and clips to the best rectangle in it
 //! (`meta_workspace_ensure_work_areas_validated`); this pushes each of the four
-//! edges past every band that meets the monitor at all. What that buys is the
-//! property placement needs, stated per axis because that is the only form of it
-//! that is true — **on an axis the struts did not empty, neither edge ever lies
-//! inside a reserved band**. What it costs is that a band touching one column of
-//! a monitor reserves that monitor's whole edge, where Mutter would have kept the
-//! full-height rectangle beside it. Both agree for a panel that spans its monitor,
-//! which is every panel anyone actually runs.
+//! edges past every band that meets the monitor at all. What that buys, stated
+//! per axis because the two axes fail independently:
 //!
-//! The per-axis phrasing is not a hedge, and the alternative is not merely weaker
-//! but false: an emptied axis is given back **in full**, which produces a
+//! - **On an axis the struts did not empty, the result's span on that axis
+//!   excludes every band reserved from that axis's edges.** `left` is at least
+//!   every applicable left strut's depth and `right` at most every applicable
+//!   right one's, so no left or right reservation reaches into `[left, right)`;
+//!   likewise for the vertical. A band that is *not* applicable — its range on
+//!   the other axis misses the monitor — cannot reach the result either, because
+//!   the result is always inside the monitor on both axes, including when an axis
+//!   is handed back in full.
+//! - **So when neither axis was emptied, the rectangle overlaps no reservation at
+//!   all**, which is the form placement actually consumes.
+//!
+//! What it costs is that a band touching one column of a monitor reserves that
+//! monitor's whole edge, where Mutter would have kept the full-height rectangle
+//! beside it. Both agree for a panel that spans its monitor, which is every panel
+//! anyone actually runs.
+//!
+//! The per-axis phrasing is not a hedge, and the shorter alternative is not merely
+//! weaker but false: an emptied axis is given back **in full**, which produces a
 //! perfectly non-degenerate rectangle lying across the very bands that emptied it.
 //! `two_conformant_panels_can_empty_an_axis_between_them` is that rectangle — a
-//! whole 1920×1080 monitor, overlapping two 1000 px docks. Saying "a
-//! non-degenerate result never overlaps" would be contradicted by this module's
+//! whole 1920×1080 monitor, overlapping two 1000 px docks. "A non-degenerate
+//! result never overlaps a reserved band" would be contradicted by this module's
 //! own test suite. [`work_area`] documents why the exception is chosen: an empty
 //! rectangle pins the flyout to a corner, an overlapping one merely sits under a
 //! panel.
@@ -1156,6 +1167,147 @@ mod tests {
             ..X11Strut::default()
         };
         assert_eq!(work_area(bounds, screen(1920, 1080), &[absurd]), bounds);
+    }
+
+    /// Assert one strut against a computed work area, per the module docs'
+    /// guarantee: on an axis that was not handed back in full, the span excludes
+    /// every band reserved from that axis's edges.
+    ///
+    /// Applicability comes from [`super::band_meets`] rather than from a
+    /// hand-written copy of it. That deliberately makes this a check of
+    /// `work_area`'s arithmetic *given* the applicability rule, not of the rule: a
+    /// test that restated the predicate would agree with a wrong one, which is how
+    /// a sibling test in this crate quietly became a copy of the function it was
+    /// checking.
+    fn assert_respects(work: WorkRect, bounds: WorkRect, root: X11Screen, strut: &X11Strut) {
+        let (monitor_left, monitor_top) = (i64::from(bounds.x), i64::from(bounds.y));
+        let monitor_right = monitor_left.saturating_add(i64::from(bounds.w));
+        let monitor_bottom = monitor_top.saturating_add(i64::from(bounds.h));
+        let left = i64::from(work.x);
+        let top = i64::from(work.y);
+        let right = left.saturating_add(i64::from(work.w));
+        let bottom = top.saturating_add(i64::from(work.h));
+        let rows = (monitor_top, monitor_bottom);
+        let columns = (monitor_left, monitor_right);
+        // "Handed back" is the documented exception, and it is the only escape:
+        // an axis identical to the monitor's own extent either had nothing to
+        // subtract or was emptied and restored.
+        let kept_x = !(left == monitor_left && right == monitor_right);
+        let kept_y = !(top == monitor_top && bottom == monitor_bottom);
+        let screen_right = i64::from(root.width);
+        let screen_bottom = i64::from(root.height);
+
+        if kept_x && strut.left > 0 && super::band_meets(strut.left_start_y, strut.left_end_y, rows)
+        {
+            assert!(
+                left >= i64::from(strut.left),
+                "{work:?} starts inside a left band"
+            );
+        }
+        if kept_x
+            && strut.right > 0
+            && super::band_meets(strut.right_start_y, strut.right_end_y, rows)
+        {
+            let edge = screen_right.saturating_sub(i64::from(strut.right));
+            assert!(right <= edge, "{work:?} ends inside a right band");
+        }
+        if kept_y && strut.top > 0 && super::band_meets(strut.top_start_x, strut.top_end_x, columns)
+        {
+            assert!(
+                top >= i64::from(strut.top),
+                "{work:?} starts inside a top band"
+            );
+        }
+        if kept_y
+            && strut.bottom > 0
+            && super::band_meets(strut.bottom_start_x, strut.bottom_end_x, columns)
+        {
+            let edge = screen_bottom.saturating_sub(i64::from(strut.bottom));
+            assert!(bottom <= edge, "{work:?} ends inside a bottom band");
+        }
+    }
+
+    #[test]
+    fn a_surviving_axis_excludes_every_band_that_reaches_it() {
+        // The module docs' guarantee, checked rather than asserted in prose: for
+        // every band the code considers applicable to this monitor, either the
+        // result's span on that band's axis excludes it, or that axis was handed
+        // back in full. Nothing in between — and the second arm is why the
+        // guarantee cannot be stated as "the result never overlaps".
+        let full = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let side = |depth: u32, right: bool| {
+            if right {
+                X11Strut {
+                    right: depth,
+                    right_start_y: 0,
+                    right_end_y: 1079,
+                    ..X11Strut::default()
+                }
+            } else {
+                X11Strut {
+                    left: depth,
+                    left_start_y: 0,
+                    left_end_y: 1079,
+                    ..X11Strut::default()
+                }
+            }
+        };
+        let top = X11Strut {
+            top: 30,
+            top_start_x: 0,
+            top_end_x: 1919,
+            ..X11Strut::default()
+        };
+        let stacked = WorkRect {
+            x: 0,
+            y: 1080,
+            w: 1920,
+            h: 1080,
+        };
+        let tall = screen(1920, 2160);
+        let short_of_two = WorkRect {
+            x: 1920,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+
+        let cases: [(WorkRect, X11Screen, Vec<X11Strut>); 5] = [
+            // A single monitor with a bottom panel.
+            (full, screen(1920, 1080), vec![bottom_panel(40, 0, 1919)]),
+            // Two monitors, the panel on the short one, measured from the screen.
+            (
+                short_of_two,
+                screen(3840, 1200),
+                vec![bottom_panel(160, 1920, 3839)],
+            ),
+            // Four edges at once on a stacked layout, via the legacy form.
+            (
+                stacked,
+                tall,
+                vec![X11Strut::from_legacy([60, 80, 30, 160], tall)],
+            ),
+            // An axis emptied by two conformant docks: the second arm.
+            (
+                full,
+                screen(1920, 1080),
+                vec![side(1000, false), side(1000, true)],
+            ),
+            // One axis emptied, the other not: both arms in one case.
+            (full, screen(1920, 1080), vec![top, side(4000, false)]),
+        ];
+
+        for (bounds, root, struts) in cases {
+            let work = work_area(bounds, root, &struts);
+            for strut in &struts {
+                assert_respects(work, bounds, root, strut);
+            }
+        }
     }
 
     #[test]
