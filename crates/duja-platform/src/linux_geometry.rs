@@ -200,6 +200,21 @@ impl X11Strut {
         }
     }
 
+    /// Whether this strut reserves any space at all.
+    ///
+    /// Only the four depths are consulted, because the ranges are meaningless
+    /// without one — which is also how a window manager reads them: Mutter's
+    /// `meta_window_x11_update_struts` does `if (thickness == 0) continue;`
+    /// before it looks at the corresponding `_start`/`_end` pair.
+    ///
+    /// The X11 backend uses this to decide whether an all-zero
+    /// `_NET_WM_STRUT_PARTIAL` should let the legacy `_NET_WM_STRUT` through;
+    /// [`work_area`] does not need it, since a zero depth moves no edge there
+    /// either.
+    pub(crate) const fn reserves_anything(&self) -> bool {
+        self.left > 0 || self.right > 0 || self.top > 0 || self.bottom > 0
+    }
+
     /// The legacy four-field `_NET_WM_STRUT`, widened to the partial form.
     ///
     /// EWMH defines the short property as the partial one "where all start
@@ -1065,6 +1080,28 @@ mod tests {
             30,
             "the top band must span the whole screen width"
         );
+    }
+
+    #[test]
+    fn only_a_depth_makes_a_strut_a_strut() {
+        // What the X11 backend uses to decide whether an all-zero
+        // `_NET_WM_STRUT_PARTIAL` lets the legacy property through. Ranges alone
+        // must not count: a window that publishes twelve values of which only the
+        // `_start`/`_end` pairs are set has reserved nothing, and treating it as a
+        // strut would suppress a legacy property that reserves something real.
+        assert!(!X11Strut::default().reserves_anything());
+        assert!(
+            !X11Strut::from_partial([0, 0, 0, 0, 0, 1079, 0, 1079, 0, 1919, 0, 1919])
+                .reserves_anything()
+        );
+        for edge in 0..4 {
+            let mut values = [0_u32; 12];
+            *values.get_mut(edge).expect("four depths") = 40;
+            assert!(
+                X11Strut::from_partial(values).reserves_anything(),
+                "edge {edge} alone must count"
+            );
+        }
     }
 
     #[test]

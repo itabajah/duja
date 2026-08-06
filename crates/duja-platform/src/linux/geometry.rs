@@ -237,29 +237,46 @@ fn crtcs(connection: &RustConnection, root: xproto::Window) -> Option<Vec<randr:
 /// without one nothing is honouring struts anyway and the whole monitor really is
 /// available.
 ///
-/// A window that publishes both properties contributes only the partial one.
-/// EWMH says the window manager MUST ignore `_NET_WM_STRUT` in that case, and a
-/// client computing the same work area has to make the same choice or it will
-/// disagree with the shell about where a window fits.
+/// A window that publishes both properties contributes only the partial one,
+/// **unless the partial one reserves nothing**. EWMH's rule is that the window
+/// manager MUST ignore `_NET_WM_STRUT` when `_NET_WM_STRUT_PARTIAL` is present,
+/// and a client computing the same work area has to make the same choice or it
+/// disagrees with the shell about where a window fits. Mutter is more forgiving
+/// than the rule it implements — `meta_window_x11_update_struts` falls back to the
+/// legacy property whenever the partial one produced no strut at all, which
+/// includes twelve zeroes — and that is the behaviour copied here. It can only
+/// ever add a reservation, and adding one costs a flyout that sits further from
+/// an edge than it had to, where missing one costs a flyout under a panel.
 ///
-/// **Every managed window counts, including ones on another workspace.** A window
-/// manager narrows this to the current desktop; matching it would mean reading
-/// `_NET_CURRENT_DESKTOP` and then `_NET_WM_DESKTOP` per window, and the
-/// difference only shows for a non-sticky window with a strut — which in practice
-/// means a panel someone has confined to one workspace. The failure is to
-/// over-reserve, so the flyout sits a little further from an edge than it needed
-/// to; that is the direction to err in, and it is why this is a paragraph rather
-/// than two more round trips.
+/// The two strut atoms are looked up **independently**, which is not a detail: a
+/// session whose panels use only the partial form may never have interned
+/// `_NET_WM_STRUT` at all, and treating a missing atom as fatal would throw away
+/// every strut on it.
+///
+/// **Every managed window counts, including ones on another workspace.**
+/// `meta_workspace_ensure_work_areas_validated` collects struts from
+/// `meta_workspace_list_windows` — that workspace's windows — where this reads
+/// `_NET_CLIENT_LIST`, which is all of them. Matching it would mean
+/// `_NET_CURRENT_DESKTOP` plus a `_NET_WM_DESKTOP` per window, and the difference
+/// only shows for a non-sticky window with a strut, which in practice means a
+/// panel someone has confined to one workspace. Again the error is to
+/// over-reserve, which is why this is a paragraph rather than two more round
+/// trips per tray click.
 fn struts(connection: &RustConnection, root: xproto::Window, screen: X11Screen) -> Vec<X11Strut> {
-    let Some(client_list) = atom(connection, b"_NET_CLIENT_LIST") else {
+    // All three names interned in one round trip.
+    let client_list = intern(connection, b"_NET_CLIENT_LIST");
+    let partial_atom = intern(connection, b"_NET_WM_STRUT_PARTIAL");
+    let legacy_atom = intern(connection, b"_NET_WM_STRUT");
+    let client_list = resolve(client_list);
+    let partial_atom = resolve(partial_atom);
+    let legacy_atom = resolve(legacy_atom);
+
+    let Some(client_list) = client_list else {
         return Vec::new();
     };
-    let Some(partial_atom) = atom(connection, b"_NET_WM_STRUT_PARTIAL") else {
+    if partial_atom.is_none() && legacy_atom.is_none() {
         return Vec::new();
-    };
-    let Some(legacy_atom) = atom(connection, b"_NET_WM_STRUT") else {
-        return Vec::new();
-    };
+    }
 
     let clients = cardinals(connection, root, client_list, AtomEnum::WINDOW).unwrap_or_default();
 
@@ -269,10 +286,12 @@ fn struts(connection: &RustConnection, root: xproto::Window, screen: X11Screen) 
     // panels.
     let pending: Vec<_> = clients
         .iter()
-        .filter_map(|&client| {
-            let partial = property(connection, client, partial_atom, AtomEnum::CARDINAL)?;
-            let legacy = property(connection, client, legacy_atom, AtomEnum::CARDINAL)?;
-            Some((partial, legacy))
+        .map(|&client| {
+            let partial = partial_atom
+                .and_then(|name| property(connection, client, name, AtomEnum::CARDINAL));
+            let legacy =
+                legacy_atom.and_then(|name| property(connection, client, name, AtomEnum::CARDINAL));
+            (partial, legacy)
         })
         .collect();
 
@@ -280,18 +299,19 @@ fn struts(connection: &RustConnection, root: xproto::Window, screen: X11Screen) 
         .into_iter()
         .filter_map(|(partial, legacy)| {
             let twelve = partial
-                .reply()
-                .ok()
+                .and_then(|cookie| cookie.reply().ok())
                 .and_then(|reply| values(&reply))
-                .and_then(|values| <[u32; 12]>::try_from(values.as_slice()).ok());
-            if let Some(values) = twelve {
-                // `legacy` goes out of scope unread, which is safe rather than
-                // merely tidy: x11rb's cookie `Drop` issues a `discard_reply` for
-                // that sequence number, so the connection stays in step and a
-                // later reply cannot be mistaken for this one.
-                return Some(X11Strut::from_partial(values));
+                .and_then(|values| <[u32; 12]>::try_from(values.as_slice()).ok())
+                .map(X11Strut::from_partial)
+                .filter(X11Strut::reserves_anything);
+            if twelve.is_some() {
+                // The unused `legacy` cookie goes out of scope unread, which is
+                // safe rather than merely tidy: x11rb's cookie `Drop` issues a
+                // `discard_reply` for that sequence number, so the connection
+                // stays in step and a later reply cannot be mistaken for this one.
+                return twelve;
             }
-            let four = values(&legacy.reply().ok()?)?;
+            let four = values(&legacy?.reply().ok()?)?;
             Some(X11Strut::from_legacy(
                 <[u32; 4]>::try_from(four.as_slice()).ok()?,
                 screen,
@@ -306,10 +326,22 @@ fn struts(connection: &RustConnection, root: xproto::Window, screen: X11Screen) 
 /// as in `DISPLAY=:0.1` — not a monitor. It is 0 in almost every session, but
 /// hard-coding it would read another screen's settings in the ones where it is
 /// not.
+///
+/// No owner means no settings manager, and [`None`] here sends the scale chain on
+/// to the `Xft.dpi` X resource. winit arrives at the same place by a different
+/// route: its `new_xsettings_screen` subscribes to `PropertyNotify` on the owning
+/// window, which fails with `BadWindow` when the selection is unowned, and it then
+/// skips XSETTINGS for the life of the connection.
 fn xsettings_dpi(connection: &RustConnection, screen_index: usize) -> Option<f64> {
-    let selection = atom(connection, format!("_XSETTINGS_S{screen_index}").as_bytes())?;
+    // Both names in one round trip; the second is needed only if the first has an
+    // owner, but asking for it costs nothing next to a second round trip.
+    let selection = intern(connection, format!("_XSETTINGS_S{screen_index}").as_bytes());
+    let settings = intern(connection, b"_XSETTINGS_SETTINGS");
+    let selection = resolve(selection);
+    let settings = resolve(settings);
+
     let owner = connection
-        .get_selection_owner(selection)
+        .get_selection_owner(selection?)
         .ok()?
         .reply()
         .ok()?;
@@ -318,7 +350,7 @@ fn xsettings_dpi(connection: &RustConnection, screen_index: usize) -> Option<f64
     }
     // The property's type is the `_XSETTINGS_SETTINGS` atom itself, which is what
     // the specification says and what winit asks for.
-    let settings = atom(connection, b"_XSETTINGS_SETTINGS")?;
+    let settings = settings?;
     let reply = connection
         .get_property(false, owner.owner, settings, settings, 0, WHOLE_PROPERTY)
         .ok()?
@@ -327,7 +359,7 @@ fn xsettings_dpi(connection: &RustConnection, screen_index: usize) -> Option<f64
     linux_xsettings::xft_dpi(&reply.value)
 }
 
-/// Look up an **existing** atom, or [`None`].
+/// Ask for an **existing** atom, returning the cookie so the caller can pipeline.
 ///
 /// `only_if_exists` is true, and every atom this module wants is one someone else
 /// creates: `_NET_CLIENT_LIST` by the window manager, the strut atoms by the
@@ -335,9 +367,19 @@ fn xsettings_dpi(connection: &RustConnection, screen_index: usize) -> Option<f64
 /// window has ever published this" are the same answer, and asking this way gets
 /// it in the same round trip without interning a name into a server where atoms
 /// live until it exits.
-fn atom(connection: &RustConnection, name: &[u8]) -> Option<xproto::Atom> {
-    Some(connection.intern_atom(true, name).ok()?.reply().ok()?.atom)
-        .filter(|&atom| atom != x11rb::NONE)
+fn intern<'c>(
+    connection: &'c RustConnection,
+    name: &[u8],
+) -> Option<x11rb::cookie::Cookie<'c, RustConnection, xproto::InternAtomReply>> {
+    connection.intern_atom(true, name).ok()
+}
+
+/// Read an [`intern`] cookie, mapping both "the request failed" and "the server
+/// has no such atom" to [`None`].
+fn resolve(
+    cookie: Option<x11rb::cookie::Cookie<'_, RustConnection, xproto::InternAtomReply>>,
+) -> Option<xproto::Atom> {
+    Some(cookie?.reply().ok()?.atom).filter(|&atom| atom != x11rb::NONE)
 }
 
 /// Send a `GetProperty` for a whole 32-bit property, returning the cookie so the
