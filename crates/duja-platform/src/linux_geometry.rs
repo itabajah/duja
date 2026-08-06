@@ -479,11 +479,21 @@ pub(crate) fn scale_factor(sources: &DpiSources<'_>, monitor: &X11Monitor) -> f3
 /// stopped from scaling a window off the screen.
 ///
 /// The first of those two is **belt and braces rather than load-bearing**, and
-/// saying so is what stops a later reader deleting the second by mistake:
-/// dividing by a zero millimetre reading gives an infinity that survives `round`
-/// and `max` unchanged and is then caught by the ceiling, so removing the guard
-/// changes no answer. It is kept because winit has it, and because an answer that
-/// depends on three floating-point edge cases lining up is not one to rely on.
+/// saying so is what stops a later reader deleting the second by mistake.
+/// Removing the guard changes no answer, by two different routes depending on
+/// the pixel count:
+///
+/// - with pixels to divide, a zero millimetre reading gives an infinity that
+///   survives `round` and `max` unchanged and is then caught by the ceiling;
+/// - with **no** pixels either — a zero-extent CRTC, which only this module's own
+///   suite constructs — it is `0.0 / 0.0`, and the answer comes back 1.0 because
+///   `f64::max` returns the *other* operand when one is a NaN, before the ceiling
+///   is reached at all.
+///
+/// Three versions of this paragraph offered only the first route, for a guard
+/// whose own first clause admits the second. It is kept because winit has it, and
+/// because an answer that depends on that many floating-point edge cases lining
+/// up is not one to rely on.
 fn randr_scale(monitor: &X11Monitor) -> f64 {
     if monitor.mm_width == 0 || monitor.mm_height == 0 {
         return 1.0;
@@ -848,9 +858,13 @@ fn distance_squared(rect: WorkRect, (x, y): (i32, i32)) -> i64 {
 /// had those two verbs the other way round. The conclusion was right and the
 /// argument for it described an unreachable case.) It is kept for a future caller
 /// that could pass a left edge below `i32::MIN`, and named here rather than left
-/// to look load-bearing — the same treatment
-/// [`randr_scale`]'s zero-millimetre guard and [`monitor_for_cursor`]'s
-/// containment fast path get, for the same reason.
+/// to look load-bearing — the same treatment [`randr_scale`]'s zero-millimetre
+/// guard and [`clamp_extent`]'s lower cap get, for the same reason.
+///
+/// [`monitor_for_cursor`]'s containment check was the third member of that list
+/// until the commit above this one, which found it was not inert at all. The
+/// list is short on purpose now: a claim of inertness is a claim about every
+/// input, and this file has already shipped one that a later test falsified.
 fn rect_from_edges(left: i64, top: i64, right: i64, bottom: i64) -> WorkRect {
     let x = clamp_to_i32(left);
     let y = clamp_to_i32(top);
@@ -879,6 +893,18 @@ fn clamp_to_i32(value: i64) -> i32 {
 }
 
 /// Saturate an `i64` extent into a `u32` no larger than [`MAX_EXTENT`].
+///
+/// The lower half of the clamp is inert and is named here rather than left to
+/// look load-bearing: `u32::try_from` rejects every negative `i64`, so
+/// `unwrap_or(0)` already answers zero for exactly the values `clamp(0, ..)`
+/// maps to zero. Replacing the clamp with a bare `.min()` changes no answer, and
+/// a mutation run confirms it.
+///
+/// Unlike the two claims of inertness this module has had to retract, that one
+/// is a statement about `u32::try_from` rather than about which inputs a caller
+/// can produce — it cannot be falsified by a new fixture. What the clamp buys is
+/// that `unwrap_or` becomes unreachable rather than merely unreached, which is
+/// the difference between a fallback and a second implementation of the rule.
 fn clamp_extent(value: i64) -> u32 {
     u32::try_from(value.clamp(0, i64::from(MAX_EXTENT))).unwrap_or(0)
 }
@@ -1093,6 +1119,26 @@ mod tests {
         // `distance_squared` stands on, and the reason both are pinned here.
         let monitors = [monitor(10, 10, 0, 0), monitor(0, 0, 1920, 1080)];
         assert_eq!(monitor_for_cursor((10, 10), &monitors), Some(1));
+    }
+
+    #[test]
+    fn an_extent_saturates_at_both_ends_rather_than_wrapping() {
+        // `clamp_extent` is reached from `extent_from` with a value that has
+        // already been through two saturating steps, so the ends are hard to drive
+        // from `work_area` and easy to leave unpinned. Its own doc calls the lower
+        // cap inert — true, and the reason is `u32::try_from`, so this pins the
+        // answer rather than the mechanism.
+        assert_eq!(super::clamp_extent(-1), 0);
+        assert_eq!(super::clamp_extent(i64::MIN), 0);
+        assert_eq!(super::clamp_extent(0), 0);
+        assert_eq!(super::clamp_extent(1), 1);
+        assert_eq!(super::clamp_extent(i64::from(MAX_EXTENT)), MAX_EXTENT);
+        assert_eq!(
+            super::clamp_extent(i64::from(MAX_EXTENT) + 1),
+            MAX_EXTENT,
+            "one past the cap is the cap, not a wrap to zero"
+        );
+        assert_eq!(super::clamp_extent(i64::MAX), MAX_EXTENT);
     }
 
     #[test]
@@ -2427,13 +2473,24 @@ mod tests {
         // is kept for the reason it exists in winit — so the answer comes from a
         // decision rather than from three float edge cases agreeing — and no test
         // can distinguish the two, which is why one is not claimed here.
-        for (mm_width, mm_height) in [(0, 194), (344, 0), (0, 0)] {
+        //
+        // The last row is a different mechanism rather than a fourth fixture of
+        // the same one, and it is here because `randr_scale`'s doc argued the
+        // infinity route for a guard that also admits this: with no pixels to
+        // divide either, the ratio is a NaN, and 1.0 comes back from `f64::max`
+        // preferring the non-NaN operand long before the ceiling is consulted.
+        for (pixels, mm_width, mm_height) in [
+            ((1920, 1080), 0, 194),
+            ((1920, 1080), 344, 0),
+            ((1920, 1080), 0, 0),
+            ((0, 0), 0, 0),
+        ] {
             let odd = X11Monitor {
                 bounds: WorkRect {
                     x: 0,
                     y: 0,
-                    w: 1920,
-                    h: 1080,
+                    w: pixels.0,
+                    h: pixels.1,
                 },
                 mm_width,
                 mm_height,

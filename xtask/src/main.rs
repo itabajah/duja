@@ -188,6 +188,139 @@ mod tests {
         assert_eq!(cell_count("| `a | b` | c |"), 3);
     }
 
+    /// A row whose cell count disagrees with its header's.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Mismatch {
+        /// 1-based line number of the offending row.
+        line: usize,
+        /// How many cells the row has.
+        cells: usize,
+        /// How many its header has.
+        width: usize,
+        /// 1-based line number of that header.
+        header_line: usize,
+    }
+
+    /// Every row in `text` whose cell count disagrees with its header's, and how
+    /// many rows were compared to find them.
+    ///
+    /// Split out of [`every_docs_table_row_matches_its_header`] rather than
+    /// written inline, because inline it could only ever be exercised by whatever
+    /// the real corpus happens to contain: with no file under `docs/` drawing a
+    /// table inside a code fence, and none carrying a mismatched row, both the
+    /// fence toggle and the comparison itself could be deleted with the suite
+    /// green. The walk asserts; this decides.
+    fn table_mismatches(text: &str) -> (Vec<Mismatch>, usize) {
+        let mut found = Vec::new();
+        let mut rows = 0_usize;
+        let mut header: Option<(usize, usize)> = None;
+        let mut fenced = false;
+        for (number, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.starts_with("```") {
+                fenced = !fenced;
+                // A fence line is not a row, and it also ends any table above it.
+                header = None;
+                continue;
+            }
+            if fenced {
+                continue;
+            }
+            if !line.starts_with('|') {
+                // Any non-row line ends the table; the next one that starts
+                // with a pipe is a fresh header.
+                header = None;
+                continue;
+            }
+            let cells = cell_count(line);
+            match header {
+                Some((width, at)) => {
+                    rows = rows.saturating_add(1);
+                    if cells != width {
+                        found.push(Mismatch {
+                            line: number.saturating_add(1),
+                            cells,
+                            width,
+                            header_line: at,
+                        });
+                    }
+                }
+                None => header = Some((cells, number.saturating_add(1))),
+            }
+        }
+        (found, rows)
+    }
+
+    /// [`table_mismatches`] against the shapes the corpus does not contain.
+    #[test]
+    fn table_mismatches_reports_the_rows_that_disagree_with_their_header() {
+        // Nothing under `docs/` has a mismatched row - that is the point of the
+        // check - so without a fixture the comparison could be replaced by
+        // `assert_eq!(cells, cells)` and stay green forever.
+        let (found, rows) = table_mismatches("| a | b |\n| --- | --- |\n| c |\n");
+        assert_eq!(
+            found,
+            vec![Mismatch {
+                line: 3,
+                cells: 1,
+                width: 2,
+                header_line: 1
+            }]
+        );
+        assert_eq!(rows, 2, "the delimiter row is compared like any other");
+
+        // An *extra* cell is the direction the walk exists for: it renders as a
+        // correct table and leaves text nobody reads.
+        let (extra, _) = table_mismatches("| a | b |\n| --- | --- |\n| c | d | e |\n");
+        assert_eq!(extra.len(), 1);
+        assert_eq!(extra.first().map(|m| m.cells), Some(3));
+
+        // A well-formed table reports nothing, and counts what it compared.
+        let (none, counted) =
+            table_mismatches("| a | b |\n| --- | --- |\n| c | d |\n| e | f |\n");
+        assert!(none.is_empty());
+        assert_eq!(counted, 3);
+
+        // A blank line ends the table, so the second one is measured against its
+        // own header rather than the first one's.
+        let (two_tables, _) =
+            table_mismatches("| a | b |\n| --- | --- |\n\n| c |\n| --- |\n| d |\n");
+        assert!(two_tables.is_empty(), "{two_tables:?}");
+    }
+
+    /// The fence rule, which the corpus cannot exercise.
+    #[test]
+    fn a_table_drawn_inside_a_code_fence_is_illustration_rather_than_data() {
+        // No file under `docs/` draws a table inside a fence today, so deleting
+        // the toggle changes nothing about the real corpus and everything about
+        // the first document that adds one - a shape this project's own docs
+        // invite, since they explain the table rules by showing rows.
+        let (found, rows) = table_mismatches(
+            "```text\n| a | b |\n| --- |\n```\n",
+        );
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(rows, 0, "nothing inside a fence is compared");
+
+        // And the fence has to close: a table after it is checked again.
+        let (after, _) = table_mismatches(
+            "```text\n| a | b |\n```\n\n| c | d |\n| --- | --- |\n| e |\n",
+        );
+        assert_eq!(after.len(), 1, "{after:?}");
+        assert_eq!(after.first().map(|m| m.line), Some(7));
+
+        // A fence ends the table above it, so a row *after* the fence is a fresh
+        // header rather than a mismatch against the table before it. The first
+        // version of this case put nothing after the closing fence, which made it
+        // pass whether or not the fence ended anything — the fenced lines were
+        // skipped either way, so it compared nothing and asserted that nothing was
+        // wrong. The row below is what gives the assertion something to be wrong
+        // about.
+        let (straddling, rows_across) =
+            table_mismatches("| a | b |\n```text\nx\n```\n| c |\n| --- |\n| d |\n");
+        assert!(straddling.is_empty(), "{straddling:?}");
+        assert_eq!(rows_across, 2, "both rows of the second table, and no more");
+    }
+
     /// Every Markdown file under `docs/`, recursively.
     fn markdown_files(dir: &PathBuf) -> Vec<PathBuf> {
         let mut found = Vec::new();
@@ -231,7 +364,10 @@ mod tests {
     /// so that mismatch turns a table into a paragraph of pipes.
     ///
     /// Fenced code blocks are skipped: a table drawn inside one is illustration,
-    /// not data.
+    /// not data. That rule, and the comparison itself, live in
+    /// [`table_mismatches`] so that both can be driven by fixtures — no file under
+    /// `docs/` contains either a fenced table or a mismatched row, so inline they
+    /// were code no test could reach.
     ///
     /// Four things it deliberately does not model, none of which any file under
     /// `docs/` uses today: `~~~` fences (only backticks toggle), indented code
@@ -256,45 +392,31 @@ mod tests {
             let text = std::fs::read_to_string(path)
                 .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
             let name = path.strip_prefix(&docs).unwrap_or(path).display();
-            let mut header: Option<(usize, usize)> = None;
-            let mut fenced = false;
-            for (number, line) in text.lines().enumerate() {
-                let line = line.trim();
-                if line.starts_with("```") {
-                    fenced = !fenced;
-                    continue;
-                }
-                if fenced {
-                    continue;
-                }
-                if !line.starts_with('|') {
-                    // Any non-row line ends the table; the next one that starts
-                    // with a pipe is a fresh header.
-                    header = None;
-                    continue;
-                }
-                let cells = cell_count(line);
-                match header {
-                    Some((width, at)) => {
-                        rows_checked = rows_checked.saturating_add(1);
-                        assert_eq!(
-                            cells,
-                            width,
-                            "docs/{name} line {} has {cells} cells; its header at line {at} has \
-                             {width}. An extra cell renders correctly and is read by nobody — \
-                             see this test's docs.",
-                            number.saturating_add(1),
-                        );
-                    }
-                    None => header = Some((cells, number.saturating_add(1))),
-                }
+            let (found, rows) = table_mismatches(&text);
+            rows_checked = rows_checked.saturating_add(rows);
+            if let Some(bad) = found.first() {
+                panic!(
+                    "docs/{name} line {} has {} cells; its header at line {} has {}. An extra \
+                     cell renders correctly and is read by nobody — see this test's docs.",
+                    bad.line, bad.cells, bad.header_line, bad.width
+                );
             }
         }
 
-        // The guard that stops this check quietly covering nothing. Its first
-        // version named four files, two of which have no tables at all, and
+        // The guards that stop this check quietly covering nothing. The first
+        // version of it named four files, two of which have no tables at all, and
         // missed six that do — including the ADR this project tells new backends
         // to read. A walk plus a floor cannot rot the same way.
+        //
+        // Both floors are tripwires rather than rules, and neither can be pinned
+        // by a test: lowering `200` to `0` leaves every test in this file green,
+        // because the only thing that would notice is this assertion. The `panic!`
+        // above is the same shape — the corpus has no mismatched row, so deleting
+        // the reaction survives everything. Both are written down so the next
+        // mutation census does not read the survivors as evidence that either is
+        // pointless; what a fixture *can* pin is the decision, and
+        // [`table_mismatches`] now takes it. The numbers are roughly half of what
+        // the corpus carries today, so ordinary pruning does not trip them.
         assert!(
             files.len() >= 10,
             "only {} markdown files under docs/ — the walk is not walking",

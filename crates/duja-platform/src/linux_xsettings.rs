@@ -215,6 +215,13 @@ impl<'a> Parser<'a> {
     }
 
     /// Take `n` bytes, or [`None`] if fewer remain.
+    ///
+    /// The refusal is the contract, not an implementation detail. Handing back a
+    /// *short* slice instead survives every test that goes through [`xft_dpi`],
+    /// because each caller re-checks: [`Parser::card16`] and [`Parser::card32`]
+    /// need an exact array, and [`Parser::byte`] needs a first element. That is a
+    /// property of five callers rather than of this function, so
+    /// `a_short_read_is_refused_rather_than_shortened` pins it here.
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let (part, rest) = self.bytes.split_at_checked(n)?;
         self.bytes = rest;
@@ -465,6 +472,12 @@ mod tests {
 
     #[test]
     fn an_unknown_byte_order_marker_falls_back_to_the_host_order() {
+        // Which on every target this project builds for is little-endian, so
+        // `Endianness::native()` and `Endianness::Little` are the same value here
+        // and no test can tell them apart. Said out loud because the alternative
+        // is a reader concluding from a green suite that the fallback is exercised:
+        // what is exercised is that an unknown marker is *accepted* rather than
+        // rejected, which is the half of the mirror that matters.
         // winit's behaviour, mirrored deliberately: a corrupt marker is treated
         // as "the machine that wrote this is this machine". Rejecting the blob
         // instead would drop a DPI winit is going to read successfully.
@@ -648,6 +661,67 @@ mod tests {
             ],
         );
         assert_eq!(xft_dpi(&bytes), None);
+    }
+
+    #[test]
+    fn a_short_read_is_refused_rather_than_shortened() {
+        // Every accessor is built on `take`, and `take` returning a short slice
+        // rather than `None` is invisible from `xft_dpi`: the callers that matter
+        // all re-check the length themselves, so the whole suite stays green while
+        // the cursor primitive silently reads what is not there. Pinned directly,
+        // because "the callers happen to cover it" is a property of the callers.
+        let bytes = [1_u8, 2, 3];
+        let mut parser = super::Parser {
+            bytes: &bytes,
+            endianness: super::Endianness::Little,
+        };
+        assert_eq!(parser.take(4), None, "one more than remains");
+        assert_eq!(
+            parser.bytes.len(),
+            3,
+            "and a refused read consumes nothing, or the walk loses its place"
+        );
+        assert_eq!(parser.take(3), Some(&bytes[..]), "exactly what remains");
+        assert_eq!(parser.take(0), Some(&[][..]), "zero bytes is a read, not an end");
+        assert_eq!(parser.take(1), None, "and nothing is left");
+    }
+
+    #[test]
+    fn a_name_length_is_two_bytes_and_both_of_them_count() {
+        // Every fixture in this file names a setting in fewer than 256 bytes, and
+        // that is enough to hide the whole 16-bit read: for any length under 256
+        // one byte is zero, so *summing* the two bytes gives the same answer as
+        // decoding them, in either byte order. A 258-byte name separates them —
+        // 258 decodes as 258 and sums to 3 — and it is the only shape in this
+        // module where the high byte of a length is ever non-zero.
+        //
+        // Not a hypothetical shape either: this module's own docs turn on what a
+        // very long name does, since a name of 32 KiB is where winit's signed read
+        // and this one part company.
+        let long = vec![b'x'; 258];
+        let bytes = blob(
+            LITTLE_ENDIAN,
+            &[
+                (&long, 0, 4_096_i32.to_le_bytes().to_vec()),
+                integer(b"Xft/DPI", 98_304),
+            ],
+        );
+        assert_eq!(
+            xft_dpi(&bytes),
+            Some(96.0),
+            "the long-named setting has to be stepped over exactly"
+        );
+
+        // And in the other order, so a wrong length is a wrong *answer* rather
+        // than only a lost one.
+        let big = blob(
+            BIG_ENDIAN,
+            &[
+                (&long, 0, 4_096_i32.to_be_bytes().to_vec()),
+                (b"Xft/DPI", 0, 98_304_i32.to_be_bytes().to_vec()),
+            ],
+        );
+        assert_eq!(xft_dpi(&big), Some(96.0));
     }
 
     #[test]
