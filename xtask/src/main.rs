@@ -91,9 +91,12 @@ mod tests {
     /// Two rules from the [GFM tables extension], both load-bearing:
     ///
     /// - **A `|` preceded by a backslash is content, not a separator, *including
-    ///   inside other inline spans*.** The spec says exactly that, and gives
-    ///   `` b `\|` az `` as its example. So an unescaped `|` inside backticks
-    ///   really does split the cell — which is how a
+    ///   inside other inline spans*.** The spec makes the narrower claim — "include
+    ///   a pipe in a cell's content by escaping it, including inside other inline
+    ///   spans", with `` b `\|` az `` as its example — and the broader lookbehind
+    ///   comes from cmark-gfm's scanner rather than from the spec; see below. What
+    ///   both agree on is the half that matters here: an *unescaped* `|` inside
+    ///   backticks really does split the cell, which is how a
     ///   `` `O_NOFOLLOW | O_DIRECTORY` `` in `debt.md` silently shunted a row's
     ///   cells one column left and dropped its last one.
     /// - **A leading and trailing pipe is optional.** Discounting one of each
@@ -175,7 +178,9 @@ mod tests {
     /// `debt.md`, a document consulted by grepping far more often than by
     /// rendering. It is how a stale, already-retracted "Why deferred" cell
     /// survived a correction to the row above it in `#132`, and how another row's
-    /// last cell had been invisible since v0.1.1.
+    /// last cell went invisible the day `#114` added an unescaped `|` to it. (Not
+    /// "since v0.1.1", which an earlier version of this sentence said by reading
+    /// the row's *When* column instead of dating the break.)
     ///
     /// The delimiter row is checked like any other, which is stricter than
     /// necessary in one direction and exactly right in the other: GFM says a

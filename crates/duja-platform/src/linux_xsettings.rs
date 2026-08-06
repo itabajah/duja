@@ -14,8 +14,10 @@
 //!
 //! Pure by construction: the X11 backend fetches the property bytes and hands
 //! them here, so the format — which is where the bugs are — is unit-tested on
-//! **every** CI lane, including the two with no X server. Same shape and same
-//! reason as `mac_events` and `linux_events`.
+//! **every** CI lane. None of the three has an X server — the Ubuntu one runs no
+//! `Xvfb` either — so without this split the format would have no coverage at all
+//! rather than one lane's worth. Same shape and same reason as `mac_events` and
+//! `linux_events`.
 //!
 //! # The format
 //!

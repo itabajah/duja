@@ -9,17 +9,21 @@
 //! property decoding, and a small number of rules that are *about* the fetching
 //! rather than about the geometry.
 //!
-//! Those rules are named where they are made, because they are the code in this
-//! crate with the least test coverage and the most bug history: which strut
-//! property wins when a window publishes both ([`struts`]), whether a pointer on
-//! another X screen can be used at all ([`cursor_anchor`]), and which `RandR`
-//! request this server supports ([`crtcs`]). An earlier version of this sentence
-//! said "five reads and no decisions", which is the claim the paragraph below it
-//! already contradicted.
+//! Each such rule is documented where it is made, because between them they are
+//! the code in this crate with the least test coverage and the most bug history.
+//! No count is given here on purpose — the two attempts before this one said "no
+//! decisions" and then named three, and both were contradicted by the same file a
+//! paragraph later. What is true is that every one of them is stated at its own
+//! definition: [`struts`] carries which strut property wins when a window
+//! publishes both, and that every managed window counts rather than the current
+//! workspace's; [`monitors`] carries winit's filter for which CRTCs are monitors
+//! at all; [`cursor_anchor`] carries whether a pointer on another X screen can be
+//! used; [`crtcs`] carries which `RandR` request this server supports.
 //!
 //! # What it reads
 //!
-//! Five sources, of which four are X requests:
+//! Five entries, and they are not five requests — the last bundles three DPI
+//! sources of which one never touches the server:
 //!
 //! 1. `QueryPointer` on the root — where the cursor is.
 //! 2. `GetGeometry` on the root — how big the screen is, which is the space

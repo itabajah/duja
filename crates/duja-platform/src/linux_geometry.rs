@@ -128,15 +128,24 @@
 //! per axis because the two axes fail independently:
 //!
 //! - **On an axis the struts did not empty, the result's span on that axis
-//!   excludes every band reserved from that axis's edges.** `left` is at least
-//!   every applicable left strut's depth and `right` at most every applicable
-//!   right one's, so no left or right reservation reaches into `[left, right)`;
-//!   likewise for the vertical. A band that is *not* applicable — its range on
-//!   the other axis misses the monitor — cannot reach the result either, because
-//!   the result is always inside the monitor on both axes, including when an axis
-//!   is handed back in full.
+//!   excludes every *applicable* band reserved from that axis's edges** —
+//!   applicable meaning the band's range on the **other** axis meets the monitor,
+//!   which is what [`band_meets`] decides. `left` is at least every applicable
+//!   left strut's depth and `right` at most every applicable right one's, so no
+//!   applicable left or right reservation reaches into `[left, right)`; likewise
+//!   for the vertical.
+//!
+//!   The qualifier is load-bearing and was missing from the first draft of this
+//!   bullet, which made it plainly false: a left panel on the lower of two stacked
+//!   monitors reserves `x ∈ [0, 800)` for rows the upper monitor does not have, so
+//!   the upper monitor's span runs `[0, 1920)` and does not exclude it. Nothing is
+//!   wrong there — the band is nowhere near that monitor — which is exactly why
+//!   the one-dimensional claim needs the two-dimensional predicate in it.
 //! - **So when neither axis was emptied, the rectangle overlaps no reservation at
-//!   all**, which is the form placement actually consumes.
+//!   all**, which is the form placement actually consumes. This one needs no
+//!   qualifier: a non-applicable band misses the monitor on the other axis, and
+//!   the result is always inside the monitor on both axes — including when an axis
+//!   is handed back in full.
 //!
 //! What it costs is that a band touching one column of a monitor reserves that
 //! monitor's whole edge, where Mutter would have kept the full-height rectangle
@@ -318,11 +327,15 @@ impl X11Strut {
     /// to `height - 1` instead would be equally correct and would stop agreeing
     /// with the sentence it is quoting.
     ///
-    /// A caller that has both properties must prefer the partial one; the
-    /// specification says the window manager MUST ignore `_NET_WM_STRUT` when
-    /// `_NET_WM_STRUT_PARTIAL` is present, and a client computing the same work
-    /// area has to make the same choice or it will disagree with the shell about
-    /// where a window fits.
+    /// A caller that has both properties prefers the partial one — EWMH says the
+    /// window manager MUST ignore `_NET_WM_STRUT` when `_NET_WM_STRUT_PARTIAL` is
+    /// present — **except when the partial one reserves nothing**, which is where
+    /// the X11 backend follows Mutter instead of the letter of the rule. Mutter
+    /// falls back to the legacy property whenever the partial one produced no
+    /// strut at all, so on GNOME, obeying the MUST is precisely what would
+    /// disagree with the shell about where a window fits. `struts` documents the
+    /// trade; this paragraph stated the rule unconditionally for one commit after
+    /// that fallback landed.
     pub(crate) const fn from_legacy(values: [u32; 4], screen: X11Screen) -> Self {
         let [left, right, top, bottom] = values;
         X11Strut {
@@ -536,7 +549,10 @@ pub(crate) fn monitor_for_cursor(cursor: (i32, i32), monitors: &[X11Monitor]) ->
 /// reservation and open the flyout underneath it.
 ///
 /// **This is the one case where the result overlaps a reserved band**, and it is
-/// the exception the module docs' "never overlaps" property is stated against.
+/// the exception the module docs' second bullet is stated against — the one that
+/// holds "when neither axis was emptied". (It used to point at a "never overlaps"
+/// property; that phrasing was retracted, and the module docs now quote it only
+/// to say it is false, so the reference outlived its target by one commit.)
 /// Giving the axis back is precisely an overlap — the reservation that emptied it
 /// is still there — and it is chosen anyway, for the reason above.
 ///
