@@ -130,8 +130,10 @@
 //! steps and two gaps — **none of them can reach a bound**. Rewriting all
 //! fourteen to the wrapping form at once leaves the suite green.
 //!
-//! The first version of this paragraph listed twelve of the fourteen, omitting
-//! `contains`, under a heading that is a claim about all of them.
+//! An earlier version of this list omitted `contains`' two, under a heading that
+//! is a claim about all of them — which is the failure mode of enumerating in
+//! prose, and the reason the fourteen are checked by rewriting them all at once
+//! rather than by being counted here.
 //!
 //! The exceptions are the three in [`distance_squared`]'s last line, because
 //! squaring leaves that range: two gaps that each fit in an `i64` have squares
@@ -667,7 +669,7 @@ pub(crate) fn monitor_for_cursor(cursor: (i32, i32), monitors: &[X11Monitor]) ->
 /// `bounds` minus every strut band that reaches onto it — unless subtracting them
 /// would empty an axis, which gives that axis back in full.
 ///
-/// (The first sentence carried no exception for one commit. It is the sentence
+/// (The first sentence carried no exception at first. It is the sentence
 /// rustdoc puts in the item list and in search results, so it is both the
 /// most-read form of the claim and the one a correction to the paragraphs below
 /// does not touch. This project has watched that happen often enough to name it.)
@@ -696,7 +698,7 @@ pub(crate) fn monitor_for_cursor(cursor: (i32, i32), monitors: &[X11Monitor]) ->
 /// one that involves a band this module accepted; the other is a band with a
 /// backwards range, which [`band_meets`] discards and which can therefore sit
 /// anywhere. The module docs state both bullets against exactly these two
-/// exceptions. (This paragraph said "the one case" for two commits, and before
+/// exceptions. (This paragraph said "the one case" at first, and before
 /// that pointed at a "never overlaps" property the module docs now quote only in
 /// order to call it false.)
 ///
@@ -804,23 +806,17 @@ pub(crate) fn anchor_from_x11(
 /// `legacies` arrays in `the_partial_strut_wins_unless_it_reserves_nothing`, and
 /// deliberately not restated here.**
 ///
-/// That is the sixth version of this paragraph. The five before it were each
-/// wrong in a new direction and the count was always the thing that broke: "four
-/// cases" while the legacy-only shape was missing; "every shape a window can
-/// present" while the partial-only one was; "twenty cells" for a grid whose legacy
-/// axis was short an all-zero row; "twenty" again after that row was added; and
-/// "five values on each axis, and the test walks all twenty-five" in a sentence
-/// claiming, one breath later, to be derived from the arrays rather than restated.
+/// **Pointing rather than describing is deliberate.** Several earlier versions of
+/// this paragraph named the shapes or counted the cells, and each was falsified by
+/// the next commit to touch the arrays; so were two of the corrections, one of
+/// which mis-diagnosed the cause as "the fixed-length types guard only against
+/// shrinking" when growing is `error[E0308]` just as shrinking is.
 ///
-/// The fifth attempt's *diagnosis* was wrong too, which is why this one points at
-/// the arrays instead of describing them. It said growing an array "leaves the
-/// suite green because the fixed-length types guard only against shrinking";
-/// growing is `error[E0308]` exactly as shrinking is. The real hazard is that
-/// `[PartialCase<'_>; 5]`'s `5` is itself a hand-written numeral — the compiler
-/// makes you edit it in lockstep with the rows, and at that moment any prose
-/// counting those rows is stale with nothing to catch it. A pointer cannot rot
-/// that way; a description of the arrays' contents can, and a count of them
-/// certainly does.
+/// The real hazard is smaller and duller: `[PartialCase<'_>; 5]`'s `5` is itself a
+/// hand-written numeral, the compiler makes you edit it in lockstep with the rows,
+/// and at that moment any prose counting those rows is stale with nothing to catch
+/// it. A pointer cannot rot that way. A description of the arrays' contents can,
+/// and a count of them certainly does.
 pub(crate) fn choose_strut(
     partial: Option<&[u32]>,
     legacy: Option<&[u32]>,
@@ -985,9 +981,9 @@ fn contains(rect: WorkRect, (x, y): (i32, i32)) -> bool {
 /// redundant: pulling the last pixel back to the first is what makes this
 /// function answer zero for a point [`contains`] rejects, and that disagreement
 /// is the whole reason the early return is load-bearing. This note is the one
-/// [`monitor_for_cursor`] refers to; for one commit it referred to a note that
-/// had never been written, because the round that added the test above added no
-/// paragraph here.
+/// [`monitor_for_cursor`] refers to; it once referred to a note that had never
+/// been written, because the commit that added the test above added no paragraph
+/// here.
 fn distance_squared(rect: WorkRect, (x, y): (i32, i32)) -> i64 {
     let left = i64::from(rect.x);
     let top = i64::from(rect.y);
@@ -1826,8 +1822,8 @@ mod tests {
         // Unreachable through the X11 backend, which filters `width > 0 &&
         // height > 0` — in the half no lane can run. That filter *is* now named
         // within sight of the guard, in `distance_squared`'s own docs; this
-        // comment went on saying it was not for one commit after the note landed,
-        // which is the half-of-a-pair the same commit was fixing elsewhere.
+        // comment went on saying it was not after the note landed, which is the
+        // half-of-a-pair that same commit was fixing elsewhere.
         let degenerate = [monitor(10, 10, 0, 0), monitor(100, 100, 1920, 1080)];
         assert_eq!(monitor_for_cursor((0, 0), &degenerate), Some(0));
         assert_eq!(monitor_for_cursor((500, 500), &degenerate), Some(1));
@@ -2080,7 +2076,7 @@ mod tests {
     /// every band **this module accepts** reserved from that axis's edges.
     ///
     /// The qualifier is the same one the module docs carry, and it was missing
-    /// here for two commits after being restored there — a second copy of a claim
+    /// here after being restored there — a second copy of a claim
     /// sixty lines from the fixed one.
     ///
     /// The **range** half of acceptance comes from [`super::band_meets`] rather
@@ -3045,7 +3041,7 @@ mod tests {
     /// A partial-strut fixture: its name, its bytes, and the strut it wins with —
     /// [`None`] when it does not win, in which case the legacy value decides.
     ///
-    /// The third column was a `bool` for two commits, which made the oracle reach
+    /// The third column was a `bool` before this, which made the oracle reach
     /// outside the row for `X11Strut::from_partial(partial)` and hard-code the
     /// fixture that happens to be the only winning one. Correct only because both
     /// outcomes coincide there; a second conformant row with different bytes would
@@ -3089,19 +3085,14 @@ mod tests {
         // end of this test. It was unreachable from any test until it moved out of
         // the X11 backend.
         //
-        // This comment has been wrong five times, each in a new direction. It said
-        // "four shapes" while the legacy-only case was absent; the round that added
-        // that case promoted it to "every shape a window can present" and left out
-        // the partial-only case, the commoner of the two; the round that added
-        // *that* named the axes and claimed their product while asserting twelve of
-        // its twenty cells; the round that added the missing all-zero legacy row
-        // updated the loop and left three copies describing a four-value axis; and
-        // the round that fixed *those* bumped this sentence's count from three to
-        // four without adding the fourth item to this list.
-        //
-        // Walking the rows did not catch any of it, and an earlier version of this
-        // paragraph claimed it would. The grid checks the *rule*; nothing checks a
-        // number written beside it, which is why there is no longer one.
+        // **Do not write a count here.** Every attempt to describe this grid by
+        // number rather than by pointer has been falsified by the next commit to
+        // touch the arrays, and the corrections were falsified in turn — including
+        // one that bumped its own tally of past errors without adding the new one
+        // to the list, and one that claimed walking the rows would catch it. The
+        // grid checks the *rule*. Nothing checks a number written beside it, so
+        // there is no longer one; `git log` holds the history, which is where a
+        // history that keeps being wrong belongs.
         let root = screen(1920, 1080);
         let partial = [40, 0, 0, 0, 0, 1079, 0, 0, 0, 0, 0, 0];
         let empty_partial = [0_u32; 12];
