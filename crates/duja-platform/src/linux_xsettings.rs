@@ -691,7 +691,11 @@ mod tests {
             "and a refused read consumes nothing, or the walk loses its place"
         );
         assert_eq!(parser.take(3), Some(&bytes[..]), "exactly what remains");
-        assert_eq!(parser.take(0), Some(&[][..]), "zero bytes is a read, not an end");
+        assert_eq!(
+            parser.take(0),
+            Some(&[][..]),
+            "zero bytes is a read, not an end"
+        );
         assert_eq!(parser.take(1), None, "and nothing is left");
     }
 

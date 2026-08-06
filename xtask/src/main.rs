@@ -276,8 +276,7 @@ mod tests {
         assert_eq!(extra.first().map(|m| m.cells), Some(3));
 
         // A well-formed table reports nothing, and counts what it compared.
-        let (none, counted) =
-            table_mismatches("| a | b |\n| --- | --- |\n| c | d |\n| e | f |\n");
+        let (none, counted) = table_mismatches("| a | b |\n| --- | --- |\n| c | d |\n| e | f |\n");
         assert!(none.is_empty());
         assert_eq!(counted, 3);
 
@@ -295,16 +294,13 @@ mod tests {
         // the toggle changes nothing about the real corpus and everything about
         // the first document that adds one - a shape this project's own docs
         // invite, since they explain the table rules by showing rows.
-        let (found, rows) = table_mismatches(
-            "```text\n| a | b |\n| --- |\n```\n",
-        );
+        let (found, rows) = table_mismatches("```text\n| a | b |\n| --- |\n```\n");
         assert!(found.is_empty(), "{found:?}");
         assert_eq!(rows, 0, "nothing inside a fence is compared");
 
         // And the fence has to close: a table after it is checked again.
-        let (after, _) = table_mismatches(
-            "```text\n| a | b |\n```\n\n| c | d |\n| --- | --- |\n| e |\n",
-        );
+        let (after, _) =
+            table_mismatches("```text\n| a | b |\n```\n\n| c | d |\n| --- | --- |\n| e |\n");
         assert_eq!(after.len(), 1, "{after:?}");
         assert_eq!(after.first().map(|m| m.line), Some(7));
 
