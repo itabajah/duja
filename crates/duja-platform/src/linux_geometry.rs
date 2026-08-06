@@ -108,12 +108,18 @@
 //! worth stating rather than claiming parity. Mutter builds a minimal spanning set
 //! over the strut-subtracted region and clips to the best rectangle in it
 //! (`meta_workspace_ensure_work_areas_validated`); this pushes each of the four
-//! edges past every band that meets the monitor at all. The guarantee that gives
-//! is the one placement needs — **the result never overlaps a reserved band** —
-//! and what it costs is that a band touching one column of a monitor reserves that
-//! monitor's whole edge, where Mutter would have kept the full-height rectangle
-//! beside it. Both agree for a panel that spans its monitor, which is every panel
-//! anyone actually runs. Struts are in **root-window**
+//! edges past every band that meets the monitor at all. What that buys is the
+//! property placement needs — **a non-degenerate result never overlaps a reserved
+//! band** — and what it costs is that a band touching one column of a monitor
+//! reserves that monitor's whole edge, where Mutter would have kept the
+//! full-height rectangle beside it. Both agree for a panel that spans its monitor,
+//! which is every panel anyone actually runs.
+//!
+//! "Non-degenerate" is load-bearing rather than a hedge, and [`work_area`]'s own
+//! docs carry the exception: a strut set that consumes an axis entirely gets that
+//! axis back in full, which is an overlap, chosen because an empty rectangle pins
+//! the flyout to a corner and an overlapping one merely sits under a panel.
+//! Struts are in **root-window**
 //! coordinates and the specification is explicit that they are *not* relative to
 //! a Xinerama monitor, which is what makes the arithmetic non-obvious: a panel
 //! along the bottom of a short monitor beside a taller one reserves a band
@@ -462,7 +468,13 @@ pub(crate) fn monitor_for_cursor(cursor: (i32, i32), monitors: &[X11Monitor]) ->
     nearest.map(|(index, _)| index)
 }
 
-/// `bounds` minus every strut band that reaches onto it.
+/// `bounds` minus every strut band that reaches onto it — unless subtracting them
+/// would empty an axis, which gives that axis back in full.
+///
+/// (The first sentence carried no exception for one commit. It is the sentence
+/// rustdoc puts in the item list and in search results, so it is both the
+/// most-read form of the claim and the one a correction to the paragraphs below
+/// does not touch. This project has watched that happen often enough to name it.)
 ///
 /// The reservation an edge suffers is capped at the screen edge's, not summed:
 /// two panels stacked on the same edge reserve as much as the deeper one, which
@@ -483,6 +495,13 @@ pub(crate) fn monitor_for_cursor(cursor: (i32, i32), monitors: &[X11Monitor]) ->
 /// rectangle, because the two axes fail independently. Falling back wholesale
 /// would let one malformed `left` value throw away a perfectly good top panel's
 /// reservation and open the flyout underneath it.
+///
+/// **This is the one case where the result overlaps a reserved band**, and it is
+/// the exception the module docs' "never overlaps" property is stated against.
+/// Giving the axis back is precisely an overlap — the reservation that emptied it
+/// is still there — and it is chosen anyway, for the reason above. Reaching it
+/// needs a strut deeper than the monitor's own extent, which a conformant panel
+/// cannot publish.
 pub(crate) fn work_area(bounds: WorkRect, screen: X11Screen, struts: &[X11Strut]) -> WorkRect {
     let monitor_left = i64::from(bounds.x);
     let monitor_top = i64::from(bounds.y);
