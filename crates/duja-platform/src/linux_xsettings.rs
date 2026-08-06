@@ -294,15 +294,27 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BIG_ENDIAN, LITTLE_ENDIAN, word_padding, xft_dpi};
+    // `word_padding` is deliberately absent: the fixture writes the padding
+    // literally, and clippy flagging this import as unused is the compiler
+    // confirming the two no longer share arithmetic.
+    use super::{BIG_ENDIAN, LITTLE_ENDIAN, xft_dpi};
 
     /// Build a well-formed little-endian blob out of `(name, type, payload)`
     /// triples.
     ///
-    /// Written out rather than expressed with a helper per type, because the
-    /// padding rule is the part most likely to be wrong in both the parser and a
-    /// hand-written fixture, and a builder that shares the parser's arithmetic
-    /// would hide a mistake in both at once.
+    /// The padding is written out here rather than taken from the parser's own
+    /// [`word_padding`], because it is the part most likely to be wrong in both,
+    /// and a fixture that shares the arithmetic hides a mistake in both at once.
+    ///
+    /// That is not a hypothetical: this builder *did* call `word_padding` for the
+    /// name field, so a wrong name-padding rule was invisible to every test —
+    /// including
+    /// `a_name_whose_length_is_already_a_multiple_of_four_gains_no_padding`, which
+    /// exists for exactly that rule. Only a hand-written 4-byte string payload in
+    /// one other fixture happened to redden a global mutation, and nothing said
+    /// so. A settings manager publishes names of length 12 and 20
+    /// (`Gtk/FontName`, `Net/DndDragThreshold`), so the rule is live on every real
+    /// blob.
     fn blob(order: u8, settings: &[(&[u8], u8, Vec<u8>)]) -> Vec<u8> {
         let mut out = vec![order, 0, 0, 0];
         let serial: u32 = 7;
@@ -330,7 +342,15 @@ mod tests {
             let len = u16::try_from(name.len()).expect("test fixture");
             out.extend_from_slice(&word2(len));
             out.extend_from_slice(name);
-            out.extend(std::iter::repeat_n(0_u8, word_padding(name.len())));
+            // Deliberately a literal table rather than `word_padding`: see this
+            // function's docs for what sharing it cost.
+            let padding = match name.len() % 4 {
+                0 => 0,
+                1 => 3,
+                2 => 2,
+                _ => 1,
+            };
+            out.extend(std::iter::repeat_n(0_u8, padding));
             out.extend_from_slice(&word4(serial));
             out.extend_from_slice(payload);
         }
@@ -503,7 +523,11 @@ mod tests {
         let full = blob(LITTLE_ENDIAN, &[integer(b"Xft/DPI", 98_304)]);
         for len in 0..full.len() {
             let prefix = full.get(..len).expect("len is below the length");
-            let _ = xft_dpi(prefix);
+            // Asserted, not merely called. Every proper prefix of this blob is
+            // short of the value, so `None` is the whole answer — and a test whose
+            // name promises `None` while its body only promises "no panic" is the
+            // weaker claim rustdoc and `cargo test` actually display.
+            assert_eq!(xft_dpi(prefix), None, "prefix of {len} bytes");
         }
         assert_eq!(xft_dpi(&full), Some(96.0));
     }

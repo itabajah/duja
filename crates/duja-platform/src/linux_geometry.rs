@@ -131,9 +131,7 @@
 //! Both are scoped to the bands this module **accepts**: a non-zero depth *and*
 //! [`band_meets`] answering true. The depth half is vacuous — a zero-depth band
 //! reserves the empty region, which every span excludes — so the scope that does
-//! work is `band_meets`, and it is not a formality; see below. (Naming only
-//! `band_meets` here was the fourth version of this paragraph and the first to be
-//! merely imprecise rather than false.)
+//! work is `band_meets`, and it is not a formality; see below.
 //!
 //! - **On an axis the struts did not empty, the result's span on that axis
 //!   excludes every accepted band reserved from that axis's edges.** `left` is at
@@ -434,6 +432,25 @@ fn parse_override(raw: Option<&str>) -> Option<ScaleOverride> {
 /// `Xft.dpi` is neutralised. The individual sources deliberately do **not**
 /// clamp — see [`crate::linux_xsettings::xft_dpi`] for why one guard at the end
 /// of the chain beats four along it.
+///
+/// # The top end is deliberately not guarded
+///
+/// [`sane_scale`] guards the low end only, and says a backend whose source can
+/// produce garbage at the top must guard that itself. Only one of these four
+/// does: [`randr_scale`] inherits winit's `> 20` ceiling. An XSETTINGS `Xft/DPI`
+/// near `i32::MAX`, an `Xft.dpi` of `1e10`, or `WINIT_X11_SCALE_FACTOR=1e10` all
+/// pass through as finite `f32`s.
+///
+/// That is the answer, not an omission, for two reasons. **winit does the same**
+/// — it applies no ceiling to either DPI source, and a scale this crate clamped
+/// where winit did not would clamp the box while the window kept growing, which
+/// is the failure this whole mirror exists to avoid. And the consequence is
+/// bounded rather than catastrophic: the app's `scale_extent` saturates and its
+/// placement clamps into the work area, so an absurd factor puts the flyout at
+/// the work area's origin rather than off-screen or in a panic. A user who
+/// writes `Xft.dpi: 1e10` has broken every toolkit on the machine, and Duja
+/// failing in the same direction as the rest of the desktop is the honest
+/// behaviour.
 pub(crate) fn scale_factor(sources: &DpiSources<'_>, monitor: &X11Monitor) -> f32 {
     let resolved = match parse_override(sources.scale_override) {
         Some(ScaleOverride::Randr) => randr_scale(monitor),
@@ -791,10 +808,8 @@ fn rect_from_edges(left: i64, top: i64, right: i64, bottom: i64) -> WorkRect {
 /// The extent from `origin` to `far`, capped so `origin + extent` is still an
 /// `i32`.
 ///
-/// ("From a *saturated* origin" until a review pointed out that the word had
-/// survived here, four lines from a paragraph explaining that no saturation is
-/// involved. The origin is simply an `i32`; whether it got there by clamping is
-/// this function's caller's business.)
+/// The origin is simply an `i32`; whether it got there by clamping is the
+/// caller's business, and no saturation is involved in the case this exists for.
 fn extent_from(origin: i32, far: i64) -> u32 {
     let origin = i64::from(origin);
     let headroom = i64::from(i32::MAX).saturating_sub(origin);
@@ -893,9 +908,12 @@ mod tests {
             Some(0),
             "off the top-left of the first"
         );
-        // Just outside monitor 1's left edge but level with it: nearer to 1 than
-        // to 0, which is only true if the distance is measured to the rectangle
-        // rather than to its origin.
+        // Just outside monitor 1's left edge but level with it. Measuring to the
+        // origin instead of to the rectangle would give the same answer here, so
+        // this probe pins the fallback's *existence*, not its shape — the
+        // rectangle-versus-origin distinction is what the next test's `(149, 50)`
+        // and `(151, 50)` pin, and deleting that one on the grounds that this one
+        // covers it would take the only coverage with it.
         assert_eq!(monitor_for_cursor((1910, 1500), &monitors), Some(1));
     }
 
@@ -1953,10 +1971,8 @@ mod tests {
         // winit's `validate_scale_factor`, and never reaches `sane_scale` at all.
         // The next test pins that distinction.
         //
-        // ("Remaining", not "third". This PR has already had to correct two
-        // comments that called XSETTINGS the chain's *first* source when it is
-        // the second; numbering the override by elimination rather than by its
-        // position in the chain is the same slip pointing the other way.)
+        // Named rather than numbered: "the third source" invites the reader to
+        // count the chain, where the override is first.
         for raw in DEGENERATE {
             let parsed: f64 = raw.parse().expect("the fixture is a float");
             let from_xsettings = DpiSources {

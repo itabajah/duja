@@ -4,11 +4,9 @@
 //! The pump is what the rest of these docs are about — kernel uevents for display
 //! hot-plug, logind for suspend and resume. [`geometry`] is a lodger, here for the
 //! `cfg` rather than for any kinship with it; its own module docs stand alone.
-//! (This summary said "The Linux event pump" for the twenty-five commits between
-//! `af6256f`, which added that submodule, and the review round that noticed —
-//! and it is the sentence rustdoc puts in the parent's item list. "One commit"
-//! is what the first draft of this parenthesis guessed, in the same breath as a
-//! sibling sentence that had counted.)
+//! (It said "The Linux event pump" from the moment `#132` added that submodule
+//! until late in the same PR's review — and it is the sentence rustdoc puts in
+//! the parent's item list, which is why a stale one is worth a note.)
 //!
 //! Two sources rather than one, and deliberately not two D-Bus sources.
 //! Hot-plug comes from the kernel's `NETLINK_KOBJECT_UEVENT` socket, which works
@@ -51,8 +49,7 @@
 // `crate::linux_events`.
 //
 // "The geometry", not "its decisions": a handful of rules about the fetching
-// itself do live in that module, and it names them. This comment said otherwise
-// for the nine review rounds in which nobody opened this file.
+// itself do live in that module, and it names them at their definitions.
 pub(crate) mod geometry;
 mod sleep;
 mod uevent;

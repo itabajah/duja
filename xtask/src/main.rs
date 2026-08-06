@@ -145,6 +145,49 @@ mod tests {
         fields.saturating_sub(lead).saturating_sub(trail)
     }
 
+    /// [`cell_count`] against the shapes its own docs argue about.
+    ///
+    /// Until this existed, the only exercise the function got was the corpus walk
+    /// below — and the backslash rule its documentation spends a paragraph on was
+    /// covered by exactly one line of `docs/debt.md`. Editing that row would have
+    /// silently removed the coverage for a rule nothing else touches.
+    #[test]
+    fn cell_count_agrees_with_cmark_gfm_on_the_shapes_it_documents() {
+        // The ordinary rows, with and without the optional delimiters. GFM makes
+        // both leading and trailing pipes optional, so all four must agree.
+        assert_eq!(cell_count("|a|b|"), 2);
+        assert_eq!(cell_count("a|b"), 2);
+        assert_eq!(cell_count("|a|b"), 2);
+        assert_eq!(cell_count("a|b|"), 2);
+        assert_eq!(cell_count("|---|---|"), 2, "the delimiter row is a row");
+
+        // The escape rule, which is the whole reason this is not a `split('|')`.
+        // An escaped pipe is content; the row is one cell.
+        assert_eq!(cell_count("|a \\| b|"), 1);
+        // And the shape a CommonMark escape machine gets wrong: cmark-gfm's
+        // longest match parses `a`, `\`, `\|`, `b`, absorbing the pipe. Two
+        // rewrites of this function disagreed with that before the scanner source
+        // was read.
+        assert_eq!(cell_count("|a \\\\| b|"), 1);
+        assert_eq!(cell_count("|a \\\\\\| b|"), 1);
+        // A row ending in an escaped pipe has no trailing delimiter to discount.
+        assert_eq!(cell_count("|a\\|"), 1);
+
+        // The degenerate shapes the discount arithmetic has to survive.
+        assert_eq!(cell_count("||"), 1, "one empty cell between two delimiters");
+        assert_eq!(
+            cell_count("|"),
+            1,
+            "the documented divergence from cmark-gfm"
+        );
+        assert_eq!(cell_count("abc"), 1, "no pipes at all");
+        assert_eq!(cell_count(""), 1, "and the empty line cannot underflow");
+
+        // A pipe inside a code span still splits, which is how an unescaped one in
+        // `debt.md` ate a row's last cell for months.
+        assert_eq!(cell_count("| `a | b` | c |"), 3);
+    }
+
     /// Every Markdown file under `docs/`, recursively.
     fn markdown_files(dir: &PathBuf) -> Vec<PathBuf> {
         let mut found = Vec::new();
