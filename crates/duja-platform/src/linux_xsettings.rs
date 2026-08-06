@@ -334,9 +334,9 @@ mod tests {
     /// name field, so a wrong name-padding rule was invisible to every test —
     /// including
     /// `a_name_whose_length_is_already_a_multiple_of_four_gains_no_padding`, which
-    /// exists for exactly that rule. Only a hand-written 4-byte string payload in
-    /// one other fixture happened to redden a global mutation, and nothing said
-    /// so. A settings manager publishes names of length 12 and 20
+    /// exists for exactly that rule — and the one assertion that did redden a
+    /// global mutation of the padding rule was *inside that same test*, not in a
+    /// separate fixture as an earlier version of this sentence said. A settings manager publishes names of length 12 and 20
     /// (`Gtk/FontName`, `Net/DndDragThreshold`), so the rule is live on every real
     /// blob.
     fn blob(order: u8, settings: &[(&[u8], u8, Vec<u8>)]) -> Vec<u8> {
@@ -455,16 +455,30 @@ mod tests {
     fn a_name_whose_length_is_already_a_multiple_of_four_gains_no_padding() {
         // `(4 - len % 4) % 4` is the whole rule: the outer modulo is what stops
         // an aligned name from being followed by four bytes of padding that are
-        // not there. Dropping it desynchronises every blob whose first setting
-        // has a 4, 8 or 12-character name.
-        let bytes = blob(LITTLE_ENDIAN, &[integer(b"Xft/DPI", 98_304)]);
-        assert_eq!(b"Xft/DPI".len() % 4, 3, "the fixture must exercise padding");
+        // not there. Dropping it desynchronises every blob whose first setting has
+        // a name whose length is a multiple of four — this comment used to say
+        // "4, 8 or 12", which omits 20, the length of `Net/DndDragThreshold`, one
+        // of the two real names the doc above names.
+        let padded_name: &[u8] = b"Xft/DPI";
+        let bytes = blob(LITTLE_ENDIAN, &[integer(padded_name, 98_304)]);
+        assert_eq!(
+            padded_name.len() % 4,
+            3,
+            "the fixture must exercise padding"
+        );
         assert_eq!(xft_dpi(&bytes), Some(96.0));
 
+        // One binding, read by both the fixture and its guard. Written as two
+        // copies of the literal, the guard restates its own subject: changing the
+        // name here to something unaligned leaves `b"Gtk/FontName".len() % 4 == 0`
+        // true forever while this test quietly stops covering the aligned case it
+        // is named for. Verified by injecting a name-padding bug — with the
+        // binding shared the test fails, with the literal duplicated it passes.
+        let aligned_name: &[u8] = b"Gtk/FontName";
         let aligned = blob(
             LITTLE_ENDIAN,
             &[
-                (b"Gtk/FontName", 1, {
+                (aligned_name, 1, {
                     let mut v = 4_u32.to_le_bytes().to_vec();
                     v.extend_from_slice(b"Sans");
                     v
@@ -472,14 +486,19 @@ mod tests {
                 integer(b"Xft/DPI", 98_304),
             ],
         );
-        assert_eq!(b"Gtk/FontName".len() % 4, 0, "the fixture must be aligned");
+        assert_eq!(aligned_name.len() % 4, 0, "the fixture must be aligned");
         assert_eq!(xft_dpi(&aligned), Some(96.0));
     }
 
     #[test]
     fn the_byte_order_byte_is_obeyed() {
-        // A big-endian blob read little-endian turns 98_304 into 1_536, i.e.
-        // 1.5 dpi. The marker is the only thing that distinguishes them.
+        // A big-endian blob read little-endian turns 98_304 into 8_388_864 — a
+        // scale factor of about 85, which `sane_scale` does not catch because it
+        // guards the low end only. The marker is the only thing that distinguishes
+        // the two readings. (An earlier version of this comment said "1_536, i.e.
+        // 1.5 dpi", a number this file gets right 130 lines above and which is
+        // wrong in the safe direction: the real one is off the top of the scale,
+        // not near the bottom of it.)
         let bytes = blob(
             BIG_ENDIAN,
             &[(b"Xft/DPI", 0, 98_304_i32.to_be_bytes().to_vec())],
@@ -532,8 +551,10 @@ mod tests {
 
     #[test]
     fn a_dpi_published_as_a_string_is_not_read_as_a_number() {
-        // The type tag decides how the payload is laid out; reading a string's
-        // length prefix as an integer would report a DPI of 4/1024.
+        // The type tag decides how the payload is laid out; reading this string's
+        // length prefix as an integer would report a DPI of 2/1024, its payload
+        // being the two bytes "96". (An earlier version said 4/1024, which is the
+        // `"Sans"` fixtures' prefix rather than this one's.)
         // A second, well-formed `Xft/DPI` follows, and it is what makes this a
         // test of *stopping* rather than of the type check alone. winit's `find`
         // matches the first `Xft/DPI` and errors on its type, so a blob carrying a

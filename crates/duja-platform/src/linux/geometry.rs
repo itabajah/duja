@@ -1,13 +1,20 @@
 //! The X11 half of the Linux tray anchor: the reads, and only the decisions that
 //! cannot be made without them.
 //!
-//! Every *value* this module obtains is copied into one of
+//! Every *geometric* value this module obtains is copied into one of
 //! [`crate::linux_geometry`]'s plain structs and handed straight back out again.
 //! Nothing here chooses a monitor, subtracts a strut or resolves a scale factor —
 //! that all lives next door, where it is unit-tested on every CI lane. What is
 //! left is the part no lane can run: the connection, the round trips, the
 //! property decoding, and a small number of rules that are *about* the fetching
 //! rather than about the geometry.
+//!
+//! "Geometric" is load-bearing and an earlier version of this sentence omitted it,
+//! which made the paragraph contradict its own last clause. Several values are
+//! read here and never handed out — `same_screen`, the compositing selection
+//! owner, the `RandR` version, a CRTC's output list — because each is an input to
+//! one of those fetching rules rather than a coordinate. The XSETTINGS blob is a
+//! third case again: handed out, but to a different module.
 //!
 //! Each such rule is documented where it is made, because between them they are
 //! the code in this crate with the least test coverage and the most bug history.
@@ -89,46 +96,15 @@ use crate::linux_geometry::{
 };
 use crate::linux_xsettings;
 
-/// The most a strut property is asked for: thirteen four-byte units, one more
-/// than `_NET_WM_STRUT_PARTIAL` can legitimately hold.
-///
-/// **The extra word is the whole point, and asking for twelve is a live bug.**
-/// `GetProperty` returns `MINIMUM(remaining, 4 * long_length)`, so a property
-/// carrying thirteen `CARDINAL`s answers a twelve-word request with exactly
-/// twelve values and a `bytes_after` nothing here reads — and
-/// `<[u32; 12]>::try_from` then *succeeds*, honouring a malformed property that
-/// an unbounded read rejected. Any client on the display could publish thirteen
-/// values and have Duja reserve space a conformant window manager ignores.
-///
-/// Thirteen restores the old behaviour exactly: a conformant property still
-/// returns twelve and is accepted, an over-long one returns thirteen and fails
-/// the conversion, and the cost of the guard is four bytes per window. (The first
-/// version of this constant was twelve, and its doc said the cap "can only
-/// allocate memory nothing will read" — true of the memory and false of the
-/// behaviour.)
-const STRUT_WORDS: u32 = 13;
-
-/// The most `_NET_CLIENT_LIST` is asked for: 8192 windows, 32 KB.
-///
-/// A desktop session has tens of managed windows and a busy one has hundreds. The
-/// cap exists because the property lives on the **root window**, which every
-/// client on the display can write: without one, a single hostile or broken
-/// client turns a tray click into a multi-gigabyte allocation, and then into two
-/// `GetProperty` requests *per listed entry*, all queued before the first reply
-/// is read. A list this long is not a session, and truncating it costs at worst
-/// a strut from a window beyond the eight-thousandth.
-const CLIENT_LIST_WORDS: u32 = 8192;
-
-/// The most `_XSETTINGS_SETTINGS` is asked for: 256 KB.
-///
-/// GNOME publishes a few kilobytes. The owner of that selection is another
-/// client, so the same argument as [`CLIENT_LIST_WORDS`] applies — and the parser
-/// this feeds is explicitly written for a blob "written by another process". A
-/// blob past this cap is truncated, the parser stops where the bytes stop, and
-/// the scale chain falls through to the `Xft.dpi` resource, which is what it does
-/// for a malformed blob anyway. winit reads the same property in 4 KB chunks with
-/// no ceiling at all; matching that would mean matching its unboundedness.
-const XSETTINGS_WORDS: u32 = 65_536;
+// The three property bounds these reads use live in [`crate::linux_geometry`],
+// not here. They are pure scalars whose correctness is an argument about
+// `GetProperty`'s truncation rule, and this module is `cfg(target_os = "linux")`
+// — so defined here they were referenced by no test on any lane, and a comment in
+// the pure module claimed the too-long strut row left `STRUT_WORDS` "defending a
+// check nothing tested" while nothing tested the constant either. Setting it back
+// to twelve left every lane green. ADR-0011: if it can be decided without an OS,
+// it belongs where all three lanes compile it.
+use crate::linux_geometry::{CLIENT_LIST_WORDS, STRUT_WORDS, XSETTINGS_WORDS};
 
 // One read is deliberately *not* bounded here, and a reader who has just met
 // these three constants should know why before finding it two functions below.
@@ -151,8 +127,12 @@ const XSETTINGS_WORDS: u32 = 65_536;
 // number. All three constants are far below that, so the arithmetic is safe in
 // either width. Noted because the first version of this module used
 // `i32::MAX / 4` for every read and justified it on exactly that ground — a real
-// hazard, but not the one that mattered, which is that two of these properties
-// live on windows this process does not control.
+// hazard, but not the one that mattered, which is that **every** property this
+// module reads lives on a window this process does not control: the client list on
+// the root window, the struts on foreign clients, the XSETTINGS blob on the
+// selection owner. (Two earlier comments said "two of these", counting the two
+// they happened to be next to. This module creates no window, so there is no
+// partition under which the number is less than all of them.)
 
 /// The `RandR` version whose `GetScreenResourcesCurrent` this module prefers.
 ///
@@ -480,8 +460,8 @@ fn resolve(
 /// so the caller can pipeline.
 ///
 /// The bound is a parameter rather than a constant because each caller knows a
-/// different one, and the difference matters: two of these properties live on
-/// windows this process does not control.
+/// different one, and the difference matters: every property this module reads
+/// lives on a window this process does not control.
 fn property(
     connection: &RustConnection,
     window: xproto::Window,

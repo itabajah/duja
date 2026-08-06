@@ -635,10 +635,16 @@ mod platform {
     /// caller gets a usable anchor and a flyout lands *somewhere* plausible
     /// instead of not at all.
     ///
-    /// Nothing Duja ships reaches this. The three targets with a tray each have a
-    /// backend above, and this arm exists so the crate still compiles on a
-    /// fourth — a BSD, say, where the X11 module would very nearly work and has
+    /// Nothing Duja ships reaches this. Every target that builds a tray has a
+    /// backend above, and this arm exists so the crate still compiles on one that
+    /// does not — a BSD, say, where the X11 module would very nearly work and has
     /// simply never been built or run.
+    ///
+    /// An earlier version said "the three targets with a tray". Two build one:
+    /// `bin_support::tray` is `cfg(any(windows, target_os = "macos"))`, and Linux
+    /// gets a stub that prints a message and exits 1 until the ksni wave lands.
+    /// Three targets have a *geometry* backend, which is the set this arm is the
+    /// complement of, and conflating the two overstated what ships.
     ///
     /// It is declared [`AnchorUnit::PhysicalPixels`] purely because the scale is a
     /// flat 1.0, so both conversion factors are 1.0 and the choice cannot affect

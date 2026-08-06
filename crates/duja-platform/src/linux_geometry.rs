@@ -5,9 +5,17 @@
 //! Not one line here talks to an X server. The backend runs `QueryPointer`, walks
 //! `RandR`'s CRTCs, reads the EWMH strut properties off every managed window and
 //! fetches the three DPI sources, copies them into the plain structs below, and
-//! hands them to [`anchor_from_x11`] — so every *decision* is unit-tested on
-//! **every** CI lane, and only the reads themselves need an X server. Same shape
-//! and same reason as `mac_geometry`.
+//! hands them to [`anchor_from_x11`] — so every decision *about the geometry* is
+//! unit-tested on **every** CI lane. Same shape and same reason as `mac_geometry`.
+//!
+//! Not every decision, and an earlier version of this sentence claimed otherwise
+//! by saying "only the reads themselves need an X server". The wire half keeps the
+//! rules that are *about* the fetching, and several of them are consequential: the
+//! CRTC filter that drops zero-extent and output-less monitors, the `same_screen`
+//! guard on `QueryPointer`, the `RandR` version comparison, and the compositing
+//! owner check. Each is documented where it is made, and each is in the half no
+//! lane can run — which is precisely why the guards downstream of them are pinned
+//! here rather than trusted.
 //!
 //! # Coordinate space
 //!
@@ -207,6 +215,47 @@ use std::str::FromStr;
 
 use crate::geometry::{AnchorUnit, TrayAnchor, WorkRect, sane_scale};
 
+/// The most a strut property is asked for: thirteen four-byte units, one more
+/// than `_NET_WM_STRUT_PARTIAL` can legitimately hold.
+///
+/// **The extra word is the whole point, and asking for twelve is a live bug.**
+/// `GetProperty` returns `MINIMUM(remaining, 4 * long_length)`, so a property
+/// carrying thirteen `CARDINAL`s answers a twelve-word request with exactly
+/// twelve values and a `bytes_after` nothing here reads â€” and
+/// `<[u32; 12]>::try_from` then *succeeds*, honouring a malformed property that
+/// an unbounded read rejected. Any client on the display could publish thirteen
+/// values and have Duja reserve space a conformant window manager ignores.
+///
+/// Thirteen restores the old behaviour exactly: a conformant property still
+/// returns twelve and is accepted, an over-long one returns thirteen and fails
+/// the conversion, and the cost of the guard is four bytes per window. (The first
+/// version of this constant was twelve, and its doc said the cap "can only
+/// allocate memory nothing will read" â€” true of the memory and false of the
+/// behaviour.)
+pub(crate) const STRUT_WORDS: u32 = 13;
+
+/// The most `_NET_CLIENT_LIST` is asked for: 8192 windows, 32 KB.
+///
+/// A desktop session has tens of managed windows and a busy one has hundreds. The
+/// cap exists because the property lives on the **root window**, which every
+/// client on the display can write: without one, a single hostile or broken
+/// client turns a tray click into a multi-gigabyte allocation, and then into two
+/// `GetProperty` requests *per listed entry*, all queued before the first reply
+/// is read. A list this long is not a session, and truncating it costs at worst
+/// a strut from a window beyond the eight-thousandth.
+pub(crate) const CLIENT_LIST_WORDS: u32 = 8192;
+
+/// The most `_XSETTINGS_SETTINGS` is asked for: 256 KB.
+///
+/// GNOME publishes a few kilobytes. The owner of that selection is another
+/// client, so the same argument as [`CLIENT_LIST_WORDS`] applies â€” and the parser
+/// this feeds is explicitly written for a blob "written by another process". A
+/// blob past this cap is truncated, the parser stops where the bytes stop, and
+/// the scale chain falls through to the `Xft.dpi` resource, which is what it does
+/// for a malformed blob anyway. winit reads the same property in 4 KB chunks with
+/// no ceiling at all; matching that would mean matching its unboundedness.
+pub(crate) const XSETTINGS_WORDS: u32 = 65_536;
+
 /// The largest extent a [`WorkRect`] produced here reports.
 ///
 /// `i32::MAX`, the same ceiling `mac_geometry::MAX_EXTENT` names and the Windows
@@ -358,10 +407,20 @@ impl X11Strut {
     ///
     /// Note that this puts the `_end` fields one past the last row or column,
     /// where the field docs above call both ends inclusive. That is the
-    /// specification's own wording rather than a slip, and it cannot matter: the
-    /// extra row is `screen.height`, and no monitor's rows begin there. Widening
-    /// to `height - 1` instead would be equally correct and would stop agreeing
-    /// with the sentence it is quoting.
+    /// specification's own wording rather than a slip, and it is followed to the
+    /// letter because **it is observable**.
+    ///
+    /// Two earlier versions of this paragraph said the opposite — "it cannot
+    /// matter: the extra row is `screen.height`, and no monitor's rows begin
+    /// there", and "widening to `height - 1` instead would be equally correct".
+    /// Both are false on an input this module documents elsewhere as reachable: a
+    /// monitor whose rows begin *at or past* a stale screen's height, which is what
+    /// [`work_area`]'s own doc describes and what its fixtures exercise. On a
+    /// `1000x500` screen with a monitor at `y = 500`, a legacy left strut widens to
+    /// `left_end_y = 500`, `band_meets(0, 500, (500, 1580))` is true, and the edge
+    /// is reserved; with `height - 1` it is `499 >= 500`, false, and it is not. The
+    /// two widenings differ on exactly the monitor the old sentence said could not
+    /// exist.
     ///
     /// A caller that has both properties prefers the partial one — EWMH says the
     /// window manager MUST ignore `_NET_WM_STRUT` when `_NET_WM_STRUT_PARTIAL` is
@@ -734,26 +793,34 @@ pub(crate) fn anchor_from_x11(
 /// which falls back whenever the partial form produced no strut at all. On GNOME,
 /// obeying the letter of the rule is what would disagree with the shell.
 ///
-/// This lived in the X11 backend until a review pointed out that it is the one
+/// This lived in the X11 backend until a review pointed out that it is a
 /// consequential rule in that module which is a pure function of its inputs — and
 /// that the module's own opening sentence claims nothing there subtracts a strut.
-/// Here it is tested on every CI lane, over the whole product of what the two
-/// properties can be: each of them absent, well formed and reserving, well formed
-/// and all zero, too short, or too long. The test walks that grid in full.
+/// (It is not *the* one: `monitors`' zero-extent CRTC filter is another, as three
+/// passages in this file say and as the sentence that used to stand here did not.)
 ///
-/// **There is deliberately no number in that sentence.** This paragraph has been
-/// wrong five times, in five directions, and the count is what keeps going wrong:
-/// "four cases" while the legacy-only shape was missing; "every shape a window can
+/// It is now tested on every CI lane over the product of the two properties'
+/// possible shapes. **What those shapes are is defined by the `partials` and
+/// `legacies` arrays in `the_partial_strut_wins_unless_it_reserves_nothing`, and
+/// deliberately not restated here.**
+///
+/// That is the sixth version of this paragraph. The five before it were each
+/// wrong in a new direction and the count was always the thing that broke: "four
+/// cases" while the legacy-only shape was missing; "every shape a window can
 /// present" while the partial-only one was; "twenty cells" for a grid whose legacy
 /// axis was short an all-zero row; "twenty" again after that row was added; and
-/// then "five values on each axis, and the test walks all twenty-five" over a
-/// sentence claiming in its next breath to be *derived* from the two arrays rather
-/// than restated. It was two hand-written numerals. Growing either array leaves
-/// the suite green and the prose silently wrong, because the arrays' fixed-length
-/// types guard only against shrinking.
+/// "five values on each axis, and the test walks all twenty-five" in a sentence
+/// claiming, one breath later, to be derived from the arrays rather than restated.
 ///
-/// A count that no code produces cannot be kept true by being careful. Naming the
-/// kinds and omitting the arithmetic is the version that has nothing to rot.
+/// The fifth attempt's *diagnosis* was wrong too, which is why this one points at
+/// the arrays instead of describing them. It said growing an array "leaves the
+/// suite green because the fixed-length types guard only against shrinking";
+/// growing is `error[E0308]` exactly as shrinking is. The real hazard is that
+/// `[PartialCase<'_>; 5]`'s `5` is itself a hand-written numeral — the compiler
+/// makes you edit it in lockstep with the rows, and at that moment any prose
+/// counting those rows is stale with nothing to catch it. A pointer cannot rot
+/// that way; a description of the arrays' contents can, and a count of them
+/// certainly does.
 pub(crate) fn choose_strut(
     partial: Option<&[u32]>,
     legacy: Option<&[u32]>,
@@ -1089,10 +1156,17 @@ mod tests {
         // CRTC it was on. Returning the first monitor unconditionally would put
         // the flyout on the wrong screen whenever the tray is on the second one.
         let monitors = [monitor(0, 0, 1920, 1080), monitor(1920, 1080, 1920, 1080)];
+        // (4000, 2500), not (3800, 2000). The old probe was *inside* monitor 1 —
+        // 40 px within its right edge and 160 within its bottom — so it returned
+        // through the containment fast path and never reached the nearest-search
+        // this test is named for, while its own message called it "far past the
+        // second monitor's bottom-right". A probe that a test's message places
+        // outside the rectangle it is inside makes the test a duplicate of
+        // `the_cursor_picks_the_monitor_it_is_inside`.
         assert_eq!(
-            monitor_for_cursor((3800, 2000), &monitors),
+            monitor_for_cursor((4000, 2500), &monitors),
             Some(1),
-            "far past the second monitor's bottom-right"
+            "past the second monitor's bottom-right corner, and nearer to it"
         );
         assert_eq!(
             monitor_for_cursor((-500, -500), &monitors),
@@ -1123,7 +1197,10 @@ mod tests {
         let monitors = [monitor(0, 0, 100, 100), monitor(201, 0, 100, 100)];
         let picked = monitor_for_cursor((150, 50), &monitors);
         assert_eq!(picked, Some(0));
-        assert_eq!(picked, monitor_for_cursor((150, 50), &monitors));
+        // No second call with the same arguments here. One used to sit at this
+        // line asserting that a pure function agrees with itself, which no
+        // mutation can redden; what makes the choice stable is the strict `<`,
+        // pinned by the tie above and the two probes below.
         // One pixel either way still goes to the nearer monitor, which is what
         // makes the case above a genuine tie rather than a left-hand bias.
         assert_eq!(monitor_for_cursor((149, 50), &monitors), Some(0));
@@ -1426,10 +1503,17 @@ mod tests {
         );
 
         // And the third of `band_meets`' clauses. A band lying entirely *before*
-        // the monitor's span is rejected by `end >= low`; every other fixture in
-        // this file rejects by `start < high` instead, so deleting that clause
-        // survived. This bottom panel's columns end at 1919 and the monitor starts
-        // at 1920.
+        // the monitor's span is rejected by `end >= low` rather than by
+        // `start < high`. This bottom panel's columns end at 1919 and the monitor
+        // starts at 1920.
+        //
+        // An earlier version of this comment claimed every other fixture in the
+        // file rejects by `start < high`, "so deleting that clause survived". It
+        // did not: the `left_panel` block twelve lines above rejects by this same
+        // clause (columns ending at 1919 against a monitor starting at 1920), and
+        // both blocks arrived in the same commit — so the mutation the sentence
+        // described was never green on the file as shipped. The case below is
+        // still worth its lines; the claim about what it uniquely covers was not.
         let early_panel = bottom_panel(40, 0, 1919);
         assert_eq!(
             work_area(right, screen(3840, 1080), &[early_panel]),
@@ -1558,8 +1642,15 @@ mod tests {
         //
         // This is the behaviour the module docs single out as the chosen cost — "a
         // band touching one column of a monitor reserves that monitor's whole
-        // edge" — and every other fixture in this file either spans a monitor's
-        // full height or misses it by hundreds of pixels.
+        // edge".
+        //
+        // An earlier version added "and every other fixture in this file either
+        // spans a monitor's full height or misses it by hundreds of pixels". At
+        // least five miss by exactly one — `lower_dock`, `left_panel`,
+        // `early_panel`, the 1919/1920 bottom panels, and the `sliver` — and a
+        // mutation census confirms three of `work_area`'s four band endpoints are
+        // already killed by those. What this block adds is the fourth,
+        // `monitor_top`, which none of them reached.
         let stacked = screen(1920, 2160);
         let lower = WorkRect {
             x: 0,
@@ -2954,7 +3045,7 @@ mod tests {
     /// A partial-strut fixture: its name, its bytes, and the strut it wins with —
     /// [`None`] when it does not win, in which case the legacy value decides.
     ///
-    /// The third column was a `bool` for one commit, which made the oracle reach
+    /// The third column was a `bool` for two commits, which made the oracle reach
     /// outside the row for `X11Strut::from_partial(partial)` and hard-code the
     /// fixture that happens to be the only winning one. Correct only because both
     /// outcomes coincide there; a second conformant row with different bytes would
@@ -2962,6 +3053,34 @@ mod tests {
     type PartialCase<'a> = (&'a str, Option<&'a [u32]>, Option<X11Strut>);
     /// A legacy-strut fixture: its name, its bytes, and what it decodes to.
     type LegacyCase<'a> = (&'a str, Option<&'a [u32]>, Option<[u32; 4]>);
+
+    #[test]
+    fn a_strut_request_asks_for_one_word_more_than_a_strut_can_hold() {
+        // `STRUT_WORDS` used to live in the X11 backend, which is
+        // `cfg(target_os = "linux")`, so no test on any lane referenced it: setting
+        // it back to twelve — the value whose own doc calls it "a live bug" —
+        // left every lane green. The strut grid below pins what `choose_strut`
+        // does with thirteen values; this pins that thirteen is what arrives.
+        //
+        // `GetProperty` returns `MINIMUM(remaining, 4 * long_length)`, so asking
+        // for exactly twelve makes a thirteen-`CARDINAL` property answer with
+        // twelve, which `<[u32; 12]>::try_from` then accepts — honouring a
+        // malformed property that an unbounded read rejects. One word of headroom
+        // is what turns truncation into a detectable over-length.
+        assert_eq!(
+            super::STRUT_WORDS,
+            12 + 1,
+            "one more than `_NET_WM_STRUT_PARTIAL`'s twelve CARDINALs"
+        );
+        // The other two bounds are caps rather than detectors, so what matters is
+        // only that they are generous enough for a real session. Written as
+        // `const` blocks because that is what they are — a comparison of two
+        // literals, checked when this file compiles rather than when the test
+        // runs, which is the form clippy asks for and the form `geometry.rs`
+        // already uses for its own floor. They fail the build, not the suite.
+        const { assert!(super::CLIENT_LIST_WORDS >= 1024) };
+        const { assert!(super::XSETTINGS_WORDS >= 4096) };
+    }
 
     #[test]
     fn the_partial_strut_wins_unless_it_reserves_nothing() {
@@ -3043,10 +3162,9 @@ mod tests {
         assert_eq!(choose_strut(None, Some(&legacy[..3]), root), None);
 
         // And too *long* is the direction that matters, because it is the only
-        // one an attacker chooses: `STRUT_WORDS` in the X11 backend asks for
-        // thirteen words precisely so an over-long property arrives here as
-        // thirteen values and fails this conversion. Pinning only the short side
-        // would leave that constant defending a check nothing tested.
+        // one an attacker chooses: [`STRUT_WORDS`] asks for thirteen words
+        // precisely so an over-long property arrives here as thirteen values and
+        // fails this conversion.
         let thirteen = [40, 0, 0, 0, 0, 1079, 0, 0, 0, 0, 0, 0, 99];
         assert_eq!(
             choose_strut(Some(&thirteen), Some(&legacy), root),
@@ -3059,32 +3177,44 @@ mod tests {
         // And neither is nothing at all.
         assert_eq!(choose_strut(None, None, root), None);
 
-        // The twelve rows above are the ones worth reading, each with the reason
-        // it exists. They are twelve of the twenty-five cells the grid below walks,
-        // and no attempt is made here to characterise the other thirteen: two
-        // earlier versions of this comment did, and both were wrong — the second
-        // said the omissions were "eight" and all of them a present partial against
-        // a malformed legacy, when adding the all-zero legacy row made them
-        // thirteen, five of those against a *well-formed* legacy, and one of the
-        // five against no partial at all. Round 24's mutation — adding
-        // `.filter(X11Strut::reserves_anything)` to the legacy arm — reddens
-        // *four* of them: every all-zero-legacy cell whose partial does not win.
-        // Only `(conformant, all zero)` survives it, because there the partial
-        // wins before the legacy arm is reached. An earlier version of this
-        // sentence said "that last cell is the one", which named one of four and
-        // used a definite article to do it.
+        // The rows above are the ones worth reading, each with the reason it
+        // exists. They are a subset of the cells the grid below walks, and no
+        // attempt is made here to say how big either set is or to characterise the
+        // difference. Three versions tried. The first said the omissions were
+        // "eight" and all of them a present partial against a malformed legacy; the
+        // second corrected the tally to thirteen and named one omitted cell as "the
+        // one" a mutation reddens, when it reddens four; the third left five live
+        // numerals in this paragraph — twelve, twenty-five, thirteen, five, one —
+        // in the very commit whose message was about deleting such numerals from
+        // the paragraph above.
+        //
+        // Every one of them describes the *contents* of the two arrays at the end
+        // of this test, which is where they can be counted by anyone who needs the
+        // number and where they cannot go stale. The one fact worth keeping is
+        // qualitative: round 24's mutation — adding
+        // `.filter(X11Strut::reserves_anything)` to the legacy arm — reddens every
+        // all-zero-legacy cell whose partial does not win, and no cell that the
+        // readable rows above cover. That is why the grid earns its place.
         //
         // Rather than let the sentence outrun the assertions again, the whole
         // product is walked. The expectation is the rule itself, stated once:
         // a conformant partial wins whatever the legacy is; otherwise a valid
         // legacy wins; otherwise nothing.
-        // The third column of each row is that row's expectation, written out
-        // rather than computed: for a partial, the strut it wins with or `None`;
-        // for a legacy, what it decodes to. The rule is then one line — take the
-        // partial's answer, else the legacy's — and it reads only the row in front
-        // of it. Two earlier versions did not: one keyed on the label "valid",
-        // which cannot tell a well-formed empty legacy from a malformed one, and
-        // one carried a `bool` and reached outside the row for the winner's value.
+        // The third column of each row is that row's expectation: for a partial,
+        // the strut it wins with or `None`; for a legacy, the four words it decodes
+        // to. The rule is then one line — take the partial's answer, else the
+        // legacy's — and it reads only the row in front of it. Two earlier versions
+        // did not: one keyed on the label "valid", which cannot tell a well-formed
+        // empty legacy from a malformed one, and one carried a `bool` and reached
+        // outside the row for the winner's value.
+        //
+        // The two columns are not equally independent, and an earlier version of
+        // this comment called both "written out rather than computed". The legacy
+        // column is raw wire words that the loop decodes; the conformant partial's
+        // column calls `X11Strut::from_partial`, the implementation's own
+        // constructor. So this grid pins the *precedence* rule rather than
+        // `from_partial`'s field mapping, which is pinned separately by
+        // `the_partial_field_order_matches_the_property`.
         let zero_legacy = [0_u32; 4];
         let partials: [PartialCase<'_>; 5] = [
             ("absent", None, None),
@@ -3122,14 +3252,15 @@ mod tests {
                 );
             }
         }
-        // No `assert_eq!(cells, 25)` here. The first version of this loop counted
-        // its iterations and asserted the total, presented as the check that made
-        // the comment's cell count verified rather than claimed. It is a
-        // compile-time tautology: the two arrays have fixed-length types, the body
-        // is unconditional, so the count is 25 on every possible execution and
-        // shrinking an array is a compiler error rather than a test failure. The
-        // grid's size is checked by the type system; what this loop checks is the
-        // rule.
+        // No `assert_eq!(cells, …)` here. An earlier version counted its
+        // iterations and asserted the total, presented as the check that made the
+        // comment's cell count verified rather than claimed. It is a compile-time
+        // tautology: the two arrays have fixed-length types and the body is
+        // unconditional, so the product is fixed on every possible execution and
+        // changing an array's length in *either* direction is a compiler error
+        // rather than a test failure. (An earlier note said only shrinking was.)
+        // The grid's size is settled by the type system; what this loop checks is
+        // the rule.
     }
 
     // -- which windowing system --------------------------------------------
