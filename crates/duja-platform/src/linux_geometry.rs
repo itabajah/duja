@@ -110,8 +110,10 @@ pub(crate) struct X11Monitor {
     /// `0` when `RandR` would not say.
     ///
     /// Read only by [`randr_scale`], the last resort of the scale chain. Zero is
-    /// common enough to be the reason that function has a guard rather than a
-    /// division: a virtual output, a projector and a KVM all report it.
+    /// a real answer rather than a hypothetical one — winit guards against it and
+    /// its comment there ("`XRandR` reported that the display's 0mm in size,
+    /// which is certifiably insane") cites the xpra bug that prompted it — which
+    /// is why that function opens with a guard instead of a division.
     pub(crate) mm_width: u32,
     /// Physical height in millimetres, with the same caveats as
     /// [`mm_width`](Self::mm_width).

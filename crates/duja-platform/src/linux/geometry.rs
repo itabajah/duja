@@ -73,9 +73,14 @@ const WHOLE_PROPERTY: u32 = i32::MAX.unsigned_abs() / 4;
 /// The `RandR` version whose `GetScreenResourcesCurrent` this module prefers.
 ///
 /// 1.3 introduced it, and the difference from `GetScreenResources` is not
-/// cosmetic: the older request re-polls every output's connection state, which
-/// takes tens of milliseconds per connected display on some drivers. A server
-/// older than 1.3 falls back to it, because a slow anchor beats no anchor.
+/// cosmetic. The protocol spells it out both ways: the older request "explicitly
+/// asks the server to ensure that the configuration data is up-to-date wrt the
+/// hardware — if that requires polling, this is when such polling would take
+/// place", where the newer one "merely returns the current configuration, and
+/// does not poll for hardware changes". How long that poll takes is the driver's
+/// business, which is the point — this path runs on a tray click and has nothing
+/// to gain from re-probing every connector. A server older than 1.3 falls back to
+/// the polling request, because a slow anchor beats no anchor.
 const CURRENT_RESOURCES_SINCE: (u32, u32) = (1, 3);
 
 /// The anchor for this X11 session, or [`None`] if the server would not answer.
