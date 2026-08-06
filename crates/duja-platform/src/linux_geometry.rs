@@ -318,10 +318,11 @@ impl X11Strut {
     /// `meta_window_x11_update_struts` does `if (thickness == 0) continue;`
     /// before it looks at the corresponding `_start`/`_end` pair.
     ///
-    /// The X11 backend uses this to decide whether an all-zero
+    /// [`choose_strut`] uses this to decide whether an all-zero
     /// `_NET_WM_STRUT_PARTIAL` should let the legacy `_NET_WM_STRUT` through;
     /// [`work_area`] does not need it, since a zero depth moves no edge there
-    /// either.
+    /// either. (The caller was the X11 backend until that rule moved here, which
+    /// is also why this can now be a link.)
     pub(crate) const fn reserves_anything(&self) -> bool {
         self.left > 0 || self.right > 0 || self.top > 0 || self.bottom > 0
     }
@@ -342,12 +343,11 @@ impl X11Strut {
     /// A caller that has both properties prefers the partial one — EWMH says the
     /// window manager MUST ignore `_NET_WM_STRUT` when `_NET_WM_STRUT_PARTIAL` is
     /// present — **except when the partial one reserves nothing**, which is where
-    /// the X11 backend follows Mutter instead of the letter of the rule. Mutter
+    /// [`choose_strut`] follows Mutter instead of the letter of the rule. Mutter
     /// falls back to the legacy property whenever the partial one produced no
     /// strut at all, so on GNOME, obeying the MUST is precisely what would
-    /// disagree with the shell about where a window fits. `struts` documents the
-    /// trade; this paragraph stated the rule unconditionally for one commit after
-    /// that fallback landed.
+    /// disagree with the shell about where a window fits. [`choose_strut`]
+    /// documents the trade and its tests pin all four cases.
     pub(crate) const fn from_legacy(values: [u32; 4], screen: X11Screen) -> Self {
         let [left, right, top, bottom] = values;
         X11Strut {
@@ -518,22 +518,42 @@ fn randr_scale(monitor: &X11Monitor) -> f64 {
 ///
 /// [`None`] only for an empty list, which means `RandR` reported no enabled CRTC.
 ///
-/// # The containment check is a fast path, not a second rule
+/// # The containment check looks redundant and is not
 ///
-/// [`distance_squared`] is zero for exactly the points [`contains`] accepts — it
-/// measures to the last *pixel* rather than to the exclusive edge, which is what
-/// makes the two coincide — so deleting the early return changes no answer.
-/// `containment_and_a_zero_distance_are_the_same_predicate` pins that, and a
-/// mutation run confirms the redundancy directly: removing the early return is
-/// the one mutation of this function the suite does **not** redden, which is the
-/// evidence rather than an embarrassment.
+/// [`distance_squared`] is zero for exactly the points [`contains`] accepts —
+/// it measures to the last *pixel* rather than to the exclusive edge — **as long
+/// as both extents are at least one**. On a zero-extent rectangle they part
+/// company: `contains` accepts nothing, while the distance is zero at the
+/// origin, because the guard that stops `Ord::clamp` panicking on inverted
+/// bounds pulls the last pixel back to the first.
 ///
-/// The consequence is asymmetric and is the reason to say this out loud. An edge
-/// that is too *narrow* is silently absorbed — the fallback finds the same
-/// monitor at distance zero — so only an edge that is too *wide* changes an
-/// answer, by claiming a pixel column that belongs to the neighbour. That is the
-/// direction `the_shared_column_between_two_monitors_belongs_to_the_right_hand_one`
-/// tests from.
+/// That is enough to make the early return load-bearing. Put a zero-extent CRTC
+/// ahead of a monitor that really contains the cursor, and without the fast path
+/// the degenerate one records distance zero first — after which `distance < best`
+/// (ties to the earlier monitor) will not let the real one displace it. The
+/// answer is a monitor the cursor is nowhere near.
+///
+/// **Three earlier versions of this paragraph said the opposite**, and cited the
+/// surviving mutation as proof: "removing the early return is the one mutation of
+/// this function the suite does not redden, which is the evidence rather than an
+/// embarrassment". It was the embarrassment. The counterexample was created by
+/// this module's own suite, twenty lines away, when
+/// `a_zero_extent_monitor_does_not_panic_the_nearest_search` first constructed a
+/// zero-extent rectangle — a mutation surviving is a question, and answering it
+/// with "therefore the code is redundant" is the same move as trusting a green
+/// test.
+///
+/// Reachable only through a zero-extent CRTC, which `linux::geometry::monitors`
+/// filters out — in the half no CI lane compiles, which is exactly the argument
+/// [`distance_squared`]'s own guard is documented under.
+///
+/// One asymmetry is worth keeping from those earlier versions, because it is
+/// still true: an edge that is too *narrow* is absorbed by the fallback on
+/// non-degenerate input, so among the ordinary mistakes only a too-*wide* edge
+/// changes an answer — by claiming a pixel column that belongs to the neighbour.
+/// That is the direction
+/// `the_shared_column_between_two_monitors_belongs_to_the_right_hand_one` tests
+/// from.
 pub(crate) fn monitor_for_cursor(cursor: (i32, i32), monitors: &[X11Monitor]) -> Option<usize> {
     let mut nearest: Option<(usize, i64)> = None;
     for (index, monitor) in monitors.iter().enumerate() {
@@ -988,18 +1008,17 @@ mod tests {
     }
 
     #[test]
-    fn containment_and_a_zero_distance_are_the_same_predicate() {
-        // The fast path in `monitor_for_cursor` returns early on containment,
-        // and the fallback picks the first strictly-nearest monitor. Those agree
-        // only because "inside" and "distance zero" describe the same set of
-        // points — `distance_squared` clamps to the last pixel, not to the
-        // exclusive edge, which is what makes them coincide.
+    fn containment_and_a_zero_distance_agree_on_every_real_rectangle() {
+        // The fast path in `monitor_for_cursor` returns early on containment, and
+        // the fallback picks the first strictly-nearest monitor. Those agree
+        // because "inside" and "distance zero" describe the same set of points —
+        // `distance_squared` clamps to the last pixel, not to the exclusive edge.
         //
-        // Worth pinning because the consequence is asymmetric, and a reader
-        // could otherwise take the fast path for the whole rule: an edge that is
-        // too *narrow* is silently rescued by the fallback, so only an edge that
-        // is too *wide* changes an answer. That is why the test above pins the
-        // shared column from the over-inclusive side.
+        // "Real" is the load-bearing word, and the next test is why: on a
+        // zero-extent rectangle the two disagree, so this one asserts the
+        // equivalence over rectangles a CRTC can actually have. An earlier version
+        // was named for a universal equivalence and had a fixture set that
+        // excluded the only counterexample.
         let rects = [
             WorkRect {
                 x: 0,
@@ -1043,6 +1062,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn an_empty_rectangle_is_the_one_place_the_two_predicates_disagree() {
+        // And the reason `monitor_for_cursor`'s early return is not redundant.
+        // `contains` accepts nothing from a zero-extent rectangle; the distance is
+        // zero at its origin, because `distance_squared`'s clamp guard pulls the
+        // last pixel back to the first rather than panicking on inverted bounds.
+        let empty = WorkRect {
+            x: 7,
+            y: 3,
+            w: 0,
+            h: 0,
+        };
+        assert!(!super::contains(empty, (7, 3)));
+        assert_eq!(super::distance_squared(empty, (7, 3)), 0);
+    }
+
+    #[test]
+    fn a_degenerate_crtc_cannot_capture_a_cursor_that_is_inside_another() {
+        // What that disagreement costs if the fast path goes. Listed first, the
+        // zero-extent rectangle records distance zero, and `distance < best` ties
+        // to the earlier monitor — so the fallback alone would answer with a
+        // monitor the cursor is nowhere near, while the cursor sits squarely
+        // inside the second one.
+        //
+        // Unreachable while `linux::geometry::monitors` filters zero extents, in
+        // the half no CI lane compiles. That is the same footing the guard in
+        // `distance_squared` stands on, and the reason both are pinned here.
+        let monitors = [monitor(10, 10, 0, 0), monitor(0, 0, 1920, 1080)];
+        assert_eq!(monitor_for_cursor((10, 10), &monitors), Some(1));
     }
 
     #[test]
@@ -2109,7 +2159,7 @@ mod tests {
 
     #[test]
     fn only_a_depth_makes_a_strut_a_strut() {
-        // What the X11 backend uses to decide whether an all-zero
+        // What `choose_strut` uses to decide whether an all-zero
         // `_NET_WM_STRUT_PARTIAL` lets the legacy property through. Ranges alone
         // must not count: a window that publishes twelve values of which only the
         // `_start`/`_end` pairs are set has reserved nothing, and treating it as a
@@ -2645,6 +2695,21 @@ mod tests {
         assert_eq!(choose_strut(Some(&partial[..11]), None, root), None);
         // As is a legacy value of the wrong length.
         assert_eq!(choose_strut(None, Some(&legacy[..3]), root), None);
+
+        // And too *long* is the direction that matters, because it is the only
+        // one an attacker chooses: `STRUT_WORDS` in the X11 backend asks for
+        // thirteen words precisely so an over-long property arrives here as
+        // thirteen values and fails this conversion. Pinning only the short side
+        // would leave that constant defending a check nothing tested.
+        let thirteen = [40, 0, 0, 0, 0, 1079, 0, 0, 0, 0, 0, 0, 99];
+        assert_eq!(
+            choose_strut(Some(&thirteen), Some(&legacy), root),
+            Some(X11Strut::from_legacy(legacy, root)),
+            "thirteen values are not a partial strut"
+        );
+        assert_eq!(choose_strut(Some(&thirteen), None, root), None);
+        let five = [0, 0, 60, 0, 99];
+        assert_eq!(choose_strut(None, Some(&five), root), None);
         // And neither is nothing at all.
         assert_eq!(choose_strut(None, None, root), None);
     }
