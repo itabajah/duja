@@ -369,6 +369,23 @@ fn randr_scale(monitor: &X11Monitor) -> f64 {
 /// flyout on a screen rather than at the fallback rectangle.
 ///
 /// [`None`] only for an empty list, which means `RandR` reported no enabled CRTC.
+///
+/// # The containment check is a fast path, not a second rule
+///
+/// [`distance_squared`] is zero for exactly the points [`contains`] accepts — it
+/// measures to the last *pixel* rather than to the exclusive edge, which is what
+/// makes the two coincide — so deleting the early return changes no answer.
+/// `containment_and_a_zero_distance_are_the_same_predicate` pins that, and a
+/// mutation run confirms the redundancy directly: removing the early return is
+/// the one mutation of this function the suite does **not** redden, which is the
+/// evidence rather than an embarrassment.
+///
+/// The consequence is asymmetric and is the reason to say this out loud. An edge
+/// that is too *narrow* is silently absorbed — the fallback finds the same
+/// monitor at distance zero — so only an edge that is too *wide* changes an
+/// answer, by claiming a pixel column that belongs to the neighbour. That is the
+/// direction `the_shared_column_between_two_monitors_belongs_to_the_right_hand_one`
+/// tests from.
 pub(crate) fn monitor_for_cursor(cursor: (i32, i32), monitors: &[X11Monitor]) -> Option<usize> {
     let mut nearest: Option<(usize, i64)> = None;
     for (index, monitor) in monitors.iter().enumerate() {
