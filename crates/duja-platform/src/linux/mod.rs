@@ -1,5 +1,11 @@
-//! The Linux event pump: kernel uevents for display hot-plug, logind for
-//! suspend and resume.
+//! What only compiles on Linux: the event pump, and the X11 reads behind the tray
+//! anchor.
+//!
+//! The pump is what the rest of these docs are about — kernel uevents for display
+//! hot-plug, logind for suspend and resume. [`geometry`] is a lodger, here for the
+//! `cfg` rather than for any kinship with it; its own module docs stand alone.
+//! (This summary said "The Linux event pump" for one commit after that submodule
+//! landed, which is the sentence rustdoc puts in the parent's item list.)
 //!
 //! Two sources rather than one, and deliberately not two D-Bus sources.
 //! Hot-plug comes from the kernel's `NETLINK_KOBJECT_UEVENT` socket, which works
@@ -37,8 +43,13 @@
 
 // The X11 reads behind `crate::geometry`'s Linux backend. Not part of the event
 // pump this module is otherwise about; it lives here because this is where the
-// crate keeps code that only compiles on Linux, and its decisions live in the
-// pure `crate::linux_geometry` beside the pump's own `crate::linux_events`.
+// crate keeps code that only compiles on Linux, and the *geometry* it feeds is
+// decided in the pure `crate::linux_geometry`, beside the pump's own
+// `crate::linux_events`.
+//
+// "The geometry", not "its decisions": a handful of rules about the fetching
+// itself do live in that module, and it names them. This comment said otherwise
+// for the nine review rounds in which nobody opened this file.
 pub(crate) mod geometry;
 mod sleep;
 mod uevent;
