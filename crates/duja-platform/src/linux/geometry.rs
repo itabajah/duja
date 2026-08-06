@@ -12,17 +12,20 @@
 //! Each such rule is documented where it is made, because between them they are
 //! the code in this crate with the least test coverage and the most bug history.
 //!
-//! Neither a count nor a list is given here, and that is the third attempt at this
-//! paragraph rather than laziness. The first said "no decisions" and the second
-//! named three as though that were all of them; both were contradicted by this
-//! same file a paragraph later, because a summary of rules is a second copy of
-//! each — in the one place nothing checks it against the code. The rules live in
-//! [`cursor_anchor`], [`monitors`], [`crtcs`], [`struts`], [`intern`] and on
-//! [`STRUT_WORDS`], [`CLIENT_LIST_WORDS`] and [`XSETTINGS_WORDS`]; read them
-//! there. (This list has now named two items that no longer existed — `atom`,
-//! split into [`intern`] and [`resolve`], and `WHOLE_PROPERTY`, split into the
-//! three bounds above. Both times rustdoc refused the link, which is why the
-//! list is links rather than prose.)
+//! No summary of those rules is given here, and that is the fourth attempt at
+//! this paragraph rather than laziness. The first said "no decisions"; the second
+//! named three as though that were all of them; the third said it gave neither a
+//! count nor a list and then gave a list, which was also incomplete. Each was
+//! contradicted by this same file a paragraph later, because a summary of rules
+//! is a second copy of each — in the one place nothing checks it against the
+//! code.
+//!
+//! So: **every item in this module carries its own**, and the way to find them is
+//! to read the module, not this paragraph. (Two earlier versions of the list
+//! named items that no longer existed — `atom`, since split into [`intern`] and
+//! [`resolve`], and `WHOLE_PROPERTY`, since split into three bounds. Both times
+//! rustdoc refused the link, which is the argument for links over prose and, in
+//! the end, for neither.)
 //!
 //! # What it reads
 //!
@@ -84,13 +87,24 @@ use crate::geometry::TrayAnchor;
 use crate::linux_geometry::{DpiSources, X11Monitor, X11Screen, X11Strut, anchor_from_x11};
 use crate::linux_xsettings;
 
-/// The most a strut property can legitimately hold, in the four-byte units
-/// `GetProperty` counts in.
+/// The most a strut property is asked for: thirteen four-byte units, one more
+/// than `_NET_WM_STRUT_PARTIAL` can legitimately hold.
 ///
-/// `_NET_WM_STRUT_PARTIAL` is twelve `CARDINAL`s; the reply parser here rejects
-/// anything that is not exactly twelve, so asking for more can only allocate
-/// memory nothing will read.
-const STRUT_WORDS: u32 = 12;
+/// **The extra word is the whole point, and asking for twelve is a live bug.**
+/// `GetProperty` returns `MINIMUM(remaining, 4 * long_length)`, so a property
+/// carrying thirteen `CARDINAL`s answers a twelve-word request with exactly
+/// twelve values and a `bytes_after` nothing here reads — and
+/// `<[u32; 12]>::try_from` then *succeeds*, honouring a malformed property that
+/// an unbounded read rejected. Any client on the display could publish thirteen
+/// values and have Duja reserve space a conformant window manager ignores.
+///
+/// Thirteen restores the old behaviour exactly: a conformant property still
+/// returns twelve and is accepted, an over-long one returns thirteen and fails
+/// the conversion, and the cost of the guard is four bytes per window. (The first
+/// version of this constant was twelve, and its doc said the cap "can only
+/// allocate memory nothing will read" — true of the memory and false of the
+/// behaviour.)
+const STRUT_WORDS: u32 = 13;
 
 /// The most `_NET_CLIENT_LIST` is asked for: 8192 windows, 32 KB.
 ///

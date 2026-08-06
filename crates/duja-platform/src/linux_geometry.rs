@@ -1236,6 +1236,32 @@ mod tests {
             work_area(bounds, screen(1920, 1080), &[left, top]),
             expected
         );
+
+        // The same trap on the other axis, which is a separate line and was
+        // separately unpinned: a *narrow* top panel, whose columns a left dock
+        // would push the running left edge past. Testing the column span against
+        // the running value instead of the monitor makes the answer depend on
+        // which of the two was listed first.
+        let narrow_top = X11Strut {
+            top: 30,
+            top_start_x: 0,
+            top_end_x: 40,
+            ..X11Strut::default()
+        };
+        let both = WorkRect {
+            x: 60,
+            y: 30,
+            w: 1860,
+            h: 1050,
+        };
+        assert_eq!(
+            work_area(bounds, screen(1920, 1080), &[left, narrow_top]),
+            both
+        );
+        assert_eq!(
+            work_area(bounds, screen(1920, 1080), &[narrow_top, left]),
+            both
+        );
     }
 
     #[test]
@@ -1248,12 +1274,38 @@ mod tests {
             w: 1920,
             h: 1080,
         };
+        // Deepest first, so "the deepest wins" and "the last one wins" stop
+        // agreeing — listed 40-then-60 they give the same answer, which is what
+        // let a plain assignment survive here.
         let work = work_area(
+            bounds,
+            screen(1920, 1080),
+            &[bottom_panel(60, 0, 1919), bottom_panel(40, 0, 1919)],
+        );
+        assert_eq!(work.h, 1020, "1080 - 60, not 1080 - 40 and not 1080 - 100");
+        let other_order = work_area(
             bounds,
             screen(1920, 1080),
             &[bottom_panel(40, 0, 1919), bottom_panel(60, 0, 1919)],
         );
-        assert_eq!(work.h, 1020, "1080 - 60, not 1080 - 100");
+        assert_eq!(other_order, work, "and the order does not matter");
+
+        // The bottom edge is a `min` against the monitor as well as the screen,
+        // and nothing exercised the monitor half: a panel at the bottom of a
+        // *taller* screen must not pull the upper monitor's edge down past its
+        // own. Under a plain assignment this reports a rectangle 920px taller
+        // than the monitor, reaching onto the screen below it.
+        let upper = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        assert_eq!(
+            work_area(upper, screen(1920, 2160), &[bottom_panel(160, 0, 1919)]),
+            upper,
+            "a monitor cannot grow past its own bottom edge"
+        );
     }
 
     #[test]
@@ -1810,6 +1862,32 @@ mod tests {
             },
             "left and right bands must span the whole screen height"
         );
+        // A portrait root, which is what separates widening the left and right
+        // bands to the screen's *height* from widening them to its *width*. On
+        // the landscape roots above the two are indistinguishable, because the
+        // monitor's first row is below both.
+        let portrait = screen(1080, 3840);
+        let lower_portrait = WorkRect {
+            x: 0,
+            y: 1920,
+            w: 1080,
+            h: 1920,
+        };
+        assert_eq!(
+            work_area(
+                lower_portrait,
+                portrait,
+                &[X11Strut::from_legacy([60, 80, 0, 0], portrait)]
+            ),
+            WorkRect {
+                x: 60,
+                y: 1920,
+                w: 940,
+                h: 1920
+            },
+            "the left and right bands span the screen's height"
+        );
+
         // And the top band, on a monitor whose columns start past zero.
         let right_of_origin = WorkRect {
             x: 1920,
@@ -2086,6 +2164,25 @@ mod tests {
             };
             approx(scale_factor(&NO_DPI, &odd), 1.0);
         }
+    }
+
+    #[test]
+    fn the_measurement_ceiling_is_inclusive_the_way_winits_is() {
+        // winit's escape hatch is `if dpi_factor <= 20.` and this mirrors it, so
+        // the boundary is part of the mirror. A factor of exactly 20.0 is
+        // reachable — 3840x2160 reported as 3x482 mm quantises to it precisely —
+        // and `<` instead of `<=` there discards a measurement winit keeps.
+        let exactly_twenty = X11Monitor {
+            bounds: WorkRect {
+                x: 0,
+                y: 0,
+                w: 3840,
+                h: 2160,
+            },
+            mm_width: 3,
+            mm_height: 482,
+        };
+        approx(scale_factor(&NO_DPI, &exactly_twenty), 20.0);
     }
 
     #[test]
