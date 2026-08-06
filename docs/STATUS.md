@@ -1819,11 +1819,35 @@ session** starts. `open_url` uses `xdg-open` rather than the portal's `OpenURI`,
 which wants a parent-window handle Slint cannot produce under Wayland. Dark mode
 comes from the portal's `color-scheme`, the one cross-desktop key.
 
-Two Linux gaps stay open on purpose and are in `debt.md`: `SessionUnlocked` has no
-honest source (logind's `Lock`/`Unlock` are requests, not state), and
-`cursor_anchor` is still the placeholder, because answering it needs the
-display-server connection wave 4 builds — and on Wayland there is no global cursor
-position at all, so it is not a port of the Windows path.
+`SessionUnlocked` has no honest source (logind's `Lock`/`Unlock` are requests, not
+state) and stays in `debt.md`.
+
+`cursor_anchor` was the second gap and is now half closed. **X11 has a real
+backend** (wave 4b-5): `QueryPointer` for the cursor, RandR's CRTC list for the
+display under it, and the EWMH struts for that display's work area. Three things
+about it are worth knowing before touching it.
+
+The work area comes from struts rather than from `_NET_WORKAREA`, which EWMH
+defines as one rectangle **per desktop** — on two monitors a panel on either
+shrinks the single global rectangle and the other monitor inherits a gap it does
+not have. Struts are in root-window coordinates and explicitly not relative to a
+Xinerama monitor, so a 40px panel along the bottom of a short monitor beside a
+taller one reserves 160, and the taller monitor must keep its full height.
+
+The scale factor is a deliberate **mirror of winit 0.30's chain** — the
+`WINIT_X11_SCALE_FACTOR` override, then XSETTINGS `Xft/DPI`, then the `Xft.dpi` X
+resource, then a measurement from the display's pixels and millimetres quantised
+to twelfths. It has to be winit's number rather than a defensible one, because
+the consumer multiplies a logical size by it to get the box it clamps into the
+work area. A mirror has a cost and `debt.md` carries it.
+
+**Wayland is not a port of any of that, and cannot be.** There is no global cursor
+position for a client to ask for, a client cannot position its own toplevel at all
+(`set_outer_position` is a no-op on winit's Wayland backend), and a layer-shell
+panel's exclusive zone is known only to the compositor. The Wayland answer is a
+different mechanism — the screen coordinates the tray host passes to
+`StatusNotifierItem.Activate(x, y)`, feeding a compositor-side positioner — which
+is ADR-0010's seam and arrives with ksni.
 
 ## Notes & gotchas for whoever continues
 
