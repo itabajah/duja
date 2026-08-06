@@ -265,9 +265,12 @@ with the phases; keep entries as observable behaviors, not implementation.
            wrongly sized *clamp box*, so it shows up as a flyout overhanging the panel
            or the screen edge rather than as an obviously wrong window. `docs/debt.md`
            carries the pin. -->
-- [ ] **Flyout placement on Wayland is the compositor's, and that is expected.** The
-      flyout will not open under the tray icon. A Wayland client cannot ask where the
-      pointer is and cannot position its own toplevel, so this is not a bug to file
-      until the ksni wave feeds `Activate(x, y)` into a compositor-side positioner.
-      What *must* hold today: the flyout opens, is fully on screen, and is the right
-      size.
+- [ ] **Flyout placement on Wayland is the compositor's, and that is expected.**
+      *Blocked on the same thing as the two rows above, and for a stronger reason:
+      there is no flyout on Linux at all yet - `run_tray` is a stub that prints
+      "the tray application is not available on this platform in this build" and
+      exits 1.* When the tray lands: the flyout will not open under the tray icon,
+      and that is not a bug to file. A Wayland client cannot ask where the pointer
+      is and cannot position its own toplevel, so the anchor has to arrive through
+      `Activate(x, y)` and a compositor-side positioner. What must hold even then:
+      the flyout opens, is fully on screen, and is the right size.

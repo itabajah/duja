@@ -153,7 +153,12 @@ pub(crate) fn cursor_anchor() -> Option<TrayAnchor> {
     let monitors = monitors(&connection, root);
     let struts = struts(&connection, root, screen);
     let xsettings_dpi = xsettings_dpi(&connection, screen_index);
-    // Held in a binding because `get_string` borrows from it.
+    // `new_from_default` rather than the narrower `new_from_resource_manager`,
+    // which would read only the root property and skip the files. winit reads the
+    // files, so a bare `startx` session whose only `Xft.dpi` lives in
+    // `.Xresources` has to be visible here too — the module docs' "A connection
+    // per call" section prices what that costs. Held in a binding because
+    // `get_string` borrows from it.
     let database = resource_manager::new_from_default(&connection).ok();
     let scale_override = std::env::var("WINIT_X11_SCALE_FACTOR").ok();
 

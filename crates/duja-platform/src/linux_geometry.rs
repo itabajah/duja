@@ -127,25 +127,34 @@
 //! edges past every band that meets the monitor at all. What that buys, stated
 //! per axis because the two axes fail independently:
 //!
-//! - **On an axis the struts did not empty, the result's span on that axis
-//!   excludes every *applicable* band reserved from that axis's edges** —
-//!   applicable meaning the band's range on the **other** axis meets the monitor,
-//!   which is what [`band_meets`] decides. `left` is at least every applicable
-//!   left strut's depth and `right` at most every applicable right one's, so no
-//!   applicable left or right reservation reaches into `[left, right)`; likewise
-//!   for the vertical.
+//! Both are scoped to the bands this module **accepts**, which is exactly the
+//! ones [`band_meets`] answers true for, and that scope is not a formality —
+//! see below.
 //!
-//!   The qualifier is load-bearing and was missing from the first draft of this
-//!   bullet, which made it plainly false: a left panel on the lower of two stacked
-//!   monitors reserves `x ∈ [0, 800)` for rows the upper monitor does not have, so
-//!   the upper monitor's span runs `[0, 1920)` and does not exclude it. Nothing is
-//!   wrong there — the band is nowhere near that monitor — which is exactly why
-//!   the one-dimensional claim needs the two-dimensional predicate in it.
-//! - **So when neither axis was emptied, the rectangle overlaps no reservation at
-//!   all**, which is the form placement actually consumes. This one needs no
-//!   qualifier: a non-applicable band misses the monitor on the other axis, and
-//!   the result is always inside the monitor on both axes — including when an axis
-//!   is handed back in full.
+//! - **On an axis the struts did not empty, the result's span on that axis
+//!   excludes every accepted band reserved from that axis's edges.** `left` is at
+//!   least every such left strut's depth and `right` at most every such right
+//!   one's, so no accepted left or right reservation reaches into `[left, right)`;
+//!   likewise for the vertical.
+//! - **So when neither axis was emptied, the rectangle overlaps no accepted
+//!   reservation**, which is the form placement consumes.
+//!
+//! [`band_meets`] rejects a band for two quite different reasons, and only one of
+//! them is harmless:
+//!
+//! - **Its range on the other axis misses the monitor.** Then the band is nowhere
+//!   near this rectangle and there is nothing to exclude. A left panel on the
+//!   lower of two stacked monitors reserves `x ∈ [0, 800)` for rows the upper
+//!   monitor does not have, so that monitor's span stays `[0, 1920)` — and should.
+//! - **Its range is backwards** (`start > end`), which EWMH does not define.
+//!   [`band_meets`] discards it, and its own docs say what that costs: an ignored
+//!   panel is a panel the flyout may sit under. `a_band_whose_end_precedes_its_start_is_ignored`
+//!   is that case, and it is why neither bullet can say "no reservation **at
+//!   all**" — a malformed band can be squarely on the monitor.
+//!
+//! Two drafts of the second bullet did say that, the second one justifying it with
+//! "a non-applicable band misses the monitor on the other axis" — true of the
+//! first rejection reason and not of the second.
 //!
 //! What it costs is that a band touching one column of a monitor reserves that
 //! monitor's whole edge, where Mutter would have kept the full-height rectangle
@@ -548,11 +557,13 @@ pub(crate) fn monitor_for_cursor(cursor: (i32, i32), monitors: &[X11Monitor]) ->
 /// would let one malformed `left` value throw away a perfectly good top panel's
 /// reservation and open the flyout underneath it.
 ///
-/// **This is the one case where the result overlaps a reserved band**, and it is
-/// the exception the module docs' second bullet is stated against — the one that
-/// holds "when neither axis was emptied". (It used to point at a "never overlaps"
-/// property; that phrasing was retracted, and the module docs now quote it only
-/// to say it is false, so the reference outlived its target by one commit.)
+/// **This is one of the two ways the result can overlap a band**, and the only
+/// one that involves a band this module accepted; the other is a band with a
+/// backwards range, which [`band_meets`] discards and which can therefore sit
+/// anywhere. The module docs state both bullets against exactly these two
+/// exceptions. (This paragraph said "the one case" for two commits, and before
+/// that pointed at a "never overlaps" property the module docs now quote only in
+/// order to call it false.)
 /// Giving the axis back is precisely an overlap — the reservation that emptied it
 /// is still there — and it is chosen anyway, for the reason above.
 ///
@@ -1187,14 +1198,24 @@ mod tests {
 
     /// Assert one strut against a computed work area, per the module docs'
     /// guarantee: on an axis that was not handed back in full, the span excludes
-    /// every band reserved from that axis's edges.
+    /// every band **this module accepts** reserved from that axis's edges.
     ///
-    /// Applicability comes from [`super::band_meets`] rather than from a
-    /// hand-written copy of it. That deliberately makes this a check of
-    /// `work_area`'s arithmetic *given* the applicability rule, not of the rule: a
-    /// test that restated the predicate would agree with a wrong one, which is how
-    /// a sibling test in this crate quietly became a copy of the function it was
-    /// checking.
+    /// The qualifier is the same one the module docs carry, and it was missing
+    /// here for two commits after being restored there — a second copy of a claim
+    /// sixty lines from the fixed one.
+    ///
+    /// Acceptance comes from [`super::band_meets`] rather than from a hand-written
+    /// copy of it. That deliberately makes this a check of `work_area`'s
+    /// arithmetic *given* the acceptance rule, not of the rule: a test that
+    /// restated the predicate would agree with a wrong one, which is how a sibling
+    /// test in this crate quietly became a copy of the function it was checking.
+    ///
+    /// The escape below is **broader** than "this axis was not emptied": an axis
+    /// that simply had nothing to subtract also equals the monitor's extent and is
+    /// also skipped. That is a weaker check than the sentence above describes, and
+    /// it is only sound because the skipped case is vacuous — no accepted band on
+    /// an unreduced axis exists in any fixture here. A fixture that broke that
+    /// would silently narrow this test rather than fail it.
     fn assert_respects(work: WorkRect, bounds: WorkRect, root: X11Screen, strut: &X11Strut) {
         let (monitor_left, monitor_top) = (i64::from(bounds.x), i64::from(bounds.y));
         let monitor_right = monitor_left.saturating_add(i64::from(bounds.w));
