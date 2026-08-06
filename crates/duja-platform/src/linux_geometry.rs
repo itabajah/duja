@@ -738,16 +738,17 @@ pub(crate) fn anchor_from_x11(
 /// consequential rule in that module which is a pure function of its inputs — and
 /// that the module's own opening sentence claims nothing there subtracts a strut.
 /// Here it is tested on every CI lane, over the whole product of what the two
-/// properties can be: a partial that is absent, conformant, all zero, too short
-/// or too long, against a legacy that is absent, valid, too short or too long.
+/// properties can be: each of them absent, well formed and reserving, well formed
+/// and all zero, too short, or too long. Five values on each axis, and the test
+/// walks all twenty-five.
 ///
-/// That is twenty cells and the test walks all twenty, which is the third
-/// description this paragraph has carried. It said "four cases" while the
-/// legacy-only shape was missing; the round that added that shape wrote "every
-/// shape a window can present" and left out the partial-only one, which is the
-/// commoner of the two; the round that added *that* named the axes and then
-/// claimed their product without covering it. Walking the product is what makes
-/// the sentence checkable instead of a fourth claim.
+/// This paragraph has been wrong four times, in four directions, and the count is
+/// what keeps going wrong: "four cases" while the legacy-only shape was missing;
+/// "every shape a window can present" while the partial-only one was; "twenty
+/// cells" for a grid whose legacy axis was short an all-zero row; and then
+/// "twenty" again after that row was added. The description above is derived from
+/// the two arrays in the test rather than restated, which is the only version of
+/// this sentence that cannot rot on its own.
 pub(crate) fn choose_strut(
     partial: Option<&[u32]>,
     legacy: Option<&[u32]>,
@@ -875,8 +876,11 @@ fn contains(rect: WorkRect, (x, y): (i32, i32)) -> bool {
 ///   twice `i64::MAX` and wraps to **negative** `8_589_934_591` — which beats every
 ///   real monitor, so the nearest-monitor search returns the rectangle *furthest*
 ///   from the cursor. The sum overflows on a smaller input still: a 1×1 rectangle
-///   probed from `(i32::MIN, i32::MAX)` gives components summing to
-///   `9_223_372_049_739_677_761`, about 13 billion past `i64::MAX`.
+///   at **(7, 3)** probed from `(i32::MIN, i32::MAX)` gives components summing
+///   to `9_223_372_049_739_677_761`, about 13 billion past `i64::MAX`. The origin
+///   is load-bearing and two versions of this sentence said only "a 1×1
+///   rectangle": the same rectangle at the *`(0, 0)`* origin sums to
+///   `9_223_372_032_559_808_513`, which fits with 4.3 billion to spare.
 /// - **The six that cannot.** Computing `right` and `bottom` adds an extent
 ///   (`u32`, so under 2³²) to an origin (`i32`, so under 2³¹) and subtracts one:
 ///   under 2³³ in an `i64`, with no reachable edge. Computing `dx` and `dy`
@@ -1685,12 +1689,18 @@ mod tests {
 
         // The `saturating_add` needs its own case, and the reason is worth stating
         // because the first version of this test did not have one. That addition
-        // already overflows on every run of the suite — a 1x1 rectangle probed
-        // from `(i32::MIN, i32::MAX)` sums to 9_223_372_049_739_677_761, about 13
-        // billion past `i64::MAX` — and `wrapping_add` there survived the whole
-        // file anyway, because nothing asserted the result. A line that executes
-        // is not a guard that is exercised, which is the same confusion this
-        // module has already had to retract about a surviving mutation.
+        // already overflows on every run of the suite — the 1x1 rectangle at
+        // (7, 3), probed from `(i32::MIN, i32::MAX)`, sums to
+        // 9_223_372_049_739_677_761, about 13 billion past `i64::MAX` — and
+        // `wrapping_add` there survived the whole file anyway, because nothing
+        // asserted the result. A line that executes is not a guard that is
+        // exercised, which is the same confusion this module has already had to
+        // retract about a surviving mutation.
+        //
+        // The origin is doing work here and two versions of this comment said only
+        // "a 1x1 rectangle". At (0, 0) the same probe sums to
+        // 9_223_372_032_559_808_513, which fits with 4.3 billion to spare, so the
+        // obvious rectangle to reach for is one that would not have overflowed.
         assert_eq!(
             super::distance_squared(
                 WorkRect {
@@ -2944,12 +2954,11 @@ mod tests {
     #[test]
     fn the_partial_strut_wins_unless_it_reserves_nothing() {
         // The rule that deliberately disobeys EWMH's MUST, over the product of
-        // what each property can be: a partial that is absent, conformant, all
-        // zero, too short or too long, against a legacy that is absent, valid, too
-        // short or too long. It was unreachable from any test until it moved out
-        // of the X11 backend.
+        // what each property can be — five values on each axis, listed in the two
+        // arrays at the end of this test. It was unreachable from any test until it
+        // moved out of the X11 backend.
         //
-        // This comment has been wrong three times, each in a new direction. It said
+        // This comment has been wrong four times, each in a new direction. It said
         // "four shapes" while the legacy-only case was absent; the round that added
         // that case promoted it to "every shape a window can present" and left out
         // the partial-only case, the commoner of the two; the round that added
@@ -3033,13 +3042,17 @@ mod tests {
         assert_eq!(choose_strut(None, None, root), None);
 
         // The twelve rows above are the ones worth reading, each with the reason
-        // it exists. They are also twelve of the twenty cells this test's opening
-        // sentence claims, and every one of the eight it left out pairs a *present*
-        // partial with a *malformed* legacy — because every present-partial row
-        // above carries either a valid legacy or none.
+        // it exists. They are twelve of the twenty-five cells the grid below walks,
+        // and no attempt is made here to characterise the other thirteen: two
+        // earlier versions of this comment did, and both were wrong — the second
+        // said the omissions were "eight" and all of them a present partial against
+        // a malformed legacy, when adding the all-zero legacy row made them
+        // thirteen, five of those against a *well-formed* legacy, and one of the
+        // five against no partial at all. That last cell is the one the round-24
+        // mutation reddens.
         //
-        // Rather than let the sentence outrun the assertions a third time, the
-        // whole product is walked. The expectation is the rule itself, stated once:
+        // Rather than let the sentence outrun the assertions again, the whole
+        // product is walked. The expectation is the rule itself, stated once:
         // a conformant partial wins whatever the legacy is; otherwise a valid
         // legacy wins; otherwise nothing.
         // The third column is the expectation, not a restatement of the code: for
