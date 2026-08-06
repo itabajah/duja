@@ -1839,7 +1839,21 @@ The scale factor is a deliberate **mirror of winit 0.30's chain** — the
 resource, then a measurement from the display's pixels and millimetres quantised
 to twelfths. It has to be winit's number rather than a defensible one, because
 the consumer multiplies a logical size by it to get the box it clamps into the
-work area. A mirror has a cost and `debt.md` carries it.
+work area.
+
+The chain is mirrored faithfully. **Where it is evaluated is not, and that is a
+live divergence rather than a latent one.** Only the chain's last step is
+per-monitor, and there Duja reads the cursor's monitor while winit reads
+`monitors[0]` — not by choice: `x11/window.rs` guesses a new window's monitor from
+`XIQueryPointer`, whose `root_x` is `Fp1616` fixed point, and casts it to `i64`
+without the `>> 16`, so nothing ever contains the pointer and the guess falls
+through to the first enabled CRTC. That guess is a transient winit corrects on the
+first synthetic `ConfigureNotify`, so the cursor's monitor is what it settles on,
+and reproducing the upstream bug to match would be wrong the day it is fixed.
+Reaching the divergence at all needs the chain to get to step 4, which is either
+`WINIT_X11_SCALE_FACTOR=randr` or a session with no XSETTINGS manager and no
+`Xft.dpi`. `debt.md` carries it, with the note to re-read `x11/window.rs` when a
+Slint bump moves winit.
 
 **Wayland is not a port of any of that, and cannot be.** There is no global cursor
 position for a client to ask for, a client cannot position its own toplevel at all
