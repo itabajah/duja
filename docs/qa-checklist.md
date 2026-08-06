@@ -255,9 +255,10 @@ with the phases; keep entries as observable behaviors, not implementation.
         monitor must be untouched. Measuring that strut from the monitor's own right
         edge instead of the screen's is the mistake this catches, and it is invisible
         on the monitor the panel is actually on.
-- [ ] **Flyout size on a HiDPI X11 session.** Set `Xft.dpi: 144` (or let the desktop
-      set it), restart, and compare the flyout against any GTK or Qt dialog: same
-      apparent size. Then check `WINIT_X11_SCALE_FACTOR=2` scales it further, and
+- [ ] **Flyout size on a HiDPI X11 session.** *Blocked on the ksni wave, like the
+      row above and the row below - there is no flyout on Linux until the tray
+      lands.* Set `Xft.dpi: 144` (or let the desktop set it), restart, and compare
+      the flyout against any GTK or Qt dialog: same apparent size. Then check `WINIT_X11_SCALE_FACTOR=2` scales it further, and
       `WINIT_X11_SCALE_FACTOR=randr` falls back to the display measurement.
       <!-- Duja re-implements winit's scale chain rather than asking for it, because the
            anchor has to be computed before the window exists. The failure mode is not a
@@ -266,8 +267,8 @@ with the phases; keep entries as observable behaviors, not implementation.
            or the screen edge rather than as an obviously wrong window. `docs/debt.md`
            carries the pin. -->
 - [ ] **Flyout placement on Wayland is the compositor's, and that is expected.**
-      *Blocked on the same thing as the two rows above, and for a stronger reason:
-      there is no flyout on Linux at all yet - `run_tray` is a stub that prints
+      *Blocked on the same thing as the two rows above: there is no flyout on
+      Linux at all yet - `run_tray` is a stub that prints
       "the tray application is not available on this platform in this build" and
       exits 1.* When the tray lands: the flyout will not open under the tray icon,
       and that is not a bug to file. A Wayland client cannot ask where the pointer

@@ -124,8 +124,9 @@
 //! worth stating rather than claiming parity. Mutter builds a minimal spanning set
 //! over the strut-subtracted region and clips to the best rectangle in it
 //! (`meta_workspace_ensure_work_areas_validated`); this pushes each of the four
-//! edges past every band that meets the monitor at all. What that buys, stated
-//! per axis because the two axes fail independently:
+//! edges past every band that meets the monitor at all. What that buys is two
+//! statements, one per axis and one for the rectangle, because the two axes fail
+//! independently.
 //!
 //! Both are scoped to the bands this module **accepts**: a non-zero depth *and*
 //! [`band_meets`] answering true. The depth half is vacuous — a zero-depth band
@@ -173,6 +174,7 @@
 //! own test suite. [`work_area`] documents why the exception is chosen: an empty
 //! rectangle pins the flyout to a corner, an overlapping one merely sits under a
 //! panel.
+//!
 //! Struts are in **root-window**
 //! coordinates and the specification is explicit that they are *not* relative to
 //! a Xinerama monitor, which is what makes the arithmetic non-obvious: a panel
@@ -567,8 +569,12 @@ pub(crate) fn monitor_for_cursor(cursor: (i32, i32), monitors: &[X11Monitor]) ->
 /// exceptions. (This paragraph said "the one case" for two commits, and before
 /// that pointed at a "never overlaps" property the module docs now quote only in
 /// order to call it false.)
-/// Giving the axis back is precisely an overlap — the reservation that emptied it
-/// is still there — and it is chosen anyway, for the reason above.
+/// Giving the axis back is an overlap wherever the reservations that emptied it
+/// actually lie on this monitor, which is the case worth planning for and not
+/// quite the same as "always": the two round trips behind a strut and a monitor
+/// rectangle are separate, so a reconfiguration between them can leave a
+/// reservation recorded against a screen the monitor no longer sits inside. It is
+/// chosen anyway, for the reason above.
 ///
 /// Reaching it does **not** need a single absurd strut, which is what an earlier
 /// version of this paragraph claimed. Opposing reservations sum: the x axis
@@ -743,15 +749,35 @@ fn distance_squared(rect: WorkRect, (x, y): (i32, i32)) -> i64 {
 
 /// Build a [`WorkRect`] from four edges, saturating rather than wrapping.
 ///
-/// The origin saturates into `i32` and each extent is capped at [`MAX_EXTENT`],
-/// so `x + w` stays representable however absurd the inputs were.
+/// The origin saturates into `i32` and each extent is then capped **twice**: at
+/// [`MAX_EXTENT`], and at the room left between the saturated origin and
+/// `i32::MAX`. So `x + w` stays representable however absurd the inputs were,
+/// which is the promise [`MAX_EXTENT`]'s own doc makes.
+///
+/// The second cap is not decoration. Measuring the extent from the *unclamped*
+/// left edge — which this did until a review constructed the case — lets a
+/// rectangle whose origin saturated at `i32::MAX` still report a positive width,
+/// so `x + w` overflows and the span reaches back across coordinates the
+/// subtraction had already excluded. Unreachable from `RandR`, whose CRTC origin
+/// is an `i16` and extent a `u16`, but `work_area` is `pub(crate)` and its own
+/// suite drives it with `i32::MIN` and `u32::MAX`.
 fn rect_from_edges(left: i64, top: i64, right: i64, bottom: i64) -> WorkRect {
+    let x = clamp_to_i32(left);
+    let y = clamp_to_i32(top);
     WorkRect {
-        x: clamp_to_i32(left),
-        y: clamp_to_i32(top),
-        w: clamp_extent(right.saturating_sub(left)),
-        h: clamp_extent(bottom.saturating_sub(top)),
+        x,
+        y,
+        w: extent_from(x, right),
+        h: extent_from(y, bottom),
     }
+}
+
+/// The extent from a saturated origin to `far`, capped so `origin + extent` is
+/// still an `i32`.
+fn extent_from(origin: i32, far: i64) -> u32 {
+    let origin = i64::from(origin);
+    let headroom = i64::from(i32::MAX).saturating_sub(origin);
+    clamp_extent(far.saturating_sub(origin).min(headroom))
 }
 
 /// Saturate an `i64` coordinate into the `i32` the anchor contract uses.
@@ -1207,11 +1233,19 @@ mod tests {
     /// here for two commits after being restored there — a second copy of a claim
     /// sixty lines from the fixed one.
     ///
-    /// Acceptance comes from [`super::band_meets`] rather than from a hand-written
-    /// copy of it. That deliberately makes this a check of `work_area`'s
-    /// arithmetic *given* the acceptance rule, not of the rule: a test that
+    /// The **range** half of acceptance comes from [`super::band_meets`] rather
+    /// than from a hand-written copy of it, which deliberately makes this a check
+    /// of `work_area`'s arithmetic *given* that rule, not of the rule: a test that
     /// restated the predicate would agree with a wrong one, which is how a sibling
     /// test in this crate quietly became a copy of the function it was checking.
+    ///
+    /// The **depth** half (`> 0`) *is* restated here, and that is worth admitting
+    /// rather than glossing: it is one comparison against a literal, where
+    /// `band_meets` is a three-clause predicate over four values, so copying it
+    /// costs what copying the other would have cost. A previous version of this
+    /// paragraph said acceptance came from `band_meets` full stop — the same
+    /// one-condition-for-two imprecision that had just been corrected in the module
+    /// docs, one screen away in this file.
     ///
     /// The escape below is **broader** than "this axis was not emptied": an axis
     /// that simply had nothing to subtract also equals the monitor's extent and is
@@ -1270,10 +1304,17 @@ mod tests {
     #[test]
     fn a_surviving_axis_excludes_every_band_that_reaches_it() {
         // The module docs' guarantee, checked rather than asserted in prose: for
-        // every band the code considers applicable to this monitor, either the
-        // result's span on that band's axis excludes it, or that axis was handed
-        // back in full. Nothing in between — and the second arm is why the
-        // guarantee cannot be stated as "the result never overlaps".
+        // every band the code **accepts**, either the result's span on that band's
+        // axis excludes it, or that axis was handed back in full.
+        //
+        // Two things that phrasing is careful about, both of which earlier versions
+        // of this comment got wrong. "Accepts", not "applicable" — the module docs
+        // retired that word because it read as "reaches this monitor", and
+        // `band_meets` also rejects a backwards range, which can be anywhere. And
+        // the handed-back arm is *one* of the two reasons the guarantee cannot be
+        // stated as "the result never overlaps"; a discarded malformed band is the
+        // other, and this test does not cover it because `work_area` is right to
+        // ignore it — see `a_band_whose_end_precedes_its_start_is_ignored`.
         let full = WorkRect {
             x: 0,
             y: 0,
@@ -1348,6 +1389,45 @@ mod tests {
                 assert_respects(work, bounds, root, strut);
             }
         }
+    }
+
+    #[test]
+    fn a_saturated_origin_leaves_no_width_to_overflow_with() {
+        // `MAX_EXTENT`'s doc promises `x + w` stays inside `i32`, and measuring
+        // the extent from the unclamped left edge broke that promise: a monitor
+        // whose origin saturates at `i32::MAX` still reported a positive width, so
+        // the span ran past the end of the coordinate space and back across
+        // columns an accepted strut had already excluded.
+        //
+        // Unreachable from RandR — a CRTC origin is `i16` and its extent `u16` —
+        // which is exactly why it needs a test rather than a comment: nothing else
+        // in this file can reach the arithmetic.
+        let far = WorkRect {
+            x: i32::MAX - 100,
+            y: i32::MAX - 100,
+            w: 4000,
+            h: 4000,
+        };
+        let work = work_area(far, screen(u32::MAX, u32::MAX), &[]);
+        assert_eq!(work.x, i32::MAX - 100);
+        assert_eq!(
+            i64::from(work.x).saturating_add(i64::from(work.w)),
+            i64::from(i32::MAX),
+            "the span must stop at the end of the coordinate space, not past it"
+        );
+        assert_eq!(
+            i64::from(work.y).saturating_add(i64::from(work.h)),
+            i64::from(i32::MAX)
+        );
+
+        // And an origin that saturates exactly at the end has no room at all.
+        let pinned = WorkRect {
+            x: i32::MAX,
+            y: 0,
+            w: 4000,
+            h: 1080,
+        };
+        assert_eq!(work_area(pinned, screen(u32::MAX, u32::MAX), &[]).w, 0);
     }
 
     #[test]
