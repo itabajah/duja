@@ -60,6 +60,17 @@
 //! Both cases end the same way in both crates — no DPI from XSETTINGS, fall
 //! through to the `Xft.dpi` X resource — which is why they are worth matching
 //! rather than improving on.
+//!
+//! One divergence is **not** matched, and is named here rather than left for
+//! someone to find. winit reads the name length as `i16` and a string value's
+//! length as `i32`, then casts to `usize`; this reads both unsigned. A length with
+//! its high bit set therefore sign-extends into an enormous `usize` in winit and
+//! fails its bounds check, ending its search, where here it is a large length that
+//! this parser's own bounds check rejects — and on a blob big enough to satisfy
+//! it, this walk would continue and could find an `Xft/DPI` winit never reaches.
+//! It needs a setting whose name is at least 32 KiB, which no settings manager
+//! produces, and the divergence runs in the direction that matters (a DPI used
+//! here and not there), which is why it is written down instead of guarded.
 
 /// The setting an X11 session's scale factor comes from, when a settings manager
 /// is running.
