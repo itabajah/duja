@@ -51,14 +51,24 @@ use crate::geometry::TrayAnchor;
 use crate::linux_geometry::{DpiSources, X11Monitor, X11Screen, X11Strut, anchor_from_x11};
 use crate::linux_xsettings;
 
-/// `GetProperty`'s length is in four-byte units, so this asks for a gigabyte —
-/// more than any of these properties can be, and the server returns only what
-/// exists.
+/// How much of a property to ask for, in the four-byte units `GetProperty`
+/// counts in: two gigabytes, so every read here is a single round trip and the
+/// server returns whatever actually exists.
 ///
-/// Deliberately not `u32::MAX`: that is four times larger again and would ask a
-/// server to compute a byte count that overflows the 32-bit arithmetic the
-/// protocol describes it with.
-const WHOLE_PROPERTY: u32 = u32::MAX / 4;
+/// The ceiling is `i32::MAX / 4` rather than `u32::MAX` or `u32::MAX / 4`, and
+/// the reason is the server's arithmetic rather than ours. `GetProperty` returns
+/// `MINIMUM(remaining, 4 * long_length)`, and Xorg computes that `4 *` into a
+/// `long` — 64-bit on the servers anyone runs, but 32-bit on an ILP32 build,
+/// where `u32::MAX / 4` multiplies to `0xFFFFFFFC` and lands on the wrong side of
+/// zero. Quartering `i32::MAX` instead keeps the product at `0x7FFFFFFC`, which is
+/// positive in either width.
+///
+/// winit reads the same properties in 4 KB chunks and loops on `bytes_after`.
+/// One shot is equivalent here only because the bound is far past what these
+/// properties can hold — a `_NET_CLIENT_LIST` is four bytes per managed window
+/// and an `_XSETTINGS_SETTINGS` blob is a few kilobytes — and it is one round trip
+/// instead of two on a path that runs when the user clicks the tray.
+const WHOLE_PROPERTY: u32 = i32::MAX.unsigned_abs() / 4;
 
 /// The `RandR` version whose `GetScreenResourcesCurrent` this module prefers.
 ///
@@ -82,6 +92,17 @@ pub(crate) fn cursor_anchor() -> Option<TrayAnchor> {
     let geometry = connection.get_geometry(root).ok()?;
     let pointer = pointer.reply().ok()?;
     let geometry = geometry.reply().ok()?;
+
+    // `root_x`/`root_y` are relative to the root the pointer is *logically on*,
+    // which on a multi-screen display (`DISPLAY=:0.1`, one X server with several
+    // independent roots) is not necessarily the one this connection's monitor
+    // list describes. Placing a flyout with another screen's coordinates would
+    // put it confidently in the wrong corner, so this is the fallback's case
+    // rather than a best effort. Always true on the single-root sessions RandR
+    // produces, which is every desktop this decade.
+    if !pointer.same_screen {
+        return None;
+    }
 
     // The root's *live* size, not `setup().roots[..]`'s. The setup is a snapshot
     // from connect time, and a `RandR` reconfiguration since then would leave it
@@ -220,6 +241,15 @@ fn crtcs(connection: &RustConnection, root: xproto::Window) -> Option<Vec<randr:
 /// EWMH says the window manager MUST ignore `_NET_WM_STRUT` in that case, and a
 /// client computing the same work area has to make the same choice or it will
 /// disagree with the shell about where a window fits.
+///
+/// **Every managed window counts, including ones on another workspace.** A window
+/// manager narrows this to the current desktop; matching it would mean reading
+/// `_NET_CURRENT_DESKTOP` and then `_NET_WM_DESKTOP` per window, and the
+/// difference only shows for a non-sticky window with a strut — which in practice
+/// means a panel someone has confined to one workspace. The failure is to
+/// over-reserve, so the flyout sits a little further from an edge than it needed
+/// to; that is the direction to err in, and it is why this is a paragraph rather
+/// than two more round trips.
 fn struts(connection: &RustConnection, root: xproto::Window, screen: X11Screen) -> Vec<X11Strut> {
     let Some(client_list) = atom(connection, b"_NET_CLIENT_LIST") else {
         return Vec::new();
