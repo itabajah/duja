@@ -316,10 +316,23 @@ mod tests {
     /// (`Gtk/FontName`, `Net/DndDragThreshold`), so the rule is live on every real
     /// blob.
     fn blob(order: u8, settings: &[(&[u8], u8, Vec<u8>)]) -> Vec<u8> {
+        // `b'B'`, not `super::BIG_ENDIAN`. The fixture took both markers from the
+        // code under test, so every mutation of either constant survived the whole
+        // suite — the same defect the padding rule had, in the same builder, left
+        // standing when that one was un-shared. A one-character typo in
+        // `BIG_ENDIAN` sends a real `B`-marked blob to the host-order fallback,
+        // where 98304 reads back as 8388864: a scale of about 85, which
+        // `sane_scale` does not catch because it guards the low end only.
+        assert_eq!(
+            super::LITTLE_ENDIAN,
+            b'l',
+            "the wire's marker for LSB-first"
+        );
+        assert_eq!(super::BIG_ENDIAN, b'B', "and for MSB-first");
         let mut out = vec![order, 0, 0, 0];
         let serial: u32 = 7;
         let count = u32::try_from(settings.len()).expect("test fixture");
-        let big = order == BIG_ENDIAN;
+        let big = order == b'B';
         let word4 = |value: u32| {
             if big {
                 value.to_be_bytes()
@@ -564,6 +577,47 @@ mod tests {
         );
         overwrite_count(&mut nameless);
         assert_eq!(xft_dpi(&nameless), None);
+    }
+
+    #[test]
+    fn the_declared_count_is_an_upper_bound_not_a_hint() {
+        // winit takes exactly `total_settings`, so walking past it is a mirror
+        // divergence in the direction this module cares about — a DPI found here
+        // that winit never reaches. `a_count_larger_than_the_blob_stops_at_the_end`
+        // pins only the other direction.
+        let mut bytes = blob(
+            LITTLE_ENDIAN,
+            &[integer(b"Gtk/FontName", 1_024), integer(b"Xft/DPI", 98_304)],
+        );
+        // Declare one setting where two are written.
+        bytes
+            .get_mut(8..12)
+            .expect("a fixture always carries a full header")
+            .copy_from_slice(&1_u32.to_le_bytes());
+        assert_eq!(
+            xft_dpi(&bytes),
+            None,
+            "the second setting is past the declared count and must not be read"
+        );
+    }
+
+    #[test]
+    fn only_an_exact_name_match_is_the_dpi_setting() {
+        // No fixture carried a decoy, so `==` could be weakened to `starts_with`,
+        // `ends_with`, `eq_ignore_ascii_case` or even a length comparison with the
+        // suite green. Each decoy below defeats one of those, and carries a
+        // distinguishable value so a wrong match is visible rather than merely
+        // possible.
+        let bytes = blob(
+            LITTLE_ENDIAN,
+            &[
+                integer(b"Xft/dpi", 1_024),  // same length, different case
+                integer(b"Xft/DPIx", 2_048), // a prefix match
+                integer(b"zXft/DPI", 4_096), // a suffix match
+                integer(b"Xft/DPI", 98_304), // the real one
+            ],
+        );
+        assert_eq!(xft_dpi(&bytes), Some(96.0));
     }
 
     #[test]

@@ -1309,6 +1309,78 @@ mod tests {
     }
 
     #[test]
+    fn the_deepest_reservation_wins_on_every_edge_not_just_the_bottom() {
+        // `work_area` implements this rule on four separate lines, and the test
+        // named for it built both of its panels with `bottom_panel` — so three of
+        // the four accepted a last-wins implementation with the suite green.
+        // Round 17 found the defect on the bottom edge and fixed the fixture
+        // there; this is the same rule on the lines that fix did not reach.
+        //
+        // The configuration is ordinary: a left dock beside a left-edge launcher,
+        // or a top bar beside a second top-strut publisher, with the shallower one
+        // later in `_NET_CLIENT_LIST`. Under last-wins the flyout opens under the
+        // deeper panel until a restart happens to reorder the list.
+        let bounds = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let side = |depth: u32, right: bool| {
+            if right {
+                X11Strut {
+                    right: depth,
+                    right_start_y: 0,
+                    right_end_y: 1079,
+                    ..X11Strut::default()
+                }
+            } else {
+                X11Strut {
+                    left: depth,
+                    left_start_y: 0,
+                    left_end_y: 1079,
+                    ..X11Strut::default()
+                }
+            }
+        };
+        let top_of = |depth: u32| X11Strut {
+            top: depth,
+            top_start_x: 0,
+            top_end_x: 1919,
+            ..X11Strut::default()
+        };
+        let root = screen(1920, 1080);
+
+        // Deeper first in each pair, which is the order that separates "deepest
+        // wins" from "last wins".
+        assert_eq!(
+            work_area(bounds, root, &[side(60, false), side(40, false)]).x,
+            60,
+            "left"
+        );
+        assert_eq!(
+            work_area(bounds, root, &[side(80, true), side(40, true)]).w,
+            1840,
+            "right"
+        );
+        assert_eq!(
+            work_area(bounds, root, &[top_of(60), top_of(30)]).y,
+            60,
+            "top"
+        );
+        assert_eq!(
+            work_area(
+                bounds,
+                root,
+                &[bottom_panel(60, 0, 1919), bottom_panel(40, 0, 1919)]
+            )
+            .h,
+            1020,
+            "bottom"
+        );
+    }
+
+    #[test]
     fn a_zero_width_strut_reserves_nothing_however_its_ranges_are_set() {
         // A window that publishes the property with all four depths zero is
         // saying "I reserve nothing"; the ranges are then meaningless and must
@@ -1403,6 +1475,25 @@ mod tests {
         let work = work_area(far, screen(u32::MAX, u32::MAX), &[past_the_end]);
         assert_eq!(work.x, i32::MAX, "the origin saturates");
         assert_eq!(work.w, 0, "and takes the width with it");
+
+        // `rect_from_edges` clamps two origins on two lines, and this test drove
+        // only the first. The same shape on the y axis, with a top strut past the
+        // end of the space.
+        let far_down = WorkRect {
+            x: 0,
+            y: i32::MAX - 100,
+            w: 1920,
+            h: 4000,
+        };
+        let below_the_end = X11Strut {
+            top: 2_147_484_647,
+            top_start_x: 0,
+            top_end_x: 1919,
+            ..X11Strut::default()
+        };
+        let vertical = work_area(far_down, screen(u32::MAX, u32::MAX), &[below_the_end]);
+        assert_eq!(vertical.y, i32::MAX, "so does the vertical origin");
+        assert_eq!(vertical.h, 0);
     }
 
     #[test]
@@ -2183,6 +2274,22 @@ mod tests {
             mm_height: 482,
         };
         approx(scale_factor(&NO_DPI, &exactly_twenty), 20.0);
+
+        // And just past it, which pins the ceiling's *value* rather than only its
+        // inclusivity: the other above-ceiling fixture measures 762, so raising
+        // the constant to 21, 30 or 700 changed no answer. 3840x2160 at 2x690 mm
+        // quantises to 20.5.
+        let just_over = X11Monitor {
+            bounds: WorkRect {
+                x: 0,
+                y: 0,
+                w: 3840,
+                h: 2160,
+            },
+            mm_width: 2,
+            mm_height: 690,
+        };
+        approx(scale_factor(&NO_DPI, &just_over), 1.0);
     }
 
     #[test]

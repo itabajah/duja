@@ -128,7 +128,21 @@ const CLIENT_LIST_WORDS: u32 = 8192;
 /// no ceiling at all; matching that would mean matching its unboundedness.
 const XSETTINGS_WORDS: u32 = 65_536;
 
-// Why none of those is `u32::MAX`, beyond the sizes themselves: `GetProperty`
+// One read is deliberately *not* bounded here, and a reader who has just met
+// these three constants should know why before finding it two functions below.
+// `resource_manager::new_from_default` issues its own `GetProperty` for
+// `RESOURCE_MANAGER` with `long_length = 100_000_000` — 400 MB, from a `const`
+// inside `x11rb-protocol` whose comment reads "This is what Xlib does, so it must
+// be correct (tm)". That property is on the root window, which is exactly the
+// argument `CLIENT_LIST_WORDS` gives for capping. It is left alone because
+// bounding it means re-implementing `new_from_default`'s two-stage file search
+// around a hand-rolled request — and because winit carries the identical exposure
+// through the identical call, so a session that can be attacked this way has a
+// bigger problem than Duja's tray. Named rather than fixed, and named here rather
+// than nowhere.
+//
+// Why none of the three above is `u32::MAX`, beyond the sizes themselves:
+// `GetProperty`
 // returns `MINIMUM(remaining, 4 * long_length)`, and Xorg computes that `4 *`
 // into a `long` — 64-bit on the servers anyone runs, but 32-bit on an ILP32
 // build, where a `long_length` above `i32::MAX / 4` multiplies to a negative
