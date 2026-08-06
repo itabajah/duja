@@ -563,9 +563,26 @@ mod tests {
         // parser that skipped the tag and kept going would read the payload as a
         // setting header and could report any number at all. Stopping matches
         // winit, which errors on the same byte.
+        // The payload is itself a complete `Xft/DPI` setting, byte for byte, so
+        // the two behaviours are distinguishable: a parser that stops answers
+        // `None`, and one that skips the tag and keeps walking reads these bytes
+        // as the next setting's header and answers `Some(96.0)`. With a payload of
+        // zeroes — which is what this fixture used to have — a desynchronised walk
+        // also gets lost and also answers `None`, so the test could not see the
+        // difference it is named for.
+        let mut embedded = vec![0_u8, 0]; // type = integer, then padding
+        embedded.extend_from_slice(&7_u16.to_le_bytes());
+        embedded.extend_from_slice(b"Xft/DPI");
+        embedded.push(0); // the name's padding to a 4-byte boundary
+        embedded.extend_from_slice(&7_u32.to_le_bytes()); // last-change serial
+        embedded.extend_from_slice(&98_304_i32.to_le_bytes());
+
         let bytes = blob(
             LITTLE_ENDIAN,
-            &[(b"Some/Future", 9, vec![0; 4]), integer(b"Xft/DPI", 98_304)],
+            &[
+                (b"Some/Future", 9, embedded),
+                integer(b"Gtk/FontName", 1_024),
+            ],
         );
         assert_eq!(xft_dpi(&bytes), None);
     }

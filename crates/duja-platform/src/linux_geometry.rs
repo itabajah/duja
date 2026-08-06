@@ -1134,6 +1134,69 @@ mod tests {
     }
 
     #[test]
+    fn each_band_is_matched_against_the_axis_it_spans_not_the_other_one() {
+        // `X11Strut::from_partial`'s docs warn that a transposed pair is a silent
+        // wrong answer. So is a transposed *axis*: a left band's range is rows and
+        // a top band's is columns, and swapping which span each is tested against
+        // survived the whole suite until these three fixtures existed. The right
+        // and bottom equivalents were already covered, which is exactly what made
+        // the gap look closed.
+        let upper = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        // A left dock on the *lower* of two stacked monitors. Its rows are
+        // [1080, 2159], which the upper monitor does not have — but its columns
+        // would overlap, so matching it against columns reserves 60px here.
+        let lower_dock = X11Strut {
+            left: 60,
+            left_start_y: 1080,
+            left_end_y: 2159,
+            ..X11Strut::default()
+        };
+        assert_eq!(
+            work_area(upper, screen(1920, 2160), &[lower_dock]),
+            upper,
+            "a left band is a range of rows"
+        );
+
+        // The mirror, for the top edge: a top panel spanning the left monitor of a
+        // horizontal pair, checked against the right one. Its columns stop at 1919;
+        // its rows would overlap.
+        let right = WorkRect {
+            x: 1920,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let left_panel = X11Strut {
+            top: 30,
+            top_start_x: 0,
+            top_end_x: 1919,
+            ..X11Strut::default()
+        };
+        assert_eq!(
+            work_area(right, screen(3840, 1080), &[left_panel]),
+            right,
+            "a top band is a range of columns"
+        );
+
+        // And the third of `band_meets`' clauses. A band lying entirely *before*
+        // the monitor's span is rejected by `end >= low`; every other fixture in
+        // this file rejects by `start < high` instead, so deleting that clause
+        // survived. This bottom panel's columns end at 1919 and the monitor starts
+        // at 1920.
+        let early_panel = bottom_panel(40, 0, 1919);
+        assert_eq!(
+            work_area(right, screen(3840, 1080), &[early_panel]),
+            right,
+            "a band that ends before the monitor begins does not reach it"
+        );
+    }
+
+    #[test]
     fn the_result_does_not_depend_on_the_order_the_windows_were_listed_in() {
         // The trap this pins: if each strut's overlap test ran against the
         // *running* work area instead of the monitor, a top panel processed first
@@ -1212,6 +1275,30 @@ mod tests {
             ..X11Strut::default()
         };
         assert_eq!(work_area(bounds, screen(1920, 1080), &[idle]), bounds);
+
+        // The monitor above sits at the origin, where `left.max(0)` and
+        // `top.max(0)` are no-ops — so it cannot see the `> 0` guards at all, and
+        // deleting them survived. A negative origin can: `a_monitor_left_of_the_
+        // primary_keeps_its_negative_origin` says one is reachable during a
+        // reconfiguration, and there `max(0)` would move the edge.
+        let off_origin = WorkRect {
+            x: -100,
+            y: -100,
+            w: 1920,
+            h: 1080,
+        };
+        let idle_over_it = X11Strut {
+            left_start_y: 0,
+            left_end_y: 4000,
+            top_start_x: 0,
+            top_end_x: 4000,
+            ..X11Strut::default()
+        };
+        assert_eq!(
+            work_area(off_origin, screen(1920, 1080), &[idle_over_it]),
+            off_origin,
+            "a zero depth must not pull an edge up to the screen's origin"
+        );
     }
 
     #[test]
@@ -1511,6 +1598,28 @@ mod tests {
             work_area(bounds, screen(1920, 1080), &[left_dock, right_dock]),
             bounds,
             "the x axis empties and is given back; y was never touched"
+        );
+
+        // And the boundary itself, which the pair above steps past: two 960px
+        // docks leave `right == left` exactly. Weakening the test to `right < left`
+        // survived every other fixture, and under it this hands placement a
+        // zero-width rectangle — the outcome the give-back exists to avoid.
+        let half = X11Strut {
+            left: 960,
+            left_start_y: 0,
+            left_end_y: 1079,
+            ..X11Strut::default()
+        };
+        let other_half = X11Strut {
+            right: 960,
+            right_start_y: 0,
+            right_end_y: 1079,
+            ..X11Strut::default()
+        };
+        assert_eq!(
+            work_area(bounds, screen(1920, 1080), &[half, other_half]),
+            bounds,
+            "an exactly-emptied axis is emptied"
         );
         // One dock alone is well inside the bound and reserves normally, which is
         // what makes the pair the interesting case rather than either half.
@@ -2053,15 +2162,17 @@ mod tests {
                     w: 1920,
                     h: 1080,
                 },
-                mm_width: 531,
-                mm_height: 299,
+                // Deliberately a *different* density from the first monitor, and
+                // deliberately with no session-wide DPI source below: otherwise
+                // "the cursor's monitor" and "monitors[0]" are the same number and
+                // the scale half of this test's name is unobservable. That is the
+                // behaviour the module docs, STATUS and a debt row all spend their
+                // longest passages on, so it earns a fixture that can see it.
+                mm_width: 344,
+                mm_height: 194,
             },
         ];
-        let sources = DpiSources {
-            scale_override: None,
-            xsettings_dpi: Some(144.0),
-            xft_dpi: None,
-        };
+        let sources = NO_DPI;
         let anchor = anchor_from_x11(
             (2500, 900),
             &monitors,

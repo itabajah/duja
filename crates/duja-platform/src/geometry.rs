@@ -667,7 +667,18 @@ mod platform {
 /// The cursor position, the work area of the monitor under it, and that
 /// monitor's scale — see the [module docs](self) for the coordinate space.
 ///
-/// Never fails and never blocks.
+/// **Never fails.** Every OS query falls back rather than propagating an error,
+/// for the reason the [module docs](self) give.
+///
+/// **Blocking depends on the backend**, and the sentence here used to say it
+/// never blocks — true while Windows and macOS were the only ones. Both of those
+/// are local syscalls. The X11 backend is not: it opens a connection (a TCP
+/// connect when `DISPLAY` names a remote server), makes several round trips, and
+/// reads up to four files under `$HOME` through `resource_manager`. x11rb sets no
+/// connect or read timeout, so a hung X server hangs this call, on whatever
+/// thread called it. That is the same exposure every X client has and the same
+/// one Duja's other X paths carry, but it is not "never blocks", and
+/// `docs/debt.md` carries what it would take to bound it.
 #[must_use]
 pub fn cursor_anchor() -> TrayAnchor {
     platform::cursor_anchor()
