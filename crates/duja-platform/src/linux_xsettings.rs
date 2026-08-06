@@ -218,10 +218,19 @@ impl<'a> Parser<'a> {
     ///
     /// The refusal is the contract, not an implementation detail. Handing back a
     /// *short* slice instead survives every test that goes through [`xft_dpi`],
-    /// because each caller re-checks: [`Parser::card16`] and [`Parser::card32`]
-    /// need an exact array, and [`Parser::byte`] needs a first element. That is a
-    /// property of five callers rather than of this function, so
-    /// `a_short_read_is_refused_rather_than_shortened` pins it here.
+    /// by a route that has nothing to do with this function: a short read is only
+    /// possible when `n` exceeds what is left, which means it consumes the rest,
+    /// and every path out of [`Parser::setting`] then reaches a
+    /// [`Parser::byte`], [`Parser::card16`] or [`Parser::card32`] on an empty
+    /// buffer — and those three fail, because they need a first element or an
+    /// exact array rather than however many bytes arrived.
+    ///
+    /// [`Parser::setting`]'s own five direct calls do **not** re-check; they are
+    /// covered by whichever of those three comes next. So the masking is a
+    /// property of the walk's shape rather than of its callers, which is exactly
+    /// the kind of thing that stops being true when the walk changes.
+    /// `a_short_read_is_refused_rather_than_shortened` pins the contract here
+    /// instead.
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let (part, rest) = self.bytes.split_at_checked(n)?;
         self.bytes = rest;
