@@ -7,7 +7,9 @@
 //! What is left is the part no lane can run: the connection, the round trips,
 //! and the property decoding.
 //!
-//! # Five reads
+//! # What it reads
+//!
+//! Four questions for the X server, and one that is not:
 //!
 //! 1. `QueryPointer` on the root — where the cursor is.
 //! 2. `GetGeometry` on the root — how big the screen is, which is the space
@@ -16,8 +18,11 @@
 //!    first output it drives.
 //! 4. `_NET_CLIENT_LIST` and each managed window's `_NET_WM_STRUT_PARTIAL` (or
 //!    the legacy `_NET_WM_STRUT`) — what the panels have reserved.
-//! 5. The three DPI sources: `WINIT_X11_SCALE_FACTOR`, the XSETTINGS manager's
-//!    `Xft/DPI`, and the `Xft.dpi` X resource.
+//! 5. The three DPI sources — and only two of those are X requests. The
+//!    XSETTINGS manager's `Xft/DPI` is a property read; the `Xft.dpi` X resource
+//!    goes through `resource_manager`, which reads files as well as a property;
+//!    and `WINIT_X11_SCALE_FACTOR` is an environment variable that never touches
+//!    the server at all.
 //!
 //! # A connection per call
 //!

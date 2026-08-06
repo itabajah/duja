@@ -578,8 +578,8 @@ mod platform {
     /// The Wayland answer is therefore a different mechanism rather than a second
     /// implementation of this one: the screen coordinates the tray host passes to
     /// `StatusNotifierItem.Activate(x, y)`, which ksni surfaces, feeding a
-    /// compositor-side positioner. ADR-0010 records that, wave 5b builds it, and
-    /// `docs/debt.md` carries the gap until then. Returning [`FALLBACK`] in the
+    /// compositor-side positioner. ADR-0010 records that, the ksni wave builds it,
+    /// and `docs/debt.md` carries the gap until then. Returning [`FALLBACK`] in the
     /// meantime is honest: the flyout lands where the compositor puts it, which
     /// is what would happen whatever this function returned.
     ///

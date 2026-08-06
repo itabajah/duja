@@ -58,8 +58,11 @@
 //! pointer and taking the first monitor rectangle containing it — except that
 //! `XIQueryPointer` reports `Fp1616`, 16.16 fixed point, and winit casts
 //! `root_x`/`root_y` to `i64` without the `>> 16`. Every coordinate is therefore
-//! 65536× too large, no rectangle ever contains it, and the guess falls through to
-//! `monitors[0]`: the first enabled CRTC, whatever the pointer is doing. (winit's
+//! 65536× too large, no rectangle contains it, and the guess falls through to
+//! `monitors[0]`: the first enabled CRTC, whatever the pointer is doing. (Every
+//! coordinate but one — `0 << 16` is still `0`, so a pointer resting exactly on
+//! the root's origin does match, and winit's `contains_point` is inclusive on both
+//! edges. "Always" would be the wrong word by one pixel.) (winit's
 //! CRTC list is also one entry shorter than this module's wherever
 //! `GetOutputInfo` failed or an output name was not UTF-8, which it drops and this
 //! keeps — so even "the first CRTC" is not always the same CRTC.)
@@ -71,10 +74,18 @@
 //! `ScaleFactorChanged`. Since the flyout is placed on the cursor's monitor, the
 //! settled scale is the one computed here.
 //!
-//! So the divergence needs four things at once: no `WINIT_X11_SCALE_FACTOR`, no
-//! XSETTINGS manager, no `Xft.dpi` resource, and two CRTCs of different densities
-//! with the cursor not on the first — i.e. a bare window manager on a mixed-DPI
-//! desktop. There it costs a clamp box computed for the settled size while the
+//! So the divergence needs the chain to reach step 4, and that happens **two**
+//! ways, not one: `WINIT_X11_SCALE_FACTOR=randr` goes straight to the measurement
+//! by design, skipping XSETTINGS and `Xft.dpi` entirely; otherwise it takes no
+//! override *and* no XSETTINGS manager *and* no `Xft.dpi` resource. Either route
+//! then needs two CRTCs of different densities with the cursor not on the first.
+//!
+//! The `randr` override is the cheap way in and worth naming first, because
+//! `docs/qa-checklist.md` tells a tester to set exactly that — an earlier draft of
+//! this paragraph listed only the bare-window-manager route and so described the
+//! checklist's own instruction as unreachable.
+//!
+//! What it costs there is a clamp box computed for the settled size while the
 //! window is briefly created at another, and on a non-reparenting window manager
 //! that sends no synthetic `ConfigureNotify`, for longer than briefly.
 //! Reproducing winit's fixed-point bug to match it is the one thing not worth
@@ -149,9 +160,14 @@ const BASELINE_DPI: f64 = 96.0;
 ///
 /// A CRTC rather than a `RandR` 1.5 "monitor" because that is what winit walks,
 /// and the scale factor has to agree with winit's per-CRTC one. The backend
-/// applies winit's own filter before building these — a CRTC with a zero extent
-/// or no connected output is not a monitor — so every entry here is displaying
-/// something.
+/// applies winit's own filter before building these — a zero extent, or no
+/// outputs at all — so every entry here is a CRTC that drives something.
+///
+/// **Not "displaying something", and not "connected".** Neither this crate nor
+/// winit reads `RandR`'s `connection` field, so a CRTC still driving an output
+/// the server considers `Disconnected` passes the filter in both. An earlier
+/// version of this sentence said "no connected output", which the wire half's
+/// twin of it was corrected away from and this one was not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct X11Monitor {
     /// The CRTC's rectangle in root-window coordinates, device pixels.
@@ -499,9 +515,13 @@ pub(crate) fn monitor_for_cursor(cursor: (i32, i32), monitors: &[X11Monitor]) ->
 /// **This is the one case where the result overlaps a reserved band**, and it is
 /// the exception the module docs' "never overlaps" property is stated against.
 /// Giving the axis back is precisely an overlap — the reservation that emptied it
-/// is still there — and it is chosen anyway, for the reason above. Reaching it
-/// needs a strut deeper than the monitor's own extent, which a conformant panel
-/// cannot publish.
+/// is still there — and it is chosen anyway, for the reason above. Reaching it does **not** need a single absurd strut, which is what an earlier
+/// version of this sentence claimed. Opposing reservations sum: the x axis empties
+/// whenever `max(monitor_left, left) >= min(monitor_right, screen_width - right)`,
+/// so two well-formed docks of 1000 px each on a 1920-wide single-monitor screen
+/// do it between them with neither one deeper than the monitor. Absurd jointly
+/// rather than individually — but the bound is the inequality, not the depth of
+/// any one strut.
 pub(crate) fn work_area(bounds: WorkRect, screen: X11Screen, struts: &[X11Strut]) -> WorkRect {
     let monitor_left = i64::from(bounds.x);
     let monitor_top = i64::from(bounds.y);

@@ -61,10 +61,20 @@ use crate::geometry::{AnchorUnit, TrayAnchor, WorkRect, sane_scale};
 /// placement kernel downstream (which converts extents back to `i32`) never sees
 /// a width it has to invent a substitute for.
 ///
-/// That cross-backend claim is not left as prose: `geometry`'s Windows
-/// `an_extreme_rect_saturates_instead_of_overflowing` asserts this constant equals
-/// what `rect_from` actually produces for the extreme `RECT`. The Windows lane is
-/// the only one that compiles both backends, so that is where it can be checked.
+/// That cross-backend claim is not left as prose, and it is pinned twice.
+/// `geometry`'s Windows `an_extreme_rect_saturates_instead_of_overflowing` asserts
+/// this constant equals what `rect_from` actually produces for the extreme
+/// `RECT` — Windows-only, because that is the only lane which runs the real Win32
+/// `rect_from`. `linux_geometry`'s `both_backends_cap_an_absurd_extent_at_the_same_value`
+/// asserts the same equality against its own third constant, on **every** lane,
+/// since both pure modules compile under `cfg(test)` everywhere. Windows equals
+/// this here and Linux equals this there, so no pair can drift without one of the
+/// two reddening.
+///
+/// (This paragraph used to say the Windows lane was "the only one that compiles
+/// both backends". That was true of neither half by the time the Linux backend
+/// landed, and the commit that corrected the test comment left the doc pointing at
+/// it untouched.)
 pub(crate) const MAX_EXTENT: u32 = i32::MAX.unsigned_abs();
 
 /// A point in Cocoa's global screen space: bottom-left origin, y-up, in points.

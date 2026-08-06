@@ -44,8 +44,9 @@ than pretending there is only one:
    (`mac_geometry`) that is unit-tested on every CI host.
 
 2. **The unit is *not* normalized; it is declared.** `TrayAnchor` carries an
-   `AnchorUnit` — `PhysicalPixels` (Windows) or `Points` (macOS) — and the
-   contract is "the unit the platform's own window-positioning API expects".
+   `AnchorUnit` — `PhysicalPixels` (Windows, and X11 since P7) or `Points`
+   (macOS) — and the contract is "the unit the platform's own window-positioning
+   API expects".
    This costs the placement kernel nothing: it only compares the cursor against
    the work area and clamps inside it, and both are in the same unit by
    construction.
@@ -57,7 +58,7 @@ than pretending there is only one:
 
    | Unit | `logical_to_anchor()` | `anchor_to_physical()` |
    |---|---|---|
-   | `PhysicalPixels` (Windows) | `scale` | `1.0` |
+   | `PhysicalPixels` (Windows, and X11 since P7) | `scale` | `1.0` |
    | `Points` (macOS) | `1.0` | `scale` |
 
 4. **The invariant:** `logical_to_anchor() * anchor_to_physical() ==
@@ -158,8 +159,9 @@ become a false statement the moment macOS landed.
 
 ## Amendment, 2026-08-06: what the Linux backend answered
 
-Both questions, and the answers make X11 the only backend that converts in
-neither direction.
+Both questions, and the answers put X11 alongside Windows rather than alone:
+it is the **second** backend that converts in neither direction, and it lands on
+the same row of the factor table above.
 
 **Unit: physical pixels.** X11 has no logical pixel at all. Root-window
 coordinates, RandR's CRTC rectangles, EWMH struts and window positions are the
@@ -170,7 +172,12 @@ physical). So `AnchorUnit::PhysicalPixels`, and `anchor_to_physical` is `1.0`.
 
 **Y axis: no flip.** Root-window coordinates are top-left origin, y increasing
 downward, which is already this contract's orientation. The flip exists for
-Cocoa; X11 needs none.
+Cocoa; X11 needs none — as, for the same reason, Win32 does not.
+
+That two of the three backends answer identically is worth stating, because it
+sets the expectation for a fourth: the interesting divergence in this contract has
+so far been macOS's, and a new backend that finds both its answers boring is
+probably right rather than probably careless.
 
 Two things this contract did not anticipate, both worth recording because they
 are the parts a fourth backend should read first.
