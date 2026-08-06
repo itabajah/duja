@@ -83,15 +83,24 @@ fn read_repo_file(parts: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     /// The number of `|`-delimited fields a GitHub-flavoured Markdown row splits
-    /// into, counting a backslash-escaped `\|` as content rather than a
-    /// separator.
+    /// into, with a leading and a trailing pipe discounted.
     ///
-    /// Returns the raw field count, leading and trailing empties included, so a
-    /// well-formed four-column row answers 6. The comparison is row-against-row,
-    /// so the two extras cancel; they are kept because subtracting them here
-    /// would make an underflow possible on a line with no pipes at all.
-    fn unescaped_cells(line: &str) -> usize {
+    /// Two rules from the [GFM tables extension], both load-bearing:
+    ///
+    /// - **`\|` is content, not a separator, *including inside other inline
+    ///   spans*.** The spec says exactly that, and gives `` b `\|` az `` as its
+    ///   example. So an unescaped `|` inside backticks really does split the
+    ///   cell — which is how a `` `O_NOFOLLOW | O_DIRECTORY` `` in `debt.md`
+    ///   silently shunted a row's cells one column left and dropped its last one.
+    /// - **A leading and trailing pipe is optional.** Discounting one of each
+    ///   means both styles count the same, so a table written without them cannot
+    ///   raise a false alarm here.
+    ///
+    /// [GFM tables extension]: https://github.github.com/gfm/#tables-extension-
+    fn cell_count(line: &str) -> usize {
         let mut fields: usize = 1;
         let mut escaped = false;
         for byte in line.bytes() {
@@ -102,39 +111,61 @@ mod tests {
                 _ => {}
             }
         }
-        fields
+        // A leading pipe contributes an empty first field and a trailing one an
+        // empty last; `saturating_sub` rather than `-` so a pipe-less line (which
+        // the caller never passes, but which a future one might) cannot underflow.
+        let lead = usize::from(line.starts_with('|'));
+        let trail = usize::from(line.len() > 1 && line.ends_with('|') && !line.ends_with("\\|"));
+        fields.saturating_sub(lead).saturating_sub(trail)
     }
 
-    /// Every row of a Markdown table in `docs/` must have exactly as many cells
-    /// as its header.
+    /// Every Markdown file under `docs/`, recursively.
+    fn markdown_files(dir: &PathBuf) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let entries =
+            std::fs::read_dir(dir).unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                found.extend(markdown_files(&path));
+            } else if path.extension().is_some_and(|ext| ext == "md") {
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    /// Every row of every Markdown table under `docs/` must have exactly as many
+    /// cells as its own header.
     ///
-    /// This exists because a row with an **extra** cell is invisible: GitHub's
-    /// Markdown silently drops cells past the header count, so the page renders
-    /// correctly while the file contains text nobody reads. `docs/debt.md` is
-    /// read by grepping far more often than by rendering, which is the worst
-    /// combination of those two facts — and it is exactly how a stale,
-    /// already-retracted "Why deferred" cell survived a correction to the row
-    /// above it in `#132`.
+    /// GFM does not require this — "if there are a number of cells fewer than the
+    /// number of cells in the header row, empty cells are inserted; if there are
+    /// greater, the excess is ignored" — and that permissiveness is the whole
+    /// problem. An **extra** cell renders as a correct table and leaves text in
+    /// the file that nobody reads, which is the worst possible combination for
+    /// `debt.md`, a document consulted by grepping far more often than by
+    /// rendering. It is how a stale, already-retracted "Why deferred" cell
+    /// survived a correction to the row above it in `#132`, and how another row's
+    /// last cell had been invisible since v0.1.1.
+    ///
+    /// The delimiter row is checked like any other, which is stricter than
+    /// necessary in one direction and exactly right in the other: GFM says a
+    /// header and delimiter that disagree mean **no table is recognised at all**,
+    /// so that mismatch turns a table into a paragraph of pipes.
     ///
     /// Fenced code blocks are skipped: a table drawn inside one is illustration,
     /// not data.
-    ///
-    /// Cells are counted the way GitHub counts them, which means honouring
-    /// `\|` — a backslash-escaped pipe is a literal character, not a separator,
-    /// **including inside a code span**. That is not a nicety: an unescaped `|`
-    /// in something like `` `O_NOFOLLOW | O_DIRECTORY` `` splits the cell it sits
-    /// in, shunts every later cell one column left, and drops the last one off
-    /// the end. This check found exactly that in a row written at v0.1.1, whose
-    /// "Why deferred" cell had been invisible on the rendered page ever since.
     #[test]
     fn every_docs_table_row_matches_its_header() {
-        for file in [
-            "debt.md",
-            "STATUS.md",
-            "qa-checklist.md",
-            "release-checklist.md",
-        ] {
-            let text = crate::read_repo_file(&["docs", file]);
+        let mut docs = crate::repo_root().expect("repo root");
+        docs.push("docs");
+        let files = markdown_files(&docs);
+        let mut rows_checked = 0_usize;
+
+        for path in &files {
+            let text = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            let name = path.strip_prefix(&docs).unwrap_or(path).display();
             let mut header: Option<(usize, usize)> = None;
             let mut fenced = false;
             for (number, line) in text.lines().enumerate() {
@@ -146,28 +177,42 @@ mod tests {
                 if fenced {
                     continue;
                 }
-                if !(line.starts_with('|') && line.ends_with('|')) {
-                    // A blank or prose line ends the table; the next `|` line is
-                    // a new header.
+                if !line.starts_with('|') {
+                    // Any non-row line ends the table; the next one that starts
+                    // with a pipe is a fresh header.
                     header = None;
                     continue;
                 }
-                let cells = unescaped_cells(line);
+                let cells = cell_count(line);
                 match header {
-                    // The `|---|---|` separator is a row like any other and is
-                    // checked against the header the same way.
-                    Some((width, at)) => assert_eq!(
-                        cells,
-                        width,
-                        "docs/{file} line {} has {} cells, but the header at line {} has {}",
-                        number + 1,
-                        cells - 2,
-                        at,
-                        width - 2
-                    ),
-                    None => header = Some((cells, number + 1)),
+                    Some((width, at)) => {
+                        rows_checked = rows_checked.saturating_add(1);
+                        assert_eq!(
+                            cells,
+                            width,
+                            "docs/{name} line {} has {cells} cells; its header at line {at} has \
+                             {width}. An extra cell renders correctly and is read by nobody — \
+                             see this test's docs.",
+                            number.saturating_add(1),
+                        );
+                    }
+                    None => header = Some((cells, number.saturating_add(1))),
                 }
             }
         }
+
+        // The guard that stops this check quietly covering nothing. Its first
+        // version named four files, two of which have no tables at all, and
+        // missed six that do — including the ADR this project tells new backends
+        // to read. A walk plus a floor cannot rot the same way.
+        assert!(
+            files.len() >= 10,
+            "only {} markdown files under docs/ — the walk is not walking",
+            files.len()
+        );
+        assert!(
+            rows_checked >= 200,
+            "only {rows_checked} table rows checked — the tables are no longer being found"
+        );
     }
 }
