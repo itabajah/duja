@@ -96,14 +96,13 @@ use crate::linux_geometry::{
 };
 use crate::linux_xsettings;
 
-// The three property bounds these reads use live in [`crate::linux_geometry`],
-// not here. They are pure scalars whose correctness is an argument about
+// The three property bounds these reads use live in `crate::linux_geometry`, not
+// here. They are pure scalars whose correctness is an argument about
 // `GetProperty`'s truncation rule, and this module is `cfg(target_os = "linux")`
-// — so defined here they were referenced by no test on any lane, and a comment in
-// the pure module claimed the too-long strut row left `STRUT_WORDS` "defending a
-// check nothing tested" while nothing tested the constant either. Setting it back
-// to twelve left every lane green. ADR-0011: if it can be decided without an OS,
-// it belongs where all three lanes compile it.
+// — so defined here they were referenced by no test on any lane, and setting
+// `STRUT_WORDS` back to the twelve its own doc calls a live bug left every lane
+// green. ADR-0011: if it can be decided without an OS, it belongs where all three
+// lanes compile it, which is also the only place a test can reach it.
 use crate::linux_geometry::{CLIENT_LIST_WORDS, STRUT_WORDS, XSETTINGS_WORDS};
 
 // One read is deliberately *not* bounded here, and a reader who has just met
