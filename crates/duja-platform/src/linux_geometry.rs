@@ -11,8 +11,11 @@
 //!
 //! # Coordinate space
 //!
-//! X11 needs no conversion, and it is the only one of the three backends that
-//! needs neither half of one:
+//! X11 needs no conversion — neither half of one — which puts it beside Windows
+//! rather than alone. ADR-0021's amendment states the same thing and states it
+//! this way round: the interesting divergence in that contract has always been
+//! macOS's, and a backend that finds both its answers boring is probably right
+//! rather than careless.
 //!
 //! - **Orientation.** Root-window coordinates are top-left origin, y **down** —
 //!   already [`geometry`](crate::geometry)'s contract, so there is no flip to get
@@ -59,13 +62,15 @@
 //! `XIQueryPointer` reports `Fp1616`, 16.16 fixed point, and winit casts
 //! `root_x`/`root_y` to `i64` without the `>> 16`. Every coordinate is therefore
 //! 65536× too large, no rectangle contains it, and the guess falls through to
-//! `monitors[0]`: the first enabled CRTC, whatever the pointer is doing. (Every
-//! coordinate but one — `0 << 16` is still `0`, so a pointer resting exactly on
-//! the root's origin does match, and winit's `contains_point` is inclusive on both
-//! edges. "Always" would be the wrong word by one pixel.) (winit's
-//! CRTC list is also one entry shorter than this module's wherever
-//! `GetOutputInfo` failed or an output name was not UTF-8, which it drops and this
-//! keeps — so even "the first CRTC" is not always the same CRTC.)
+//! `monitors[0]`: the first enabled CRTC, whatever the pointer is doing.
+//!
+//! Every coordinate but one — `0 << 16` is still `0`, so a pointer resting
+//! exactly on the root's origin does match, and winit's `contains_point` is
+//! inclusive on both edges. "Always" would be the wrong word by one pixel.
+//!
+//! winit's CRTC list is also one entry shorter than this module's wherever
+//! `GetOutputInfo` failed or an output name was not UTF-8, which it drops and
+//! this keeps — so even "the first CRTC" is not always the same CRTC.
 //!
 //! **That guess is a transient, not the settled value.** On the first synthetic
 //! `ConfigureNotify` — the absolute-coordinate one an ICCCM reparenting window
@@ -515,13 +520,17 @@ pub(crate) fn monitor_for_cursor(cursor: (i32, i32), monitors: &[X11Monitor]) ->
 /// **This is the one case where the result overlaps a reserved band**, and it is
 /// the exception the module docs' "never overlaps" property is stated against.
 /// Giving the axis back is precisely an overlap — the reservation that emptied it
-/// is still there — and it is chosen anyway, for the reason above. Reaching it does **not** need a single absurd strut, which is what an earlier
-/// version of this sentence claimed. Opposing reservations sum: the x axis empties
-/// whenever `max(monitor_left, left) >= min(monitor_right, screen_width - right)`,
-/// so two well-formed docks of 1000 px each on a 1920-wide single-monitor screen
-/// do it between them with neither one deeper than the monitor. Absurd jointly
-/// rather than individually — but the bound is the inequality, not the depth of
-/// any one strut.
+/// is still there — and it is chosen anyway, for the reason above.
+///
+/// Reaching it does **not** need a single absurd strut, which is what an earlier
+/// version of this paragraph claimed. Opposing reservations sum: the x axis
+/// empties whenever
+/// `max(monitor_left, left) >= min(monitor_right, screen_width - right)`, so two
+/// well-formed docks of 1000 px each on a 1920-wide single-monitor screen do it
+/// between them with neither one deeper than the monitor. Absurd jointly rather
+/// than individually — the bound is the inequality, not the depth of any one
+/// strut, and `two_conformant_panels_can_empty_an_axis_between_them` pins it from
+/// that side.
 pub(crate) fn work_area(bounds: WorkRect, screen: X11Screen, struts: &[X11Strut]) -> WorkRect {
     let monitor_left = i64::from(bounds.x);
     let monitor_top = i64::from(bounds.y);
@@ -1143,6 +1152,47 @@ mod tests {
     }
 
     #[test]
+    fn two_conformant_panels_can_empty_an_axis_between_them() {
+        // The claim `work_area`'s docs now rest on, after an earlier version said
+        // emptying an axis "needs a strut deeper than the monitor's own extent,
+        // which a conformant panel cannot publish". Opposing reservations sum:
+        // neither of these 1000px docks is deeper than the 1920px monitor, and
+        // between them they leave nothing.
+        //
+        // Pinned from this side because the two tests either side of it use the
+        // individually-absurd shape the doc explicitly says is *not* the bound, so
+        // without this one the correction would be prose the suite never checks.
+        let bounds = WorkRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let left_dock = X11Strut {
+            left: 1000,
+            left_start_y: 0,
+            left_end_y: 1079,
+            ..X11Strut::default()
+        };
+        let right_dock = X11Strut {
+            right: 1000,
+            right_start_y: 0,
+            right_end_y: 1079,
+            ..X11Strut::default()
+        };
+        // left = max(0, 1000) = 1000; right = min(1920, 1920 - 1000) = 920.
+        assert_eq!(
+            work_area(bounds, screen(1920, 1080), &[left_dock, right_dock]),
+            bounds,
+            "the x axis empties and is given back; y was never touched"
+        );
+        // One dock alone is well inside the bound and reserves normally, which is
+        // what makes the pair the interesting case rather than either half.
+        assert_eq!(work_area(bounds, screen(1920, 1080), &[left_dock]).x, 1000);
+        assert_eq!(work_area(bounds, screen(1920, 1080), &[right_dock]).w, 920);
+    }
+
+    #[test]
     fn one_swallowed_axis_does_not_discard_the_other_axis_reservations() {
         // The fallback is per axis, not per rectangle. A real 30px top panel plus
         // one window publishing a `left` deeper than the monitor is wide must
@@ -1501,7 +1551,12 @@ mod tests {
 
     #[test]
     fn a_display_that_reports_no_physical_size_measures_as_one() {
-        // Virtual outputs, projectors and several KVMs report 0 mm.
+        // A display reporting 0 mm is a real answer rather than a hypothetical
+        // one — winit guards the same case and cites the xpra bug that prompted
+        // it. (An earlier version of this comment named three kinds of hardware
+        // that supposedly do it; two of the three I could not support, and the
+        // commit that struck them from `X11Monitor::mm_width`'s doc left this
+        // copy standing.)
         //
         // This pins the *property*, not the guard that delivers it, and the
         // distinction is worth stating because deleting the guard does not redden
@@ -1548,13 +1603,45 @@ mod tests {
         // A settings manager can publish zero or a negative; `sane_scale` is the
         // single place that is caught, which is why the parsers pass it through
         // instead of each inventing a floor.
+        //
+        // "Any source" means all three, and it used to mean XSETTINGS alone. The
+        // `Xft.dpi` resource reaches the same divide through `f64::from_str`, so
+        // `"0"` and `"nan"` are as reachable as the parsed values — and the
+        // override is checked before either, by a *different* predicate
+        // (`validate_scale_factor`, winit's), which rejects them one step earlier
+        // and hands the chain on rather than substituting. All three must arrive
+        // at 1.0 and only two of the routes are the same route.
         for dpi in [0.0, -96.0, f64::NAN, f64::INFINITY] {
-            let sources = DpiSources {
+            let from_xsettings = DpiSources {
                 scale_override: None,
                 xsettings_dpi: Some(dpi),
                 xft_dpi: None,
             };
-            approx(scale_factor(&sources, &monitor(0, 0, 1920, 1080)), 1.0);
+            approx(
+                scale_factor(&from_xsettings, &monitor(0, 0, 1920, 1080)),
+                1.0,
+            );
+        }
+        for raw in ["0", "-96", "nan", "inf", "0.0"] {
+            let from_resource = DpiSources {
+                scale_override: None,
+                xsettings_dpi: None,
+                xft_dpi: Some(raw),
+            };
+            approx(
+                scale_factor(&from_resource, &monitor(0, 0, 1920, 1080)),
+                1.0,
+            );
+            // And as an override, where winit's own validation rejects it first:
+            // the chain falls through to the next source, which here is the
+            // measurement of a display reporting no physical size — also 1.0, by
+            // a different route.
+            let as_override = DpiSources {
+                scale_override: Some(raw),
+                xsettings_dpi: None,
+                xft_dpi: None,
+            };
+            approx(scale_factor(&as_override, &monitor(0, 0, 1920, 1080)), 1.0);
         }
     }
 
@@ -1611,8 +1698,9 @@ mod tests {
         );
         assert_eq!(anchor.unit, AnchorUnit::PhysicalPixels);
         approx(anchor.scale, 1.5);
-        // X11 is the one backend that converts in neither direction: the anchor
-        // is already the space `set_outer_position` takes.
+        // X11 converts in neither direction — the anchor is already the space
+        // `set_outer_position` takes — which is the same pair of factors Windows
+        // gets, not a distinction from it.
         approx(anchor.anchor_to_physical(), 1.0);
         approx(anchor.logical_to_anchor(), 1.5);
     }

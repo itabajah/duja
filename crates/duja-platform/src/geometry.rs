@@ -105,10 +105,13 @@ pub enum AnchorUnit {
     /// straight through — the same space for the same reason, arrived at from a
     /// different protocol.
     ///
-    /// Also used by every fallback anchor (the Linux backend's on Wayland, and
-    /// the placeholder on a target with no backend at all), where the scale is a
-    /// flat 1.0, so both conversion factors are 1.0 and the distinction cannot
-    /// matter.
+    /// Also used by two of the three fallback anchors — the Linux backend's on
+    /// Wayland, and the placeholder on a target with no backend at all — where
+    /// the scale is a flat 1.0, so both conversion factors are 1.0 and the
+    /// distinction cannot matter. **Not macOS's**, which falls back to
+    /// [`Points`](Self::Points) so that its fallback and its real answer are in
+    /// one unit; an earlier version of this sentence said "every fallback anchor"
+    /// and listed only the two that are not.
     PhysicalPixels,
     /// Points: macOS's backing-independent unit, and the one every
     /// window-positioning API there takes.

@@ -155,6 +155,14 @@ mod tests {
     ///
     /// Fenced code blocks are skipped: a table drawn inside one is illustration,
     /// not data.
+    ///
+    /// Three things it deliberately does not model, none of which any file under
+    /// `docs/` uses today: `~~~` fences (only backticks toggle), indented code
+    /// blocks, and the requirement that a delimiter row actually follow the
+    /// presumed header — so a `|`-wrapped prose line would be taken for a header
+    /// and could fail the real table beneath it. Each is a line of code and a
+    /// class of false alarm; they are named here so that a future false alarm is
+    /// diagnosable rather than mysterious.
     #[test]
     fn every_docs_table_row_matches_its_header() {
         let mut docs = crate::repo_root().expect("repo root");
