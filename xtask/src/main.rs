@@ -10,6 +10,7 @@
 mod bundle;
 mod dist;
 mod macho;
+mod size;
 mod version;
 
 use std::path::{Path, PathBuf};
@@ -28,6 +29,9 @@ TASKS:
        [--target windows|macos|linux]  package for a platform other than the host
        [--sign <identity>]       codesign identity for the macOS bundle
                                  (default `-`, an ad-hoc signature)
+  size                       measure the release binaries against their byte
+                             budgets (ADR-0012); exits non-zero if either is over
+       [--target <triple>]       look under target/<triple>/release instead
   (licenses, tr-extract arrive in later phases)
 ";
 
@@ -43,6 +47,13 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
                 eprintln!("xtask dist: {msg}");
+                ExitCode::from(1)
+            }
+        },
+        Some("size") => match size::run(args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("xtask size: {msg}");
                 ExitCode::from(1)
             }
         },

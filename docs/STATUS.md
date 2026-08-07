@@ -119,9 +119,10 @@ own `display` helper inside its macros.
 
 ## Health
 
-Measured on this box, 2026-08-07:
+Measured on this box, 2026-08-08:
 
-- **1,350 tests** pass in a local `cargo test --workspace --all-features`.
+- **1,370 tests** pass in a local `cargo test --workspace --all-features`
+  (1,354 without `--all-features`).
   The per-OS count differs, and deliberately is not enumerated here: the
   `#![cfg(windows)]` and `#![cfg(unix)]` integration suites compile out on the
   other lanes, as do per-OS unit tests spread across roughly two dozen modules.
@@ -136,9 +137,17 @@ Measured on this box, 2026-08-07:
   adversarially verified) with every confirmed finding fixed test-first.
 - Measured at the P4/P5 gates, headless: idle RSS **23.3 MB** (budget 35), idle
   CPU **0 ms over 20 s** - zero wakeups, by construction.
-- `duja.exe` is **~19 MB** release (thin LTO), over the 16 MB budget;
-  `dujactl.exe` ~0.8 MB. Tracked in
-  [ADR-0012](adr/0012-binary-size-budget-variance.md) and owned by P8.
+- `duja.exe` is **15,546,368 bytes** (14.83 MiB) release, **within** its
+  16 MiB budget with 1,230,848 bytes to spare; `dujactl.exe` is 832,000 (2 MiB
+  budget). P8 wave 1 took 3,900,416 bytes off it, 20 %, and the budget is now
+  enforced by `cargo xtask size` in the release workflow rather than remembered.
+  The measured ledger, and the one lever that is a trade rather than a free win,
+  are in [ADR-0012](adr/0012-binary-size-budget-variance.md).
+- **Two perf budgets are not measured by anything.** "Overlay alpha update
+  < 16 ms" and "Cold start < 300 ms" were last measured by hand at P4, and wave
+  1 changed the optimization level, which plausibly moves both. There is no
+  automated render benchmark ([D-109](debt.md#d-109)); the interim instrument is
+  two rows at the top of [qa-checklist.md](qa-checklist.md).
 
 The CI commands, which a local check must match exactly:
 

@@ -10,6 +10,30 @@
 //!
 //! Levels honour `RUST_LOG` when set, else default to WARN (file) / DEBUG
 //! (`--verbose`, stderr). Callers log stable ids only — never raw EDID bytes.
+//!
+//! # Why [`Targets`] and not `EnvFilter`
+//!
+//! `EnvFilter` is the usual choice and it is the one this module used until P8.
+//! It parses a strictly larger grammar — span-field predicates like
+//! `target[span{field=value}]=level` — and it pays for that with a regex engine:
+//! turning the `env-filter` feature off drops `regex-automata`, `regex-syntax`
+//! and `matchers`, which measured **[345 KiB of `.text`][adr]** in a binary that
+//! is over its budget.
+//!
+//! [`Targets`] parses the part of the grammar Duja actually uses (`warn`,
+//! `duja_app=debug,warn`, a comma-separated list of `target=level`) and nothing
+//! else. Two differences are worth knowing before debugging a filter that did
+//! not do what you expected:
+//!
+//! - **No span-field predicates.** `RUST_LOG=[worker{id=3}]=trace` parses under
+//!   `EnvFilter` and is rejected here.
+//! - **Rejection is all-or-nothing.** `EnvFilter::from_env_lossy` drops the
+//!   directives it cannot parse and keeps the rest; [`level_filter`] falls back
+//!   to the default level for the whole string. That is the safer of the two
+//!   when the alternative is silently logging at a level nobody asked for, and
+//!   it is why the fallback is spelled out in a test rather than left implicit.
+//!
+//! [adr]: ../../../../docs/adr/0012-binary-size-budget-variance.md
 
 use std::backtrace::Backtrace;
 use std::fs::{self, OpenOptions};
@@ -18,7 +42,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::filter::{LevelFilter, Targets};
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 /// The rotating log file's base name.
 const LOG_FILE: &str = "duja.log";
@@ -38,30 +65,34 @@ const MAX_FILES: usize = 3;
 /// Idempotent-ish: `tracing` allows the global subscriber to be set once; a
 /// second call is a no-op (the error is swallowed).
 pub(crate) fn init(log_dir: Option<&Path>, verbose: bool) {
+    // Read the environment once: three call sites asking separately would be
+    // three chances for them to disagree.
+    let rust_log = std::env::var("RUST_LOG").ok();
+    let spec = rust_log.as_deref();
+
     if verbose {
-        let filter = env_filter("debug");
-        let _ = tracing_subscriber::fmt()
+        let layer = tracing_subscriber::fmt::layer()
             .with_writer(io::stderr)
-            .with_env_filter(filter)
             .with_ansi(false)
-            .try_init();
+            .with_filter(level_filter(spec, LevelFilter::DEBUG));
+        let _ = tracing_subscriber::registry().with(layer).try_init();
         return;
     }
 
     if let Some(dir) = log_dir {
         let _ = fs::create_dir_all(dir);
         let writer = RotatingWriter::new(dir.to_path_buf(), LOG_FILE, MAX_BYTES, MAX_FILES);
-        let _ = tracing_subscriber::fmt()
+        let layer = tracing_subscriber::fmt::layer()
             .with_writer(move || writer.clone())
-            .with_env_filter(env_filter("warn"))
             .with_ansi(false)
-            .try_init();
+            .with_filter(level_filter(spec, LevelFilter::WARN));
+        let _ = tracing_subscriber::registry().with(layer).try_init();
     } else {
-        let _ = tracing_subscriber::fmt()
+        let layer = tracing_subscriber::fmt::layer()
             .with_writer(io::stderr)
-            .with_env_filter(env_filter("warn"))
             .with_ansi(false)
-            .try_init();
+            .with_filter(level_filter(spec, LevelFilter::WARN));
+        let _ = tracing_subscriber::registry().with(layer).try_init();
     }
 }
 
@@ -131,11 +162,16 @@ fn write_crash_record(path: &Path, record: &str) -> io::Result<()> {
     file.flush()
 }
 
-/// Build an [`EnvFilter`] honouring `RUST_LOG`, defaulting to `default_level`.
-fn env_filter(default_level: &str) -> EnvFilter {
-    EnvFilter::builder()
-        .with_default_directive(default_level.parse().unwrap_or_default())
-        .from_env_lossy()
+/// Resolve `RUST_LOG` (already read, so this stays pure) into a [`Targets`]
+/// filter, falling back to `default_level` for everything.
+///
+/// `rust_log` is `None` when the variable is unset. A value that does not parse
+/// is treated as absent — see the module header for why that is all-or-nothing
+/// rather than `EnvFilter`'s per-directive leniency.
+fn level_filter(rust_log: Option<&str>, default_level: LevelFilter) -> Targets {
+    rust_log
+        .and_then(|spec| spec.parse::<Targets>().ok())
+        .unwrap_or_else(|| Targets::new().with_default(default_level))
 }
 
 /// Whether a write of `incoming` bytes to a file already `current` bytes long
@@ -231,6 +267,43 @@ impl Rotator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use tracing::Level;
+
+    #[test]
+    fn unset_rust_log_applies_the_default_level_to_everything() {
+        let filter = level_filter(None, LevelFilter::WARN);
+        assert!(filter.would_enable("duja_app::tray", &Level::WARN));
+        assert!(filter.would_enable("some_dependency", &Level::ERROR));
+        assert!(!filter.would_enable("duja_app::tray", &Level::INFO));
+    }
+
+    #[test]
+    fn rust_log_overrides_the_default_level() {
+        let filter = level_filter(Some("debug"), LevelFilter::WARN);
+        assert!(filter.would_enable("duja_app::tray", &Level::DEBUG));
+    }
+
+    #[test]
+    fn rust_log_scopes_a_level_to_one_target() {
+        let filter = level_filter(Some("duja_app=debug,warn"), LevelFilter::WARN);
+        assert!(filter.would_enable("duja_app::tray", &Level::DEBUG));
+        // The trailing bare `warn` is the default for everything else, so a
+        // chatty dependency stays quiet.
+        assert!(!filter.would_enable("i_slint_core", &Level::DEBUG));
+        assert!(filter.would_enable("i_slint_core", &Level::WARN));
+    }
+
+    /// The one behaviour that differs from the `EnvFilter` this replaced, so it
+    /// is pinned rather than left to be rediscovered. `EnvFilter::from_env_lossy`
+    /// would drop `[span{field}]` and keep the `debug`; `Targets` rejects the
+    /// whole string, and the default level stands.
+    #[test]
+    fn an_unparseable_rust_log_falls_back_to_the_default_level() {
+        let filter = level_filter(Some("[worker{id=3}]=trace,debug"), LevelFilter::WARN);
+        assert!(!filter.would_enable("duja_app::tray", &Level::DEBUG));
+        assert!(filter.would_enable("duja_app::tray", &Level::WARN));
+    }
 
     #[test]
     fn empty_file_never_rotates() {

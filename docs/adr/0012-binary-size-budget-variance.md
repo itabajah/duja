@@ -43,6 +43,8 @@ levers, in expected-payoff order, are recorded for P8:
 |---|---|---|
 | P4 (tray + flyout + dimmer) | 14.9 MB | within the raised 16 MB budget |
 | P5 (+ settings, autostart, ureq/rustls update check) | **17.21 MB** | **over by 1.2 MB** |
+| P7 (+ the Linux tray and gamma sink) | 19,446,784 bytes | over by 2,669,568 |
+| **P8 (hardening)** | **15,546,368 bytes** | **within, by 1,230,848** |
 
 P5's overage is entirely the opt-in update check's TLS stack
 (`ureq` + `rustls` + `ring` + `webpki-roots`). It is **not** accepted as a new
@@ -56,3 +58,139 @@ budget: P8 must recover it. Levers, in expected-payoff order:
 
 If P8 cannot get under 16 MB, this ADR is superseded by an explicit
 raise-with-rationale rather than silent drift. `dujactl` remains 0.6 MB.
+
+> **Read the P8 section below before following either lever list above.** One of
+> the four levers does not exist, the unit was never pinned, and the largest
+> single component of the binary is in a section neither list mentions. P8 did
+> get under the budget, so no raise was needed - `dujactl` measures
+> 832,000 bytes and now has a budget of its own.
+
+## P8 outcome (2026-08-08)
+
+**Recovered, to 15,546,368 bytes (14.83 MiB).** Under the budget
+for the first time since P4, with 24 % taken off the P7 binary. This section
+records what worked, what the levers above got wrong, and the one trade that was
+made rather than avoided.
+
+### Two things this ADR said that were not true
+
+**"16 MB" never named a unit, and four gates argued past it.** 16 MB
+(16,000,000) and 16 MiB (16,777,216) differ by 5 %, which is wider than three of
+the four levers listed above. The budget is now an integer number of **bytes**
+in `xtask/src/size.rs`, and `docs/perf-budgets.md` states the same integer; a
+test reads the doc and fails if they drift. The value chosen is
+16,777,216 (16 MiB), the *looser* of the two readings, deliberately: the
+measured binary lands under both, so taking the loose one costs nothing today,
+and quietly tightening a budget under cover of disambiguating it would be a
+different change wearing this one's clothes.
+
+**Lever 2 does not exist.** "Slint image-format features: the flyout uses no
+SVG/EXR/animated images - investigate disabling the decoder stack Slint pulls by
+default." Investigated, and there is nothing to disable: `slint/std` implies
+`i-slint-core/std`, which implies `image-decoders` **and** `svg`, with no seam
+between them. The formats that *were* optional are already off - which is why
+`exr`, `tiff`, `qoi` and AVIF are absent from the binary while JPEG, WebP, PNG
+and GIF remain. Removing the rest means patching Slint, which is not a hardening
+change. Struck rather than left for the next person to spend a day on.
+
+### And one thing the Context missed entirely
+
+This ADR reasons about `.text`, because `cargo bloat` reasons about `.text`.
+Read the P7 baseline's PE section table instead and it is
+**11,885,568 bytes of `.text` and 7,048,192 of `.rdata`** - 11.33 MiB against
+6.72, with **36 % of the file** in a section nothing here had ever looked at and
+no tool in this project's reach attributes.
+
+(Both figures come from one binary, rebuilt for this ADR in a clean worktree off
+`main` so that the byte count the ledger below diffs against and the section
+split are the same file. An earlier draft mixed a targeted build's byte count
+with an untargeted build's sections - 25,600 bytes apart, which changed no
+conclusion and would still have been two measurements presented as one.)
+
+That section is dominated by static data tables arriving with the same
+`i-slint-core/std` feature as the SVG stack: ICU segmentation, normalization,
+properties and locale data, plus font and shaping tables. **The attribution is
+by dependency graph rather than by symbol** - nothing here can read a stripped
+PE's `.rdata` per crate, and that limitation is the finding as much as the number
+is.
+
+It reframes the problem either way. **The binary is not code-bound, it is
+data-bound**, and the data is welded to a feature a desktop GUI cannot turn off.
+That is why the dependency levers could not reach the budget and a profile change
+had to.
+
+### The update-check lever is a choice, not a saving
+
+`ureq` + `rustls` + `ring` + `rustls-webpki` + `webpki-roots` measure 724 KiB of
+`.text`, and the Ledger's lever 1 proposes feature-gating them "default on for
+release, off for a 'lite' artifact". D-011 adds the WinRT toast bindings to the
+same gate.
+
+**Gating something that is on by default saves the default build nothing.** It
+creates the *possibility* of a smaller artifact, and Duja ships no lite artifact,
+so as a lever against this budget it is worth zero bytes until "we publish a
+second artifact" is also a decision. It was not taken here, and it is not counted
+below. Whether a lite build should exist is a packaging question, not a size one,
+and answering it inside a size wave would have been the wrong PR for it.
+
+### The measured ledger
+
+Every row is `duja.exe`, stripped, `x86_64-pc-windows-msvc`, measured on the
+dev box. Each lever was applied **alone** against the baseline before any were
+combined, because a single combined diff that lands 5 MB teaches nothing about
+which lever to reach for at 1.1.
+
+| configuration | bytes | delta |
+|---|---|---|
+| P7 baseline: `lto = "thin"`, `opt-level = 3`, `env-filter` | 19,446,784 | - |
+| `lto = "fat"` alone | 18,348,544 | -1,098,240 |
+| `filter::Targets` instead of `EnvFilter`, alone | 18,782,720 | -664,064 |
+| both | 17,557,504 | -1,889,280 |
+| both, `opt-level = 2` | 17,161,216 | -2,285,568 |
+| both, `opt-level = "s"` everywhere | 14,280,192 | -5,166,592 |
+| **both, `opt-level = "s"` with the render path at 3** | **15,546,368** | **-3,900,416** |
+
+Two of those numbers are worth more than their row. **Fat LTO and `Targets`
+together beat the sum of their parts** by 127,168 bytes: LTO has less code to
+work with once the regex engine leaves, and inlines across what is left.
+And **`Targets` gave back nearly twice its `.text`** - `cargo bloat` attributes
+345 KiB to `regex-syntax` and `regex-automata`, and removing them took 664,064
+bytes off the file, because a crate leaves with its read-only data.
+
+### The trade that was made, and the budget it was made against
+
+`opt-level = "s"` is the lever that reached the budget, and it is the only one
+here that is a **trade** rather than a free win. It is `-Os`: `-O2`'s pipeline
+with size-aware inlining and vectorization thresholds. On a tight per-pixel loop
+that costs real time, and Duja's per-frame path is a *software* renderer
+(ADR-0009).
+
+So it is not applied to the per-frame path. `i-slint-core`,
+`i-slint-renderer-software`, `zeno` and `duja-ui` keep `opt-level = 3` through
+per-package profile overrides, and the 1,266,176 bytes that costs
+against `"s"` everywhere is the price of not guessing about the renderer.
+
+**What is honestly not proven:** that a per-package `opt-level` override under
+`lto = "fat"` produces codegen identical to a whole-program `-O3` build. The
+mechanism is that rustc writes per-function `optsize` attributes into the
+bitcode and the LTO pipeline honours them, so functions from the O3 crates carry
+no size constraint - and the 1,266,176-byte difference proves the
+overrides do reach the linker. "Reaches the linker" is not "identical to O3",
+and this ADR does not claim it.
+
+**And the budget that has not been re-measured**: "Overlay alpha update < 16 ms"
+and "Cold start to tray icon < 300 ms". There is no automated render benchmark
+in this repository and there never has been - both were measured by hand at P4.
+A change to the optimization level plausibly affects them, and the rubric says a
+plausibly-affected budget gets re-measured, so the re-measurement is booked into
+[`docs/qa-checklist.md`](../qa-checklist.md) where the other hand-measured
+numbers live, and the missing benchmark is a debt row. Naming the gap is the
+point; the alternative was to take the bytes and say nothing.
+
+### What now protects it
+
+`cargo xtask size`, called by the release workflow after it builds. A release
+cannot ship over budget. It deliberately does not run per PR - the check needs a
+fat-LTO release build, roughly twenty minutes on a hosted runner - so a
+dependency bump that adds a megabyte is caught at the next release rather than
+at the PR that lands it. That gap is a debt row too.

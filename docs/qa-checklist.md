@@ -4,7 +4,23 @@ Run per release (and the relevant OS section at phase gates). Sections grow
 with the phases; keep entries as observable behaviors, not implementation.
 
 ## All platforms
+
+**Two rows here are the only instrument two perf budgets have.** P8 wave 1 moved
+the release profile to `opt-level = "s"` for everything except the four crates on
+the frame path, which plausibly moves both "cold start" and "overlay alpha", and
+nothing in this repository can measure either. They were last measured by hand at
+the P4 gate. If the numbers have moved, that is a finding and
+[`docs/perf-budgets.md`](perf-budgets.md) needs it; if they have not, say so, so
+the next person is not re-litigating a settled question. The missing automated
+benchmark is [D-109](debt.md#d-109).
+
 - [ ] Tray icon appears < 300 ms after launch; correct in light and dark theme.
+      **Time it** rather than eyeballing it - this is one of the two rows above.
+- [ ] **Dragging a slider is smooth**, with no stutter as the overlay alpha
+      follows it. The budget is one frame (< 16 ms) per alpha update, and the
+      renderer is a *software* one, so this is the row that would notice a
+      size-optimized build if the per-package exemptions did not do their job.
+      Drag fast, across the full range, on the largest display available.
 - [ ] Flyout opens on tray interaction, dismisses on Esc/focus-loss, never steals focus on open.
 - [ ] Slider 100 → 0 is one visually continuous dim; no jump at the hardware/overlay handoff.
 - [ ] Overlay never intercepts input: click/type/drag through a dimmed region (security property).

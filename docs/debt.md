@@ -131,6 +131,8 @@ argument.
 | [D-106](#d-106) | P7 wave 5 follow-up (`#139`) | `duja-platform` `linux/geometry.rs` + `duja-dimmer` `linux/`, `dujactl` | Only the tray's X11 path is bounded; every other X call in the tree can still hang forever, and a timed-out probe parks a thread |
 | [D-107](#d-107) | P7 wave 6 (`#140`) | `packaging/linux/` + `xtask` `dist.rs` | Linux ships a tarball and no native package, because a package makes a dependency claim nobody here can check |
 | [D-108](#d-108) | P7 gate | `duja-app` `tray/state.rs` `begin_quit` | Every clean quit writes identity gamma to every display, including ones Duja never touched |
+| [D-109](#d-109) | P8 wave 1 | `crates/duja-ui` + `docs/perf-budgets.md` | Two perf budgets name no instrument: there is no automated render benchmark, and both were last measured by hand at P4 |
+| [D-110](#d-110) | P8 wave 1 | `.github/workflows/` + `xtask` `size.rs` | The binary-size budget is gated at release time only, so a dependency bump that adds a megabyte is caught by the next release rather than by the PR |
 
 ## Rows
 
@@ -948,6 +950,30 @@ The macOS status icon is **not** a template image (`tray-icon`'s `icon_is_templa
 - **Linux/Wayland**: releases only this process's gamma controls. Benign, because there is nothing else to find.
 
 **Why deferred.** Two reasons, and the second is the reason it is a row rather than a fix in the gate that found it. First, it is **not P7's defect**: the call has been there since the Windows train, so a fix changes shipped Windows quit behaviour and belongs in a PR whose subject that is, with its own review - `#82` is this project's standing example of what happens otherwise. Second, the analysis is worth landing before the change, because the *right* fix is not obvious from the symptom. The pass is nearly redundant everywhere: a leftover from a dirty run is what `startup::recover_from_crash_marker` handles, at launch, from the marker - and P7 is what gave **Linux** that marker, so the belt-and-braces argument is now weakest on the platform where the cost is highest. [D-099](#d-099) already carries the victim classification (`redshift` and friends repair themselves on their next timer; a `colord`/`xcalib` curve is loaded once at login and stays flattened), which is what makes this worth doing rather than filing as cosmetic. The likely shape is to drop the unconditional pass entirely and let the marker path own leftovers, keeping the wide walk for the two places a user asks for it: `duja --restore` and the tray's "Restore screen"
+
+### D-109
+
+**Where:** `crates/duja-ui` + `docs/perf-budgets.md` &nbsp;·&nbsp; **Added:** P8 wave 1
+
+**Two perf budgets name no instrument.** "Overlay alpha update < 16 ms (one frame)" and "Cold start to tray icon visible < 300 ms" both cite "tracing span" as the method, and a span is a thing you read *while watching the app*, not a thing that fails a build. Neither has been measured since the P4 gate, by hand, on this box.
+
+That was tolerable while the release profile was `opt-level = 3` and nobody was touching codegen. P8 wave 1 moved it to `"s"`, which is exactly the change those two budgets exist to notice, and the mitigation was to exempt the four crates on the frame path by name (`i-slint-core`, `i-slint-renderer-software`, `zeno`, `duja-ui`) rather than to measure the result. **The exemption is an argument, not a measurement**, and the argument has a soft spot the ADR names: a per-package `opt-level` override under fat LTO is honoured through per-function `optsize` attributes, which is not the same guarantee as a whole-program `-O3` build.
+
+**What would close this.** Slint exposes the pieces: `slint::platform::set_platform` with a `MinimalSoftwareWindow`, then `draw_if_needed(|renderer| renderer.render(&mut buffer, stride))` in a loop renders the *real* `FlyoutShell` into a real buffer with the real software renderer. That is a per-frame number on demand, on any lane, with no display server - which is more than the tracing-span method ever offered, since a span needs a human at the screen. `duja-ui`'s existing `smoke` feature already proves both shells instantiate headless, so the hard half is done.
+
+**Why deferred.** Scope discipline rather than difficulty. Wave 1's subject is the binary, and a benchmark harness is a wave-sized job with its own review - `#82` is this project's standing example of what a smuggled second subject costs. The interim cover is honest rather than absent: [`docs/qa-checklist.md`](qa-checklist.md)'s "All platforms" section now opens by saying those two rows are the only instrument these budgets have, and asks for a timed number rather than an impression
+
+### D-110
+
+**Where:** `.github/workflows/` + `xtask` `size.rs` &nbsp;·&nbsp; **Added:** P8 wave 1
+
+**The size budget is gated at release time only.** `cargo xtask size` runs in the `release` job, on the bytes it just built, so a release cannot ship over budget. Nothing checks a pull request.
+
+The exposure is the one that produced [D-011](#d-011) in the first place: `duja.exe` went from 14.9 MB at P4 to 19,446,784 bytes by P7 with nothing in the path to notice, one dependency at a time. A per-PR gate is what turns "we recovered 4.7 MB" into "we keep it", and a dependabot bump is precisely the change that would give it back.
+
+**Why deferred.** Cost, and it is a real one rather than an excuse. The measurement is only meaningful on the profile that ships - fat LTO, `codegen-units = 1` - and that build is roughly twenty minutes on a hosted Windows runner, against a PR matrix that currently completes in a fraction of that. Paying it on every pull request to catch a regression that arrives perhaps once a year is the wrong trade, and paying it on a *cheaper* profile is worse than not paying it, because a budget measured against a build nobody ships is a number that will drift away from the one that matters and then be trusted anyway.
+
+The shapes worth pricing before choosing one: a scheduled weekly run on `main` (catches drift within seven days, costs one build a week, and reports after the merge rather than before it); a run gated on `Cargo.lock` changing (catches the dependency-bump case specifically, which is the one that actually happened, and misses a regression from our own code); or accepting the release-time gate as sufficient and saying so in ADR-0012 rather than leaving this row open. The middle one is the best fit for the observed failure mode and is not obviously worth a twelfth required check
 
 ### D-102
 

@@ -427,6 +427,21 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked -p duja-app -p dujactl
 
+      # ADR-0012's budget, enforced on the bytes this job just produced rather
+      # than remembered. The binary went from 14.9 MB at P4 to 19.4 MB by P7 with
+      # nothing in the path to notice, and it was a human reading a ledger months
+      # later that caught it.
+      #
+      # This runs BEFORE packaging on purpose: an over-budget binary should fail
+      # here, not after it has been zipped, installed into an Inno Setup tree,
+      # checksummed and signed. It is also deliberately not a PR check - the
+      # measurement needs a fat-LTO release build, which is roughly twenty
+      # minutes on a hosted Windows runner. `docs/debt.md` carries the gap that
+      # leaves: a dependency bump that adds a megabyte is caught here, at the
+      # next release, rather than at the pull request that lands it.
+      - name: Gate (binary size budget)
+        run: cargo run --release -p xtask -- size
+
       # Portable zip (staging + Compress-Archive), via the dependency-free xtask.
       - name: Stage portable archive
         shell: pwsh
