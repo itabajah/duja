@@ -317,11 +317,14 @@ const RESTORE_UNIT: &str = "CRTC(s)";
 /// An X11 `RandR` gamma ramp is server state and **outlives the process that set
 /// it**, exactly as a Windows one does — which is why
 /// `xrandr --output DP-1 --gamma 1:1:0.5` works as a one-shot command (not
-/// `xgamma`, which drives a different API and says nothing about this one). So this is a real rescue on Linux from the moment the
-/// backend exists, and today it is the *only* one: nothing engages a ramp yet
-/// (the tray, which owns the gamma sink, is not built on Linux until the ksni
-/// wave), so there is no crash marker either and
-/// `startup::recover_from_crash_marker` cannot fire. Like macOS it is also a
+/// `xgamma`, which drives a different API and says nothing about this one). So
+/// this is a real rescue on Linux, and it is **no longer the only one**: P7 wave 5
+/// gave Linux a tray, which owns the gamma sink, so a ramp is engaged and a crash
+/// marker is written exactly as on Windows, and
+/// `startup::recover_from_crash_marker` fires on the next launch. This command
+/// stays the one a user runs when that did not happen — a marker that could not be
+/// written, or a screen that has to be fixed without launching the app at all.
+/// Like macOS it is also a
 /// general screen rescue — it writes identity to every CRTC with a writable
 /// table, including ones driving no output (a gamma table survives its CRTC being
 /// disabled), clearing a ramp left behind by `redshift`, `gammastep`, or a crashed
