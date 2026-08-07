@@ -20,42 +20,51 @@ corrections to.
 
 ## Contents
 
-  - [v0.1.1 — deep-review fix wave (2026-07-17)](#v011-deep-review-fix-wave-2026-07-17)
-  - [v0.1.2 — multi-monitor & capability fix wave (2026-07-18)](#v012-multi-monitor-&-capability-fix-wave-2026-07-18)
-  - [v0.1.3 — internal-panel fallback fix (2026-07-19)](#v013-internal-panel-fallback-fix-2026-07-19)
-  - [v0.1.4 — dark rebrand + the mirror/software-only pair (2026-07-19)](#v014-dark-rebrand-+-the-mirrorsoftware-only-pair-2026-07-19)
-  - [v0.1.5 — the sticky "software-only" probe fix (2026-07-26)](#v015-the-sticky-"software-only"-probe-fix-2026-07-26)
-  - [Structural wave — the tray.rs split + test infra (2026-07-26, post-v0.1.5)](#structural-wave-the-trayrs-split-+-test-infra-2026-07-26-post-v015)
-  - [P6 wave 2 — the macOS foundation, and two defects in a live install (2026-07-30)](#p6-wave-2-the-macos-foundation-and-two-defects-in-a-live-install-2026-07-30)
-  - [`#103` — the gamma captions stop being Windows sentences (2026-07-31)](#103-the-gamma-captions-stop-being-windows-sentences-2026-07-31)
-  - [`#104` — macOS packaging: a universal `Duja.app`, in an image (2026-07-31)](#104-macos-packaging-a-universal-dujaapp-in-an-image-2026-07-31)
-  - [`#106` — every Apple Silicon DDC request was malformed (2026-07-31)](#106-every-apple-silicon-ddc-request-was-malformed-2026-07-31)
-  - [`#105` — the built-in panel gets a position, so it can be dimmed (2026-07-31)](#105-the-built-in-panel-gets-a-position-so-it-can-be-dimmed-2026-07-31)
-- [What is done](#what-is-done)
-  - [P0–P2 — foundation, spikes, and the pure core](#p0–p2-foundation-spikes-and-the-pure-core)
-  - [P3 — Windows hardware slice (`m3-win-hw`)](#p3-windows-hardware-slice-m3-win-hw)
-  - [P4 — Windows MVP (`m4-win-mvp`)](#p4-windows-mvp-m4-win-mvp)
-  - [P5 — Windows feature-complete (`m5-win-full`)](#p5-windows-feature-complete-m5-win-full)
-  - [P6 — macOS port, wave 1 (backends landed 2026-07-11)](#p6-macos-port-wave-1-backends-landed-2026-07-11)
-  - [Windows UI hardening (#27–#30, live-QA driven)](#windows-ui-hardening-27–30-live-qa-driven)
-  - [Perceptual brightness continuum (v2, ADR-0014)](#perceptual-brightness-continuum-v2-adr-0014)
-  - [UI layout & ruby theme (2026-07-14)](#ui-layout-&-ruby-theme-2026-07-14)
-  - [v0.1.0 release (2026-07-16)](#v010-release-2026-07-16)
-- [P6 gate results](#p6-gate-results)
-  - [The blocker](#the-blocker)
-  - [The other findings that changed code](#the-other-findings-that-changed-code)
-  - [The near-regression](#the-near-regression)
-  - [Documentation the phase falsified](#documentation-the-phase-falsified)
-  - [Rubric](#rubric)
-  - [Deliberately still open](#deliberately-still-open)
-  - [After the gate — a CI flake, and a confident wrong diagnosis (`#113`)](#after-the-gate-a-ci-flake-and-a-confident-wrong-diagnosis-113)
-- [P5 gate results](#p5-gate-results)
-- [Live hardware QA (2026-07-11, console session, MSI MP273QP over DDC)](#live-hardware-qa-2026-07-11-console-session-msi-mp273qp-over-ddc)
-  - [1. Pure-visual QA — SIGNED OFF (user, 2026-07-16)](#1-pure-visual-qa-signed-off-user-2026-07-16)
-  - [2. Known gaps carried forward](#2-known-gaps-carried-forward)
+Every section carries an explicit `<a id>` anchor, and this list links to
+those rather than to a heading slug - the slug rule is GitHub's and is not
+verifiable from a checkout, which is the sort of thing this project prefers not
+to assert.
+
+  - [v0.1.1 — deep-review fix wave (2026-07-17)](#s01)
+  - [v0.1.2 — multi-monitor & capability fix wave (2026-07-18)](#s02)
+  - [v0.1.3 — internal-panel fallback fix (2026-07-19)](#s03)
+  - [v0.1.4 — dark rebrand + the mirror/software-only pair (2026-07-19)](#s04)
+  - [v0.1.5 — the sticky "software-only" probe fix (2026-07-26)](#s05)
+  - [Structural wave — the tray.rs split + test infra (2026-07-26, post-v0.1.5)](#s06)
+  - [P6 wave 2 — the macOS foundation, and two defects in a live install (2026-07-30)](#s07)
+    - [`#103` — the gamma captions stop being Windows sentences (2026-07-31)](#s08)
+    - [`#104` — macOS packaging: a universal `Duja.app`, in an image (2026-07-31)](#s09)
+    - [What the review changed](#s10)
+    - [And what the second review changed](#s11)
+    - [`#106` — every Apple Silicon DDC request was malformed (2026-07-31)](#s12)
+    - [`#105` — the built-in panel gets a position, so it can be dimmed (2026-07-31)](#s13)
+- [What is done](#s14)
+  - [P0–P2 — foundation, spikes, and the pure core](#s15)
+  - [P3 — Windows hardware slice (`m3-win-hw`)](#s16)
+  - [P4 — Windows MVP (`m4-win-mvp`)](#s17)
+  - [P5 — Windows feature-complete (`m5-win-full`)](#s18)
+  - [P6 — macOS port, wave 1 (backends landed 2026-07-11)](#s19)
+      - [Windows UI hardening (#27–#30, live-QA driven)](#s20)
+  - [Perceptual brightness continuum (v2, ADR-0014)](#s21)
+  - [UI layout & ruby theme (2026-07-14)](#s22)
+  - [v0.1.0 release (2026-07-16)](#s23)
+- [P6 gate results](#s24)
+  - [The blocker](#s25)
+  - [The other findings that changed code](#s26)
+  - [The near-regression](#s27)
+  - [Documentation the phase falsified](#s28)
+  - [Rubric](#s29)
+  - [Deliberately still open](#s30)
+    - [After the gate — a CI flake, and a confident wrong diagnosis (`#113`)](#s31)
+- [P5 gate results](#s32)
+- [Live hardware QA (2026-07-11, console session, MSI MP273QP over DDC)](#s33)
+  - [1. Pure-visual QA — SIGNED OFF (user, 2026-07-16)](#s34)
+  - [2. Known gaps carried forward](#s35)
 
 ---
 
+
+<a id="s01"></a>
 ### v0.1.1 — deep-review fix wave (2026-07-17)
 
 After v0.1.0 shipped, a 14-module line-by-line review (Opus reviewers, findings
@@ -89,6 +98,7 @@ in [debt.md](debt.md); ADRs **0017–0020** record the new contracts. The split 
 the E2E smoke have since landed, and the throttle pin moved to `duja-ui` — see
 the structural wave below.
 
+<a id="s02"></a>
 ### v0.1.2 — multi-monitor & capability fix wave (2026-07-18)
 
 Real-hardware testing on a laptop (internal panel + one external monitor,
@@ -128,6 +138,7 @@ update loop (`UI_Notifications`/`Data_Xml_Dom`). Tracked in
 [ADR-0012](adr/0012-binary-size-budget-variance.md)/[debt.md](debt.md); P8 owns
 the trim (fat LTO, feature-gating the update stack). `dujactl.exe` ~0.8 MB.
 
+<a id="s03"></a>
 ### v0.1.3 — internal-panel fallback fix (2026-07-19)
 
 The v0.1.2 identity fix assumed the WMI panel backend (`duja-panel`) owns every
@@ -153,6 +164,7 @@ provably disjoint), the unchanged mirror probe count, and that the red-first
 reporting laptop is pending** (tracked as a QA gate); the fix is strictly additive
 — it can only restore the panel, never remove more than before.
 
+<a id="s04"></a>
 ### v0.1.4 — dark rebrand + the mirror/software-only pair (2026-07-19)
 
 Two issues filed from laptop testing (#66, #67) both traced to **one modelling
@@ -184,6 +196,7 @@ drift-tested. That drift test surfaced a **cross-platform libm determinism** tra
 pixels — so the assertion pins the integer supersampled alpha bit-for-bit and
 allows a bounded RGB delta, which still catches a genuinely stale asset.
 
+<a id="s05"></a>
 ### v0.1.5 — the sticky "software-only" probe fix (2026-07-26)
 
 Continued real-world use surfaced the **twin** of a defect class this codebase
@@ -224,6 +237,7 @@ gets silently re-violated whenever a new code path performs the same primitive.
 When adding a read/write path, confirm it uses the project's paced/retried
 wrapper rather than a raw one-shot call making a decision.
 
+<a id="s06"></a>
 ### Structural wave — the tray.rs split + test infra (2026-07-26, post-v0.1.5)
 
 Two PRs on top of v0.1.5, both behaviour-neutral, clearing P6's documented
@@ -287,6 +301,7 @@ into a test-infra PR.
    exist, converts a tracked gap into a lie in the exact file a maintainer reads
    before re-introducing the bug. Under-promise in comments; never over-promise.
 
+<a id="s07"></a>
 ### P6 wave 2 — the macOS foundation, and two defects in a live install (2026-07-30)
 
 Seven PRs, 871 → 951 tests. Three carry the macOS port; two fix things a real
@@ -348,6 +363,7 @@ ADR-0013 keeps the macOS DDC path labelled experimental until there are ≥3
 independent community confirmations per architecture, which no amount of code
 closes.
 
+<a id="s08"></a>
 ### `#103` — the gamma captions stop being Windows sentences (2026-07-31)
 
 The last code item before packaging, and the only knowingly-wrong string in the
@@ -553,6 +569,7 @@ CLI's own runs were clean, which is why the PR that added probing did not catch 
 — it checked the wrong side. Tracked in [debt.md](debt.md); the fix direction is
 for `--report` to prefer IPC, or to say plainly that it is about to contend.
 
+<a id="s09"></a>
 ### `#104` — macOS packaging: a universal `Duja.app`, in an image (2026-07-31)
 
 C6. `xtask dist` was hard-wired to Windows — a staging directory and a PowerShell
@@ -634,6 +651,7 @@ has **no PR-time CI coverage** (its only automated exercise is the release workf
 `workflow_dispatch` dry run). Both are in [debt.md](debt.md) with the option they
 should be fixed by.
 
+<a id="s10"></a>
 #### What the review changed
 
 The adversarial pass blocked the first version, and three of its findings changed
@@ -695,6 +713,7 @@ architecture list out of the workflow's `cargo build --target` lines, and both
 cross-file readers now assert that **every** occurrence agrees rather than the
 first.
 
+<a id="s11"></a>
 #### And what the second review changed
 
 Round 2 blocked it again, and the best finding was that the mounted-volume guard
@@ -731,6 +750,7 @@ still compiles, and `dead_code` under CI's clippy is what catches that); and the
 "re-run recovers the tag" note gave the wrong reason, since with `needs:` the
 publishing job never ran and there is no Release to update.
 
+<a id="s12"></a>
 ### `#106` — every Apple Silicon DDC request was malformed (2026-07-31)
 
 Found by the **P6 phase-gate review**, and the reason `#105` was not in fact the
@@ -772,6 +792,7 @@ Note this is a reading of the wire, not an observation — Duja has still never 
 against Apple Silicon hardware, so the whole `duja-ddc` `mac/` row in
 [debt.md](debt.md) stands unchanged.
 
+<a id="s13"></a>
 ### `#105` — the built-in panel gets a position, so it can be dimmed (2026-07-31)
 
 The last P6 code item. A macOS built-in panel reached the app as `(id, None, None,
@@ -840,8 +861,10 @@ from the panel's rect. Grouping was documented as unable to mis-address anything
 placement is a third consumer, and that argument never covered it.
 
 
+<a id="s14"></a>
 ## What is done
 
+<a id="s15"></a>
 ### P0–P2 — foundation, spikes, and the pure core
 - 9-crate workspace + xtask; lint wall (`deny` unwrap/expect/panic/todo/
   undocumented-unsafe; pedantic warnings; `forbid(unsafe_code)` in the pure
@@ -863,6 +886,7 @@ placement is a third consumer, and that argument never covered it.
   parser, the quirk DB, and the reusable cross-backend **contract suite**.
   ~96 % line coverage; 3×1 M fuzz executions clean.
 
+<a id="s16"></a>
 ### P3 — Windows hardware slice (`m3-win-hw`)
 - **`duja-ddc`**: in-house dxva2 backend. `VcpTransport` seam + `DdcController`
   owning all policy (quirk-driven pacing, retry with backoff, verify-by-
@@ -881,6 +905,7 @@ placement is a third consumer, and that argument never covered it.
   debouncer double-poll that dropped enumerations, COM apartment misuse across
   threads, un-seq-gated acks, twin `-slot<n>` misrouting) — all fixed test-first.
 
+<a id="s17"></a>
 ### P4 — Windows MVP (`m4-win-mvp`)
 - **`duja-ui`**: Slint flyout with **pure-Rust view-models** (zero Slint types in
   signatures), presentation-only `.slint` (light/dark, `@tr`, keyboard + a11y,
@@ -901,6 +926,7 @@ placement is a third consumer, and that argument never covered it.
   never reached the gamma API (silently dead, along with the crash-marker
   machinery). Both fixed test-first.
 
+<a id="s18"></a>
 ### P5 — Windows feature-complete (`m5-win-full`)
 - **Global hotkeys**: pure accelerator parser + conflict detection, **no default
   bindings** (commented examples in the emitted config), WARN-and-skip on
@@ -926,6 +952,7 @@ placement is a third consumer, and that argument never covered it.
 - Gate: adversarial review + **security checklist §6 item-by-item** +
   **unsafe audit #2**. Results below.
 
+<a id="s19"></a>
 ### P6 — macOS port, wave 1 (backends landed 2026-07-11)
 
 Hardware-blind by design: Duja has no Mac, and CI's `macos-latest` runners are
@@ -1008,6 +1035,7 @@ crate, on any OS — is reported as a *failed test with a name* rather than a jo
 someone has to cancel. **A flaky test is a finding, not noise**; that rule was
 already written down here, and it was not applied.
 
+<a id="s20"></a>
 ### Windows UI hardening (#27–#30, live-QA driven)
 
 Four rounds of on-hardware visual QA (real console session, external monitor)
@@ -1053,6 +1081,7 @@ after `show()`: the flip marks the whole window dirty, so the next present cover
 it completely. Applied symmetrically to the flyout and settings windows, each
 covered by a binding test (proven red against a non-flipping present).
 
+<a id="s21"></a>
 ### Perceptual brightness continuum (v2, ADR-0014)
 
 The slider is now **perceptual**: the position *is* perceived brightness, so
@@ -1089,6 +1118,7 @@ path). The glide honours the OS "animation effects" accessibility setting
 during a drag; only the rendered thumb glides, so the DDC-never-animates rule is
 untouched.
 
+<a id="s22"></a>
 ### UI layout & ruby theme (2026-07-14)
 
 A visual/layout pass driven by direct user requests, in four small PRs:
@@ -1128,6 +1158,7 @@ finding — a fractional-DPI scale race in the settings `Resized` capture, which
 read the window's provisional scale instead of the monitor's — was fixed (it now
 queries the monitor scale, as `enforce_physical_buffer` does).
 
+<a id="s23"></a>
 ### v0.1.0 release (2026-07-16)
 
 The first public release turns the Windows-complete build into something users can
@@ -1165,6 +1196,7 @@ install and stay current on:
   run; authenticity is via the checksums + minisign key + provenance. Binary size
   regressed to ~19 MB (P8 trim).
 
+<a id="s24"></a>
 ## P6 gate results
 
 Four adversarial reviewers over the cumulative `v0.1.5..main` diff (23 commits, 96
@@ -1172,6 +1204,7 @@ files, +17,171/−3,555), split as: macOS backends + pure rules; app/tray/platfo
 UI/CLI; packaging/CI/release docs; and a holistic cross-crate + rubric pass.
 **Three returned APPROVE-WITH-FIXES, one BLOCK.** Six PRs closed it out (#106–#111).
 
+<a id="s25"></a>
 ### The blocker
 
 **Every Apple Silicon DDC/CI request was malformed** (#106), and had been since the
@@ -1202,6 +1235,7 @@ Four macOS DDC implementations were consulted; fastfetch is the most useful (it
 emits both arms from one file), MonitorControl and m1ddc **share an author** and are
 one source rather than two, and `ddc-macos` dissents on the Get checksum.
 
+<a id="s26"></a>
 ### The other findings that changed code
 
 - **A stale `Panicked` ack retired the fresh worker** (#107) — **Windows-affecting,
@@ -1216,6 +1250,7 @@ one source rather than two, and `ddc-macos` dissents on the Get checksum.
   `overlay_alpha == 0` by construction, so nothing else dimmed it. Not macOS-only:
   Windows self-healed only *incidentally*, when the event also removed the display.
 
+<a id="s27"></a>
 ### The near-regression
 
 **#108 was blocked by its own review, correctly.** The macOS `enumerate_displays`
@@ -1227,6 +1262,7 @@ that cannot use it and then released it — losing DDC control of that monitor
 entirely. What landed instead is the invariant at the call site plus a debt row
 naming the wrong fix, so it is not attempted a third time.
 
+<a id="s28"></a>
 ### Documentation the phase falsified
 
 Six claims (#110), the sharpest being that `sha256sum` — the documented verification
@@ -1236,6 +1272,7 @@ Also: the release gate does not run before the macOS job builds and signs; the
 attestation covers three artifacts, not two; and the support matrix still called the
 macOS tray "planned".
 
+<a id="s29"></a>
 ### Rubric
 
 Clean on: typed errors with no `unwrap`/`expect`/`panic` outside tests; every
@@ -1247,6 +1284,7 @@ submodule (its own long-standing convention, and restructuring untested COM code
 blind is what `debt.md` row 27 warns against), and `duja-platform` established
 `platform` as a second name for the same role.
 
+<a id="s30"></a>
 ### Deliberately still open
 
 The remaining macOS items are hardware-blind, and writing blind FFI to close them
@@ -1256,6 +1294,7 @@ carrier, the `mac/mod.rs` token-assembly hoist (a swap there is proven undetecta
 deferral the gate *disproved* from pinned `dpi` source, so it is now a real
 candidate), and the unix-socket hardening that became live on macOS. All carry rows.
 
+<a id="s31"></a>
 ### After the gate — a CI flake, and a confident wrong diagnosis (`#113`)
 
 The push build for `#112` — the docs-only commit that closed this phase — went red
@@ -1314,6 +1353,7 @@ four that was never re-run, so the one data point that could have falsified the
 environmental reading was also the one missing from the record. Both rounds share
 a root — writing the sentence before doing the arithmetic that would check it.
 
+<a id="s32"></a>
 ## P5 gate results
 
 **Security checklist §6** — every item PASS, each with a proving test: pipe
@@ -1346,6 +1386,7 @@ I/O rewrite, which in turn surfaced a second latent bug (the stop path returned
 `ErrorKind::Interrupted`, which `read_exact` silently retries into an infinite
 spin — now `ConnectionAborted`).
 
+<a id="s33"></a>
 ## Live hardware QA (2026-07-11, console session, MSI MP273QP over DDC)
 
 The build finally ran on a **connected** console session with the external
@@ -1390,6 +1431,7 @@ therefore reports an occasional FAIL that reflects real DDC/CI wire flakiness,
 not a logic defect. Tracked in [debt.md](debt.md); a future harness change
 should score an *error rate* threshold rather than absolute zero.
 
+<a id="s34"></a>
 ### 1. Pure-visual QA — SIGNED OFF (user, 2026-07-16)
 
 The functional path was proven on hardware (above); these inherently-visual
@@ -1422,6 +1464,7 @@ Both gates (hardware + visual) now pass, so `v0.1.0` ships. Add to this list per
 release: the tray **"Update available"** item + toast appear when a newer release
 exists, and clicking either opens the releases page.
 
+<a id="s35"></a>
 ### 2. Known gaps carried forward
 - **Binary ~19 MB > 16 MB budget** — P8 must recover it (ADR-0012 ledger; the
   v0.1.0 WinRT toast bindings widened the P5 17.21 MB overage).
