@@ -245,6 +245,11 @@ enum Action {
     /// Restore the screen (clear overlays + identity gamma on every display).
     Restore,
     /// Nudge every display's brightness by the given signed step (a hotkey).
+    ///
+    /// The only [`Action`] with no menu item behind it, which is why it is the
+    /// only one Linux never constructs.
+    // RATIONALE (dead_code): see `hotkey::Modifiers::is_empty`.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     Nudge(i16),
     /// Open the GitHub releases page (the "Update available" menu item). Duja
     /// only ever opens the page — it never downloads.

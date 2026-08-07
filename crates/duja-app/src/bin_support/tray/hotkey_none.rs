@@ -55,7 +55,12 @@ impl OsHotkeyRegistrar {
     /// Always `None`: no id was ever handed out, so none can arrive. Kept because
     /// `AppState::on_hotkey_fired` is not `cfg`-gated, and gating it would put a
     /// second platform switch in a file whose job is not platform switching.
-    #[allow(clippy::unused_self)] // RATIONALE: matches the real registrar's shape.
+    #[allow(clippy::unused_self)]
+    // RATIONALE: matches the real registrar's shape.
+    // RATIONALE (dead_code): its one caller, `AppState::on_hotkey_fired`, is
+    // itself unreachable here — see `hotkey::Modifiers::is_empty`. It still has to
+    // exist, because that caller is compiled on this platform and names it.
+    #[allow(dead_code)]
     pub(super) const fn action_for_id(&self, _id: u32) -> Option<HotkeyAction> {
         None
     }
@@ -111,6 +116,9 @@ pub(super) const fn install_hotkey_event_handler() {}
 /// `Some`. Kept in step with the real backend rather than deleted, because the
 /// portal route named in this module's header would make it reachable again and a
 /// mapping that had drifted in the meantime is worse than one that is unused.
+// RATIONALE (dead_code): exactly what the paragraph above says. See
+// `hotkey::Modifiers::is_empty` for the other five.
+#[allow(dead_code)]
 pub(super) const fn action_for(action: HotkeyAction) -> Action {
     match action {
         HotkeyAction::BrightnessUp => Action::Nudge(HOTKEY_BRIGHTNESS_STEP),

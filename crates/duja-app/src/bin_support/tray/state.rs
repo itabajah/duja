@@ -497,6 +497,14 @@ impl AppState {
     }
 
     /// Resolve a fired global hotkey id to its action and apply it.
+    ///
+    /// Called from the OS hotkey event source, which on Linux installs nothing —
+    /// so on that platform no id can arrive and this cannot run.
+    // RATIONALE (dead_code): see `hotkey::Modifiers::is_empty`. Deliberately an
+    // allow rather than a `cfg`: gating the method would put a platform switch in
+    // a file whose job is not platform switching, and `hotkey_none`'s
+    // `action_for_id` already documents itself as existing to keep it out of here.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub(super) fn on_hotkey_fired(&mut self, id: u32) {
         if let Some(action) = self.hotkeys.action_for_id(id) {
             self.handle_action(action_for(action));

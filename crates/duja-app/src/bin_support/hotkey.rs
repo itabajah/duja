@@ -35,6 +35,16 @@ impl Modifiers {
     pub const SUPER: Modifiers = Modifiers(1 << 3);
 
     /// Whether no modifier is set.
+    ///
+    /// Asked by the accelerator to OS-modifier conversion, which is what a real
+    /// registrar does before handing the combo to the platform. Linux has no
+    /// registrar (see `tray/hotkey_none.rs`), so nothing there converts anything.
+    // RATIONALE (dead_code): the delivery chain behind a registration that never
+    // happens. Six items across five files are dead on Linux for this one reason,
+    // and each is marked where it sits rather than covered by a module-wide allow,
+    // so the day Linux grows a backend the allows come off one by one and any that
+    // is *still* needed is a genuine finding.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     #[must_use]
     pub fn is_empty(self) -> bool {
         self.0 == 0
