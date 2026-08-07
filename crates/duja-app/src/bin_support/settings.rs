@@ -23,11 +23,6 @@
 //! slider-drag hot path) and passes it in as `gamma_allowed` — so a display that
 //! goes HDR mid-session stops receiving a bypassed gamma ramp.
 
-// RATIONALE: these pure modules are consumed only by the tray assembly (Windows and macOS),
-// but stay cross-platform (not cfg-gated) so their unit tests run on every CI
-// OS; the dead-code allow applies only where no consumer exists.
-#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-
 use duja_core::config::{Config, DimMode as ConfigDimMode, MonitorConfig, Theme as ConfigTheme};
 use duja_core::continuum::ContinuumConfig;
 use duja_core::model::{DimMode, DisplayKind};
@@ -44,8 +39,11 @@ use crate::bin_support::dimming;
 /// be pinned by a test rather than sitting at an `AppState` call site no test can
 /// reach. It was in `tray/state.rs` for one commit, and a review showed what that
 /// costs — hardcoding `advisory: false` there deletes the macOS hazard disclosure
-/// entirely while the whole suite and every CI lane stay green, because the tray
-/// module is `cfg(any(windows, target_os = "macos"))` and no test reaches it.
+/// entirely while the whole suite and every CI lane stay green, because no test
+/// reaches `tray/state.rs` at all. (That module was `cfg`-gated to Windows and
+/// macOS when this was written and is now built everywhere, which changes nothing
+/// about the argument: it is untested either way, and untested is what made the
+/// deletion invisible.)
 ///
 /// Building the struct in one place also keeps the three `set_displays` call sites
 /// from disagreeing — the failure being one refresh path that discloses a limit and
@@ -176,8 +174,9 @@ mod tests {
         // values come from `duja-dimmer` per target. Substituting either constant
         // here silently deletes a disclosure the user is meant to see — and while
         // this call lived in `tray/state.rs` *nothing in the tree noticed*, because
-        // that module is `cfg(any(windows, target_os = "macos"))`, so even
-        // `clippy (ubuntu-latest)` could not reach it.
+        // that module was then `cfg(any(windows, target_os = "macos"))`, so even
+        // `clippy (ubuntu-latest)` could not reach it. P7 wave 5 removed that gate;
+        // the call is here now regardless, which is what the test is protecting.
         //
         // Which lane catches which substitution is asymmetric, and worth stating
         // rather than leaving to be discovered:

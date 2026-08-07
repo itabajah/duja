@@ -86,7 +86,16 @@ pub(crate) mod updates;
 // which the ubuntu clippy lane rejects with `-D warnings`; the module being
 // *internally* cross-platform (a WinRT toast on Windows, a documented no-op on
 // macOS) is a separate axis from where it is compiled at all.
-#[cfg(any(windows, target_os = "macos"))]
+// Both un-gated in P7 wave 5: the tray now has a third backend (`ksni`,
+// ADR-0010) and runs on every platform Duja targets.
+//
+// `toast` follows it rather than keeping a narrower gate of its own, because its
+// gate was only ever "wherever the tray is" — its one caller is
+// `tray::update_flow` — and the file has had a `cfg(not(windows))` no-op arm
+// since macOS. Linux takes that arm. A real `org.freedesktop.Notifications` call
+// is a feature with a design (zbus is already in the graph, so it is reachable),
+// not plumbing this wave owes; `docs/debt.md` carries it. The update still
+// surfaces through the tray menu item and tooltip, which is the guaranteed path
+// on all three platforms and the only one on two of them.
 pub(crate) mod toast;
-#[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod tray;

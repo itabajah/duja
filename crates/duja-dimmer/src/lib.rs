@@ -165,6 +165,14 @@ mod gamma_support;
 
 pub use gamma_support::{GammaSupport, RestoreReport, gamma_support_from_hdr};
 
+// The gamma crash marker. Unconditional, and it did not start that way: it lived
+// in `win::gamma` while Windows was the only platform whose gamma ramp outlives
+// the process. X11's does too, so the Linux gamma sink writes the same marker and
+// `startup::recover_from_crash_marker` reads it on both. macOS still writes none.
+mod marker;
+
+pub use marker::{clear_marker, mark_dirty, marker_present};
+
 // Re-export the cross-platform vocabulary so callers can depend on this crate
 // alone for the dimming surface.
 pub use duja_core::dimmer::{
@@ -176,9 +184,8 @@ mod win;
 
 #[cfg(windows)]
 pub use win::{
-    GammaDisplay, GammaRamp, ScreenStateGuard, WindowsDimmer, clear_marker, display_supports_gamma,
-    enumerate_gamma_displays, is_hdr_active, mark_dirty, marker_present, restore_all,
-    restore_identity, set_gamma,
+    GammaDisplay, GammaRamp, ScreenStateGuard, WindowsDimmer, display_supports_gamma,
+    enumerate_gamma_displays, is_hdr_active, restore_all, restore_identity, set_gamma,
 };
 
 #[cfg(target_os = "macos")]

@@ -14,12 +14,8 @@ use tracing::{debug, warn};
 
 use crate::bin_support::hotkey::{self, Accelerator, HotkeyAction, Modifiers as AccelModifiers};
 
+use super::policy::HOTKEY_BRIGHTNESS_STEP;
 use super::{Action, with_app};
-
-/// The brightness step (percentage points) a `brightness_up` / `brightness_down`
-/// hotkey applies to every display. Fixed in P5; a configurable step is a
-/// settings-UI follow-up.
-const HOTKEY_BRIGHTNESS_STEP: i16 = 5;
 
 /// The live global-hotkey registrar: owns the OS manager, the currently
 /// registered [`HotKey`]s (so they can be unregistered on a re-plan), and the

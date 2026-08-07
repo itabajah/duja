@@ -10,6 +10,19 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use duja_core::continuum::{ContinuumConfig, map_user_level, reverse_map};
+
+/// The brightness step (percentage points) a `brightness_up` / `brightness_down`
+/// hotkey applies to every display. Fixed in P5; a configurable step is a
+/// settings-UI follow-up.
+///
+/// Here rather than beside the registrar that reads it, because there are two of
+/// those now (`hotkey_os` on Windows and macOS, `hotkey_none` on Linux) and a
+/// policy number kept in two files is a policy number that will differ in one.
+// RATIONALE (dead_code): read only by `action_for`, which is unreachable on Linux
+// — see `hotkey::Modifiers::is_empty`. Kept unconditionally so the two registrars
+// keep sharing one number, which is this constant's whole reason for being here.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+pub(super) const HOTKEY_BRIGHTNESS_STEP: i16 = 5;
 use duja_core::manager::DEFAULT_USER_LEVEL_PCT;
 use duja_core::model::DisplaySnapshot;
 

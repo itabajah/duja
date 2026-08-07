@@ -28,11 +28,14 @@ use duja_platform::ipc::PipeClient;
 
 pub(crate) use duja_app::ipc::{HeadlessBridge, IpcBridge, handle_request};
 
-#[cfg(any(windows, target_os = "macos"))]
+// `TrayBridge` and its three imports carried a `cfg(any(windows, target_os =
+// "macos"))` that was only ever a proxy for "wherever the tray is built" — its
+// one constructor call is in `tray.rs`. P7 wave 5 gave the tray a Linux backend,
+// so the proxy became wrong rather than merely redundant. Nothing in the bridge
+// is platform-specific: it holds an `EngineCommand` sender and a snapshot, which
+// is why the macOS port needed no change here either.
 use crossbeam_channel::Sender;
-#[cfg(any(windows, target_os = "macos"))]
 use duja_app::EngineCommand;
-#[cfg(any(windows, target_os = "macos"))]
 use duja_core::model::DisplaySnapshot;
 
 /// How long a second instance waits to reach the running server before giving
@@ -59,9 +62,6 @@ pub(crate) fn start(bridge: Arc<dyn IpcBridge>) -> Option<PipeServer> {
 
 /// Best-effort: connect to the already-running instance and ask it to show its
 /// flyout. Returns whether the handshake succeeded.
-// RATIONALE: only the tray second-instance path calls this, and the tray does not
-// exist on Linux yet, so keep that lane dead-code clean.
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub(crate) fn show_running_instance() -> bool {
     match PipeClient::connect(SECOND_INSTANCE_TIMEOUT) {
         Ok(mut client) => match client.request(&Request::ShowFlyout) {
@@ -81,7 +81,6 @@ pub(crate) fn show_running_instance() -> bool {
 /// The tray bridge: `set`/`show_flyout` hop onto the Slint main thread so the
 /// persisted level and the overlay/gamma batch stay consistent with the flyout;
 /// `snapshot` reads the engine directly.
-#[cfg(any(windows, target_os = "macos"))]
 pub(crate) struct TrayBridge {
     /// A **fully functional** headless bridge, embedded only for its
     /// [`snapshot`](IpcBridge::snapshot) (a plain engine read, identical in both
@@ -105,7 +104,6 @@ pub(crate) struct TrayBridge {
     bridge: HeadlessBridge,
 }
 
-#[cfg(any(windows, target_os = "macos"))]
 impl TrayBridge {
     pub(crate) fn new(engine_tx: Sender<EngineCommand>) -> Self {
         TrayBridge {
@@ -114,7 +112,6 @@ impl TrayBridge {
     }
 }
 
-#[cfg(any(windows, target_os = "macos"))]
 impl IpcBridge for TrayBridge {
     fn snapshot(&self) -> Vec<DisplaySnapshot> {
         // Same engine read as the headless bridge; only `set` differs.

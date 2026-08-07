@@ -31,31 +31,33 @@
 use anyhow::Result;
 use duja_ui::accent::AccentChoice;
 
+#[cfg(not(target_os = "linux"))]
 use super::icon;
 
 /// The label a tray must render when an update is available.
 ///
-/// At module scope rather than inlined into [`PlatformTray::announce_update`],
-/// because the ksni arm builds its menu from a callback and needs the identical
-/// string: two format strings in two `cfg` arms is the shape that drifts.
+/// At module scope rather than inlined into `announce_update`, because the ksni
+/// arm builds its menu from a callback and needs the identical string: two format
+/// strings in two `cfg` arms is the shape that drifts.
 ///
-/// Its test runs **wherever this module compiles** — the Windows and macOS lanes
-/// today, and the ubuntu one once `bin_support`'s gate on `mod tray` widens to
-/// include Linux. Not "on every lane", which an earlier version of this sentence
-/// said: `mod tray` is `cfg(any(windows, target_os = "macos"))`, so on Linux this
-/// file is not compiled at all and the ubuntu lane cannot contain the test. The
-/// sibling `geometry.rs` states the same fact correctly, and getting it backwards
-/// here would tell whoever lands the ksni arm that the shared label string is
-/// already guarded on the lane that will first exercise it.
-fn update_label(version: &str) -> String {
+/// Its test now runs on **all three lanes**, which it did not when this function
+/// was written — `bin_support`'s gate on `mod tray` was
+/// `cfg(any(windows, target_os = "macos"))`, so the ubuntu lane did not compile
+/// this file at all. P7 wave 5 removed that gate along with the reason for it,
+/// and the earlier wording is worth keeping in mind rather than just deleting:
+/// it was correct when written and became wrong without being touched, which is
+/// what a claim about *where a test runs* does whenever a module gate moves.
+pub(super) fn update_label(version: &str) -> String {
     format!("Update available — {version}")
 }
 
 /// The tray, as the rest of the app is allowed to see it.
 ///
-/// No `cfg` guard: `bin_support::tray` is itself gated, so this file compiles
-/// only where a tray is built. Repeating the gate here would be a second place to
-/// update when the Linux arm lands, and the kind that is easy to miss.
+/// One struct per target rather than one struct with `cfg` fields, because the
+/// two backends share no state at all: `tray-icon` holds three live handles plus
+/// a "have I prepended yet" flag, `ksni` holds one service handle and keeps the
+/// rest in the value it moved onto its own thread.
+#[cfg(not(target_os = "linux"))]
 pub(crate) struct PlatformTray {
     /// The tray icon itself, held so an accent change can swap its glyph live.
     icon: tray_icon::TrayIcon,
@@ -72,6 +74,7 @@ pub(crate) struct PlatformTray {
     update_shown: bool,
 }
 
+#[cfg(not(target_os = "linux"))]
 impl PlatformTray {
     /// Wrap the pieces `build_tray` produced.
     pub(super) const fn new(
@@ -129,6 +132,71 @@ impl PlatformTray {
             .prepend_items(&[&self.update_item, &separator])
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         self.update_shown = true;
+        Ok(())
+    }
+}
+
+/// The tray on Linux: a `StatusNotifierItem`, described rather than mutated.
+///
+/// The methods are infallible where the other arm's are not, and that is the
+/// backend's shape rather than a shortcut taken here. Every change goes through
+/// `ksni::blocking::Handle::update`, whose only failure is that the service has
+/// already stopped — at which point there is no tray for a `warn!` to be about,
+/// and the caller would be logging about something the user cannot see. The
+/// `Result` stays in the signature so `AppState` needs no `cfg`; what would be
+/// wrong is inventing an error for it to carry.
+#[cfg(target_os = "linux")]
+pub(crate) struct PlatformTray {
+    /// The running service.
+    inner: super::ksni_tray::LinuxTray,
+}
+
+#[cfg(target_os = "linux")]
+impl PlatformTray {
+    /// Wrap a started service.
+    pub(super) const fn new(inner: super::ksni_tray::LinuxTray) -> Self {
+        Self { inner }
+    }
+
+    /// Repaint the tray glyph in `accent`'s colour.
+    ///
+    /// # Errors
+    /// Never on this backend; see the type's own doc for why the signature keeps
+    /// the `Result` anyway.
+    #[allow(clippy::unnecessary_wraps)] // RATIONALE: seam parity, see above.
+    pub(crate) fn set_accent(&mut self, accent: AccentChoice) -> Result<()> {
+        self.inner.set_icon(duja_ui::accent::icon_rgb(accent));
+        Ok(())
+    }
+
+    /// Set (or clear) the tray tooltip.
+    ///
+    /// A deliberate no-op. A `StatusNotifierItem`'s tooltip is *rendered from the
+    /// item's state* on every host refresh, exactly as its menu is, so
+    /// [`Self::announce_update`] already puts the update into it and any string
+    /// written here would be overwritten at the host's next `ToolTip` call. An
+    /// implementation that forwarded the text would therefore work until the host
+    /// refreshed and then silently revert, which is worse than doing nothing.
+    ///
+    /// # Errors
+    /// Never.
+    #[allow(clippy::unnecessary_wraps, clippy::unused_self)] // RATIONALE: seam parity.
+    pub(crate) fn set_tooltip(&mut self, _text: Option<&str>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Say that `version` is available.
+    ///
+    /// Idempotent for free rather than by a flag: the menu and tooltip are
+    /// projections of one `Option<String>`, so setting it twice renders the same
+    /// tray. This is the asymmetry the seam exists for — the other arm needs
+    /// `update_shown` to avoid prepending a second row.
+    ///
+    /// # Errors
+    /// Never.
+    #[allow(clippy::unnecessary_wraps)] // RATIONALE: seam parity.
+    pub(crate) fn announce_update(&mut self, version: &str) -> Result<()> {
+        self.inner.announce_update(version);
         Ok(())
     }
 }

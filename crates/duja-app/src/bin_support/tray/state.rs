@@ -367,12 +367,15 @@ impl AppState {
     /// Clean shutdown: persist state, restore gamma, quit the event loop.
     fn begin_quit(&mut self) {
         let _ = self.state.flush(Instant::now());
-        // Restore every display this session engaged. The gamma guard clears the
+        // Restore every display this session engaged. The gamma backend clears the
         // crash marker itself on a CLEAN restore and KEEPS it when a restore
         // genuinely failed — the never-brick net for a ramp that would outlive
         // the process — so the marker must be removed here ONLY when that restore
         // came back clean. (The prior unconditional remove defeated the retention,
         // so a failed restore left no marker and the next launch never recovered.)
+        // "Backend", not "guard": Windows gets the retention from
+        // `ScreenStateGuard`, Linux writes it out in `LinuxSink::restore_all`, and
+        // macOS has no marker at all — but all three keep the same contract here.
         // A global identity pass then clears any ramp left over from a prior dirty
         // run, mirroring `restore_screen`'s belt-and-suspenders.
         let gamma_clean = self.gamma.restore_all();
@@ -494,6 +497,14 @@ impl AppState {
     }
 
     /// Resolve a fired global hotkey id to its action and apply it.
+    ///
+    /// Called from the OS hotkey event source, which on Linux installs nothing —
+    /// so on that platform no id can arrive and this cannot run.
+    // RATIONALE (dead_code): see `hotkey::Modifiers::is_empty`. Deliberately an
+    // allow rather than a `cfg`: gating the method would put a platform switch in
+    // a file whose job is not platform switching, and `hotkey_none`'s
+    // `action_for_id` already documents itself as existing to keep it out of here.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub(super) fn on_hotkey_fired(&mut self, id: u32) {
         if let Some(action) = self.hotkeys.action_for_id(id) {
             self.handle_action(action_for(action));

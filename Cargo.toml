@@ -115,6 +115,22 @@ i-slint-backend-testing = "1.17.1"
 # family lived there. Turning the defaults off removes the whole family from
 # `Cargo.lock` and the ignores with it.
 tray-icon = { version = "0.24.1", default-features = false }
+# The Linux tray (duja-app, P7 wave 5; ADR-0010). `tray-icon`'s Linux backend
+# wants a GTK event loop and Duja's main thread runs Slint's winit loop, so the
+# freedesktop `StatusNotifierItem` is spoken directly instead.
+#
+# The feature choice is a graph decision, not a taste one. `default-features =
+# false` drops ksni's tokio default — tokio is not in this lockfile at all, and
+# adding an async runtime to a synchronous app (ADR-0005) to draw a tray icon is
+# the wrong trade. `async-io` instead, because every crate that arm names is
+# *already* in the Linux graph via the zbus that Slint's winit backend pulls in.
+# `blocking` gets ksni's synchronous wrapper so Duja's own code stays
+# synchronous; it is not a standalone mode, and ksni's `compat.rs` emits a
+# `compile_error!` unless an executor feature is chosen alongside it.
+ksni = { version = "0.3.6", default-features = false, features = [
+    "async-io",
+    "blocking",
+] }
 # Global hotkeys (duja-app, P5): system-wide accelerators registered on the
 # Slint main thread. Version pinned to the P1 `spike/eventloop` recipe
 # (global-hotkey 0.8.0 proven cohabiting with slint + tray-icon, zero idle

@@ -6,6 +6,7 @@
 //! side thread — so each one hops onto the Slint loop and reaches the state
 //! through [`with_app`], never a direct borrow.
 
+#[cfg(not(target_os = "linux"))]
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,9 +19,11 @@ use crate::bin_support::hotkey::{self, Accelerator, HotkeyAction};
 use super::hotkey_os::{
     OsHotkeyRegistrar, install_hotkey_event_handler, log_hotkey_issues, outcomes_by_action,
 };
+#[cfg(not(target_os = "linux"))]
+use super::icon;
 use super::state::AppState;
 use super::surface::PlatformTray;
-use super::{Action, icon, with_app, with_app_ref};
+use super::{Action, with_app, with_app_ref};
 
 /// Wire the flyout's command fan-out to the app state.
 fn wire_ui_commands() {
@@ -75,9 +78,12 @@ pub(super) fn resolved_hotkey_rows(
                 .bindings
                 .iter()
                 .any(|b| b.action == action && conflicting.contains(&b.accel));
+            // Both states grey the row. They are separate variants because their
+            // *explanations* differ and only one of them is ever true on a given
+            // platform — see `RegisterResult::Unsupported`.
             let unavailable = matches!(
                 outcomes.get(&action),
-                Some(hotkey::RegisterResult::OsRejected)
+                Some(hotkey::RegisterResult::OsRejected | hotkey::RegisterResult::Unsupported)
             );
             HotkeyRow {
                 action_key: action.config_key().to_owned(),
@@ -101,7 +107,7 @@ fn action_label(action: HotkeyAction) -> &'static str {
 }
 
 /// Dispatch an [`Action`] onto the Slint main thread.
-fn dispatch(action: Action) {
+pub(super) fn dispatch(action: Action) {
     let _ = slint::invoke_from_event_loop(move || {
         with_app(move |app| app.handle_action(action));
     });
@@ -109,6 +115,12 @@ fn dispatch(action: Action) {
 
 /// Register the tray-icon and menu event handlers (they hop onto the Slint loop
 /// via [`dispatch`]).
+///
+/// No Linux counterpart, and not an omission: a `ksni` menu row *is* its
+/// callback, so there is no global event stream to subscribe to and no id table
+/// to match a fired item against. The Linux equivalent of this whole function is
+/// the `activate` closure inside `ksni_tray`'s `menu`.
+#[cfg(not(target_os = "linux"))]
 fn wire_tray_handlers() {
     use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent, menu::MenuEvent};
 
@@ -144,12 +156,14 @@ fn wire_tray_handlers() {
     }));
 }
 
+#[cfg(not(target_os = "linux"))]
 thread_local! {
     /// The menu item ids, captured so the (Send) menu handler can match them.
     static MENU_IDS: RefCell<MenuIds> = RefCell::new(MenuIds::default());
 }
 
 /// The tray menu item ids, for matching menu events.
+#[cfg(not(target_os = "linux"))]
 #[derive(Clone, Default)]
 struct MenuIds {
     open: tray_icon::menu::MenuId,
@@ -167,6 +181,7 @@ struct MenuIds {
 ///
 /// The icon is the accent-coloured display silhouette — the same glyph and colour
 /// the taskbar button carries (see [`duja_ui::icon`]).
+#[cfg(not(target_os = "linux"))]
 pub(super) fn build_tray(accent: AccentChoice) -> anyhow::Result<PlatformTray> {
     use tray_icon::menu::{Menu, MenuItem};
     use tray_icon::{TrayIconBuilder, menu::PredefinedMenuItem};
@@ -216,6 +231,46 @@ pub(super) fn build_tray(accent: AccentChoice) -> anyhow::Result<PlatformTray> {
     Ok(PlatformTray::new(tray, menu, update_item))
 }
 
+/// Start the Linux tray: register a `StatusNotifierItem` and hand back the seam.
+///
+/// Shorter than the other arm by the whole menu, and that is the backend rather
+/// than a feature gap. `ksni` takes a value and asks it for a menu whenever the
+/// host wants one, so the items, their labels and their actions are all in
+/// [`super::ksni_tray`]'s `menu` — there is nothing to build here and nothing to
+/// keep a handle on.
+#[cfg(target_os = "linux")]
+pub(super) fn build_tray(accent: AccentChoice) -> anyhow::Result<PlatformTray> {
+    let inner = super::ksni_tray::LinuxTray::start(duja_ui::accent::icon_rgb(accent))?;
+    Ok(PlatformTray::new(inner))
+}
+
+/// Linux registers no global hotkeys, and says so rather than trying.
+///
+/// The plan is still resolved and still logged: a user's `[hotkeys]` section is
+/// parsed, its syntax errors and conflicts are reported exactly as elsewhere, and
+/// the settings window still lists the actions. What differs is that every row
+/// comes back [`hotkey::RegisterResult::Unsupported`] instead of pretending to
+/// have asked the OS. See `hotkey_none`'s header for why not `global-hotkey`.
+#[cfg(target_os = "linux")]
+pub(super) fn init_hotkeys(
+    config: &Config,
+) -> (
+    OsHotkeyRegistrar,
+    BTreeMap<HotkeyAction, hotkey::RegisterResult>,
+) {
+    let mut hotkeys = OsHotkeyRegistrar::new();
+    let initial_plan = hotkey::resolve(&config.hotkeys);
+    log_hotkey_issues(&initial_plan);
+    // Deliberately the *same* `apply_plan` call the other arm makes, rather than
+    // a hand-built map of `Unsupported`. The conflict rule (a combo bound to two
+    // actions binds neither) is policy that holds on every platform, and a second
+    // construction of this map would be a second place for it to be forgotten.
+    // `apply_plan` asks the registrar what its refusals mean, and this one says
+    // `Unsupported`.
+    let outcomes = outcomes_by_action(&hotkey::apply_plan(&mut hotkeys, &initial_plan));
+    (hotkeys, outcomes)
+}
+
 /// On macOS, stop a left click from opening the context menu, so it can toggle
 /// the flyout instead.
 ///
@@ -236,7 +291,11 @@ fn with_left_click_policy(builder: tray_icon::TrayIconBuilder) -> tray_icon::Tra
 /// behaviour — left click toggles the flyout, right click opens the menu — has
 /// been verified on real hardware with this setting untouched, and this PR is not
 /// the place to change what a Windows user's left click does.
-#[cfg(not(target_os = "macos"))]
+/// Windows only, now that this is spelled positively rather than as
+/// `not(macos)`. That spelling was correct while `tray-icon` was the only
+/// backend and Windows was the only other platform; with Linux in the build it
+/// named a target where `tray_icon` is not a dependency at all.
+#[cfg(windows)]
 const fn with_left_click_policy(builder: tray_icon::TrayIconBuilder) -> tray_icon::TrayIconBuilder {
     builder
 }
@@ -245,6 +304,7 @@ const fn with_left_click_policy(builder: tray_icon::TrayIconBuilder) -> tray_ico
 /// on the (main) thread. A failure to create the manager or register a binding
 /// only disables that hotkey (logged) — the app runs on. The registrar is
 /// returned so the settings window can rebind and re-register it live.
+#[cfg(not(target_os = "linux"))]
 pub(super) fn init_hotkeys(
     config: &Config,
 ) -> (
@@ -265,6 +325,7 @@ pub(super) fn init_hotkeys(
 pub(super) fn wire_event_sources(notifications: crossbeam_channel::Receiver<EngineNotification>) {
     wire_ui_commands();
     wire_settings_commands();
+    #[cfg(not(target_os = "linux"))]
     wire_tray_handlers();
     install_hotkey_event_handler();
     spawn_notification_bridge(notifications);

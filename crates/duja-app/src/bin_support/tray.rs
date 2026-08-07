@@ -82,8 +82,36 @@ use self::state::AppState;
 use self::wiring::{build_tray, init_hotkeys, wire_event_sources};
 
 mod geometry;
+// One module name, two implementations, chosen by target. `#[path]` rather than
+// two `use` aliases so every importer — `wiring.rs`, `state.rs` — names
+// `hotkey_os` unconditionally and no caller carries the platform switch.
+#[cfg(not(target_os = "linux"))]
 mod hotkey_os;
+// The path is relative to the directory holding *this* file (`bin_support/`),
+// not to the module's own directory, which is why it carries the `tray/` prefix.
+#[cfg(target_os = "linux")]
+#[path = "tray/hotkey_none.rs"]
+mod hotkey_os;
+// `tray-icon`-shaped: it returns a `tray_icon::Icon` and a `tray_icon::BadIcon`,
+// neither of which exists on Linux, where that crate is not a dependency. The
+// Linux glyph is built in `ksni_tray` against `ksni::Icon` instead, from the same
+// `duja_ui::icon::monitor_rgba` source, so the two arms share the drawing and
+// differ only in the type they hand their library.
+#[cfg(not(target_os = "linux"))]
 mod icon;
+#[cfg(target_os = "linux")]
+mod ksni_tray;
+// The Linux tray's one host-testable rule. `cfg(any(test, …))` rather than
+// `cfg(target_os = "linux")` so every lane's `cargo test` compiles it — see the
+// module's own header for why that distinction is load-bearing here.
+//
+// `//` and not `///`, deliberately. An outer doc comment here would be
+// concatenated with the module's own `//!` header, and rustdoc resolves the
+// combined text in the scope of the *declaration* — so the header's
+// `[`super::ksni_tray`]` would start looking in `bin_support` instead of
+// `bin_support::tray` and fail on the ubuntu lane alone. It did.
+#[cfg(any(test, target_os = "linux"))]
+mod linux_icon;
 mod policy;
 mod state;
 mod surface;
@@ -217,6 +245,11 @@ enum Action {
     /// Restore the screen (clear overlays + identity gamma on every display).
     Restore,
     /// Nudge every display's brightness by the given signed step (a hotkey).
+    ///
+    /// The only [`Action`] with no menu item behind it, which is why it is the
+    /// only one Linux never constructs.
+    // RATIONALE (dead_code): see `hotkey::Modifiers::is_empty`.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     Nudge(i16),
     /// Open the GitHub releases page (the "Update available" menu item). Duja
     /// only ever opens the page — it never downloads.

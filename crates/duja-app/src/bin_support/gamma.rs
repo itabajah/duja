@@ -14,16 +14,28 @@
 //!   engage (and at what factor) and which to restore. It never touches the OS —
 //!   it drives a [`GammaSink`], so its logic is exhaustively unit-tested against
 //!   a fake sink on every target.
-//! - the real sink is per-platform, and both correlate a resolved display id to
-//!   its display-surface token before driving the OS: Windows' `GuardSink` turns
-//!   the token into a GDI device name and drives `ScreenStateGuard`'s
-//!   `engage_gamma` / `restore_display`, which write and clear the crash marker;
-//!   macOS' `MacSink` parses the token as a `CGDirectDisplayID` and calls
-//!   `duja_dimmer`'s `set_gamma` / `restore_identity` directly, with **no** guard
-//!   and no marker (see the crash-safety note below).
-//! - `GammaBackend` bundles the two and is what the tray owns. Both platforms'
-//!   versions expose the same constructor and methods, so the tray wires the
-//!   gamma channel without a `cfg`.
+//! - the real sink is per-platform, and all three correlate a resolved display id
+//!   to its gamma token before driving the OS: Windows' `GuardSink` turns the
+//!   token into a GDI device name and drives `ScreenStateGuard`'s `engage_gamma` /
+//!   `restore_display`, which write and clear the crash marker; macOS' `MacSink`
+//!   parses the token as a `CGDirectDisplayID` and calls `duja_dimmer`'s
+//!   `set_gamma` / `restore_identity` directly, with **no** guard and no marker
+//!   (see the crash-safety note below); Linux' `LinuxSink` reads the token as a
+//!   CRTC id or a `wl_output` name depending on the session's transport, and does
+//!   carry a marker, for the reason set out on the sink itself.
+//! - `GammaBackend` bundles the two and is what the tray owns. All three
+//!   platforms' versions expose the same constructor and methods, so the tray
+//!   wires the gamma channel without a `cfg`.
+//!
+//! # One token, three formats, and only Linux decides at runtime
+//!
+//! The tray hands every sink the same thing: `BoundsMap::gamma_token_for`, an
+//! opaque string stamped by `backend`. What it *is* differs — a GDI device name, a
+//! `CGDirectDisplayID`, a CRTC id, a connector name — and on the first three the
+//! platform settles the question at compile time. Linux is the exception: its two
+//! formats belong to two protocols that can both be present, so the sink decides
+//! per engage from the session transport. That is why the correlation step is a
+//! `(token, transport)` pair there and a parse everywhere else.
 //!
 //! # Why macOS has no crash marker — and how well that is actually established
 //!
@@ -79,18 +91,22 @@
 //! this layer — but a screen that is momentarily too dark is the right failure
 //! direction for a dimmer.
 
-// RATIONALE: the pure coordinator/trait stay cross-platform so their unit tests
-// run on every CI OS, but the channel itself has exactly one consumer — the tray —
-// which now exists on Windows AND macOS. So the allow is narrowed to the platforms
-// where nothing calls this at all (Linux, until P7), and the `unused_imports` half
-// the previous PR needed while the macOS sink sat unwired is gone with it.
+// The module-wide dead-code allow this file used to carry is **gone**, and its
+// removal is the point rather than a tidy-up. It read
+// `not(any(windows, target_os = "macos"))` — "the platforms where nothing calls
+// this at all (Linux, until P7)" — and P7 wave 5 is when that stopped being true:
+// the tray is the gamma channel's only consumer, and the tray now exists on all
+// three. Every item here is reachable on every lane, so an unreachable one is a
+// genuine finding again.
 //
-// Narrowing this was the point rather than a tidy-up: leaving it broad would hide a
-// genuinely unwired sink, which is the failure this file already had once — the P4
-// gate found `dim_mode = "gamma"` was a silent no-op because the planner emitted
-// commands nothing executed. It earned its keep immediately, surfacing
-// `retain_failed_engagements` as dead on macOS.
-#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+// Each narrowing has paid for itself immediately. The last one surfaced
+// `retain_failed_engagements` as dead on macOS; the underlying failure this guards
+// against is the one the P4 gate found in this very file, where `dim_mode =
+// "gamma"` was a silent no-op because the planner emitted commands nothing
+// executed. Two items keep a per-platform `cfg(any(test, ...))` of their own —
+// `retain_failed_engagements` and `display_id_from_token` — which is the narrow
+// form of the same idea: compiled under `test` everywhere so their rules stay
+// pinned on all three lanes, and out of the binary where nothing calls them.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -100,8 +116,8 @@ use duja_core::id::StableDisplayId;
 /// A per-display gamma engage/restore executor.
 ///
 /// Abstracts the OS gamma ramp so [`GammaCoordinator`]'s decisions are testable
-/// with a fake. The real implementations are Windows' `GuardSink` and macOS'
-/// `MacSink`.
+/// with a fake. The real implementations are Windows' `GuardSink`, macOS'
+/// `MacSink` and Linux' `LinuxSink`.
 pub(crate) trait GammaSink {
     /// Engage (or re-engage) gamma dimming for `id` at `factor` (`1.0` = identity,
     /// down to `GAMMA_FLOOR`), returning whether the OS **reported the write as
@@ -139,19 +155,21 @@ pub(crate) trait GammaSink {
     /// Restore one display previously engaged, back to whatever this platform
     /// treats as "not dimmed by Duja".
     ///
-    /// Deliberately not "restore identity gamma": the two implementations differ
+    /// Deliberately not "restore identity gamma": the three implementations differ
     /// and it is user-visible. Windows writes the identity ramp; macOS writes
     /// identity through `CGSetDisplayTransferByFormula`, which on a **calibrated**
-    /// display is *not* the same as its `ColorSync` profile — see `MacSink::restore`.
+    /// display is *not* the same as its `ColorSync` profile — see `MacSink::restore`;
+    /// Linux writes identity on X11 and on Wayland *releases* the output, which
+    /// un-dims it and hands the gamma control back to whoever wants it next.
     fn restore(&mut self, id: &StableDisplayId);
     /// Restore every engaged display for a clean teardown, returning whether the
     /// restore was clean (`true`).
     ///
-    /// On Windows this also clears the crash marker, and a `false` return means at
-    /// least one ramp could not be reset and the marker was **kept**, so the caller
-    /// must not force-remove it. macOS has no marker and cannot report a failure —
-    /// its `false` is unreachable (see `MacSink::restore_all`), so a caller must
-    /// not read `true` there as evidence that anything was verified.
+    /// On Windows and Linux this also clears the crash marker, and a `false` return
+    /// means at least one ramp could not be reset and the marker was **kept**, so
+    /// the caller must not force-remove it. macOS has no marker and cannot report a
+    /// failure — its `false` is unreachable (see `MacSink::restore_all`), so a
+    /// caller must not read `true` there as evidence that anything was verified.
     fn restore_all(&mut self) -> bool;
 }
 
@@ -208,6 +226,72 @@ fn display_id_from_token(token: &str) -> Option<u32> {
         // `kCGNullDirectDisplay`: a real display never has id 0.
         Ok(0) | Err(_) => None,
         Ok(id) => Some(id),
+    }
+}
+
+/// What a Linux **gamma** token addresses, once the session's transport has said
+/// which of the two formats it is written in.
+///
+/// Linux is the one platform where the token's format is not decided by the
+/// platform. `backend::place_from_outputs` stamps one string that is a `RandR`
+/// CRTC id on X11 and a `wl_output` connector name on Wayland, so the address is a
+/// pair — the token and the transport — and neither half decides alone.
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, PartialEq, Eq)]
+enum GammaAddress {
+    /// An `XRandR` CRTC id, for `duja_dimmer::GammaDisplay::from_crtc`.
+    Crtc(u32),
+    /// A `wl_output` connector name, for `duja_dimmer::GammaDisplay::from_output`.
+    Output(String),
+}
+
+/// Decide which Linux gamma channel `token` addresses on a `transport` session.
+///
+/// The whole of the Linux sink's correlation step, isolated so its rules are
+/// pinned on every CI lane rather than only where a display server exists.
+///
+/// `None` means "this display has no gamma device on this session", and the caller
+/// treats it exactly as the other two platforms treat an unusable token: it
+/// refuses the engage rather than dimming something else.
+///
+/// # The two transports are checked differently, and that is not an oversight
+///
+/// X11 refuses a token that is not a plain non-zero decimal, delegating to
+/// [`duja_dimmer::linux_gamma::crtc_from_token`], whose own documentation sets out
+/// the four cases — `0` is `x11rb::NONE`, a lenient parse of `"1abc"` would
+/// address a real CRTC that is almost certainly a different monitor, and both a
+/// Wayland output name and the other platforms' tokens must fail closed. Wayland
+/// checks only that the name is non-empty.
+///
+/// The asymmetry has one cause: **only one of the two formats can be mistaken for
+/// a valid address in the other.** A CRTC id is an index, so a wrong string that
+/// happens to parse addresses a real CRTC and dims the wrong screen — silently,
+/// because nothing downstream can tell. An output name is matched, not parsed, so
+/// a wrong string names no output and the bind fails; the refusal happens either
+/// way and the only difference is where.
+///
+/// So this deliberately does **not** reject an all-decimal output name, which is
+/// what an X11 token reaching a session that switched to Wayland mid-run would
+/// look like. Rejecting it would buy a better log line and cost a real dim on any
+/// output actually named `1`: a refused engage is not a fallback to overlay
+/// dimming — `dimming::plan` substitutes overlays from `min_gamma_factor()`, ahead
+/// of the engage — so it means that display simply does not dim below its floor.
+/// That is the failure `#96` fixed, and it is not worth re-introducing for a
+/// message.
+#[cfg(any(test, target_os = "linux"))]
+fn gamma_address(
+    transport: duja_dimmer::linux_caps::Transport,
+    token: &str,
+) -> Option<GammaAddress> {
+    use duja_dimmer::linux_caps::Transport;
+
+    match transport {
+        Transport::X11 => duja_dimmer::linux_gamma::crtc_from_token(token).map(GammaAddress::Crtc),
+        Transport::Wayland if token.is_empty() => None,
+        Transport::Wayland => Some(GammaAddress::Output(token.to_owned())),
+        // No display server: no gamma channel to address, and answering here is
+        // what keeps the sink from opening a connection to discover it.
+        Transport::None => None,
     }
 }
 
@@ -1238,6 +1322,506 @@ mod platform {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) use platform::GammaBackend;
+
+#[cfg(target_os = "linux")]
+mod platform {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use duja_core::dimmer::{DimCommand, Dimmer, DimmerError, GAMMA_FLOOR};
+    use duja_core::id::StableDisplayId;
+    use duja_dimmer::GammaDisplay;
+    use duja_dimmer::linux_caps::{SessionEnv, Transport};
+    use tracing::{debug, warn};
+
+    use super::{
+        GammaAddress, GammaCoordinator, GammaSink, RefusalLog, apply_dimming_batch, gamma_address,
+    };
+
+    /// Resolve a resolved display id to its **gamma** token — on Linux the CRTC id
+    /// in decimal on X11, or the `wl_output` connector name on Wayland (see
+    /// `backend::place_from_outputs`, which stamps it). The tray wires this from
+    /// `BoundsMap::gamma_token_for`.
+    ///
+    /// Here the gamma and surface tokens are the same string, as on Windows and
+    /// unlike macOS: an X11 CRTC drives one framebuffer *and* one gamma table, so
+    /// the mirror-group key and the gamma address are the same thing. The sink
+    /// still takes the gamma one, because which of the two the tray passes is a
+    /// property of the seam and not of today's Linux backend.
+    type DeviceResolver = Box<dyn FnMut(&StableDisplayId) -> Option<String>>;
+
+    /// [`RefusalLog`] reason: this id carries no gamma token at all.
+    ///
+    /// Means the display was never placed against the display server — a monitor
+    /// whose connector `linux_outputs::join` could not match, or a `BoundsMap` that
+    /// has not caught up with an enumeration. Both transient, which is what the
+    /// latch is for.
+    const NO_TOKEN_REASON: &str = "no gamma token for this display";
+
+    /// [`RefusalLog`] reason: a token was present but addresses nothing on this
+    /// session.
+    ///
+    /// Deliberately separate from [`NO_TOKEN_REASON`] — `RefusalLog` latches per
+    /// (id, reason), so folding the two correlation failures together would let an
+    /// already-latched "no token" swallow a later "the token is garbage" on the same
+    /// id. It covers both the malformed-token case and the one that is peculiar to
+    /// Linux: a session that changed transport under a running process, so the token
+    /// is in the *other* channel's format. See [`gamma_address`].
+    const BAD_TOKEN_REASON: &str = "gamma token addresses nothing on this session";
+
+    /// The real Linux gamma sink: correlates ids to whichever gamma channel this
+    /// session has, and drives it.
+    ///
+    /// # Why this one carries a crash marker when the macOS twin does not
+    ///
+    /// The marker tracks one property — whether a gamma ramp can outlive the
+    /// process that set it — and Linux answers it **per transport**, which neither
+    /// other platform does:
+    ///
+    /// - **X11.** A `RandR` ramp is server state. A crash leaves the screen dark
+    ///   with nothing left to undo it, exactly as on Windows, and the rescue is
+    ///   `duja_dimmer::restore_all`'s whole-screen identity walk.
+    /// - **Wayland.** A `zwlr_gamma_control_v1` table lives only as long as the
+    ///   client's object, and the compositor destroys every object a client holds
+    ///   when the socket closes. A crash cannot leave a Wayland session dark.
+    ///
+    /// The marker is written on **both** anyway, and that is a choice rather than a
+    /// simplification. It costs a Wayland session nothing measurable: the next
+    /// launch's `restore_all` opens no connection at all — the Wayland half holds no
+    /// gamma controls in a fresh process and the X11 half stops at
+    /// `linux_gamma::xrandr_refusal` before it reaches a socket. And it buys the
+    /// case the transport check cannot see: a process that engaged X11 ramps and
+    /// then acquired a `WAYLAND_DISPLAY`, which `duja_dimmer::restore_all`'s own
+    /// docs name as the direction that leaves CRTCs dark **permanently**. Deciding
+    /// per transport would write no marker for exactly that run.
+    struct LinuxSink {
+        resolve: DeviceResolver,
+        /// Where the crash marker lives. Written before the first ramp write of
+        /// this process, cleared by a restore pass that came back clean.
+        marker: PathBuf,
+        /// Whether this process has already written the marker, so the first engage
+        /// pays one `create_new` and a slider drag pays none.
+        marked: bool,
+        /// Resolved id → the channel engaged for it, so a later restore targets the
+        /// exact CRTC or output the engage used (a CRTC id is reassigned across a
+        /// hot-plug). Only ids whose write **succeeded** are here.
+        engaged: BTreeMap<StableDisplayId, GammaDisplay>,
+        /// Per-display once-only logging for a refused ramp (see [`RefusalLog`]).
+        refusals: RefusalLog,
+    }
+
+    /// Which display server this session is on, read fresh.
+    ///
+    /// Two `getenv`s per engage rather than a value cached in the sink, matching
+    /// `duja_dimmer`'s own `session_transport` and for its stated reason: a cached
+    /// answer is wrong for exactly the session that changed under a running process.
+    /// The decision itself is `linux_caps::transport`, which is pure and already
+    /// tested — this is only the environment read it takes as input.
+    fn session_transport() -> Transport {
+        let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
+        let display = std::env::var("DISPLAY").ok();
+        duja_dimmer::linux_caps::transport(SessionEnv {
+            wayland_display: wayland_display.as_deref(),
+            display: display.as_deref(),
+        })
+    }
+
+    impl LinuxSink {
+        /// Resolve `id` to a live gamma channel on a `transport` session, logging
+        /// (once per reason) and returning `None` when it has none.
+        ///
+        /// Takes the transport rather than reading it, so everything except the two
+        /// `getenv`s is reachable from a test with no display server. The crate
+        /// below splits `is_hdr_active` from `hdr_active_for` and `probe_session`
+        /// from `resolve` the same way and for the same reason.
+        fn gamma_display_for(
+            &mut self,
+            id: &StableDisplayId,
+            transport: Transport,
+        ) -> Option<GammaDisplay> {
+            let Some(token) = (self.resolve)(id) else {
+                if self.refusals.note_refusal(id, NO_TOKEN_REASON) {
+                    warn!(
+                        id = %id.as_str(),
+                        "no gamma token for this display; skipping ramp \
+                         (logged once until the reason changes)"
+                    );
+                }
+                return None;
+            };
+            let Some(address) = gamma_address(transport, &token) else {
+                if self.refusals.note_refusal(id, BAD_TOKEN_REASON) {
+                    // The token and the transport are both in the line: this reason
+                    // means the pair did not fit, and neither half names the fault
+                    // on its own.
+                    warn!(
+                        id = %id.as_str(), token, ?transport,
+                        "gamma token addresses nothing on this session; skipping ramp \
+                         (logged once until the reason changes)"
+                    );
+                }
+                return None;
+            };
+            Some(match address {
+                GammaAddress::Crtc(crtc) => GammaDisplay::from_crtc(crtc),
+                GammaAddress::Output(name) => GammaDisplay::from_output(&name),
+            })
+        }
+
+        /// Write the crash marker, once per process.
+        ///
+        /// Called **before** the ramp write and only after correlation succeeded,
+        /// which is the Windows guard's rule and has a second reason here: on X11 an
+        /// `Err` from `set_gamma` does not prove the ramp is not live — the write is
+        /// confirmed with a round trip, so a connection that dies in between reports
+        /// a failure for a table that is on the screen and stays there. Marking
+        /// first is what makes that case recoverable.
+        fn mark_if_needed(&mut self) {
+            if self.marked {
+                return;
+            }
+            self.marked = true;
+            if let Err(e) = duja_dimmer::mark_dirty(&self.marker) {
+                // Not fatal: the dim still happens, and the cost is that a crash
+                // this run would not be recovered on the next launch.
+                warn!(error = %e, path = %self.marker.display(), "could not write the gamma crash marker");
+            }
+        }
+
+        /// The whole of [`GammaSink::engage`] except reading the environment.
+        ///
+        /// Split for the same reason as [`Self::gamma_display_for`]: the marker
+        /// ordering below is the one rule here that a headless runner *can* check,
+        /// and it is unreachable from a test that has to conjure a display server
+        /// into the process environment first.
+        fn engage_on(&mut self, id: &StableDisplayId, factor: f32, transport: Transport) -> bool {
+            debug_assert!(
+                (GAMMA_FLOOR..=1.0).contains(&factor),
+                "gamma factor {factor} out of range; HDR/unknown must force overlay"
+            );
+            // `channel`, not `display`: `tracing`'s macros bring their own
+            // `display` field-value helper into scope, so a local of that name
+            // resolves to the helper inside the macro and not to this binding.
+            let Some(channel) = self.gamma_display_for(id, transport) else {
+                return false;
+            };
+            self.mark_if_needed();
+            if let Err(e) = duja_dimmer::set_gamma(&channel, factor) {
+                // Once per reason, not once per frame: a slider drag re-plans every
+                // frame, and the Windows twin of this warning shipped 349 times in
+                // one user's log before it was latched.
+                let reason = e.to_string();
+                if self.refusals.note_refusal(id, &reason) {
+                    warn!(
+                        id = %id.as_str(), channel = channel.name(), factor, error = %reason,
+                        "gamma engage refused; no ramp for this display \
+                         (logged once until the reason changes)"
+                    );
+                }
+                return false;
+            }
+            if self.refusals.note_success(id) {
+                debug!(id = %id.as_str(), channel = channel.name(), "gamma engage accepted again");
+            }
+            self.engaged.insert(id.clone(), channel);
+            true
+        }
+    }
+
+    impl GammaSink for LinuxSink {
+        fn engage(&mut self, id: &StableDisplayId, factor: f32) -> bool {
+            self.engage_on(id, factor, session_transport())
+        }
+
+        /// Undo the dim on the one display leaving the sub-floor zone.
+        ///
+        /// What that means differs by channel and the difference is user-visible:
+        /// X11 writes the identity table, which on a *calibrated* screen also
+        /// clobbers whatever `redshift` or a profile loader had set; Wayland
+        /// destroys the output's gamma control, which both un-dims it and hands it
+        /// back for another client to claim. `duja_dimmer::restore_identity`
+        /// documents both, and the composition that would fix the X11 half is owed
+        /// in `docs/debt.md` — it is **impossible** on Wayland with this protocol,
+        /// which has no request to read the current table back.
+        fn restore(&mut self, id: &StableDisplayId) {
+            if let Some(channel) = self.engaged.remove(id)
+                && let Err(e) = duja_dimmer::restore_identity(&channel)
+            {
+                warn!(id = %id.as_str(), channel = channel.name(), error = %e, "gamma restore failed");
+            }
+        }
+
+        /// Restore every display **this sink engaged**, and clear the marker only if
+        /// all of them came back.
+        ///
+        /// # Not `duja_dimmer::restore_all`, and not the macOS shape either
+        ///
+        /// The global pass is the *rescue* — a whole-screen X11 identity walk that
+        /// also flattens ramps Duja never set — and it belongs to
+        /// `startup::recover_from_crash_marker` and `duja --restore`, where a screen
+        /// is already known to be wrong. A clean quit should touch only what it
+        /// dimmed, which is the Windows semantic, so this walks its own map.
+        ///
+        /// That also sidesteps a reconciliation that would not have worked. Windows
+        /// reconciles its engage map against `RestoreReport::failed` by device name;
+        /// the Linux rescue walk labels its rows from the connectors it enumerated
+        /// (`DP-1 (CRTC 63)`) while a sink addressing a bare token labels the same
+        /// CRTC `CRTC-63`, so the two would never match and every failure would look
+        /// like a success. Restoring per entry gives the exact outcome with no names
+        /// involved.
+        ///
+        /// A `false` return means at least one ramp could not be reset: those ids
+        /// stay in `engaged` and the marker is **kept**, so the next launch recovers
+        /// and the caller must not force-remove it.
+        fn restore_all(&mut self) -> bool {
+            let mut failed = Vec::new();
+            for (id, channel) in std::mem::take(&mut self.engaged) {
+                if let Err(e) = duja_dimmer::restore_identity(&channel) {
+                    warn!(id = %id.as_str(), channel = channel.name(), error = %e, "gamma restore failed");
+                    failed.push((id, channel));
+                }
+            }
+            let clean = failed.is_empty();
+            self.engaged.extend(failed);
+            if clean && self.marked {
+                if let Err(e) = duja_dimmer::clear_marker(&self.marker) {
+                    warn!(error = %e, path = %self.marker.display(), "could not clear the gamma crash marker");
+                } else {
+                    self.marked = false;
+                }
+            }
+            clean
+        }
+    }
+
+    /// The never-brick net, which on Linux has to be written out rather than
+    /// inherited.
+    ///
+    /// Windows gets this from `ScreenStateGuard`'s own `Drop`; macOS deliberately
+    /// has none, on the belief that the window server heals a dirty exit. Linux has
+    /// neither — there is no guard type on this platform — and an X11 ramp very much
+    /// does outlive the process, so a panic unwind or any teardown that drops the
+    /// backend without calling [`GammaSink::restore_all`] would leave the screen
+    /// dark until the *next* launch noticed the marker.
+    ///
+    /// Restores what this sink engaged, not the whole screen: a `Drop` is not a
+    /// rescue and must not flatten a colour-temperature tool's ramp on the way out.
+    impl Drop for LinuxSink {
+        fn drop(&mut self) {
+            if self.engaged.is_empty() && !self.marked {
+                return;
+            }
+            let _ = GammaSink::restore_all(self);
+        }
+    }
+
+    /// The tray-owned gamma channel: the pure coordinator plus the real sink.
+    ///
+    /// Dropping it restores every display it engaged and clears the crash marker if
+    /// that was clean — see [`LinuxSink`]'s `Drop`, which is this platform's stand-in
+    /// for the Windows guard.
+    pub(crate) struct GammaBackend {
+        coord: GammaCoordinator,
+        sink: LinuxSink,
+    }
+
+    impl GammaBackend {
+        /// Build a gamma channel whose crash marker is at `marker`, using `resolve`
+        /// to map a resolved display id to its **gamma** token
+        /// (`BoundsMap::gamma_token_for`).
+        pub(crate) fn new(
+            marker: PathBuf,
+            resolve: impl FnMut(&StableDisplayId) -> Option<String> + 'static,
+        ) -> Self {
+            GammaBackend {
+                coord: GammaCoordinator::default(),
+                sink: LinuxSink {
+                    resolve: Box::new(resolve),
+                    marker,
+                    marked: false,
+                    engaged: BTreeMap::new(),
+                    refusals: RefusalLog::default(),
+                },
+            }
+        }
+
+        /// Drive one apply batch across the gamma channel **and** `overlays`, in the
+        /// order that never brightens the screen mid-transition.
+        ///
+        /// Delegates to the cross-platform [`apply_dimming_batch`], which owns the
+        /// sequencing (and its tests) — so the ordering is pinned on every CI lane
+        /// rather than only where a real sink can be built.
+        pub(crate) fn apply_batch(
+            &mut self,
+            commands: &[DimCommand],
+            overlays: Option<&mut dyn Dimmer>,
+        ) -> Result<(), DimmerError> {
+            apply_dimming_batch(commands, &mut self.coord, &mut self.sink, overlays)
+        }
+
+        /// Declare that the OS may have reset every ramp, so the next batch
+        /// rewrites instead of diffing. See [`GammaCoordinator::invalidate`].
+        ///
+        /// ADR-0003 names Windows and macOS; Linux joins on the X11 side for a
+        /// reason of its own. A `RandR` gamma table is per **CRTC**, and a mode set,
+        /// a monitor hot-plug or a DPMS cycle can rebuild the CRTC routing — so the
+        /// ramp Duja wrote may be on a CRTC that no longer drives that output, or
+        /// gone with the CRTC itself. Wayland cannot drift this way: the compositor
+        /// keeps the table bound to the output for as long as the control object
+        /// lives. The re-assert is one pass either way and costs a Wayland session a
+        /// rewrite it did not need.
+        pub(crate) fn invalidate(&mut self) {
+            self.coord.invalidate();
+        }
+
+        /// Restore every display this session engaged and clear the crash marker,
+        /// returning whether every restore succeeded (`true` = clean).
+        ///
+        /// A `false` return means a ramp could not be reset and the marker was
+        /// **kept**, so the next launch recovers; the caller must not force-remove
+        /// it. See [`LinuxSink::restore_all`].
+        pub(crate) fn restore_all(&mut self) -> bool {
+            self.coord.forget_all();
+            self.sink.restore_all()
+        }
+    }
+
+    /// # What these tests cover, and what they cannot
+    ///
+    /// The marker bookkeeping, which is the half that is decidable without a display
+    /// server: that a correlated engage marks, that an uncorrelated one does not,
+    /// that a clean restore clears and a failed one keeps. They run only on the
+    /// ubuntu lane, so the count is small on purpose — everything decidable on all
+    /// three lives in `gamma_address` and the coordinator's own tests instead.
+    ///
+    /// **The accept path is unpinned**, at parity with both other platforms: a
+    /// headless runner has neither an X server nor a compositor, so `set_gamma`
+    /// always fails here and `engaged.insert`, `note_success` and the `true` return
+    /// are never reached. An `engage` that wrote the ramp and then returned `false`
+    /// would pass every test below.
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn id(serial: &str) -> StableDisplayId {
+            StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap()
+        }
+
+        /// A sink whose resolver hands back `token`, with its marker in `dir`.
+        fn sink_with(dir: &std::path::Path, token: Option<&'static str>) -> LinuxSink {
+            LinuxSink {
+                resolve: Box::new(move |_id| token.map(str::to_owned)),
+                marker: dir.join("gamma.dirty"),
+                marked: false,
+                engaged: BTreeMap::new(),
+                refusals: RefusalLog::default(),
+            }
+        }
+
+        #[test]
+        fn a_correlated_engage_marks_dirty_even_though_the_ramp_write_fails() {
+            // The order that matters: the marker goes down before the OS write, so a
+            // ramp that landed and then lost its confirmation is still recoverable.
+            // On a headless runner the write always fails, which is exactly the case
+            // this pins — a marker written only on success would leave nothing here,
+            // and X11 is the transport where that residue outlives the process.
+            let dir = tempfile::tempdir().expect("tempdir");
+            let marker = dir.path().join("gamma.dirty");
+            let mut sink = sink_with(dir.path(), Some("63"));
+
+            assert!(
+                !sink.engage_on(&id("A"), 0.6, Transport::X11),
+                "no X server ⇒ no live ramp"
+            );
+            assert!(
+                marker.exists(),
+                "a correlated engage must mark dirty before it writes"
+            );
+            assert!(
+                sink.engaged.is_empty(),
+                "a refused ramp must not be tracked as engaged"
+            );
+        }
+
+        #[test]
+        fn an_uncorrelated_engage_leaves_no_marker() {
+            // Nothing was addressed, so nothing can be dirty. Same rule as the
+            // Windows twin's `missing_device_engages_nothing_and_leaves_no_marker`.
+            let dir = tempfile::tempdir().expect("tempdir");
+            let marker = dir.path().join("gamma.dirty");
+            let mut sink = sink_with(dir.path(), None);
+
+            assert!(!sink.engage_on(&id("A"), 0.6, Transport::X11));
+            assert!(
+                !marker.exists(),
+                "an uncorrelated gamma command must not mark dirty"
+            );
+        }
+
+        #[test]
+        fn a_session_with_no_display_server_never_marks() {
+            // The token is perfectly good and there is simply nothing to address, so
+            // this must refuse before the marker rather than after it. A sink that
+            // marked first would leave every headless run dirty, and every *next*
+            // run would open with a whole-screen rescue it did not need.
+            let dir = tempfile::tempdir().expect("tempdir");
+            let marker = dir.path().join("gamma.dirty");
+            let mut sink = sink_with(dir.path(), Some("63"));
+
+            assert!(!sink.engage_on(&id("A"), 0.6, Transport::None));
+            assert!(!marker.exists(), "no display server ⇒ nothing to be dirty");
+        }
+
+        #[test]
+        fn a_clean_restore_clears_the_marker_it_wrote() {
+            // The engage marks and then fails, so nothing is engaged: the restore has
+            // nothing that can fail either, which is clean, which is what clears the
+            // marker. The pairing is the point — a `restore_all` that cleared
+            // unconditionally would drop the never-brick net for the case it exists
+            // for, and one that never cleared would leave every clean quit dirty.
+            let dir = tempfile::tempdir().expect("tempdir");
+            let marker = dir.path().join("gamma.dirty");
+            let mut sink = sink_with(dir.path(), Some("63"));
+
+            sink.engage_on(&id("A"), 0.6, Transport::X11);
+            assert!(marker.exists(), "precondition: the engage marked");
+
+            assert!(sink.restore_all(), "nothing engaged restores cleanly");
+            assert!(!marker.exists(), "a clean restore must clear the marker");
+        }
+
+        #[test]
+        fn the_backend_the_tray_builds_reaches_the_same_sink() {
+            // `GammaBackend::new` + `apply_batch` is the only path the tray uses, and
+            // it is a different one from every test above: the coordinator decides
+            // what to engage and the sink is reached through `apply_dimming_batch`.
+            // With no token nothing correlates, so this pins the wiring rather than
+            // the ramp — but a backend wired to a sink that was never called would
+            // fail here and nowhere else.
+            let dir = tempfile::tempdir().expect("tempdir");
+            let marker = dir.path().join("gamma.dirty");
+            let mut backend = GammaBackend::new(marker.clone(), |_id| None);
+
+            backend
+                .apply_batch(
+                    &[DimCommand::new(
+                        id("A"),
+                        duja_core::dimmer::DisplayBounds::new(0, 0, 1920, 1080),
+                        0.0,
+                        Some(0.6),
+                    )],
+                    None,
+                )
+                .expect("no overlay backend ⇒ no failure");
+
+            assert!(!marker.exists(), "an uncorrelated batch marks nothing");
+            assert!(backend.restore_all(), "nothing engaged restores cleanly");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1840,5 +2424,68 @@ mod tests {
             engaged.is_empty(),
             "a clean restore forgets every engagement"
         );
+    }
+
+    /// The Linux correlation rule, pinned on all three lanes.
+    ///
+    /// `LinuxSink` itself is `cfg`-gated and its own tests run only on ubuntu, so
+    /// this is where the *decision* lives — the same split as `display_id_from_token`
+    /// beside it, and the reason both are compiled under `test` everywhere.
+    mod linux_gamma_address {
+        use super::super::{GammaAddress, gamma_address};
+        use duja_dimmer::linux_caps::Transport;
+
+        #[test]
+        fn an_x11_token_is_a_crtc_id_and_a_wayland_one_is_a_name() {
+            assert_eq!(
+                gamma_address(Transport::X11, "63"),
+                Some(GammaAddress::Crtc(63))
+            );
+            assert_eq!(
+                gamma_address(Transport::Wayland, "DP-1"),
+                Some(GammaAddress::Output("DP-1".to_owned()))
+            );
+        }
+
+        #[test]
+        fn x11_refuses_every_token_that_is_not_a_live_crtc_id() {
+            // Delegated to `linux_gamma::crtc_from_token`, which owns the four cases;
+            // asserted here because it is *this* seam that decides an engage happens,
+            // and a future arm that parsed the token itself would pass its tests and
+            // fail these.
+            for token in ["0", "DP-1", "1abc", "", r"\\.\DISPLAY1", "-1"] {
+                assert_eq!(
+                    gamma_address(Transport::X11, token),
+                    None,
+                    "X11 must refuse {token:?} rather than address a CRTC"
+                );
+            }
+        }
+
+        #[test]
+        fn wayland_refuses_only_an_empty_name() {
+            // Deliberately lenient, and the asymmetry with X11 above is the whole
+            // design note on `gamma_address`: a name is matched rather than parsed,
+            // so a wrong one addresses nothing and the bind fails on its own. The
+            // decimal case is the one that would look like a bug and is not — it is
+            // an X11 token on a session that switched transport, and refusing it here
+            // would cost a real dim on an output actually named `1`.
+            assert_eq!(gamma_address(Transport::Wayland, ""), None);
+            assert_eq!(
+                gamma_address(Transport::Wayland, "63"),
+                Some(GammaAddress::Output("63".to_owned())),
+                "a decimal name is passed through, not second-guessed"
+            );
+        }
+
+        #[test]
+        fn no_display_server_addresses_nothing_whatever_the_token_says() {
+            // The gate that keeps a headless session from opening a connection to
+            // discover it has no gamma channel — and from writing a crash marker for
+            // a ramp that could not exist.
+            for token in ["63", "DP-1", ""] {
+                assert_eq!(gamma_address(Transport::None, token), None);
+            }
+        }
     }
 }

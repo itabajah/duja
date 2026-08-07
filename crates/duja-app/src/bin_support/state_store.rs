@@ -14,11 +14,6 @@
 //! the app calls [`maybe_flush`](StateStore::maybe_flush) opportunistically from
 //! its notification loop.
 
-// RATIONALE: these pure modules are consumed only by the tray assembly (Windows and macOS),
-// but stay cross-platform (not cfg-gated) so their unit tests run on every CI
-// OS; the dead-code allow applies only where no consumer exists.
-#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-
 use std::path::PathBuf;
 use std::time::Instant;
 

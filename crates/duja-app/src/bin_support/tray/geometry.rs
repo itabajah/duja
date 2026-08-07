@@ -146,12 +146,14 @@ fn rect_from(rect: WorkRect) -> Rect {
     }
 }
 
-// These tests run on the Windows **and macOS** lanes — the `tray` module is
-// `cfg(any(windows, target_os = "macos"))` (it owns the tray icon and the Slint
-// shells), so they no longer sit on one lane. Not on Linux, until P7. The
-// platform-independent half of the same arithmetic — which factor is which, and
-// that they multiply to the scale — is pinned on every lane in `duja-platform`'s
-// `geometry` and `mac_geometry` tests.
+// These tests now run on **all three** lanes. They were on Windows only, then on
+// Windows and macOS, and the comment here tracked each move; P7 wave 5 removed
+// `mod tray`'s gate entirely when the tray gained its ksni backend, so there is
+// no lane left to exclude. Worth noting that this sentence has been wrong twice
+// by standing still while a gate above it moved — the same failure the sibling
+// `surface.rs` records about its own header. The platform-independent half of
+// this arithmetic — which factor is which, and that they multiply to the scale —
+// is pinned in `duja-platform`'s `geometry` and `mac_geometry` tests.
 #[cfg(test)]
 mod tests {
     use super::{rect_from, to_physical_position};

@@ -168,9 +168,31 @@ fn clone_error(err: &AutostartError) -> AutostartError {
 }
 
 /// The platform [`Autostart`] for Linux.
-#[must_use]
-pub fn system() -> LinuxAutostart {
-    LinuxAutostart::system()
+///
+/// # Errors
+/// Never, today — and the `Result` is the point rather than an oversight.
+///
+/// The three sibling `system()` functions are fallible because they resolve the
+/// executable and the store's directory up front, and either can fail. This
+/// backend resolves both too, but keeps each as a `Result` **inside**
+/// [`LinuxAutostart`] so the failure surfaces on the operation that actually
+/// needs it: a user whose `$XDG_CONFIG_HOME` cannot be resolved still gets a
+/// settings window with a toggle that explains itself when pressed, rather than a
+/// toggle that was disabled before it was drawn.
+///
+/// That is a deliberate difference in *behaviour*, not in the seam. The app's
+/// `build_settings_window` matches on this call for every platform, so a bare
+/// `LinuxAutostart` here would make the one call site need a `cfg` — for a
+/// distinction the caller cannot act on, since it boxes the value into
+/// `Option<Box<dyn Autostart>>` either way. Wave 5 found this the way these are
+/// usually found: the Linux tray un-gated the call site and the ubuntu lane
+/// stopped compiling.
+// RATIONALE (unnecessary_wraps): seam parity, as set out above. The wrap is what
+// keeps four platforms behind one signature; narrowing it to `LinuxAutostart`
+// would push a `cfg` into the app to buy nothing.
+#[allow(clippy::unnecessary_wraps)]
+pub fn system() -> Result<LinuxAutostart, AutostartError> {
+    Ok(LinuxAutostart::system())
 }
 
 #[cfg(test)]

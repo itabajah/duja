@@ -139,17 +139,24 @@ fn init_logging(command: Command) {
 /// Run the tray application. `relaunch` is set when this process was spawned by
 /// the tray "Restart" item, so startup waits for the outgoing instance to release
 /// the single-instance lock before taking over.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn run_tray(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
     bin_support::tray::run(verbose, relaunch)
 }
 
-/// The tray app has no backend on this target yet (Linux lands in P7); report and
-/// exit non-zero rather than silently doing nothing.
+/// The tray app has no backend on this target; report and exit non-zero rather
+/// than silently doing nothing.
+///
+/// Linux used to be here. It is the arm above now, which is what P7 wave 5 was
+/// for — and this gate is worth a sentence because it was the *last* one: the
+/// tray, its ksni backend, the gamma sink and the hotkey registrar were all
+/// compiling on the ubuntu lane while the binary still printed this line, and
+/// nothing failed. Only clippy's dead-code pass noticed, by reporting that
+/// `tray::run` was never called.
 // RATIONALE: the Result wrapper mirrors the real signature so the caller is
 // cfg-free; this stub itself can never fail.
 #[allow(clippy::unnecessary_wraps)]
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn run_tray(_verbose: bool, _relaunch: bool) -> anyhow::Result<ExitCode> {
     eprintln!("duja: the tray application is not available on this platform in this build");
     Ok(ExitCode::from(1))
