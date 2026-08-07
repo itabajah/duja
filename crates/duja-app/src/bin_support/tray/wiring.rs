@@ -19,6 +19,7 @@ use super::hotkey_os::{
     OsHotkeyRegistrar, install_hotkey_event_handler, log_hotkey_issues, outcomes_by_action,
 };
 use super::state::AppState;
+use super::surface::PlatformTray;
 use super::{Action, icon, with_app, with_app_ref};
 
 /// Wire the flyout's command fan-out to the app state.
@@ -161,20 +162,12 @@ struct MenuIds {
     quit: tray_icon::menu::MenuId,
 }
 
-/// The tray icon plus the live handles needed to surface an update at runtime:
-/// the menu (shared `Rc` inner) and the pre-built "Update available" item.
-pub(super) struct TrayHandles {
-    pub(super) tray: tray_icon::TrayIcon,
-    pub(super) menu: tray_icon::menu::Menu,
-    pub(super) update_item: tray_icon::menu::MenuItem,
-}
-
 /// Build the tray icon with its right-click menu (Open / Settings / Restore
 /// screen / Restart / Quit) plus a held-back "Update available" item.
 ///
 /// The icon is the accent-coloured display silhouette — the same glyph and colour
 /// the taskbar button carries (see [`duja_ui::icon`]).
-pub(super) fn build_tray(accent: AccentChoice) -> anyhow::Result<TrayHandles> {
+pub(super) fn build_tray(accent: AccentChoice) -> anyhow::Result<PlatformTray> {
     use tray_icon::menu::{Menu, MenuItem};
     use tray_icon::{TrayIconBuilder, menu::PredefinedMenuItem};
 
@@ -217,11 +210,10 @@ pub(super) fn build_tray(accent: AccentChoice) -> anyhow::Result<TrayHandles> {
     let tray = with_left_click_policy(builder)
         .build()
         .map_err(|e| anyhow::anyhow!("failed to create the tray icon: {e}"))?;
-    Ok(TrayHandles {
-        tray,
-        menu,
-        update_item,
-    })
+    // The three handles go straight into the seam and are never seen apart
+    // again: `tray-icon` needs all three to do what `PlatformTray` exposes as
+    // three methods, and that asymmetry is the whole reason the seam exists.
+    Ok(PlatformTray::new(tray, menu, update_item))
 }
 
 /// On macOS, stop a left click from opening the context menu, so it can toggle

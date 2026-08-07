@@ -90,22 +90,16 @@ impl AppState {
     /// top of the tray menu (once), refresh its label, set the tray tooltip, and
     /// raise a best-effort toast. Deduplicated so the same version acts once.
     fn surface_update_available(&mut self, version: &str) {
-        use tray_icon::menu::PredefinedMenuItem;
-
         if self.update_available.as_deref() == Some(version) {
             return;
         }
-        let first = self.update_available.is_none();
         self.update_available = Some(version.to_owned());
-        self.update_item
-            .set_text(format!("Update available — {version}"));
-        if first {
-            // Prepend the item + a separator above Open/Settings/… exactly once;
-            // a later version change only updates the label and re-toasts.
-            let sep = PredefinedMenuItem::separator();
-            if let Err(e) = self.menu.prepend_items(&[&self.update_item, &sep]) {
-                warn!(error = %e, "failed to add the update menu item");
-            }
+        // De-duplication by *version* stays here; "show the item exactly once"
+        // moved into the tray, because that part is a property of the backend
+        // rather than of updates — `tray-icon` must not prepend twice and `ksni`
+        // rebuilds its menu from state and cannot.
+        if let Err(e) = self.tray.announce_update(version) {
+            warn!(error = %e, "failed to add the update menu item");
         }
         if let Err(e) = self.tray.set_tooltip(Some("Duja — update available")) {
             warn!(error = %e, "failed to set the update tooltip");
