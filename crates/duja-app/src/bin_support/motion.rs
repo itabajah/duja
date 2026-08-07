@@ -12,10 +12,6 @@
 //! from the answer plus whether the window is even on screen — which is pure and
 //! is tested on every CI OS.
 
-// RATIONALE: consumed only by the tray assembly, which is not built on every
-// target; the pure policy stays cross-platform so its tests run on every CI OS.
-#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-
 /// The thumb's glide duration (ms) when motion is enabled and the window is
 /// visible. Short enough to feel responsive, long enough to read as a glide.
 pub(crate) const GLIDE_MS: i32 = 160;

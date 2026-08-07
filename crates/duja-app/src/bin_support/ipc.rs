@@ -62,9 +62,6 @@ pub(crate) fn start(bridge: Arc<dyn IpcBridge>) -> Option<PipeServer> {
 
 /// Best-effort: connect to the already-running instance and ask it to show its
 /// flyout. Returns whether the handshake succeeded.
-// RATIONALE: only the tray second-instance path calls this, and the tray does not
-// exist on Linux yet, so keep that lane dead-code clean.
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub(crate) fn show_running_instance() -> bool {
     match PipeClient::connect(SECOND_INSTANCE_TIMEOUT) {
         Ok(mut client) => match client.request(&Request::ShowFlyout) {

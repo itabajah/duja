@@ -50,11 +50,6 @@
 //! `duja-platform`, which is why the figure was a hardcoded `50`, shown on every
 //! platform, until `#103`.
 
-// RATIONALE: these pure modules are consumed only by the tray assembly (Windows and macOS),
-// but stay cross-platform (not cfg-gated) so their unit tests run on every CI
-// OS; the dead-code allow applies only where no consumer exists.
-#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-
 use duja_core::continuum::{ContinuumConfig, ContinuumOutput, map_user_level};
 use duja_core::dimmer::{DimCommand, DisplayBounds, GAMMA_FLOOR, clamp_gamma};
 use duja_core::id::StableDisplayId;

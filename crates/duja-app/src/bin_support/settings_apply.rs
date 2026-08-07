@@ -11,10 +11,6 @@
 //! the document from disk, applies exactly the touched key, and writes it back
 //! atomically.
 
-// RATIONALE: consumed only by the tray assembly (Windows and macOS); the pure mappings stay
-// cross-platform so their tests run on every CI OS.
-#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-
 use std::path::Path;
 
 use duja_core::config::{

@@ -17,12 +17,6 @@
 //! string, an unknown token, or two keys are rejected with a typed
 //! [`AccelError`].
 
-// RATIONALE: cross-platform pure module compiled on every OS; the tray consumer
-// that converts + registers accelerators is Windows-only, so on other targets
-// the public surface is unused. This mirrors the sibling `settings`/`dimming`
-// modules' dead-code allow.
-#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
