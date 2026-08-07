@@ -341,10 +341,21 @@ jobs:
           # `desktop-file-validate` is the freedesktop reference checker.
           sudo apt-get install -y --no-install-recommends desktop-file-utils
           desktop-file-validate "$check/$stage/duja.desktop"
-          # It runs. Not much of a smoke test on a headless runner -- there is no
-          # display server, so this is the CLI half -- but it is the difference
-          # between shipping a binary and shipping a file.
-          "$check/$stage/dujactl" --version
+          # It runs, and it is the build this tag names. Not much of a smoke test
+          # on a headless runner -- there is no display server, so this is the CLI
+          # half -- but it is the difference between shipping a binary and
+          # shipping a file, and comparing the version closes the other half of
+          # the mislabelling gap: `bundle`'s tests pin the artifact's *name* to
+          # the version, and this pins the *binary inside it* to the same one. A
+          # stale `target/release` would otherwise be packaged under a fresh name
+          # and pass every other check here.
+          #
+          # `version`, a subcommand -- `dujactl` has no `--version` flag, and
+          # asking for one prints usage and exits 2. That is how this step failed
+          # the first time it ever ran, which is what the dry run is for.
+          got="$("$check/$stage/dujactl" version)"
+          echo "dujactl version: $got"
+          test "$got" = "dujactl $VERSION"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
