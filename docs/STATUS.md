@@ -1,7 +1,8 @@
 # Duja - Project Status
 
-_Last updated: 2026-08-07. **P7 (Linux) is in progress**: waves 0 through 4b-5
-are merged and wave 5 is one increment in. Every phase before P7 is closed.
+_Last updated: 2026-08-07. **P7 (Linux) is in progress**: waves 0 through 5 are
+merged, so Linux has a tray and everything behind it. Every phase before P7 is
+closed.
 `v0.2.0` is tagged as `m6-macos` and **deliberately unreleased** until someone
 has launched `Duja.app` on a real Mac._
 
@@ -72,20 +73,38 @@ confirmations per architecture, which no amount of code closes.
 | 3 | event pump, autostart, desktop, geometry | done |
 | 4 | software dimming on X11 and Wayland, plus the capability probe | done |
 | 4b-5 | the X11 cursor anchor | done |
-| **5** | **the Linux tray (ksni)** | **seam landed; the backend is next** |
-| 6 | `xtask dist --target linux`, the release job, the docs | pending |
+| 5 | the Linux tray (ksni), and the gamma sink it turned out to own | done - `#134`, `#136` |
+| **6** | **`xtask dist --target linux`, the release job, the docs** | **next** |
 | 7 | phase gate, adversarial review, tag `m7-linux` | pending |
 
-[plan.md](plan.md) has what each remaining wave owes, and the one constraint
-that shapes wave 5: **`duja-app` cannot be built for Linux on the Windows dev
-box** (`yeslogic-fontconfig-sys` needs a cross-compile sysroot), so un-gating the
-tray is a CI-only loop.
+[plan.md](plan.md) has what each remaining wave owes. The constraint that shaped
+wave 5 has not gone away and shapes wave 6 too: **`duja-app` cannot be built for
+Linux on the Windows dev box** (`yeslogic-fontconfig-sys` wants a pkg-config
+sysroot; `RUST_FONTCONFIG_DLOPEN=1` gets past it and then `fontique` fails on the
+dlopen module layout, confirmed twice), so anything that has to link that crate
+is a CI-only loop at roughly ten minutes a round.
+
+**But an isolated crate can be cross-checked, and that is the technique to
+reach for first.** Only the pinned toolchain has the target installed, so:
+
+```
+cargo +1.96.1 check  --target x86_64-unknown-linux-gnu --all-targets
+cargo +1.96.1 clippy --target x86_64-unknown-linux-gnu --all-targets
+RUSTDOCFLAGS="-D warnings" cargo +1.96.1 doc --target x86_64-unknown-linux-gnu   --no-deps --document-private-items
+```
+
+A throwaway crate that pulls one app module in through `#[path]`, with the
+workspace's `[lints]` copied into its manifest, compiles that module for Linux in
+seconds. Wave 5 validated the entire ksni API surface and later all of
+`bin_support/gamma.rs` this way before spending a CI round, and it caught real
+errors both times - including a local named `display` that shadows `tracing`'s
+own `display` helper inside its macros.
 
 ## Health
 
 Measured on this box, 2026-08-07:
 
-- **1,339 tests** pass in a local `cargo test --workspace --all-features`.
+- **1,350 tests** pass in a local `cargo test --workspace --all-features`.
   The per-OS count differs, and deliberately is not enumerated here: the
   `#![cfg(windows)]` and `#![cfg(unix)]` integration suites compile out on the
   other lanes, as do per-OS unit tests spread across roughly two dozen modules.
@@ -121,6 +140,14 @@ cargo doc --workspace --no-deps --all-features --document-private-items
   unchanged; `classify_failure`'s `GetLastError` assumption needs a live unplug.
 - **No macOS hardware has ever run any of this.** Every macOS backend is
   verified by types, pure tests and cross-referenced primary sources only.
+- **No Linux desktop has ever run the tray either**, and the CI lane cannot: a
+  runner has no `StatusNotifierWatcher`, no X server and no compositor, so the
+  tray never registers, a menu item never fires and `set_gamma` always refuses.
+  Only the refusal paths are exercised ([D-105](debt.md#d-105)).
+- **Global hotkeys do not exist on Linux.** `global-hotkey`'s backend there is
+  X11-only, so Duja registers nothing and says so rather than half-working; the
+  three hotkey settings parse, validate and then do nothing
+  ([D-103](debt.md#d-103)).
 - Quirk user-override file, sync-group UI, in-UI hotkey editing - all in
   [debt.md](debt.md).
 
@@ -151,6 +178,20 @@ cargo doc --workspace --no-deps --all-features --document-private-items
   above it and read which targets it admits. A doc comment claiming a test runs
   "on every lane" is false the moment the module is `cfg`-gated, and it is
   exactly the claim a reader trusts when deciding whether a seam is guarded.
+- **Outer doc comments on a `mod` declaration resolve in the parent's scope.**
+  Rustdoc concatenates a `///` at the declaration with the module file's own
+  `//!` header and resolves the whole thing where the *declaration* sits, so a
+  `[`super::thing`]` written in the module file starts looking one level too
+  high. It fails only on the lane that compiles that module. Use `//` on the
+  declaration when the module file carries its own links (`tray.rs`, `#136`).
+- **A gate can be widened everywhere except the one place that matters.**
+  `#136` un-gated the tray for Linux, and every piece of it compiled and tested
+  green on the ubuntu lane for two rounds while `main.rs` still refused to
+  launch it. Nothing failed: not `cargo test`, not rustdoc. The only signal was
+  clippy's dead-code pass, and only because the module-wide `allow(dead_code)`s
+  had been removed in the same PR. When un-gating, grep for the *entry point*
+  first and remove blanket allows in the same change, or the lane goes green
+  over a feature that is not reachable.
 - **Elevated-token trap**: an elevated process's default object owner is the
   Administrators group, not the user - the pipe's SDDL therefore sets the owner
   explicitly (`O:<sid>`), or the DACL owner assertion fails under CI.
