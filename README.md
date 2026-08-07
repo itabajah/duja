@@ -73,6 +73,21 @@ all the way to true black. Tiny, native, and instant.**
 > *"Windows protected your PC"* on first run. Choose **More info → Run anyway**. You can confirm
 > the download is authentic first; see [Verify your download](#verify-your-download).
 
+**Linux (x64).** No release yet, and the artifact the release will carry now
+exists: `duja-<version>-linux-x64.tar.gz`, a portable tarball with both binaries,
+a `.desktop` entry and an icon. Extract it, put `duja` and `dujactl` on your
+`PATH`, and run `dujactl doctor` first: it reports what your session can actually
+do, which on Linux varies more than on the other two platforms.
+[`packaging/linux/README.md`](packaging/linux/README.md) has the install commands,
+the libraries the binary links against, and why there is no AppImage or `.deb`.
+
+Two things to know before the first run. The tray needs a
+**`StatusNotifierItem` host** (native on KDE Plasma; GNOME needs the AppIndicator
+extension), without which the icon simply never appears. And **global hotkeys do
+not work on Linux at all** - the underlying library is X11-only, and Duja refuses
+them honestly rather than half-working, so the settings rows are greyed out with
+the reason.
+
 _Package managers (winget / Scoop) are planned once the release stabilises._
 
 ### Updates
@@ -104,18 +119,20 @@ The public key and full instructions live in [SECURITY.md](SECURITY.md).
 |---|---|---|---|
 | External DDC/CI | ✅ | 🧪 experimental¹ | 🧪 experimental² |
 | Internal panel | ✅ | 🧪 | 🧪 |
-| Overlay dimming | ✅ | 🧪 | ⏳ (probed per session³) |
-| Tray + flyout | ✅ | 🧪 | ⏳ |
-| Hotkeys, input switch | ✅ | 🧪 | ⏳ |
+| Overlay dimming | ✅ | 🧪 | 🧪 (probed per session³) |
+| Tray + flyout | ✅ | 🧪 | 🧪 (needs a tray host⁴) |
+| Input switch | ✅ | 🧪 | 🧪 |
+| Global hotkeys | ✅ | 🧪 | ❌ not available⁵ |
 | `dujactl` | ✅ | 🧪 | 🧪 |
 
-✅ shipping · 🧪 written and CI-tested, **never run on real hardware** · ⏳ not written
+✅ shipping · 🧪 written and CI-tested, **never run on real hardware** · ❌ not available
 
-**There is no macOS download yet.** Every macOS cell above describes code that
-exists and builds, not a release you can install: the `.dmg` is produced by the
-release workflow but has not been published, so macOS is source-only for now
-(see [Build from source](#build-from-source)). The matrix answers "is it
-implemented". For macOS, the answer to "can I install it" is still no.
+**There is no macOS or Linux download yet.** Every 🧪 cell above describes code
+that exists and builds, not a release you can install: the `.dmg` and the
+`.tar.gz` are produced by the release workflow but have not been published, so
+both are source-only for now (see [Build from source](#build-from-source)). The
+matrix answers "is it implemented". For those two, the answer to "can I install
+it" is still no.
 
 ¹ Apple-Silicon DDC uses private APIs (same approach as MonitorControl / Lunar).
 On macOS `dujactl` lives inside `Duja.app/Contents/MacOS/`, so it is not on
@@ -125,6 +142,17 @@ On macOS `dujactl` lives inside `Duja.app/Contents/MacOS/`, so it is not on
 root-only and no `i2c` group exists: installing `i2c-tools` (or `ddcutil`) adds the
 rule and the group together, and you then join it. Without both steps external
 monitors do not appear at all; the built-in panel is unaffected.
+⁴ The tray speaks the freedesktop `StatusNotifierItem` protocol
+([ADR-0010](docs/adr/0010-linux-tray-ksni.md)). KDE Plasma implements it natively;
+GNOME needs the AppIndicator extension; most wlroots panels support it directly.
+Without a host the icon never appears - the process runs and `dujactl` works, and
+there is nothing to click.
+⁵ The `global-hotkey` backend is X11-only, and Duja ships Wayland dimming, so a
+registrar that worked on one transport and silently did nothing on the other
+would be worse than none. Duja registers nothing on Linux and says so: the three
+hotkey settings parse and validate, the rows grey out with the reason, and no
+combination is claimed. The route to a real implementation is the XDG desktop
+portal's `GlobalShortcuts` interface.
 ³ Software dimming on
 Wayland needs the `wlr-layer-shell` and `wlr-gamma-control` protocols. Duja asks the
 session which of them it offers, and for gamma whether it can actually take it: a

@@ -23,8 +23,9 @@ USAGE: cargo xtask <task>
 TASKS:
   help                       show this help
   dist --version X.Y.Z       stage the shippable artifact for this host
-                             (Windows: portable zip; macOS: Duja.app + DMG)
-       [--target windows|macos]  package for a platform other than the host
+                             (Windows: portable zip; macOS: Duja.app + DMG;
+                              Linux: portable tarball)
+       [--target windows|macos|linux]  package for a platform other than the host
        [--sign <identity>]       codesign identity for the macOS bundle
                                  (default `-`, an ad-hoc signature)
   (licenses, tr-extract arrive in later phases)

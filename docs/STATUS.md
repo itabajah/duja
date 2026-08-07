@@ -1,7 +1,8 @@
 # Duja - Project Status
 
-_Last updated: 2026-08-07. **P7 (Linux) is in progress**: waves 0 through 5 are
-merged, so Linux has a tray and everything behind it. Every phase before P7 is
+_Last updated: 2026-08-07. **P7 (Linux) is in progress**: waves 0 through 6 are
+merged, so Linux has a tray, everything behind it, and a shippable artifact.
+Only the phase gate is left, and it needs a human. Every phase before P7 is
 closed.
 `v0.2.0` is tagged as `m6-macos` and **deliberately unreleased** until someone
 has launched `Duja.app` on a real Mac._
@@ -74,8 +75,8 @@ confirmations per architecture, which no amount of code closes.
 | 4 | software dimming on X11 and Wayland, plus the capability probe | done |
 | 4b-5 | the X11 cursor anchor | done |
 | 5 | the Linux tray (ksni), and the gamma sink it turned out to own | done - `#134`, `#136` |
-| **6** | **`xtask dist --target linux`, the release job, the docs** | **next** |
-| 7 | phase gate, adversarial review, tag `m7-linux` | pending |
+| 6 | `xtask dist --target linux`, the release job, the docs | done - `#140` |
+| **7** | **phase gate, adversarial review, tag `m7-linux`** | **next - needs a human** |
 
 [plan.md](plan.md) has what each remaining wave owes. The constraint that shaped
 wave 5 has not gone away and shapes wave 6 too: **`duja-app` cannot be built for
