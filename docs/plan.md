@@ -15,10 +15,13 @@ enough that reading it is never a research task.
    binary-size trim ([ADR-0012](adr/0012-binary-size-budget-variance.md)), and
    draining what [debt.md](debt.md) still holds.
 
-Two rows are owed **before wave 6 tags anything**, both made live by wave 5
-rather than created by it: [D-101](debt.md#d-101), a settings caption that
-tells a Linux user about a macOS hardware quirk, and [D-091](debt.md#d-091),
-which is now on the Slint main thread rather than in a CLI invocation.
+One row is owed **before wave 6 tags anything**: [D-091](debt.md#d-091), an X11
+call that can block indefinitely and is now on the Slint main thread rather than
+in a CLI invocation. Its sibling, a settings caption that told a Linux user
+about a macOS hardware quirk, drained in `#138`
+([D-101](debt-archive.md#d-101)). Both were made live by wave 5 rather than
+created by it, which is the shape to expect from an un-gate: the defects were
+already written down and merely unreachable.
 
 Two things are **held rather than pending**, and neither blocks the list above:
 

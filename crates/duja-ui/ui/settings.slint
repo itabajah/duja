@@ -22,9 +22,14 @@ export struct SettingsMonitorData {
     // optional type, so `Option<u8>::None` arrives as 0; the VM field is the
     // authority on the meaning.
     gamma-cap-pct: int,
-    // Whether this OS can report a gamma write as accepted without applying it,
-    // in a way Duja cannot pre-empt. See `GammaLimits::advisory`.
-    gamma-advisory: bool,
+    // Whether this OS can report a gamma write as accepted without applying it in
+    // a way Duja cannot pre-empt, and if so by which mechanism — because the two
+    // need different sentences. `0` = nothing to disclose, `1` = macOS' window
+    // server, `2` = a Linux display server. Set from
+    // `GammaAdvisory::caption_index`, which is the authority on the numbering;
+    // an `int` rather than a bool or a Slint enum for the same reason
+    // `dim-mode-index` is one.
+    gamma-advisory-kind: int,
     inputs: [string],
     has-inputs: bool,
     // The selector index of the input the user last picked (-1 = none yet). A
@@ -449,23 +454,52 @@ export component SettingsWindow inherits Window {
                                     font-size: 11px;
                                     wrap: word-wrap;
                                 }
-                                // On macOS `CGSetDisplayTransferByFormula` can
-                                // return success and leave the display's curve
-                                // untouched. Two reported modes, deliberately not
-                                // ranked here: Apple DTS reproduced a total
-                                // no-visual-change on an M5 Max with no setting
-                                // involved (an M5 non-Max on the same build is
-                                // fine, so it is narrow recent hardware), and
-                                // separately the ramp is reported not to apply
-                                // while "Automatically adjust brightness" is on.
-                                // Unlike the Windows cap
-                                // there is no rule to comply with and readback
-                                // cannot detect it, so the only thing Duja can do
-                                // is say so before the user picks the mode. Same
-                                // decision as the cap above: keep gamma, disclose
-                                // the limit. See `duja_dimmer::gamma_is_advisory`.
-                                if monitor.gamma-available && monitor.gamma-advisory: Text {
+                                // Two OSes can accept a gamma write and not apply
+                                // it, with no rule to comply with and no readback
+                                // that detects it — so unlike the Windows cap the
+                                // only thing Duja can do is say so before the user
+                                // picks the mode. Same decision as the cap above:
+                                // keep gamma, disclose the limit. See
+                                // `duja_dimmer::gamma_is_advisory` for the evidence
+                                // and `GammaAdvisory` for why this is a kind rather
+                                // than a flag.
+                                //
+                                // The underlying fact is identical on both, which
+                                // is why one shared opening clause would have been
+                                // defensible. What is not shared is the advice: on
+                                // macOS one of the two reported triggers is a
+                                // setting the user can turn off, and telling a
+                                // Linux user to check it would send them looking
+                                // for a control their OS does not have. A caption
+                                // that names the wrong OS is worse than a vaguer
+                                // one — it reads as a bug report about someone
+                                // else's computer.
+                                //
+                                // On macOS: `CGSetDisplayTransferByFormula` can
+                                // return success and leave the curve untouched. Two
+                                // reported modes, deliberately not ranked here.
+                                // Apple DTS reproduced a total no-visual-change on
+                                // an M5 Max with no setting involved (an M5 non-Max
+                                // on the same build is fine, so it is narrow recent
+                                // hardware), and separately the ramp is reported
+                                // not to apply while "Automatically adjust
+                                // brightness" is on.
+                                if monitor.gamma-available && monitor.gamma-advisory-kind == 1: Text {
                                     text: @tr("Gamma may not take effect on this system: macOS can accept a ramp and not apply it — on some recent Macs regardless of settings, and on others while \"Automatically adjust brightness\" is on. If the screen does not dim, use the overlay instead");
+                                    color: Palette.text-faint;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                                // On Linux it is the display server rather than the
+                                // hardware, and it is unconditional rather than
+                                // narrow: `ProcRRSetCrtcGamma` discards the driver
+                                // hook's result and answers `Success` regardless,
+                                // and `GetCrtcGamma` reads back the server's own
+                                // copy — so there is nothing for the user to check
+                                // and no setting to blame. The caption is therefore
+                                // the bare fact plus the one action available.
+                                if monitor.gamma-available && monitor.gamma-advisory-kind == 2: Text {
+                                    text: @tr("Gamma may not take effect on this system: the display server can report a ramp as accepted even when the driver refused it, and reading it back does not reveal that. If the screen does not dim, use the overlay instead");
                                     color: Palette.text-faint;
                                     font-size: 11px;
                                     wrap: word-wrap;

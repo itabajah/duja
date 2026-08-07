@@ -93,8 +93,57 @@ pub struct GammaLimits {
     /// brightness — or `None` where the OS accepts the whole range.
     pub cap_pct: Option<u8>,
     /// Whether this OS can report a gamma write as accepted without applying it,
-    /// in a way Duja cannot pre-empt (`duja_dimmer::gamma_is_advisory`).
-    pub advisory: bool,
+    /// in a way Duja cannot pre-empt — and if so, which mechanism, because the two
+    /// need different sentences (`duja_dimmer::gamma_advisory`).
+    pub advisory: GammaAdvisory,
+}
+
+/// Which mechanism makes a gamma write advisory on this platform, i.e. which
+/// caption the settings window shows under the dim-mode row.
+///
+/// A copy of `duja_dimmer::GammaAdvisory` rather than a re-export, because
+/// `duja-ui` depends on neither `duja-dimmer` nor `duja-platform` — the same
+/// reason [`GammaLimits`] arrives as an argument at all, and the reason the gamma
+/// cap was once a hardcoded `50` shown on every platform. `duja-app` maps between
+/// them, in one place, in `bin_support::settings::platform_gamma_limits`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GammaAdvisory {
+    /// Nothing to disclose: this OS applies what it accepts, or refuses with a
+    /// rule Duja can comply with. Windows, and any target with no gamma backend.
+    #[default]
+    None,
+    /// macOS: the window server can accept a ramp and leave the curve unchanged.
+    /// Its caption is the longer of the two because one of the reported triggers
+    /// is a setting the user can turn off.
+    MacWindowServer,
+    /// Linux: the display server reports success for a write the driver refused.
+    /// Nothing the user can act on, so its caption is the bare fact plus what to
+    /// do instead.
+    LinuxDisplayServer,
+}
+
+impl GammaAdvisory {
+    /// The selector index this maps to in `settings.slint`.
+    ///
+    /// An `int` rather than a Slint enum for the same reason
+    /// [`MonitorSection::dim_mode_index`] is one: it is this file's established
+    /// way of crossing that boundary, and `0` is the "nothing to say" case on both
+    /// sides. The `.slint` struct's comment is the authority on the mapping.
+    #[must_use]
+    pub const fn caption_index(self) -> i32 {
+        match self {
+            GammaAdvisory::None => 0,
+            GammaAdvisory::MacWindowServer => 1,
+            GammaAdvisory::LinuxDisplayServer => 2,
+        }
+    }
+
+    /// Whether there is anything to disclose at all — the question the old `bool`
+    /// asked, kept because several call sites only ever wanted that much.
+    #[must_use]
+    pub const fn is_advisory(self) -> bool {
+        !matches!(self, GammaAdvisory::None)
+    }
 }
 
 impl GammaLimits {
@@ -103,7 +152,7 @@ impl GammaLimits {
     /// is their subject.
     pub const UNLIMITED: GammaLimits = GammaLimits {
         cap_pct: None,
-        advisory: false,
+        advisory: GammaAdvisory::None,
     };
 }
 
@@ -975,7 +1024,7 @@ mod tests {
     /// collapsed into one, or either being derived from the other.
     const BOTH_LIMITS: GammaLimits = GammaLimits {
         cap_pct: Some(NOT_THE_WINDOWS_CAP),
-        advisory: true,
+        advisory: GammaAdvisory::MacWindowServer,
     };
 
     #[test]
