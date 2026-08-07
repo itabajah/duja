@@ -45,8 +45,8 @@ use super::policy::{
 use super::wiring::resolved_hotkey_rows;
 use super::{
     Action, FLYOUT_LOGICAL_WIDTH, FLYOUT_MARGIN, FLYOUT_MAX_LOGICAL_HEIGHT,
-    FLYOUT_MIN_LOGICAL_HEIGHT, SETTINGS_LOGICAL_HEIGHT, SETTINGS_LOGICAL_WIDTH, geometry, icon,
-    open_url, spawn_relaunch, unix_now,
+    FLYOUT_MIN_LOGICAL_HEIGHT, SETTINGS_LOGICAL_HEIGHT, SETTINGS_LOGICAL_WIDTH, geometry, open_url,
+    spawn_relaunch, unix_now,
 };
 
 /// The main-thread application state driven by every event source.
@@ -129,16 +129,14 @@ pub(super) struct AppState {
     /// The last live-registration result per action, for settings-row feedback
     /// (conflict / OS-rejected).
     pub(super) hotkey_outcomes: BTreeMap<HotkeyAction, hotkey::RegisterResult>,
-    /// The tray icon itself — owned here (rather than as a `run()` local) so an
-    /// accent change can swap its glyph colour live via `TrayIcon::set_icon`.
-    /// Dropping `AppState` at teardown drops it, exactly as the old local did.
-    pub(super) tray: tray_icon::TrayIcon,
-    /// A live handle to the tray menu (shares the same `Rc` inner as the menu the
-    /// tray owns) so the "Update available" item can be prepended at runtime.
-    pub(super) menu: tray_icon::menu::Menu,
-    /// The pre-built "Update available" menu item, held out of the menu until a
-    /// background check finds a newer release, then prepended once.
-    pub(super) update_item: tray_icon::menu::MenuItem,
+    /// The tray — owned here (rather than as a `run()` local) so an accent change
+    /// can swap its glyph colour live. Dropping `AppState` at teardown drops it,
+    /// exactly as the old local did.
+    ///
+    /// One field where there were three concrete `tray-icon` handles, which is the
+    /// seam ADR-0010 asks for: see [`super::surface`] for why the second backend
+    /// could not have matched the shape they imposed.
+    pub(super) tray: super::surface::PlatformTray,
     /// The newest release surfaced this session (`Some(tag)`), for dedup so the
     /// menu item/toast fire once per version.
     pub(super) update_available: Option<String>,
@@ -689,15 +687,12 @@ impl AppState {
         self.vm.borrow_mut().set_accent(accent);
         self.rebuild_settings();
 
-        let rgb = duja_ui::accent::icon_rgb(accent);
-        match icon::tray_icon(rgb) {
-            Ok(built) => {
-                if let Err(e) = self.tray.set_icon(Some(built)) {
-                    warn!(error = %e, "could not swap the tray icon to the new accent");
-                }
-            }
-            Err(e) => warn!(error = %e, "could not build the tray icon for the new accent"),
+        if let Err(e) = self.tray.set_accent(accent) {
+            warn!(error = %e, "could not swap the tray icon to the new accent");
         }
+        // The window icons take the raw colour: they are Slint shells rather than
+        // trays, so they are not behind the seam and must not be.
+        let rgb = duja_ui::accent::icon_rgb(accent);
         self.shell.set_icon_rgb(rgb);
         self.settings_shell.set_icon_rgb(rgb);
 
@@ -715,9 +710,16 @@ impl AppState {
     /// **Not covered by any test**, and deliberately said out loud: deleting the
     /// call from `show_flyout` leaves the whole suite green and clippy silent.
     /// That is the same structural gap as the throttle and loop-assembly rows in
-    /// `docs/debt.md` — `AppState` owns a concrete `tray_icon::TrayIcon` and two
+    /// `docs/debt.md` — `AppState` owns a [`super::surface::PlatformTray`] and two
     /// live Slint shells, so it cannot be built off the Slint main thread — not an
     /// oversight to be fixed by adding one.
+    ///
+    /// The tray is behind a seam now and that changes **nothing** here: the seam
+    /// exists so a second backend can exist, not so the field can be faked. Every
+    /// `PlatformTray` a build can construct still needs a live desktop session, and
+    /// the two Slint shells are untouched. Said explicitly because a reader who
+    /// sees a seam appear naturally expects the rows that named the concrete type
+    /// to have drained, and they have not.
     fn refresh_system_theme(&mut self) {
         let theme = settings::ui_theme(
             self.config.general.theme,

@@ -79,13 +79,14 @@ use crate::bin_support::state_store::StateStore;
 use crate::bin_support::{backend, gamma, ipc, run, settings, settings_apply, startup};
 
 use self::state::AppState;
-use self::wiring::{TrayHandles, build_tray, init_hotkeys, wire_event_sources};
+use self::wiring::{build_tray, init_hotkeys, wire_event_sources};
 
 mod geometry;
 mod hotkey_os;
 mod icon;
 mod policy;
 mod state;
+mod surface;
 mod update_flow;
 mod wiring;
 
@@ -645,11 +646,7 @@ fn assemble_with_loop_running(resources: LoopStartResources) -> anyhow::Result<O
 
     // Tray icon + menu on the Slint main thread (glyph/colour shared with the
     // taskbar icons via `duja_ui::icon`), plus the update-surface handles.
-    let TrayHandles {
-        tray,
-        menu: tray_menu,
-        update_item,
-    } = build_tray(accent).context("creating the tray icon")?;
+    let tray = build_tray(accent).context("creating the tray icon")?;
 
     // Global hotkeys: same main-thread-with-a-running-loop requirement as the
     // tray. A failure only disables the affected binding.
@@ -686,8 +683,6 @@ fn assemble_with_loop_running(resources: LoopStartResources) -> anyhow::Result<O
             hotkeys,
             hotkey_outcomes,
             tray,
-            menu: tray_menu,
-            update_item,
             update_available: None,
             update_check_in_flight: false,
         }));
