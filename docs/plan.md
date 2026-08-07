@@ -79,28 +79,53 @@ at P4, P5 blew through it, and the ledger has said "P8 must recover it" for two
 releases. `duja.exe` is **19,446,784 bytes** today. That is the whole of the
 debt, and the ADR already lists four levers in expected-payoff order.
 
-**Do not start with the levers. Start with a measurement, because two of the
-ADR's stated causes are wrong.** It attributes the overage to "the Slint winit
-backend's image/SVG decode stack (`resvg`, `image`, `tiny-skia`, `zune-*`,
-`png`)". Ask `cargo tree` which of those the *linker* sees, restricted to normal
-edges, and `resvg` reaches the graph only through `i-slint-compiler` behind
-`slint-macros`, which is a **proc macro**. It is host code. It is compile time,
-and not one byte of `duja.exe`. The same is true of `ravif`/`rav1e` - an AV1
-*encoder*, by some distance the largest thing in `Cargo.lock`, and entirely
-absent from the shipped binary. Resolver 2 keeps the two feature universes
-apart, which is exactly why reading the lockfile misleads here.
+**Do not start with the levers, and do not start with `cargo tree` either.** The
+baseline attribution is already done, and it cost one wrong answer on the way,
+which is the part worth writing down. `cargo tree -e normal -i resvg` reports
+that `resvg` reaches the graph only through `i-slint-compiler` behind
+`slint-macros` - a proc macro, so host code, so not one byte of `duja.exe`.
+That answer is **false**, and `cargo bloat` says so: `usvg` is 470.9 KiB of
+`.text` and `resvg` another 141.6. The reason is that **`cargo tree -i` dedupes
+by default**: it printed the proc-macro path and collapsed the runtime one -
+`i-slint-common` is also a normal dependency of `i-slint-core` - into a `(*)`.
+Pass `--no-dedupe` and both appear. A dependency question answered from the tree
+is a guess until a linker confirms it.
 
-A wave that spends its budget on the biggest name in `Cargo.lock` and moves
-nothing is the failure mode to design against, so the order is: **attribute,
-then cut, then re-measure each cut on its own.** The four levers get applied one
-at a time with a number beside each, because a combined diff that lands 3 MB
-teaches nothing about which lever to reach for at 1.1.
+So ADR-0012's list of causes is right where it was doubted. What is genuinely
+absent from the binary is the set nobody suspected: `ravif`/`rav1e` (an AV1
+*encoder*, by some distance the largest thing in `Cargo.lock`), `exr`, `tiff`
+and `qoi` - all of them reaching only the compiler, because `image-default-formats`
+is already off.
+
+**And one of the ADR's four levers does not exist.** Lever 2 is "Slint
+image-format features: the flyout uses no SVG/EXR/animated images - investigate
+disabling the decoder stack Slint pulls by default". Investigated:
+`slint/std` implies `i-slint-core/std`, which implies `image-decoders` **and**
+`svg`, with no seam between them. The formats that *were* optional are already
+disabled. Removing the rest means patching Slint, which is not a hardening
+change. The lever gets struck from the ADR rather than left there for the next
+person to spend a day on.
+
+That leaves three real levers and an addressable `.text` budget of roughly
+1.1 MiB before LTO, which per-crate looks like this:
+
+| lever | crates | `.text` |
+|---|---|---|
+| feature-gate the update check | `rustls`, `ring`, `ureq`, `webpki` | ~724 KiB |
+| drop `env-filter` | `regex_syntax`, `regex_automata` | ~345 KiB |
+| fat LTO | - | -1.0 MB measured at P4 |
+
+`.text` is 11.3 MiB of the 18.5 MiB file, so each crate removed takes its
+read-only data with it and the file delta should exceed the table. That is a
+prediction, and the wave's job is to check it rather than assume it: **apply the
+levers one at a time with a number beside each**, because a combined diff that
+lands 3 MB teaches nothing about which lever to reach for at 1.1.
 
 What the wave owes when it is done:
 
-- The **`cargo bloat` attribution** recorded in ADR-0012's ledger, and the two
-  false causes corrected in its Context - the ADR is what the next person reads
-  before trying this again.
+- ADR-0012 **corrected in place**: lever 2 struck with the reason, the
+  `cargo bloat` attribution in the ledger, and the `cargo tree` dedupe trap
+  recorded where the next person will hit it. The ADR is what they read first.
 - **Per-lever deltas**, in bytes, so the ledger stops being a list of guesses.
 - The unit ambiguity settled. The budget says "16 MB" and the ledger's rows say
   14.9 and 17.21 with no unit named. 16 MiB and 16 MB differ by 5%, which is

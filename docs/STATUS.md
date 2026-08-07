@@ -211,6 +211,15 @@ cargo doc --workspace --no-deps --all-features --document-private-items
   had been removed in the same PR. When un-gating, grep for the *entry point*
   first and remove blanket allows in the same change, or the lane goes green
   over a feature that is not reachable.
+- **`cargo tree -i` dedupes, and the path it keeps may be the wrong one.**
+  Asking which crates the linker actually sees looks like a job for
+  `cargo tree -e normal -i <crate>`. For `resvg` that reports a single path
+  through `slint-macros`, a proc macro - i.e. "host code, not in the binary",
+  which is false. `i-slint-common` is *also* a normal dependency of
+  `i-slint-core`, and that edge was collapsed into a `(*)`. Pass `--no-dedupe`,
+  and treat the answer as a hypothesis until `cargo bloat` or a measured A/B
+  build confirms it. Resolver 2 really does keep proc-macro and target feature
+  universes apart; that is what makes the wrong answer plausible.
 - **Elevated-token trap**: an elevated process's default object owner is the
   Administrators group, not the user - the pipe's SDDL therefore sets the owner
   explicitly (`O:<sid>`), or the DACL owner assertion fails under CI.
