@@ -291,7 +291,11 @@ fn with_left_click_policy(builder: tray_icon::TrayIconBuilder) -> tray_icon::Tra
 /// behaviour — left click toggles the flyout, right click opens the menu — has
 /// been verified on real hardware with this setting untouched, and this PR is not
 /// the place to change what a Windows user's left click does.
-#[cfg(not(target_os = "macos"))]
+/// Windows only, now that this is spelled positively rather than as
+/// `not(macos)`. That spelling was correct while `tray-icon` was the only
+/// backend and Windows was the only other platform; with Linux in the build it
+/// named a target where `tray_icon` is not a dependency at all.
+#[cfg(windows)]
 const fn with_left_click_policy(builder: tray_icon::TrayIconBuilder) -> tray_icon::TrayIconBuilder {
     builder
 }
