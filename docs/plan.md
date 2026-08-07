@@ -7,13 +7,18 @@ enough that reading it is never a research task.
 
 ## What is left
 
-1. **P7 wave 5** - the Linux tray, half landed. See [below](#wave-5---the-tray).
-2. **P7 wave 6** - `xtask dist --target linux`, the release job, the docs.
-3. **P7 wave 7** - the phase gate, adversarial review, tag `m7-linux`.
-4. **`v0.3.0`** - the Linux release, once the gate passes.
-5. **P8** - hardening to `v1.0.0`: fuzz burn-in, a 72 h soak, packaging, the
+1. **P7 wave 6** - `xtask dist --target linux`, the release job, the docs. See
+   [below](#wave-6---packaging).
+2. **P7 wave 7** - the phase gate, adversarial review, tag `m7-linux`.
+3. **`v0.3.0`** - the Linux release, once the gate passes.
+4. **P8** - hardening to `v1.0.0`: fuzz burn-in, a 72 h soak, packaging, the
    binary-size trim ([ADR-0012](adr/0012-binary-size-budget-variance.md)), and
    draining what [debt.md](debt.md) still holds.
+
+Two rows are owed **before wave 6 tags anything**, both made live by wave 5
+rather than created by it: [D-101](debt.md#d-101), a settings caption that
+tells a Linux user about a macOS hardware quirk, and [D-091](debt.md#d-091),
+which is now on the Slint main thread rather than in a CLI invocation.
 
 Two things are **held rather than pending**, and neither blocks the list above:
 
@@ -62,8 +67,8 @@ rather than left implicit.
 | 3 | event pump (`NETLINK_KOBJECT_UEVENT` direct, no libudev) + autostart, desktop, geometry | done - `#118` |
 | 4 | software dimming: X11 overlay + `RandR` gamma, Wayland layer-shell + `wlr-gamma-control`, and the ADR-0011 capability probe | done - `#119`, `#121`, `#122`, `#123`, `#124`, `#130`, `#131` |
 | 4b-5 | the X11 cursor anchor, so the flyout has somewhere to open | done - `#132` |
-| **5** | **un-gate the tray (ksni as the third arm)** | **in progress - `#134` landed the seam** |
-| 6 | `xtask dist --target linux`, the release job, and the docs | pending |
+| 5 | un-gate the tray (ksni as the third arm) | done - `#134`, `#136` |
+| **6** | **`xtask dist --target linux`, the release job, and the docs** | **next** |
 | 7 | phase gate, adversarial review, tag `m7-linux` | pending |
 
 **Two corrections to the original table, made at the 2026-08-07 checkpoint.**
@@ -75,36 +80,56 @@ tray flyout needs a cursor anchor, `duja-platform` had none for X11, and that is
 a wave-4-shaped job (a display-server query) blocking a wave-5 one. The table
 now says so rather than leaving two PRs unaccounted for.
 
-### Wave 5 - the tray
+### Wave 5 - the tray, and what it turned out to own
 
-`#134` landed the **seam**: `AppState` no longer names a tray library. It holds
-one `PlatformTray`, a concrete type per target, with three methods phrased as
-outcomes (`set_accent`, `set_tooltip`, `announce_update`) rather than as menu
-edits. That shape is what [ADR-0010](adr/0010-linux-tray-ksni.md) asked for,
-and the reason is specific: `tray-icon`'s menu model is imperative (hold
-handles, mutate in place) and ksni's is declarative (hand the host a tree,
-rebuilt from a callback), so a seam written in `tray-icon`'s verbs would have
-forced the Linux backend to fake handles it does not have.
+**Done**, in two PRs. `#134` landed the **seam**: `AppState` no longer names a
+tray library, it holds one `PlatformTray` with three methods phrased as outcomes
+(`set_accent`, `set_tooltip`, `announce_update`) rather than as menu edits. That
+shape is what [ADR-0010](adr/0010-linux-tray-ksni.md) asked for, because
+`tray-icon`'s menu model is imperative and ksni's is declarative, and a seam
+written in `tray-icon`'s verbs would have forced the Linux backend to fake
+handles it does not have.
 
-What remains is the ksni arm itself. **The work exists** - a `DujaTray`
-implementing `ksni::Tray`, the RGBA-to-ARGB32 conversion with its tests, and the
-dependency wiring - and was written but not landed, because of the constraint
-below.
+`#136` landed the arm, and it was **larger than this file said it would be**,
+which is worth recording rather than smoothing over. Un-gating `mod tray` made
+three things reachable on Linux for the first time, and each had to be built or
+widened before the lane would compile:
 
-**The constraint that shapes this wave: `duja-app` cannot be built for Linux on
-the Windows dev box.** `yeslogic-fontconfig-sys` needs a cross-compile sysroot.
-Every other P7 wave could be developed locally because the pure/impure split
-([ADR-0011](adr/0011-linux-software-dimming.md)) kept the decidable half testable
-on all three lanes - but un-gating a module is exactly the change that pure code
-cannot stand in for. So wave 5's remaining increment is a **CI-only loop** at
-roughly ten minutes an iteration, and it should be planned as one: land the
-dependency and the `cfg` widening in a first PR that only has to compile, and
-the behaviour in a second. Do not batch unrelated changes into either.
+- **`bin_support::gamma` had no Linux arm** - roughly the size of the macOS one.
+  It could not be stubbed: a sink that refused every engage would re-introduce
+  the failure `#96` fixed, because `dimming::plan` substitutes an overlay from
+  `min_gamma_factor()` *ahead* of the engage rather than in response to one.
+- **`ipc::TrayBridge` and `autostart::system()`** carried gates that had been
+  proxies for "wherever the tray is".
+- **`main.rs` still refused to launch the tray**, which is the one that matters:
+  everything above compiled and tested green on the ubuntu lane for two rounds
+  while the binary printed "not available on this platform". See
+  [STATUS.md](STATUS.md)'s note on it - the technique that catches it is
+  removing blanket `allow(dead_code)`s in the same PR as the un-gate.
 
-Wave 5 also owes five [debt.md](debt.md) rows, all recorded there rather than
-here: the `refuse_gamma` production caller, `restore_all`'s three write-side
-faces, the HDR probe (`wp_color_manager_v1`, which needs the `staging`
-feature), the X11 transport-drift row, and the `#124` crash-guard row.
+Two things it deliberately did **not** do. Linux registers no global hotkeys
+(`global-hotkey`'s backend there is X11-only) and now says so through a new
+`RegisterResult::Unsupported` rather than half-working; that is
+[D-103](debt.md#d-103). And it drained no debt rows except the one its own
+deferral note demanded it drain - [D-098](debt-archive.md#d-098), the X11
+crash guard, which landed in the same PR as the sink because a sink without a
+guard ships without a net.
+
+**The four remaining rows wave 5 owed are re-triaged rather than closed**, and
+three of them changed state: [D-094](debt.md#d-094), [D-095](debt.md#d-095),
+[D-096](debt.md#d-096) and [D-097](debt.md#d-097). The pattern is the same in
+each - "deferred until Linux has a gamma sink" was the reason, that sink now
+exists, and what is left is the actual work rather than the wait. Read those
+four before wave 6: [D-097](debt.md#d-097) in particular now means "Wayland
+gamma dimming does not work", where it previously meant "a gate refuses a
+channel nothing was going to call".
+
+**The constraint that shaped this wave has not gone away.** `duja-app` cannot be
+built for Linux on the Windows dev box, so anything that links it is a CI-only
+loop. The thing that made wave 5 affordable is in [STATUS.md](STATUS.md) and
+should be the first tool wave 6 reaches for: an **isolated crate** pulling one
+module in through `#[path]` *can* be cross-checked, clippy'd and rustdoc'd for
+`x86_64-unknown-linux-gnu` locally, in seconds.
 
 ### The one architectural item worth scheduling
 
