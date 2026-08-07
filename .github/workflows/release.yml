@@ -1,25 +1,28 @@
 # Duja release pipeline — builds, packages, signs, and publishes a tagged release.
 #
 # Trigger: pushing a `v*` tag publishes a GitHub Release with the Windows
-# installer, a portable zip, SHA256SUMS, minisign signatures, and a build-
-# provenance attestation. `workflow_dispatch` builds the same artifacts and
-# uploads them as workflow artifacts for inspection WITHOUT publishing (a dry
-# run) — use it to validate the pipeline before tagging.
+# installer and portable zip, the macOS disk image, the Linux tarball,
+# SHA256SUMS, minisign signatures, and a build-provenance attestation.
+# `workflow_dispatch` builds the same artifacts and uploads them as workflow
+# artifacts for inspection WITHOUT publishing (a dry run) — use it to validate
+# the pipeline before tagging.
 #
 # Every run re-validates the tagged commit (cargo-deny + clippy + tests), so
 # advisory/yank drift — or a tag placed on a commit that never passed CI — fails
 # the run before anything is PUBLISHED.
 #
 # Not "before anything is built": those steps live in the `release` job, and the
-# `macos` job below runs first with no gate of its own, so the Apple slices are
-# built, fused, bundled and codesigned (and notarized+stapled when MACOS_SIGN is
-# on) before `cargo deny` runs. Nothing unverified can reach the Releases page —
-# `release` needs `macos`, and every publish step is PUBLISH-gated — but a tag on
-# a bad commit wastes a full macOS build -- and, ONCE MACOS_SIGN IS ENABLED (it
-# is unset today, so the notarize/staple steps do not run), a notarization
-# submission, which is a permanent request to Apple. The gate also runs on
-# windows-latest only, so it compiles no cfg(target_os = "macos") item; cargo-deny
-# is the exception, covering the whole graph via deny.toml's all-features.
+# `macos` and `linux` jobs below run first with no gate of their own, so the
+# Apple slices are built, fused, bundled and codesigned (and notarized+stapled
+# when MACOS_SIGN is on), and the Linux tarball is built and staged, before
+# `cargo deny` runs. Nothing unverified can reach the Releases page — `release`
+# needs both, and every publish step is PUBLISH-gated — but a tag on a bad commit
+# wastes those builds -- and, ONCE MACOS_SIGN IS ENABLED (it is unset today, so
+# the notarize/staple steps do not run), a notarization submission, which is a
+# permanent request to Apple. The gate also runs on windows-latest only, so it
+# compiles no cfg(target_os = "macos") or cfg(target_os = "linux") item;
+# cargo-deny is the exception, covering the whole graph via deny.toml's
+# all-features.
 #
 # All third-party actions are SHA-pinned (supply-chain policy, as in ci.yml).
 # Shell tools installed via choco (Inno Setup, minisign) are outside that policy,
@@ -264,12 +267,98 @@ jobs:
           path: target/dist/duja-${{ env.VERSION }}-macos-universal.dmg
           if-no-files-found: error
 
+  # ---- Linux: build, stage, tar ------------------------------------------
+  # The macOS job's twin, and a much shorter one: there is nothing to fuse, sign
+  # or image. It runs in parallel with that job and hands its one artifact to the
+  # publishing job below, on the same terms -- a single SHA256SUMS, a single
+  # minisign pass, a single Release.
+  #
+  # Same narrowed permissions and the same deliberate consequence: a Linux
+  # packaging failure blocks the whole release rather than quietly shipping one
+  # without it. That is the right direction for an artifact people will be told
+  # exists.
+  linux:
+    name: build & package (linux-x64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same first-match-in-Cargo.toml rule as the macOS job, and the same
+      # division of labour: the authoritative "does the tag match?" check belongs
+      # to the publishing job, which is the one that can publish a mislabeled
+      # artifact.
+      - name: Resolve version
+        run: |
+          set -euo pipefail
+          ver="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "$ver" ]; then echo "no version in Cargo.toml" >&2; exit 1; fi
+          echo "VERSION=$ver" >> "$GITHUB_ENV"
+          echo "version=$ver"
+
+      # Slint's Linux backend links these. The list is `ci.yml`'s, and the two
+      # have to stay in step: a package missing here fails the release build for
+      # a reason the 3-OS matrix already proved is not the code.
+      - name: Install Slint system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libxkbcommon-dev libxcb1-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libwayland-dev
+
+      # No rust-cache, matching both other jobs: the released build stays
+      # hermetic.
+      - name: Build release binaries
+        run: cargo build --release --locked -p duja-app -p dujactl
+
+      - name: Package the tarball
+        run: cargo run --release -p xtask -- dist --version "$VERSION"
+
+      # Checked on the bytes this job produced, by extracting the archive the way
+      # a user will rather than inspecting the staging tree beside it. The two are
+      # not the same claim: `tar` is what turns a correct tree into a correct
+      # archive, and the permission bit is exactly what it can lose.
+      - name: Verify the tarball
+        run: |
+          set -euo pipefail
+          stage="duja-$VERSION-linux-x64"
+          tarball="target/dist/$stage.tar.gz"
+          check="$RUNNER_TEMP/tar-check"
+          mkdir -p "$check"
+          tar xzf "$tarball" -C "$check"
+          # One directory at the root, named for the release -- which is what
+          # every install command in packaging/linux/README.md assumes.
+          test -d "$check/$stage"
+          test "$(ls "$check")" = "$stage"
+          for bin in duja dujactl; do
+            test -x "$check/$stage/$bin"
+          done
+          for f in LICENSE-MIT LICENSE-APACHE README.md duja.desktop duja.png; do
+            test -s "$check/$stage/$f"
+          done
+          # The entry has to be a valid one, not merely present.
+          # `desktop-file-validate` is the freedesktop reference checker.
+          sudo apt-get install -y --no-install-recommends desktop-file-utils
+          desktop-file-validate "$check/$stage/duja.desktop"
+          # It runs. Not much of a smoke test on a headless runner -- there is no
+          # display server, so this is the CLI half -- but it is the difference
+          # between shipping a binary and shipping a file.
+          "$check/$stage/dujactl" --version
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: duja-linux-x64
+          path: target/dist/duja-${{ env.VERSION }}-linux-x64.tar.gz
+          if-no-files-found: error
+
   release:
     name: build & publish (windows-x64)
     runs-on: windows-latest
-    # The macOS image is folded into this job's SHA256SUMS, minisign pass,
-    # provenance attestation and Release, so it has to exist first.
-    needs: macos
+    # The macOS image and the Linux tarball are folded into this job's
+    # SHA256SUMS, minisign pass, provenance attestation and Release, so both have
+    # to exist first. They build in parallel with each other; only this job waits.
+    needs: [macos, linux]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -355,6 +444,12 @@ jobs:
           name: duja-macos-universal
           path: target/dist
 
+      - name: Fetch the Linux tarball
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: duja-linux-x64
+          path: target/dist
+
       # ---- Optional: Azure Trusted Signing (Authenticode) — INERT today -----
       # Duja ships no code-signing certificate yet, so this step is guarded off.
       # When a cert exists, Authenticode-signing the installer stops SmartScreen
@@ -369,8 +464,9 @@ jobs:
       #   3. Repo secrets: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
       #      (or wire OIDC via this job's existing `id-token: write` and drop the
       #      client secret — the more secure option).
-      # Only the installer .exe is Authenticode-signable; the portable .zip and
-      # the macOS .dmg are not PE files. They stay covered by minisign and
+      # Only the installer .exe is Authenticode-signable; the portable .zip, the
+      # macOS .dmg and the Linux .tar.gz are not PE files. They stay covered by
+      # minisign and
       # provenance; SHA256SUMS is covered by minisign ONLY -- subject-path lists
       # the three binaries and deliberately excludes it.
       - name: Sign installer (Azure Trusted Signing)
@@ -392,7 +488,8 @@ jobs:
           Push-Location target/dist
           $files = "duja-setup-${env:VERSION}.exe",
                    "duja-${env:VERSION}-windows-x64.zip",
-                   "duja-${env:VERSION}-macos-universal.dmg"
+                   "duja-${env:VERSION}-macos-universal.dmg",
+                   "duja-${env:VERSION}-linux-x64.tar.gz"
           # Write LF-only and no BOM: Set-Content -Encoding ascii emits CRLF, which
           # leaves a trailing \r on every filename so Linux `sha256sum -c SHA256SUMS`
           # fails even though the hashes are correct. Keep the two-space form.
@@ -413,6 +510,7 @@ jobs:
             target/dist/duja-setup-${{ env.VERSION }}.exe
             target/dist/duja-${{ env.VERSION }}-windows-x64.zip
             target/dist/duja-${{ env.VERSION }}-macos-universal.dmg
+            target/dist/duja-${{ env.VERSION }}-linux-x64.tar.gz
             target/dist/SHA256SUMS
           if-no-files-found: error
 
@@ -452,6 +550,7 @@ jobs:
             foreach ($f in "duja-setup-${env:VERSION}.exe",
                             "duja-${env:VERSION}-windows-x64.zip",
                             "duja-${env:VERSION}-macos-universal.dmg",
+                            "duja-${env:VERSION}-linux-x64.tar.gz",
                             "SHA256SUMS") {
               & $minisign -S -s $keyPath -m $f -c "duja ${env:VERSION}"
               if ($LASTEXITCODE -ne 0) { throw "minisign failed for $f" }
@@ -470,6 +569,7 @@ jobs:
             target/dist/duja-setup-${{ env.VERSION }}.exe
             target/dist/duja-${{ env.VERSION }}-windows-x64.zip
             target/dist/duja-${{ env.VERSION }}-macos-universal.dmg
+            target/dist/duja-${{ env.VERSION }}-linux-x64.tar.gz
 
       - name: Install git-cliff
         if: env.PUBLISH == 'true'
@@ -495,5 +595,6 @@ jobs:
             target/dist/duja-setup-${{ env.VERSION }}.exe
             target/dist/duja-${{ env.VERSION }}-windows-x64.zip
             target/dist/duja-${{ env.VERSION }}-macos-universal.dmg
+            target/dist/duja-${{ env.VERSION }}-linux-x64.tar.gz
             target/dist/SHA256SUMS
             target/dist/*.minisig

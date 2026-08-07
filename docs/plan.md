@@ -7,11 +7,10 @@ enough that reading it is never a research task.
 
 ## What is left
 
-1. **P7 wave 6** - `xtask dist --target linux`, the release job, the docs. See
-   [below](#wave-6---packaging).
-2. **P7 wave 7** - the phase gate, adversarial review, tag `m7-linux`.
-3. **`v0.3.0`** - the Linux release, once the gate passes.
-4. **P8** - hardening to `v1.0.0`: fuzz burn-in, a 72 h soak, packaging, the
+1. **P7 wave 7** - the phase gate, adversarial review, tag `m7-linux`. This is
+   the one that needs a human: see [below](#wave-7---the-gate).
+2. **`v0.3.0`** - the Linux release, once the gate passes.
+3. **P8** - hardening to `v1.0.0`: fuzz burn-in, a 72 h soak, packaging, the
    binary-size trim ([ADR-0012](adr/0012-binary-size-budget-variance.md)), and
    draining what [debt.md](debt.md) still holds.
 
@@ -72,8 +71,8 @@ rather than left implicit.
 | 4 | software dimming: X11 overlay + `RandR` gamma, Wayland layer-shell + `wlr-gamma-control`, and the ADR-0011 capability probe | done - `#119`, `#121`, `#122`, `#123`, `#124`, `#130`, `#131` |
 | 4b-5 | the X11 cursor anchor, so the flyout has somewhere to open | done - `#132` |
 | 5 | un-gate the tray (ksni as the third arm) | done - `#134`, `#136` |
-| **6** | **`xtask dist --target linux`, the release job, and the docs** | **next** |
-| 7 | phase gate, adversarial review, tag `m7-linux` | pending |
+| 6 | `xtask dist --target linux`, the release job, and the docs | done - `#140` |
+| **7** | **phase gate, adversarial review, tag `m7-linux`** | **next - needs a human** |
 
 **Two corrections to the original table, made at the 2026-08-07 checkpoint.**
 Wave 5 was written as "un-gate the tray **+ `dujactl doctor`'s Linux
@@ -157,13 +156,25 @@ smuggled into a PR that was about something else.
 
 ### Wave 6 - packaging
 
-`xtask dist` already picks a target from the host and has a macOS branch
-(`#104`); Linux is the third. The decision half - artifact names, the accepted
-version alphabet, the host-to-target mapping - is pure code in `xtask`'s
-`bundle` and `version` modules and is unit-tested on all three lanes. Follow
-that split: what is genuinely platform-bound is filesystem plumbing and
-`Command` invocations, and those stay out of `cfg` blocks so every lane's clippy
-still sees them.
+**Done** (`#140`). `xtask dist` has a third target, the release workflow has a
+third job, and the docs say what a Linux user gets.
+
+The artifact is a **portable tarball**, `duja-<ver>-linux-x64.tar.gz` - the
+Windows zip's twin, with a `.desktop` entry and an icon added. It is deliberately
+not an AppImage or a `.deb`, and the reason is worth reading before anyone
+"finishes the job": a package declares a dependency set, and that declaration is
+exactly what cannot be checked from a machine which has never run this binary
+([D-107](debt.md#d-107)). The tarball is what unblocks the answer rather than a
+placeholder for it, because the gate below needs something a human can extract
+and run.
+
+Two things this wave got for free by following the wave-5 split. The artifact
+*names* moved into `xtask`'s `bundle` module, where all three are asserted
+together on every lane - a mislabelled archive builds, uploads and checksums
+exactly like a correct one, so a name is the packaging decision no runner can
+catch. And `--target linux` refuses on a non-unix host rather than staging a
+tarball whose binaries would extract without their permission bit, which is the
+worst shape a packaging bug takes: clean everywhere except the user's machine.
 
 ### Wave 7 - the gate
 

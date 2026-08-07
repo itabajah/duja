@@ -1,6 +1,6 @@
 //! `cargo xtask dist --version X.Y.Z` — stage the shippable artifact for a host.
 //!
-//! Two targets today, picked from the host unless `--target` overrides it:
+//! Three targets, picked from the host unless `--target` overrides it:
 //!
 //! - **Windows** — assembles `target/dist/duja-<ver>-windows-x64/` from the
 //!   already-built release binaries plus the licences and README (the "license
@@ -11,18 +11,29 @@
 //!   with `lipo`, assembles `Duja.app` around them ([`crate::bundle`]), seals it
 //!   with `codesign`, and wraps it in a drag-to-install disk image with
 //!   `hdiutil`.
+//! - **Linux** — the Windows path's twin: the same binaries, licences and README
+//!   plus a `.desktop` entry and an icon, tarred with `tar`. No installer and no
+//!   bundle, and `packaging/linux/README.md` carries why — a `.deb` or an
+//!   `AppImage` makes a dependency claim that cannot be checked from a machine
+//!   which has never run this binary.
 //!
-//! Neither target *builds* anything: like the Windows path always has, `dist`
-//! stages what `cargo build --release` already produced and says exactly which
-//! command is missing if it did not.
+//! No target *builds* anything: like the Windows path always has, `dist` stages
+//! what `cargo build --release` already produced and says exactly which command is
+//! missing if it did not.
+//!
+//! Two of the three are confined to their own host, by different means. macOS
+//! needs `lipo`, `codesign` and `hdiutil`, so it fails on anything else by not
+//! finding them. Linux needs only `tar`, which Windows now ships — so it refuses
+//! explicitly instead, because the thing it cannot do there is set a permission
+//! bit, and that failure would not surface until a user tried to run the binary.
 //!
 //! # What is verified where
 //!
 //! The decisions — the plist, the bundle layout, the artifact names, the version
 //! alphabet, the host→target mapping — live in [`crate::bundle`] and
 //! [`crate::version`] and are unit-tested on **every** lane. What is left in
-//! this module is filesystem plumbing plus four external tools (`powershell`,
-//! `lipo`, `codesign`, `hdiutil`) that only exist on their own host; those are
+//! this module is filesystem plumbing plus five external tools (`powershell`,
+//! `lipo`, `codesign`, `hdiutil`, `tar`) that only exist on their own host; those are
 //! exercised by the `release` workflow's `workflow_dispatch` dry run, which
 //! builds and packages without publishing.
 //!
@@ -46,6 +57,22 @@ const EXTRA_FILES: [&str; 3] = ["LICENSE-MIT", "LICENSE-APACHE", "README.md"];
 
 /// The binaries Duja ships.
 const BINARIES: [&str; 2] = [bundle::MAIN_EXECUTABLE, bundle::HELPER_EXECUTABLE];
+
+/// The XDG menu entry shipped in the Linux tarball, relative to the repo root.
+const DESKTOP_ENTRY: &str = "packaging/linux/duja.desktop";
+
+/// The icon that entry's `Icon=duja` resolves to, once the user has installed it
+/// into an icon theme.
+///
+/// Taken from `docs/` rather than copied into `packaging/`, so the brand mark is
+/// one file. A second copy would be a second thing to update, and the failure
+/// mode of missing it — a stale icon in the tarball while the README and the
+/// social preview moved on — is silent.
+const ICON_SOURCE: &str = "docs/images/duja-mark.png";
+
+/// What [`ICON_SOURCE`] is called inside the archive: the `.desktop` file's
+/// `Icon=` name plus an extension, which is what an icon theme expects.
+const ICON_NAME: &str = "duja.png";
 
 /// The two architectures fused into the universal macOS binary, as (Rust target
 /// triple, the name `lipo` and the Mach-O header use).
@@ -73,15 +100,19 @@ enum Target {
     Windows,
     /// The universal `.app` bundle and its disk image.
     Macos,
+    /// The portable tarball. No installer and no bundle - see
+    /// `packaging/linux/README.md` for why there is no `AppImage` or `.deb` yet.
+    Linux,
 }
 
 impl Target {
     /// The target this host packages for by default.
     ///
-    /// Deliberately a total function over the hosts that *have* packaging rather
-    /// than a `windows`-else fallback: on Linux there is no answer yet, and
-    /// silently staging a Windows tree there would produce an artifact nobody
-    /// asked for. Linux packaging (`AppImage` plus a native format) is P7.
+    /// Still a total function over the hosts that *have* packaging rather than a
+    /// `windows`-else fallback — and the arm that used to prove the point is gone.
+    /// This returned an error on Linux until P7 wave 6, because silently staging a
+    /// Windows tree there would have produced an artifact nobody asked for. All
+    /// three hosts answer now; the fallback stays for the fourth.
     ///
     /// # Errors
     /// Returns a message naming the `--target` escape hatch on a host with no
@@ -91,12 +122,12 @@ impl Target {
             Ok(Target::Windows)
         } else if cfg!(target_os = "macos") {
             Ok(Target::Macos)
+        } else if cfg!(target_os = "linux") {
+            Ok(Target::Linux)
         } else {
-            Err(
-                "`dist` has no packaging for this host yet (Linux packaging is P7); \
-                 pass `--target windows|macos` to stage one explicitly"
-                    .to_owned(),
-            )
+            Err("`dist` has no packaging for this host; \
+                 pass `--target windows|macos|linux` to stage one explicitly"
+                .to_owned())
         }
     }
 
@@ -108,8 +139,9 @@ impl Target {
         match raw {
             "windows" => Ok(Target::Windows),
             "macos" => Ok(Target::Macos),
+            "linux" => Ok(Target::Linux),
             other => Err(format!(
-                "unknown `--target` `{other}` (expected `windows` or `macos`)"
+                "unknown `--target` `{other}` (expected `windows`, `macos` or `linux`)"
             )),
         }
     }
@@ -128,6 +160,7 @@ pub(crate) fn run(args: std::env::Args) -> Result<(), String> {
     match parsed.target {
         Target::Windows => windows(&root, &dist, &parsed.version),
         Target::Macos => macos(&root, &dist, &parsed.version, &parsed.identity),
+        Target::Linux => linux(&root, &dist, &parsed.version),
     }
 }
 
@@ -202,7 +235,7 @@ fn value<I: Iterator<Item = String>>(args: &mut I, flag: &str) -> Result<String,
 /// Stage `duja-<ver>-windows-x64/` and zip it.
 fn windows(root: &Path, dist: &Path, version: &Version) -> Result<(), String> {
     let release = root.join("target").join("release");
-    let stage_name = format!("duja-{version}-windows-x64");
+    let stage_name = bundle::windows_stage_dir_name(version);
     let stage = dist.join(&stage_name);
     fresh_dir(&stage)?;
 
@@ -223,7 +256,7 @@ fn windows(root: &Path, dist: &Path, version: &Version) -> Result<(), String> {
         copy_into(&root.join(name), &stage)?;
     }
 
-    let zip = dist.join(format!("{stage_name}.zip"));
+    let zip = dist.join(bundle::windows_zip_name(version));
     if zip.exists() {
         std::fs::remove_file(&zip).map_err(|e| format!("clearing {}: {e}", zip.display()))?;
     }
@@ -231,6 +264,71 @@ fn windows(root: &Path, dist: &Path, version: &Version) -> Result<(), String> {
 
     println!("staged  {}", stage.display());
     println!("archive {}", zip.display());
+    Ok(())
+}
+
+/// Stage `duja-<ver>-linux-x64/` and tar it.
+///
+/// The Windows portable zip's twin, and deliberately not more than that. There is
+/// no installer, no bundle and no dependency metadata — `packaging/linux/README.md`
+/// carries the argument, and the short version is that a `.deb` or an `AppImage`
+/// makes a **claim** a tarball does not, and neither claim can be checked from a
+/// machine that has never run this binary.
+///
+/// # Why this refuses to run off a unix host
+///
+/// A tarball carries a permission bit and a zip does not. `bundle::assemble`'s
+/// `make_executable` is `cfg(unix)`, and every other way to set the bit —
+/// `PermissionsExt`, `tar --mode` — is either unix-only or a GNU extension, so a
+/// tree staged from Windows would produce an archive whose `duja` extracts as
+/// `rw-r--r--`. That is the worst shape a packaging bug can take: it stages
+/// cleanly, tars cleanly, checksums cleanly, uploads cleanly, and fails on the
+/// user's machine with `Permission denied`. `--target macos` is confined to a Mac
+/// by needing `lipo`; this one has to say so itself.
+fn linux(root: &Path, dist: &Path, version: &Version) -> Result<(), String> {
+    if !cfg!(unix) {
+        return Err(
+            "`--target linux` needs a unix host: the tarball has to carry the              executable bit, and this host cannot set one"
+                .to_owned(),
+        );
+    }
+
+    let release = root.join("target").join("release");
+    let stage_name = bundle::linux_stage_dir_name(version);
+    let stage = dist.join(&stage_name);
+    fresh_dir(&stage)?;
+
+    // No `EXE_SUFFIX`: that constant is the *host's*, and the answer wanted here
+    // is the target's, which is the empty string. They agree on a Linux host and
+    // the distinction is what keeps this readable next to the Windows arm.
+    for bin in BINARIES {
+        let src = release.join(bin);
+        if !src.exists() {
+            return Err(format!(
+                "missing {} — run `cargo build --release -p duja-app -p dujactl` first",
+                src.display()
+            ));
+        }
+        copy_into(&src, &stage)?;
+        bundle::make_executable(&stage.join(bin))?;
+    }
+    // Licences + README, as in every other artifact.
+    for name in EXTRA_FILES {
+        copy_into(&root.join(name), &stage)?;
+    }
+    // The menu entry, and the icon its `Icon=duja` resolves to once installed.
+    copy_into(&root.join(DESKTOP_ENTRY), &stage)?;
+    bundle::copy(&root.join(ICON_SOURCE), &stage.join(ICON_NAME))?;
+
+    let tarball = dist.join(bundle::linux_tarball_name(version));
+    if tarball.exists() {
+        std::fs::remove_file(&tarball)
+            .map_err(|e| format!("clearing {}: {e}", tarball.display()))?;
+    }
+    archive(dist, &stage_name, &tarball)?;
+
+    println!("staged  {}", stage.display());
+    println!("archive {}", tarball.display());
     Ok(())
 }
 
@@ -558,6 +656,31 @@ fn copy_into(src: &Path, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Tar+gzip `stage_name` (relative to `dir`, so the folder appears at the archive
+/// root) into `tarball`.
+///
+/// `-C dir` rather than an absolute path, for the same reason [`compress`] zips
+/// the folder rather than its contents: a user extracting this must get one
+/// directory, not two binaries and four loose files in whatever they were sitting
+/// in. An absolute path would additionally bake the build machine's directory
+/// layout into every member name.
+///
+/// Deliberately **not** reproducible. GNU tar can be made so — `--sort=name`,
+/// `--mtime`, `--owner=0 --group=0 --numeric-owner` — and those flags are a GNU
+/// extension that a busybox or bsdtar host rejects outright. The release publishes
+/// one checksum for one build and never rebuilds it, so byte-identical rebuilds
+/// buy nothing here that would justify a tar this can fail on. The Windows zip is
+/// not reproducible either, for want of even the option.
+fn archive(dir: &Path, stage_name: &str, tarball: &Path) -> Result<(), String> {
+    let mut cmd = Command::new("tar");
+    cmd.arg("-czf")
+        .arg(tarball)
+        .arg("-C")
+        .arg(dir)
+        .arg(stage_name);
+    tool(cmd, "tar")
+}
+
 /// Zip `stage` (the folder, so it appears at the archive root) into `zip` via
 /// PowerShell `Compress-Archive`. Keeps this crate free of an archiving
 /// dependency; the release workflow already runs on Windows.
@@ -590,9 +713,13 @@ mod tests {
     /// The *choice* of target, not a literal. Packaging for the wrong platform
     /// is silent — a Windows zip staged on a Mac looks like a successful run —
     /// so the mapping is pinned per lane rather than left at the call site.
-    /// Reds on the macOS lane if the arms are swapped, on Windows if the
-    /// fallback is widened, and on Linux if the "no packaging here" answer is
-    /// quietly turned into one of the two.
+    /// Reds on any lane whose arm is swapped for another, and on all three if the
+    /// fallback is widened to cover a host that has packaging of its own.
+    ///
+    /// The final `else` is now unreachable on every lane CI runs, which is worth
+    /// stating rather than deleting: it is the answer for a fourth host, and the
+    /// assertion under it is what stops that host being quietly given one of the
+    /// three existing artifacts. Until P7 wave 6 this branch was Linux's.
     #[test]
     fn the_default_target_is_this_host_rather_than_a_literal() {
         let host = Target::host();
@@ -600,6 +727,8 @@ mod tests {
             assert_eq!(host, Ok(Target::Windows));
         } else if cfg!(target_os = "macos") {
             assert_eq!(host, Ok(Target::Macos));
+        } else if cfg!(target_os = "linux") {
+            assert_eq!(host, Ok(Target::Linux));
         } else {
             let err = host.expect_err("no packaging on this host");
             assert!(err.contains("--target"), "{err}");
@@ -610,8 +739,73 @@ mod tests {
     fn an_explicit_target_overrides_the_host() {
         assert_eq!(Target::parse("windows"), Ok(Target::Windows));
         assert_eq!(Target::parse("macos"), Ok(Target::Macos));
-        let err = Target::parse("linux").expect_err("linux");
-        assert!(err.contains("expected"), "{err}");
+        assert_eq!(Target::parse("linux"), Ok(Target::Linux));
+    }
+
+    /// The rejection, kept as its own test now that all three accepted values are
+    /// above.
+    ///
+    /// The message has to *list* what is accepted rather than say the value is
+    /// wrong: `--target` is typed by a maintainer cutting a release, from memory,
+    /// and "unknown target `Linux`" with no list is a second guess rather than an
+    /// answer. It named two values for as long as there were two, which is exactly
+    /// the kind of string that goes stale silently — so it is asserted, not just
+    /// written.
+    #[test]
+    fn an_unknown_target_is_refused_with_the_list_of_real_ones() {
+        let err = Target::parse("freebsd").expect_err("not a target");
+        for accepted in ["windows", "macos", "linux"] {
+            assert!(
+                err.contains(accepted),
+                "the refusal must name `{accepted}`: {err}"
+            );
+        }
+        // Case matters: these are matched literally, so a capitalised value is a
+        // real mistake to make and must not silently mean something else.
+        assert!(Target::parse("Linux").is_err());
+    }
+
+    /// The two ways `--target linux` refuses before it stages anything, which are
+    /// the only two a maintainer meets in practice.
+    ///
+    /// Lane-dependent by construction, and that is the point rather than a
+    /// weakness: the host check *is* the behaviour, so a single-lane test could
+    /// only ever pin half of it. On Windows this asserts the explicit refusal; on
+    /// unix it asserts the missing-input message, which is the same path with the
+    /// guard passed.
+    #[test]
+    fn staging_a_linux_tarball_refuses_early_and_says_which_way() {
+        let dir = std::env::temp_dir().join(format!("duja-linux-dist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let version = Version::parse("9.9.9").expect("version");
+
+        let err = linux(&dir, &dir.join("dist"), &version).expect_err("nothing is built here");
+
+        if cfg!(unix) {
+            // The guard passed, so the first real step ran and found no binary.
+            // The message has to name the command rather than the file alone:
+            // "missing target/release/duja" is a fact, and `cargo build --release`
+            // is the answer.
+            assert!(
+                err.contains("cargo build --release"),
+                "a missing binary must name the command that produces it: {err}"
+            );
+        } else {
+            // The permission bit is unsettable here, so this must not stage at
+            // all -- a tarball whose `duja` extracts as rw-r--r-- passes every
+            // check in the release pipeline and fails on the user's machine.
+            assert!(
+                err.contains("unix host"),
+                "a non-unix host must refuse rather than stage: {err}"
+            );
+            assert!(
+                !dir.join("dist").exists(),
+                "the refusal must come before anything is created"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Assemble a bundle whose two binaries are the given synthetic universal

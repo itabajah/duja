@@ -99,14 +99,15 @@ shasum -a 256 -c SHA256SUMS      # macOS (byte-identical digests)
 #    binaries via their hashes. The public key is published in SECURITY.md.
 minisign -Vm SHA256SUMS -P RWSeL0en/zyHopbYOTmC4nwO4pLW0WN6awWsuhwoUZnSM+D0zukOl0UK
 
-# 3. Build-provenance attestation on each binary (installer, portable zip, image).
+# 3. Build-provenance attestation on each artifact (installer, zip, image, tarball).
 gh attestation verify duja-setup-0.1.0.exe            --repo itabajah/duja
 gh attestation verify duja-0.1.0-windows-x64.zip      --repo itabajah/duja
 gh attestation verify duja-0.1.0-macos-universal.dmg  --repo itabajah/duja
+gh attestation verify duja-0.1.0-linux-x64.tar.gz     --repo itabajah/duja
 ```
 
-All three must pass. Provenance covers the three binaries only; `SHA256SUMS` and
-the `.minisig` files are covered by minisign, not attestation.
+All four must pass. Provenance covers the four shippable artifacts only;
+`SHA256SUMS` and the `.minisig` files are covered by minisign, not attestation.
 
 On a Mac, also confirm the image mounts and the bundle is intact — this is the
 part CI checked on a virtualized runner and a user checks on real hardware:
@@ -117,6 +118,23 @@ codesign --verify --strict --verbose=2 /Volumes/Duja\ 0.1.0/Duja.app
 lipo -archs /Volumes/Duja\ 0.1.0/Duja.app/Contents/MacOS/duja   # x86_64 arm64
 hdiutil detach /Volumes/Duja\ 0.1.0
 ```
+
+On Linux, confirm the tarball extracts to one directory and the binaries kept
+their permission bit — the failure a tarball has and a zip does not, and the one
+that only shows up on the user's machine:
+
+```sh
+tar xzf duja-0.1.0-linux-x64.tar.gz
+cd duja-0.1.0-linux-x64
+test -x duja && test -x dujactl && echo "executable bit intact"
+./dujactl doctor          # says what this session can and cannot do
+```
+
+`dujactl doctor` is the right first command rather than launching the tray: it
+reports the transport, the overlay and gamma capabilities, and the displays it
+found, so a session missing a library or a `StatusNotifierWatcher` says so
+instead of appearing to do nothing. `packaging/linux/README.md` lists what the
+binary links against and what the tray needs from the desktop.
 
 Until a Developer ID signature is enabled (below), the bundle carries an **ad-hoc**
 signature: `codesign --verify` passes, `spctl --assess` does not, and Gatekeeper

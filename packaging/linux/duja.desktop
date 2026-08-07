@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Duja
+Comment=Monitor brightness control
+Exec=duja
+Icon=duja
+Terminal=false
+Categories=Utility;

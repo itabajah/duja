@@ -111,6 +111,46 @@ pub(crate) fn dmg_file_name(version: &Version) -> String {
     format!("{}.dmg", stage_dir_name(version))
 }
 
+/// The staged directory name for the Windows portable artifact — also the zip's
+/// stem, and the folder that appears at the archive's root.
+///
+/// Here rather than inline in `dist::windows`, which is where it lived until the
+/// Linux target arrived. Two of the three would then have been in this module and
+/// one would not, for no reason a reader could reconstruct — and this module's
+/// rule is that **every artifact name is decided here and asserted on every
+/// lane**. A name is the one packaging decision that is wrong in a way no runner
+/// can see: a mislabelled archive builds, uploads and checksums exactly like a
+/// correct one.
+pub(crate) fn windows_stage_dir_name(version: &Version) -> String {
+    format!("duja-{version}-windows-x64")
+}
+
+/// The Windows portable zip's file name.
+pub(crate) fn windows_zip_name(version: &Version) -> String {
+    format!("{}.zip", windows_stage_dir_name(version))
+}
+
+/// The staged directory name for the Linux portable artifact — also the
+/// tarball's stem, and the folder that appears at the archive's root.
+///
+/// `-x64` and not `-x86_64`, matching the Windows artifact rather than the Rust
+/// target triple. The suffix is a label for a human choosing a download, and two
+/// spellings of one architecture across two rows of the same release page is the
+/// kind of difference that reads as significant when it is not.
+pub(crate) fn linux_stage_dir_name(version: &Version) -> String {
+    format!("duja-{version}-linux-x64")
+}
+
+/// The Linux portable tarball's file name.
+///
+/// `.tar.gz` rather than `.tar.xz`: this is extracted by whatever the user's
+/// desktop does on a double-click, and gzip is the format every such tool has
+/// handled for twenty years. The size difference on two binaries is not worth a
+/// support question.
+pub(crate) fn linux_tarball_name(version: &Version) -> String {
+    format!("{}.tar.gz", linux_stage_dir_name(version))
+}
+
 /// The volume name the mounted disk image shows in Finder's sidebar.
 pub(crate) fn volume_name(version: &Version) -> String {
     format!("{APP_NAME} {version}")
@@ -275,7 +315,7 @@ fn write(path: &Path, contents: &str) -> Result<(), String> {
 
 /// Copy `src` to `dest`, reporting a missing source as its own message rather
 /// than as an opaque `NotFound`.
-fn copy(src: &Path, dest: &Path) -> Result<(), String> {
+pub(crate) fn copy(src: &Path, dest: &Path) -> Result<(), String> {
     if !src.exists() {
         return Err(format!("missing {}", src.display()));
     }
@@ -294,7 +334,7 @@ fn copy(src: &Path, dest: &Path) -> Result<(), String> {
 /// decision: `PermissionsExt` simply does not exist off unix, and neither does
 /// the concept.
 #[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
-fn make_executable(path: &Path) -> Result<(), String> {
+pub(crate) fn make_executable(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -570,11 +610,40 @@ mod tests {
     // ---- names ------------------------------------------------------------
 
     #[test]
-    fn the_artifact_names_carry_the_version_and_say_universal() {
+    fn every_artifact_name_carries_the_version_and_names_its_platform() {
+        // All three platforms in one test, because the property that matters is
+        // the *set*: every row of a release page has to name a version and a
+        // platform, and two rows spelling one architecture differently is a
+        // failure only a comparison can see.
         let v = Version::parse("0.2.0").expect("version");
         assert_eq!(stage_dir_name(&v), "duja-0.2.0-macos-universal");
         assert_eq!(dmg_file_name(&v), "duja-0.2.0-macos-universal.dmg");
         assert_eq!(volume_name(&v), "Duja 0.2.0");
         assert_eq!(APP_DIR_NAME, format!("{APP_NAME}.app"));
+        assert_eq!(windows_stage_dir_name(&v), "duja-0.2.0-windows-x64");
+        assert_eq!(windows_zip_name(&v), "duja-0.2.0-windows-x64.zip");
+        assert_eq!(linux_stage_dir_name(&v), "duja-0.2.0-linux-x64");
+        assert_eq!(linux_tarball_name(&v), "duja-0.2.0-linux-x64.tar.gz");
+    }
+
+    #[test]
+    fn every_archive_extracts_to_the_directory_the_release_page_named() {
+        // The stem of each archive is its staging directory. They are separate
+        // functions and could drift, and the symptom would be a user extracting
+        // `duja-0.3.0-linux-x64.tar.gz` into a folder called something else --
+        // harmless-looking, and enough to break every copy-pasteable install
+        // command in `packaging/linux/README.md`.
+        let v = Version::parse("0.2.0").expect("version");
+        for (dir, archive, ext) in [
+            (stage_dir_name(&v), dmg_file_name(&v), ".dmg"),
+            (windows_stage_dir_name(&v), windows_zip_name(&v), ".zip"),
+            (linux_stage_dir_name(&v), linux_tarball_name(&v), ".tar.gz"),
+        ] {
+            assert_eq!(
+                archive,
+                format!("{dir}{ext}"),
+                "{archive} must extract to {dir}"
+            );
+        }
     }
 }
