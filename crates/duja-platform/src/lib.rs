@@ -63,6 +63,13 @@ mod linux_events;
 mod linux_geometry;
 #[cfg(any(test, target_os = "linux"))]
 mod linux_xsettings;
+// The deadline `linux::geometry::cursor_anchor` runs behind, so a wedged X server
+// or an unresponsive `$HOME` costs a mis-placed flyout rather than a frozen main
+// thread. Names no x11rb type — it is a thread, a channel and a latch — so it is
+// compiled and tested on every lane, which is the only place its timeout, latch
+// and panic-unwind behaviour can be exercised at all.
+#[cfg(any(test, target_os = "linux"))]
+mod linux_deadline;
 
 // Pure raw-code → `PlatformEvent` mapping for the macOS backend. Compiled on
 // macOS (where `mac::sys` calls it) and, under `cfg(test)`, on every host so its

@@ -37,6 +37,7 @@ refusing to renumber.
 | [A-015](#a-015) | ~~post-v0.1.5 (#90, found while wiring)~~ | `dujactl` `backend.rs` | ~~`discover()` is `discover_ddc()` + `discover_panel()` with **no merge or dedup at all** and `open()` is… |
 | [A-016](#a-016) | ~~post-v0.1.5 (#92, found in passing)~~ | `dujactl` `cli.rs`/`run.rs`/`fmt.rs` + `CONTRIBUTING.md` / `.github/ISSUE_TEMPLATE/monitor-quirk-report.yml` | ~~Both places tell users to run `dujactl doctor --report`, and there is no such flag: `parse` routes `doctor` through… |
 | [A-017](#a-017) | ~~P6 (`#103` CI)~~ | `duja-app` `tests/engine.rs` | ~~**`worker_panic_does_not_kill_engine` is timing-flaky on the Windows CI lane.**~~ — **diagnosed at the P6 gate: a… |
+| [D-091](#d-091) | ~~P7 wave 4b-5 (`#132`)~~ | `duja-platform` `geometry.rs` `cursor_anchor` + `linux/geometry.rs` | ~~`cursor_anchor()` can block indefinitely on X11, and it will run on the Slint main thread once the tray lands~~ - **drained in `#139`**, with a deadline around the whole probe rather than the `Stream` wrapper this row proposed |
 | [D-098](#d-098) | ~~P7 wave 4 (`#124`), narrowed to X11 `#131`~~ | `duja-dimmer` `linux/gamma.rs` + `duja-app` `bin_support/gamma.rs` | ~~An X11 gamma ramp outlives the process and Linux has no crash guard for it~~ — **drained in `#136`**, in the same PR as the sink, exactly as its deferral note demanded |
 | [D-101](#d-101) | ~~P7 wave 4 (`#124` review)~~ | `duja-ui` `ui/settings.slint` + `duja-app` `bin_support/settings.rs` | ~~The gamma hazard caption names macOS, and `gamma_is_advisory()` is now true on Linux too~~ - **drained in `#138`**: the `bool` that made the two platforms indistinguishable is now a kind |
 
@@ -229,3 +230,39 @@ reinstating the defect where it historically sat - one `@tr` string behind
 **Still true, and worth carrying forward**: nothing tests a translated caption's
 content. This test would pass against a translation that said the wrong thing in
 any language it does not know the words for
+
+### D-091
+
+**Where:** `duja-platform` `geometry.rs` `cursor_anchor` + `linux/geometry.rs` &nbsp;·&nbsp; **Added:** ~~P7 wave 4b-5 (`#132`)~~
+
+~~**`cursor_anchor()` can block indefinitely on X11, and it will run on the Slint main thread once the tray lands.**~~ - **drained in `#139`**, one PR after the wave that made the second half of that sentence true. Its doc said "never fails and never blocks" - true while Windows and macOS were the only backends, both of which are local syscalls. The X11 one opens a connection (a TCP connect when `DISPLAY` names a remote server), makes several round trips, and reads X resource files through `resource_manager` - at most two of `.Xresources`, `.Xdefaults` and either `$XENVIRONMENT` or `.Xdefaults-<hostname>`, and then however many those pull in, since the parser follows `#include` a hundred levels deep. x11rb 0.13.2 sets no connect or read timeout anywhere, so a hung or wedged X server hangs the caller - and so does a `$HOME` on an unresponsive network mount, with no X server involved at all. (An earlier revision of this row said "up to four files under `$HOME`", which is wrong in both directions and was corrected in `geometry.rs` while this copy stood.) The sentence is corrected; the exposure is not
+
+**Why deferred.** Closable, at a price, and the price is the argument rather than impossibility - an earlier revision of this row said x11rb "offers no timeout knob" and enumerated only a worker thread or an `alarm`/`SIGALRM` dance. It has one: `rust_connection::Stream` is a public trait, `PollMode` is public, and `RustConnection::connect_to_stream` is generic over it, so a wrapper around `DefaultStream` whose `poll` carries a deadline bounds every wait that goes through the stream - round trips, flushes, and the setup handshake - with no extra thread and no signals. **Not the socket connect**, which is the one this row's problem column names first: `DefaultStream::connect` calls `TcpStream::connect` or `UnixStream::connect` before any `Stream` exists to wrap. The remote case wants `TcpStream::connect_timeout`; the local one - every ordinary session - has no std timeout at all and needs a non-blocking socket and a poll loop. What that costs is display-string parsing and the xauth lookup `x11rb::connect` does for free, plus a generic parameter through this module's helpers. (`SO_RCVTIMEO` is the obvious first guess and does not work: the block is in `poll(2)`, not `read`, so a socket timeout there just spins.) The worker-thread alternative remains worse than it looks - it leaks the blocked thread rather than cancelling it, since nothing cancels a blocked `connect`. The honest framings are that this is the exposure every X client has, that Duja's other X paths (`duja-dimmer`'s probe, the overlay, `--restore`) already carry it unbounded, and that a wedged X server means the user has no working desktop to open a flyout on. What would change the calculus is the tray: a hang there freezes the UI thread rather than one CLI invocation. **That is now the case** - P7 wave 5 (`#136`) un-gated the tray on Linux, and `geometry::cursor_anchor` runs on the Slint main thread on every flyout open. This row was written to be re-read at exactly this point, so: the calculus has changed and the exposure is live, which promotes it from "the exposure every X client has" to "one unresponsive `$HOME` mount freezes the whole app". Consider caching the resource database first - the file reads are the part with no protocol excuse, and they are the half that hangs with no X server involved
+
+**How it drained, and why not the way this row proposed.** The row's remedy was a
+deadline-carrying `rust_connection::Stream` wrapper, and it was a real knob -
+`Stream` is a public trait and `connect_to_stream` is generic over it. It is also
+the wrong fix, by this row's *own* problem column: it bounds only what goes
+through the stream, and **neither** hazard named at the top does. The socket
+connect happens in `DefaultStream::connect`, before any `Stream` exists to wrap -
+the row says so itself, in bold, and then proposes the wrapper anyway. And the
+resource-database file reads never touch the server at all, so no protocol-level
+timeout can see them.
+
+What landed instead is a deadline around the **whole** probe:
+`linux_deadline::probe_within` runs it on a worker thread and gives up after 250
+ms, and `cursor_anchor` falls back exactly as it already did for every other
+failure. That bounds all three failure sites - connect, round trips, file reads -
+in a fraction of the code, and it names no x11rb type, so its timeout, latch and
+panic-unwind behaviour are tested on **all three lanes** rather than on none.
+Three mutations proven red: removing the `Drop` guard, removing the latch, and
+removing the deadline itself.
+
+The row's closing suggestion - cache the resource database first - was also not
+taken, and for a reason worth keeping: a cache removes the file reads from the
+*second* call onward and leaves the first one, still on the main thread, exactly
+as exposed. Cheapness was never the problem.
+
+**What it does not close is now [D-106](debt.md#d-106)**: every other X path in
+the tree is still unbounded, and a timed-out probe parks a thread that nothing
+can cancel
