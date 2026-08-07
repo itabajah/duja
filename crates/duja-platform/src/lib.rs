@@ -51,6 +51,19 @@ mod linux;
 #[cfg(any(test, target_os = "linux"))]
 mod linux_events;
 
+// Pure X11 → tray-anchor geometry (which CRTC the cursor is on, what a panel has
+// reserved on it, and the scale factor winit will draw at) for the Linux
+// `geometry` backend, plus the `_XSETTINGS_SETTINGS` parser that chain's *second*
+// source needs — the first is the `WINIT_X11_SCALE_FACTOR` environment variable,
+// which needs no parser and no server. Same shape and same reason as
+// `mac_geometry`: compiled on Linux, where `geometry::platform` calls
+// `linux_geometry` (and `linux::geometry` calls `linux_xsettings`), and under
+// `cfg(test)` on every host so the arithmetic is tested without an X server.
+#[cfg(any(test, target_os = "linux"))]
+mod linux_geometry;
+#[cfg(any(test, target_os = "linux"))]
+mod linux_xsettings;
+
 // Pure raw-code → `PlatformEvent` mapping for the macOS backend. Compiled on
 // macOS (where `mac::sys` calls it) and, under `cfg(test)`, on every host so its
 // logic is unit-tested cross-platform without macOS hardware.

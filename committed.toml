@@ -1,10 +1,52 @@
 # Conventional-commit enforcement (crate-ci/committed, runs in CI).
 #
-# We squash-merge: branch commit BODIES never reach main (only PR titles do),
-# so body line length is unchecked; subjects keep type/lowercase/length rules.
+# We squash-merge, and GitHub's squash keeps every branch commit's FULL message
+# as a bullet under the PR title - `git log -1 a35fb3d` is eleven of them. So a
+# body written here does reach main, and the comment that used to sit on this
+# line said the opposite while disabling the check below on that basis.
+#
+# `line_length` stays 0 anyway, but now for a reason that is true: a body here is
+# prose meant to be read in `git log`, and this project writes long, argued ones
+# deliberately. Turning the check on would be a policy change with a queue of
+# existing commits behind it, so `docs/debt.md` carries the question rather than a
+# comment pretending it was already settled. Subjects keep type/lowercase/length.
 # TDD spec commits ("test(core): debounce specs") are noun phrases by
 # convention, so the imperative-mood heuristic is off.
 style = "conventional"
+# Read from the source, after a "measured" guess got it wrong. `committed`
+# v1.1.11's `check_subject_length` (crates/committed/src/checks.rs:118-145) takes
+# the subject line, drops everything from the LAST SPACE onward, and compares the
+# grapheme count of what remains. So the budget is the subject minus its final
+# word - a soft-wrap allowance. #132's 76-character subject passed with a
+# compared value of 70; its 82-character one failed with 77.
+#
+# Two traps worth carrying:
+#
+# 1. The error message reports the FULL length while the comparison used the
+#    shortened one. #132's failure printed "82 exceeds the max length of 72" for
+#    a line whose compared value was 77, which is what sent the first
+#    investigation down the wrong path.
+# 2. The obvious local check disagrees with the gate in both directions.
+#    `git log --format=%s | awk 'length > 72'` flagged five conforming commits on
+#    that branch by the end, and would miss a non-conforming one ending in a long
+#    word. (It said four when this comment was written, and the commit that wrote
+#    it added the fifth - so the number was stale before it was pushed. Prefer
+#    running the command to quoting its output.)
+#    `line[..line.rfind(' ')]` is close, and two details separate it from the
+#    real check. `rfind` is `unwrap_or(0)`, so a subject containing **no space
+#    at all** compares as the empty string and passes at any length. And the
+#    count is *graphemes*, not bytes or chars, so a subject carrying an emoji or
+#    a combining mark is budgeted by what a reader sees rather than by what
+#    `len()` returns. Neither matters for a conventional subject in English,
+#    which is why they are recorded rather than guarded.
+#
+# The wrong rule that stood here briefly - "it counts the description" - fit every
+# data point on that branch, and the coincidence that let it is worth stating
+# exactly, because the first attempt to state it was itself off by one. The
+# failing subject was 82 graphemes. Its prefix `fix: ` is 5, so the description is
+# 77. Its final word is `open`, 4 - but `rfind` drops the space too, so the span
+# removed is also 5, and the compared value is also 77. Prefix length happened to
+# equal dropped-span length; the final word is four characters, not five.
 subject_length = 72
 subject_capitalized = false
 imperative_subject = false

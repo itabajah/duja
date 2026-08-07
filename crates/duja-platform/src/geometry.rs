@@ -5,7 +5,8 @@
 //!
 //! **Top-left origin, y increasing downward**, in the unit the platform's own
 //! window-positioning API expects: physical pixels on Windows (a
-//! Per-Monitor-V2 process), points on macOS.
+//! Per-Monitor-V2 process) and on X11 (which has no other kind), points on
+//! macOS.
 //!
 //! Orientation is normalized by the backend; the *unit* deliberately is not.
 //! Both halves of that need justifying, because the obvious alternative — one
@@ -43,10 +44,11 @@
 //! than making the caller branch on the variant:
 //!
 //! - [`TrayAnchor::logical_to_anchor`] — logical (design-unit) window size →
-//!   anchor units. `scale` on Windows, `1.0` on macOS (points *are* logical).
+//!   anchor units. `scale` on Windows and X11, `1.0` on macOS (points *are*
+//!   logical).
 //! - [`TrayAnchor::anchor_to_physical`] — an anchor-space coordinate → the
-//!   physical pixels `slint::PhysicalPosition`/winit want. `1.0` on Windows,
-//!   `scale` on macOS.
+//!   physical pixels `slint::PhysicalPosition`/winit want. `1.0` on Windows and
+//!   X11, `scale` on macOS.
 //!
 //! Their product is always the (sanitised) `scale`: logical→winit-physical is
 //! `×scale` on every platform, and the two factors are only *where* that single
@@ -98,9 +100,30 @@ pub enum AnchorUnit {
     /// process: monitor rects, the cursor position, and `SetWindowPos` all speak
     /// this one space, so no conversion happens anywhere on the path.
     ///
-    /// Produced by the Windows backend. Also used by the no-backend placeholder,
-    /// where the scale is a flat 1.0, so both conversion factors are 1.0 and the
-    /// distinction cannot matter.
+    /// Produced by the Windows backend and by the Linux one on X11, where root-
+    /// window coordinates are device pixels and winit hands a `PhysicalPosition`
+    /// straight through — the same space for the same reason, arrived at from a
+    /// different protocol.
+    ///
+    /// Also used by two of the three **declared** fallback anchors — the Linux
+    /// backend's on Wayland, and the placeholder on a target with no backend at
+    /// all — where the scale is a flat 1.0, so both conversion factors are 1.0 and
+    /// the distinction cannot matter. **Not macOS's**, which falls back to
+    /// [`Points`](Self::Points) so that its fallback and its real answer are in
+    /// one unit; an earlier version of this sentence said "every fallback anchor"
+    /// and listed only the two that are not.
+    ///
+    /// "Declared" is doing work, and not the work an earlier version of this
+    /// paragraph claimed. It is *not* "has a `const`" — only macOS and Linux have
+    /// one; the placeholder builds its `TrayAnchor` inline, and counting by
+    /// constants would make the total two. It is "spells out a whole anchor as
+    /// **the** answer when the query cannot run", which the placeholder does and
+    /// Windows does not: a fully-degraded Windows query assembles its value from
+    /// `DEFAULT_WORK` and the 96-DPI seed, arriving at something value-identical
+    /// to the Linux fallback without ever naming it. That is why three other
+    /// comments in this file speak of "the Windows fallback" as though it were a
+    /// fourth, and they are describing a reachable value rather than a declared
+    /// one.
     PhysicalPixels,
     /// Points: macOS's backing-independent unit, and the one every
     /// window-positioning API there takes.
@@ -116,8 +139,14 @@ pub enum AnchorUnit {
 /// it, and that monitor's scale.
 ///
 /// "Work area" means the monitor's usable region — the screen minus the taskbar
-/// (Windows) or minus the menu bar and Dock (macOS). Anchoring to it rather than
-/// to the full screen bounds is what keeps the flyout off the shell furniture.
+/// (Windows), minus the menu bar and Dock (macOS), or minus whatever the panels
+/// have reserved with an EWMH strut (X11). Anchoring to it rather than to the
+/// full screen bounds is what keeps the flyout off the shell furniture.
+///
+/// Windows and macOS are told the answer (`rcWork`, `visibleFrame`); X11 has no
+/// per-monitor equivalent to ask for and Duja computes it, which is why
+/// `linux_geometry`'s `work_area` exists and why it is the part of the Linux
+/// backend with the most tests behind it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TrayAnchor {
     /// Cursor position in the space described by the [module docs](self).
@@ -218,7 +247,8 @@ const DEFAULT_WORK: WorkRect = WorkRect {
 /// (a detached or zero-size `NSScreen`, say) must guard that itself.
 ///
 /// Shared by every backend that queries a real scale (Windows' effective DPI,
-/// macOS' `backingScaleFactor`) **and** by the two conversion factors on
+/// macOS' `backingScaleFactor`, X11's `Xft.dpi`-and-friends chain) **and** by
+/// the two conversion factors on
 /// [`TrayAnchor`], which is why it now has a live caller on every target and no
 /// longer carries a dead-code allow: a degenerate scale must be neutralised
 /// once, at the single place both factors read it.
@@ -392,14 +422,21 @@ mod platform {
             });
             assert_eq!(converted.w, i32::MAX as u32);
             assert_eq!(converted.h, i32::MAX as u32);
-            // The macOS backend's `MAX_EXTENT` claims to match *this* ceiling, and
-            // this is the only lane that compiles both backends (`mac_geometry` is
-            // compiled under `cfg(test)` everywhere), so the claim is pinned here
-            // against the real Windows output rather than against a literal.
+            // The macOS backend's `MAX_EXTENT` claims to match *this* ceiling,
+            // and this is the only lane that runs the real `rect_from`, so the
+            // claim is pinned here against live Windows output rather than
+            // against a literal.
+            //
+            // That covers all three backends between two assertions rather than
+            // one: `linux_geometry` carries a third `MAX_EXTENT` and pins it
+            // against this same macOS constant, on every lane (both pure modules
+            // compile under `cfg(test)` everywhere). Windows = macOS here and
+            // Linux = macOS there, so no pair can drift apart without one of the
+            // two reddening.
             assert_eq!(
                 converted.w,
                 crate::mac_geometry::MAX_EXTENT,
-                "both backends must cap an absurd extent at the same value"
+                "every backend must cap an absurd extent at the same value"
             );
         }
 
@@ -518,11 +555,79 @@ mod platform {
     // `mac_geometry`; a test here could only assert that a struct copy copies.
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+mod platform {
+    use super::{AnchorUnit, DEFAULT_WORK, TrayAnchor};
+    use crate::linux_geometry::{DisplayEnv, WindowSystem, window_system};
+
+    /// The anchor used when the session is not one this backend can measure.
+    ///
+    /// [`AnchorUnit::PhysicalPixels`] with a 1.0 scale, so both conversion
+    /// factors are 1.0 and it behaves identically to the Windows and macOS
+    /// fallbacks.
+    const FALLBACK: TrayAnchor = TrayAnchor {
+        cursor: (0, 0),
+        work_area: DEFAULT_WORK,
+        scale: 1.0,
+        unit: AnchorUnit::PhysicalPixels,
+    };
+
+    /// The Linux anchor: a real measurement on X11, the fallback on Wayland.
+    ///
+    /// # Why Wayland is not a port of this
+    ///
+    /// The X11 path here is close to the Windows one — ask where the pointer is,
+    /// find the display under it, take that display's work area and scale. Every
+    /// step of that is unavailable on Wayland, and not by omission:
+    ///
+    /// - **There is no global cursor position.** A Wayland client learns pointer
+    ///   coordinates only from events delivered to its own surfaces, in that
+    ///   surface's coordinates. There is no request that answers "where is the
+    ///   pointer", by design.
+    /// - **A client cannot position its own toplevel.** `set_outer_position` is a
+    ///   no-op on winit's Wayland backend, because `xdg_toplevel` has no request
+    ///   for it. So even a correct anchor would not move the flyout.
+    /// - **There is no work area to read.** A layer-shell panel's exclusive zone
+    ///   is known to the compositor and to no one else.
+    ///
+    /// The Wayland answer is therefore a different mechanism rather than a second
+    /// implementation of this one: the screen coordinates the tray host passes to
+    /// `StatusNotifierItem.Activate(x, y)`, which ksni surfaces, feeding a
+    /// compositor-side positioner. ADR-0010 records that, the ksni wave builds it,
+    /// and `docs/debt.md` carries the gap until then. Returning [`FALLBACK`] in the
+    /// meantime is honest: the flyout lands where the compositor puts it, which
+    /// is what would happen whatever this function returned.
+    ///
+    /// A session with neither display server — a TTY launch, a service unit —
+    /// takes the same path, and has no tray to click in the first place.
+    pub(super) fn cursor_anchor() -> TrayAnchor {
+        let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
+        let wayland_socket = std::env::var("WAYLAND_SOCKET").ok();
+        let display = std::env::var("DISPLAY").ok();
+        let env = DisplayEnv {
+            wayland_display: wayland_display.as_deref(),
+            wayland_socket: wayland_socket.as_deref(),
+            display: display.as_deref(),
+        };
+        match window_system(env) {
+            WindowSystem::X11 => crate::linux::geometry::cursor_anchor().unwrap_or(FALLBACK),
+            WindowSystem::Wayland | WindowSystem::None => FALLBACK,
+        }
+    }
+
+    // No unit tests here, deliberately, and for the reason the macOS backend
+    // gives: every line above is an environment read, a `match` on a rule that is
+    // tested in `linux_geometry`, or a call into the X11 module that needs a
+    // server. A test here could only assert that `std::env::var` reads the
+    // environment — and would have to mutate the process's environment to do it,
+    // which is unsound in a threaded test harness.
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod platform {
     use super::{AnchorUnit, DEFAULT_WORK, TrayAnchor};
 
-    /// No screen-geometry backend on this platform yet (Linux, P7).
+    /// No screen-geometry backend on this platform.
     ///
     /// **This is a placeholder, not a supported configuration**, and it is
     /// documented as such rather than presented as a query that succeeded. It
@@ -530,10 +635,18 @@ mod platform {
     /// caller gets a usable anchor and a flyout lands *somewhere* plausible
     /// instead of not at all.
     ///
-    /// The Linux backend (P7) has to answer the same two questions the Windows
-    /// and macOS ones did: which unit its window-positioning API takes (which
-    /// picks the [`AnchorUnit`]), and whether its y axis needs flipping. It is
-    /// declared [`AnchorUnit::PhysicalPixels`] here purely because the scale is a
+    /// Nothing Duja ships reaches this. Every target that builds a tray has a
+    /// backend above, and this arm exists so the crate still compiles on one that
+    /// does not — a BSD, say, where the X11 module would very nearly work and has
+    /// simply never been built or run.
+    ///
+    /// An earlier version said "the three targets with a tray". Two build one:
+    /// `bin_support::tray` is `cfg(any(windows, target_os = "macos"))`, and Linux
+    /// gets a stub that prints a message and exits 1 until the ksni wave lands.
+    /// Three targets have a *geometry* backend, which is the set this arm is the
+    /// complement of, and conflating the two overstated what ships.
+    ///
+    /// It is declared [`AnchorUnit::PhysicalPixels`] purely because the scale is a
     /// flat 1.0, so both conversion factors are 1.0 and the choice cannot affect
     /// anything until a real backend replaces it.
     pub(super) fn cursor_anchor() -> TrayAnchor {
@@ -560,7 +673,22 @@ mod platform {
 /// The cursor position, the work area of the monitor under it, and that
 /// monitor's scale — see the [module docs](self) for the coordinate space.
 ///
-/// Never fails and never blocks.
+/// **Never fails.** Every OS query falls back rather than propagating an error,
+/// for the reason the [module docs](self) give.
+///
+/// **Blocking depends on the backend**, and the sentence here used to say it
+/// never blocks — true while Windows and macOS were the only ones. Both of those
+/// are local syscalls. The X11 backend is not: it opens a connection (a TCP
+/// connect when `DISPLAY` names a remote server), makes several round trips, and
+/// reads X resource files through
+/// `resource_manager` — at most two of `.Xresources`, `.Xdefaults` and either
+/// `$XENVIRONMENT` or `.Xdefaults-<hostname>`, and then however many those pull
+/// in, since the parser follows `#include` a hundred levels deep. x11rb sets no
+/// connect or read timeout, so a hung X server hangs this call on whatever thread
+/// called it — and so does a `$HOME` on an unresponsive network mount, with no X
+/// server involved at all. That is the same exposure every X client has and the
+/// same one Duja's other X paths carry, but it is not "never blocks", and
+/// `docs/debt.md` carries what it would take to bound it.
 #[must_use]
 pub fn cursor_anchor() -> TrayAnchor {
     platform::cursor_anchor()
@@ -677,8 +805,13 @@ mod tests {
     /// version of this comment gave — the three lanes differ from each other, not
     /// just from Windows:
     ///
-    /// - on **Linux** the placeholder trips a `debug_assert`, so calling this would
-    ///   fail the lane by design rather than tell us anything;
+    /// - on **Linux** it would pass without testing anything. A CI runner has
+    ///   neither `DISPLAY` nor `WAYLAND_DISPLAY`, so the backend takes its
+    ///   documented fallback, and every assertion below holds against a fallback
+    ///   by construction — a green result would mean the environment was empty,
+    ///   not that the X11 path works. (Until wave 4b-5 the reason was the
+    ///   opposite: the Linux arm was a placeholder that tripped a `debug_assert`,
+    ///   so calling this failed the lane by design.)
     /// - on **macOS** it would not fail loudly at all. The libtest harness runs
     ///   test bodies on worker threads, where `MainThreadMarker::new()` is `None`,
     ///   so this would silently exercise the fallback — and then the
@@ -687,6 +820,10 @@ mod tests {
     ///   being correct. Testing the live macOS path needs a `harness = false`
     ///   binary on the real main thread (the shape `duja-dimmer`'s `macos_live`
     ///   test uses) and a window server to talk to.
+    ///
+    /// The Linux equivalent needs the same shape and an X server to talk to, which
+    /// is why `docs/qa-checklist.md` carries it as a human check rather than this
+    /// file carrying it as a green test.
     #[cfg(windows)]
     #[test]
     fn the_real_backend_returns_a_usable_anchor() {

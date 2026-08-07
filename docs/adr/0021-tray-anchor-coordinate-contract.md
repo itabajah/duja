@@ -44,8 +44,9 @@ than pretending there is only one:
    (`mac_geometry`) that is unit-tested on every CI host.
 
 2. **The unit is *not* normalized; it is declared.** `TrayAnchor` carries an
-   `AnchorUnit` — `PhysicalPixels` (Windows) or `Points` (macOS) — and the
-   contract is "the unit the platform's own window-positioning API expects".
+   `AnchorUnit` — `PhysicalPixels` (Windows, and X11 since P7) or `Points`
+   (macOS) — and the contract is "the unit the platform's own window-positioning
+   API expects".
    This costs the placement kernel nothing: it only compares the cursor against
    the work area and clamps inside it, and both are in the same unit by
    construction.
@@ -57,7 +58,7 @@ than pretending there is only one:
 
    | Unit | `logical_to_anchor()` | `anchor_to_physical()` |
    |---|---|---|
-   | `PhysicalPixels` (Windows) | `scale` | `1.0` |
+   | `PhysicalPixels` (Windows, and X11 since P7) | `scale` | `1.0` |
    | `Points` (macOS) | `1.0` | `scale` |
 
 4. **The invariant:** `logical_to_anchor() * anchor_to_physical() ==
@@ -91,9 +92,10 @@ become a false statement the moment macOS landed.
   sentence got written backwards once already.)
 - **A new backend has exactly two questions to answer** — which unit its
   window-positioning API takes, and whether its y axis needs flipping — and the
-  factor table answers everything downstream. This binds the P7 Linux backend,
-  whose placeholder is `PhysicalPixels` today only because its scale is a flat
-  `1.0`, which makes both factors `1.0` and the choice inert.
+  factor table answers everything downstream. This bound the P7 Linux backend,
+  which has since answered both; see the amendment below. (Until it did, its
+  placeholder was `PhysicalPixels` only because its scale was a flat `1.0`, which
+  made both factors `1.0` and the choice inert.)
 - **`AnchorUnit` is public API.** A third unit (if some platform positions
   windows in something that is neither) is an additive variant plus two table
   rows, not a re-litigation.
@@ -154,3 +156,49 @@ become a false statement the moment macOS landed.
   flyout land under the menu-bar icon on a real Retina Mac?) is a *verification*
   gap, not an undecided design. Deferring further would mean the macOS backend
   ships with its contract recorded nowhere.
+
+## Amendment, 2026-08-06: what the Linux backend answered
+
+Both questions, and the answers put X11 alongside Windows rather than alone:
+it is the **second** backend that converts in neither direction, and it lands on
+the same row of the factor table above.
+
+**Unit: physical pixels.** X11 has no logical pixel at all. Root-window
+coordinates, RandR's CRTC rectangles, EWMH struts and window positions are the
+same device-pixel space, and winit's `set_outer_position` passes a
+`PhysicalPosition` through unchanged on X11 (it calls `to_physical` with the
+window's scale factor, which is the identity on a position that is already
+physical). So `AnchorUnit::PhysicalPixels`, and `anchor_to_physical` is `1.0`.
+
+**Y axis: no flip.** Root-window coordinates are top-left origin, y increasing
+downward, which is already this contract's orientation. The flip exists for
+Cocoa; X11 needs none — as, for the same reason, Win32 does not.
+
+That two of the three backends answer identically is worth stating, because it
+sets the expectation for a fourth: the interesting divergence in this contract has
+so far been macOS's, and a new backend that finds both its answers boring is
+probably right rather than probably careless.
+
+Two things this contract did not anticipate, both worth recording because they
+are the parts a fourth backend should read first.
+
+**Where the scale comes from is a harder question than which factor carries it.**
+On Windows and macOS the scale is a single OS query. X11 has no such query: the
+number a window will actually be drawn at is whatever winit resolves from a chain
+of four sources, and Duja has to resolve the *same* chain rather than a
+defensible one of its own, because the consumer multiplies a logical size by it
+to get the box it clamps into the work area. A scale that disagrees with winit's
+clamps a rectangle the window will not occupy. `docs/debt.md` carries the pin
+that mirroring implies.
+
+**The unit question has a prior question on some platforms: whether the client
+positions the window at all.** Wayland answers no — `xdg_toplevel` has no request
+to set a position, and winit's Wayland `set_outer_position` is an empty function
+with the comment "Not possible on Wayland." A client there also cannot ask where
+the pointer is, and cannot see a layer-shell panel's exclusive zone. So the
+Wayland arm returns the documented fallback and the real answer is a different
+mechanism entirely: the screen coordinates the tray host passes to
+`StatusNotifierItem.Activate(x, y)` (ADR-0010), feeding a compositor-side
+positioner. This contract still applies to that anchor — it is a rectangle and a
+cursor in some unit, with the same two factors — but nothing about it is a port
+of the X11 path.

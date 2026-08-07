@@ -23,8 +23,10 @@
 //! # Units
 //!
 //! Everything the placement kernel sees is in **anchor units** — physical pixels
-//! on Windows, points on macOS, per [`duja_platform::geometry`]'s contract. Two
-//! factors bridge that to the units either side of it:
+//! on Windows and on X11, points on macOS, per [`duja_platform::geometry`]'s
+//! contract. This module is `cfg`-gated to Windows and macOS until the ksni wave
+//! un-gates the tray, so X11 is named here for the contract rather than for a
+//! path that runs. Two factors bridge that to the units either side of it:
 //!
 //! - [`Placement::logical_to_anchor`] turns the flyout's logical (`.slint` design
 //!   unit) size into anchor units, so the placement clamp measures the box the
@@ -37,11 +39,15 @@
 //! spelled out per factor rather than with a "respectively" that a reader has to
 //! bind back to the bullets above:
 //!
-//! - **Windows** (anchor units are physical pixels): `logical_to_anchor` is the
-//!   monitor's `scale`, `anchor_to_physical` is `1.0`. The `1.0` is what makes
-//!   [`to_physical_position`] a bit-for-bit identity — see its own docs.
+//! - **Windows and X11** (anchor units are physical pixels): `logical_to_anchor`
+//!   is the monitor's `scale`, `anchor_to_physical` is `1.0`. The `1.0` is what
+//!   makes [`to_physical_position`] a bit-for-bit identity — see its own docs.
 //! - **macOS** (anchor units are points, i.e. already logical):
 //!   `logical_to_anchor` is `1.0`, `anchor_to_physical` is the monitor's `scale`.
+//!
+//! Two rows, three platforms: X11 lands on the Windows row, which ADR-0021's
+//! amendment records and which is why this list is by *unit* rather than by
+//! operating system.
 
 use duja_platform::WorkRect;
 

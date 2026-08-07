@@ -15,7 +15,12 @@
 //!
 //! Every coordinate and extent here is in **anchor units**: the unit
 //! `duja_platform::geometry` hands out, which is physical device pixels on
-//! Windows and points on macOS. This module never learns which; it only ever
+//! Windows and on X11, and points on macOS. X11 joined that list at P7, and is
+//! named here for the contract rather than for a path that runs — this module is
+//! reached only from the tray, which is still Windows and macOS. Listing it
+//! anyway is what the closing paragraph of these docs is about.
+//!
+//! This module never learns which unit it has; it only ever
 //! compares the cursor against the work area, clamps inside it, and returns an
 //! origin in the same space it was given — an operation that is unit-agnostic by
 //! construction, provided the caller does not mix units. That is what
@@ -156,9 +161,9 @@ fn clamp(value: i32, lo: i32, hi: i32) -> i32 {
 /// while the real, larger window overflows the work-area edge (P0 live-QA bug 4).
 ///
 /// `logical_to_anchor` is the factor `duja_platform::TrayAnchor` derives for that
-/// conversion: the monitor's scale on Windows (anchor units are physical pixels,
-/// so a logical size must grow), and `1.0` on macOS (anchor units are points,
-/// which already *are* logical). The height is content-driven (`f32`), so this
+/// conversion: the monitor's scale on Windows and X11 (anchor units are physical
+/// pixels, so a logical size must grow), and `1.0` on macOS (anchor units are
+/// points, which already *are* logical). The height is content-driven (`f32`), so this
 /// takes `f32` inputs. A non-finite/degenerate factor falls back to the unscaled
 /// dimension.
 pub(crate) fn anchor_window_size(
@@ -177,8 +182,8 @@ pub(crate) fn anchor_window_size(
 ///
 /// The arithmetic is [`duja_core::scale::scale_extent`], shared with
 /// `duja-ui`'s `dpi` module. **The unit is not shared**, which is why this
-/// wrapper stays: an anchor unit is physical pixels on Windows and points on
-/// macOS (ADR-0021), where `dpi`'s output is always physical pixels. Calling the
+/// wrapper stays: an anchor unit is physical pixels on Windows and X11 and
+/// points on macOS (ADR-0021), where `dpi`'s output is always physical pixels. Calling the
 /// core helper directly at the call sites would erase that distinction at
 /// exactly the layer the ADR exists to keep it explicit.
 fn anchor_dim(logical: f32, logical_to_anchor: f32) -> u32 {

@@ -73,13 +73,24 @@ rustix = { workspace = true }
 # (LaunchAgent plist).
 directories = { workspace = true }
 
-# -- Linux event pump + panel/desktop integration ----------------------------
+# -- Linux event pump + desktop integration + tray geometry ------------------
 [target.'cfg(target_os = "linux")'.dependencies]
 # logind's PrepareForSleep signal, the only source of suspend/resume on Linux
 # (the kernel offers userspace none). Taken from the workspace so the version and
 # feature selection stay identical to duja-panel's and to the one
 # i-slint-backend-winit already resolves; see ADR-0022.
 zbus = { workspace = true }
+# Tray-anchor geometry (`geometry::platform` -> `linux::geometry`): the pointer
+# position, the RandR CRTC layout, the EWMH strut properties, and the two X-side
+# DPI sources. Taken from the workspace, which pins 0.13 for the reason ADR-0023
+# records; `randr` is already in that feature set for duja-dimmer's gamma channel.
+#
+# `resource_manager` is the one addition, and it adds no package to Cargo.lock:
+# winit already enables it on the same x11rb, for the same `Xft.dpi` lookup this
+# backend has to agree with. Using x11rb's parser rather than reading
+# RESOURCE_MANAGER by hand is deliberate - it is literally the code winit runs, so
+# the two cannot drift over what a resource file means.
+x11rb = { workspace = true, features = ["resource_manager"] }
 
 # -- macOS event pump + tray geometry ---------------------------------------
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -239,3 +239,40 @@ with the phases; keep entries as observable behaviors, not implementation.
       a stock system that group does not exist until a package creates it.
 - [ ] `i2c-dev` not loaded at all: `doctor` says so per connector rather than reporting zero
       monitors with no explanation.
+- [ ] **Flyout placement on X11.** *Blocked until the tray lands on Linux: nothing
+      currently calls `cursor_anchor()` there, and no CLI surface reaches it.* When
+      it does, four checks in one session:
+      - a single monitor with a panel on any edge - the flyout must sit clear of the
+        panel, not under it;
+      - two monitors - the flyout must open on the one the pointer is on, clamped to
+        *that* monitor's work area;
+      - two monitors of **different heights** with the panel on the shorter one -
+        the taller monitor's flyout must use its full height. This is the case
+        `_NET_WORKAREA` gets wrong and the reason Duja reads struts instead: a strut
+        is measured from the edge of the whole screen, so the panel's raw `bottom`
+        value is much larger than the panel is tall;
+      - a panel on the **right** edge with a second monitor to its left - the left
+        monitor must be untouched. Measuring that strut from the monitor's own right
+        edge instead of the screen's is the mistake this catches, and it is invisible
+        on the monitor the panel is actually on.
+- [ ] **Flyout size on a HiDPI X11 session.** *Blocked on the ksni wave, like the
+      row above and the row below - there is no flyout on Linux until the tray
+      lands.* Set `Xft.dpi: 144` (or let the desktop set it), restart, and compare
+      the flyout against any GTK or Qt dialog: same apparent size. Then check
+      that `WINIT_X11_SCALE_FACTOR=2` scales it further, and that
+      `WINIT_X11_SCALE_FACTOR=randr` falls back to the display measurement.
+      <!-- Duja re-implements winit's scale chain rather than asking for it, because the
+           anchor has to be computed before the window exists. The failure mode is not a
+           wrongly *sized* window - Slint still uses winit's number for that - but a
+           wrongly sized *clamp box*, so it shows up as a flyout overhanging the panel
+           or the screen edge rather than as an obviously wrong window. `docs/debt.md`
+           carries the pin. -->
+- [ ] **Flyout placement on Wayland is the compositor's, and that is expected.**
+      *Blocked on the same thing as the two rows above: there is no flyout on
+      Linux at all yet - `run_tray` is a stub that prints
+      "the tray application is not available on this platform in this build" and
+      exits 1.* When the tray lands: the flyout will not open under the tray icon,
+      and that is not a bug to file. A Wayland client cannot ask where the pointer
+      is and cannot position its own toplevel, so the anchor has to arrive through
+      `Activate(x, y)` and a compositor-side positioner. What must hold even then:
+      the flyout opens, is fully on screen, and is the right size.
