@@ -716,8 +716,12 @@ impl AppState {
     ///
     /// The tray is behind a seam now and that changes **nothing** here: the seam
     /// exists so a second backend can exist, not so the field can be faked. Every
-    /// `PlatformTray` a build can construct still needs a live desktop session, and
-    /// the two Slint shells are untouched. Said explicitly because a reader who
+    /// `PlatformTray` a build can construct still needs a live desktop session.
+    /// The two Slint shells are untouched — but do not read that as a second
+    /// obstacle, because `duja-ui` builds both of them headless in its own tests
+    /// under `i_slint_backend_testing::init_no_event_loop`. The `docs/debt.md`
+    /// row `D-102` carries what is and is not verified about closing this class
+    /// of gap; the short version is that one field blocks it, not three. Said
     /// sees a seam appear naturally expects the rows that named the concrete type
     /// to have drained, and they have not.
     fn refresh_system_theme(&mut self) {

@@ -42,11 +42,16 @@ release** rather than quietly publishing a Windows-only one.
 - [ ] **Bump the version and changelog.** Update the workspace `version` in
       `Cargo.toml` (refresh `Cargo.lock`), and move the `CHANGELOG.md` unreleased
       entries under a new `vX.Y.Z` heading. Merge that through CI first.
-- [ ] **Sync `docs/STATUS.md`.** Refresh the "last updated" stamp, flip the
-      previous release's At-a-glance row from "shipping" to "shipped", add a row
-      and a written section for the new one, and update the test count. This
-      drifted three releases behind once (caught at v0.1.5); it is cheap to do
-      here and invisible until someone reads a stale claim.
+- [ ] **Sync `docs/STATUS.md` and `docs/history.md`.** In `STATUS.md`: refresh
+      the "last updated" stamp, flip the previous release's row from "shipping"
+      to "shipped", add a row for the new one, and update the measured test
+      count. In `history.md`: add the written section — what the release did,
+      what its review found, and which of its stated reasons turned out to be
+      wrong. The two files split at the 2026-08-07 checkpoint precisely so that
+      the second one can be long without making the first unreadable; putting
+      the write-up in `STATUS.md` is what made it 1,911 lines. This drifted
+      three releases behind once (caught at v0.1.5); it is cheap to do here and
+      invisible until someone reads a stale claim.
 - [ ] **Refresh the platform-facing docs when a platform is new.** The README's
       Install section, the support matrix, and `SECURITY.md` describe what a user
       can actually download. Do not add a platform's instructions before the tag

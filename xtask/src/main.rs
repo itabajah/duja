@@ -415,23 +415,28 @@ mod tests {
         //
         // The numbers are measured rather than guessed, because the first version
         // of this comment guessed: it put the row floor at 200 and called that
-        // "roughly half of what the corpus carries", when the corpus carries 258
-        // rows across 31 files and 200 is 78 % of them. `docs/debt.md` alone holds
-        // 119, and its own preamble says to delete entries when they are drained —
-        // so draining half of one document would have failed this test, which is
-        // precisely the "ordinary pruning" that same sentence promised was safe. A
-        // floor is only a tripwire if the thing it trips on is a broken walk, and a
-        // broken walk reports approximately zero — with one exception, which is
-        // why there are two floors rather than one. Measured against this corpus
-        // (31 files, 258 rows):
+        // "roughly half of what the corpus carries", when the corpus then carried
+        // 258 rows across 31 files and 200 is 78 % of them. A floor is only a
+        // tripwire if the thing it trips on is a broken walk, and a broken walk
+        // reports approximately zero — with one exception, which is why there are
+        // two floors rather than one. Re-measured against the corpus as it stands
+        // after the 2026-08-07 docs checkpoint (34 files, 307 rows, of which
+        // `docs/debt.md` holds 103 and `docs/debt-archive.md` 19):
         //
         // - **the walk stops descending.** Delete the recursion from
-        //   `markdown_files` and it finds 7 files but still 211 rows, 82 % of the
-        //   corpus, clearing any row floor worth setting. Only the file floor
-        //   catches this.
-        // - **the scan stops recognising rows.** Invert the fence state and all 31
+        //   `markdown_files` and it finds the 10 top-level files but still 257
+        //   rows, 84 % of the corpus, clearing any row floor worth setting. Only
+        //   the file floor catches this.
+        // - **the scan stops recognising rows.** Invert the fence state and all 34
         //   files are still walked while 0 rows are compared. Only the row floor
         //   catches this.
+        //
+        // One pressure on the row floor was removed by that checkpoint rather than
+        // by this test. Draining a debt row used to delete it, so `debt.md`'s own
+        // preamble promised as routine an edit that could halve the largest single
+        // contributor to the corpus; draining now *moves* the row to
+        // `debt-archive.md`, and the total is unchanged. The floor no longer has to
+        // survive ordinary pruning of this file, only a broken walk.
         //
         // Two figures have been struck from this comment for not reproducing, so
         // both above were measured against the live corpus rather than reasoned

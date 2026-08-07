@@ -40,8 +40,11 @@ before proposing structural changes. To change what an accepted ADR **decided**,
 write a new ADR that supersedes it; never rewrite the old decision. Correcting a
 false claim, or adding a pointer to the ADR that later settled something, is an
 edit in place, and [docs/adr/README.md](docs/adr/README.md) sets out the
-difference. Refactor debt goes to [docs/debt.md](docs/debt.md) and is drained
-at each phase checkpoint.
+difference. Refactor debt goes to [docs/debt.md](docs/debt.md) and is drained at
+each phase checkpoint; a drained row moves to
+[docs/debt-archive.md](docs/debt-archive.md) rather than being deleted, because
+how a row drained is usually worth more than the row was. Cite a row by its id
+(`D-017`) rather than by the file alone.
 
 ## Reporting monitors
 
