@@ -101,9 +101,15 @@ mod hotkey_os;
 mod icon;
 #[cfg(target_os = "linux")]
 mod ksni_tray;
-/// The Linux tray's one host-testable rule. `cfg(any(test, …))` rather than
-/// `cfg(target_os = "linux")` so every lane's `cargo test` compiles it — see the
-/// module's own header for why that distinction is load-bearing here.
+// The Linux tray's one host-testable rule. `cfg(any(test, …))` rather than
+// `cfg(target_os = "linux")` so every lane's `cargo test` compiles it — see the
+// module's own header for why that distinction is load-bearing here.
+//
+// `//` and not `///`, deliberately. An outer doc comment here would be
+// concatenated with the module's own `//!` header, and rustdoc resolves the
+// combined text in the scope of the *declaration* — so the header's
+// `[`super::ksni_tray`]` would start looking in `bin_support` instead of
+// `bin_support::tray` and fail on the ubuntu lane alone. It did.
 #[cfg(any(test, target_os = "linux"))]
 mod linux_icon;
 mod policy;

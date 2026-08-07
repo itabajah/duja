@@ -10,8 +10,8 @@
 //! `tray-icon` hands back live handles and you mutate them. `ksni` inverts it:
 //! you give it a value implementing [`ksni::Tray`], it moves that value onto its
 //! own thread, and whenever the host asks what the item looks like it calls the
-//! methods again. So there is no menu handle to prepend to — [`DujaTray::menu`]
-//! renders the whole menu from `self` every time, and "the update item appears"
+//! methods again. So there is no menu handle to prepend to — [`DujaTray`]'s
+//! `menu` renders the whole menu from `self` every time, and "the update item appears"
 //! is a *field* becoming `Some`, not a call that adds a row.
 //!
 //! Changes therefore go through [`ksni::blocking::Handle::update`], which takes a
