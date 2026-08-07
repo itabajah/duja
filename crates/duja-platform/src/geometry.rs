@@ -676,19 +676,30 @@ mod platform {
 /// **Never fails.** Every OS query falls back rather than propagating an error,
 /// for the reason the [module docs](self) give.
 ///
-/// **Blocking depends on the backend**, and the sentence here used to say it
-/// never blocks — true while Windows and macOS were the only ones. Both of those
-/// are local syscalls. The X11 backend is not: it opens a connection (a TCP
-/// connect when `DISPLAY` names a remote server), makes several round trips, and
-/// reads X resource files through
+/// **Bounded, rather than non-blocking**, and the difference is worth the
+/// sentence. This doc used to say the call never blocks, which was true while
+/// Windows and macOS were the only backends — both are local syscalls. The X11
+/// backend is not: it opens a connection (a TCP connect when `DISPLAY` names a
+/// remote server), makes several round trips, and reads X resource files through
 /// `resource_manager` — at most two of `.Xresources`, `.Xdefaults` and either
 /// `$XENVIRONMENT` or `.Xdefaults-<hostname>`, and then however many those pull
 /// in, since the parser follows `#include` a hundred levels deep. x11rb sets no
-/// connect or read timeout, so a hung X server hangs this call on whatever thread
-/// called it — and so does a `$HOME` on an unresponsive network mount, with no X
-/// server involved at all. That is the same exposure every X client has and the
-/// same one Duja's other X paths carry, but it is not "never blocks", and
-/// `docs/debt.md` carries what it would take to bound it.
+/// connect or read timeout, so any of that can hang forever — a wedged or
+/// unreachable X server, or a `$HOME` on an unresponsive network mount with no X
+/// server involved at all.
+///
+/// So the X11 backend runs the whole probe behind a deadline
+/// (`linux::geometry::ANCHOR_DEADLINE`, 250 ms) and falls back when it overruns.
+/// The caller therefore blocks for **at most** that, on any backend: Windows and
+/// macOS return in microseconds, and X11 returns either an answer or the fallback.
+/// A mis-placed flyout is the failure, not a frozen application — which is what it
+/// was until P7 wave 5's tray put this on the Slint main thread and forced the
+/// question.
+///
+/// Two things that bound does *not* buy, both in `docs/debt.md`: Duja's other X
+/// paths (`duja-dimmer`'s probe, the overlay, `--restore`) are still unbounded, and
+/// a timed-out probe leaves its worker thread parked until the underlying call
+/// returns, which on a truly wedged server is never.
 #[must_use]
 pub fn cursor_anchor() -> TrayAnchor {
     platform::cursor_anchor()

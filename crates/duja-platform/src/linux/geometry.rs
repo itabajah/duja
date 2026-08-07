@@ -66,10 +66,18 @@
 //! winit loads the same database once and caches it behind an `RwLock`, reloading
 //! on `PropertyNotify`. Naming that rather than pricing this at "a few round
 //! trips": it is the part of the per-call cost that is not obvious from the
-//! request list, and it is the first thing to cache if the tray path ever needs
-//! to be cheaper. The narrower `new_from_resource_manager` would skip the files,
+//! request list. The narrower `new_from_resource_manager` would skip the files,
 //! and is deliberately not used — winit reads them, so a bare `startx` session
 //! whose only `Xft.dpi` lives in `.Xresources` has to be visible here too.
+//!
+//! An earlier version of this paragraph called that database "the first thing to
+//! cache if the tray path ever needs to be cheaper". The tray landed and the
+//! answer turned out to be a deadline rather than a cache — see
+//! [`ANCHOR_DEADLINE`], and [`crate::linux_deadline`] for why: a cache removes the
+//! file reads from the *second* call onward and leaves the first one, still on the
+//! main thread, exactly as exposed. Cheapness was never the problem. Worth keeping
+//! rather than deleting, because the sentence was reasonable and led somewhere
+//! else.
 //!
 //! Requests are pipelined wherever there is more than one of a kind — every
 //! `GetCrtcInfo` is sent before the first reply is read, and so is every strut
@@ -84,6 +92,9 @@
 //! fail, and a flyout on a guessed work area is a cosmetic problem where no
 //! flyout is a broken app.
 
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
+
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{self, AtomEnum, ConnectionExt as _};
@@ -91,6 +102,7 @@ use x11rb::resource_manager;
 use x11rb::rust_connection::RustConnection;
 
 use crate::geometry::TrayAnchor;
+use crate::linux_deadline::probe_within;
 use crate::linux_geometry::{
     DpiSources, X11Monitor, X11Screen, X11Strut, anchor_from_x11, choose_strut,
 };
@@ -146,11 +158,62 @@ use crate::linux_geometry::{CLIENT_LIST_WORDS, STRUT_WORDS, XSETTINGS_WORDS};
 /// the polling request, because a slow anchor beats no anchor.
 const CURRENT_RESOURCES_SINCE: (u32, u32) = (1, 3);
 
+/// How long the caller waits for X11 before placing the flyout on the fallback
+/// anchor.
+///
+/// The budget has to clear a *slow but working* session, because overrunning it
+/// mis-places the window rather than degrading gracefully in some smaller way. A
+/// local anchor is a socket connect plus five round trips and a couple of small
+/// file reads - well under a millisecond in practice; the case that actually needs
+/// room is a remote `DISPLAY` over `ssh -X`, where each round trip pays the link's
+/// latency. 250 ms leaves headroom for a link an order of magnitude slower than
+/// anything a user would tolerate interactively.
+///
+/// It is also the longest the UI thread can now be stuck, and a quarter second on
+/// a wedged server is a hesitation rather than a freeze - which is the trade this
+/// constant *is*. Deliberately shorter than
+/// `bin_support::ipc`'s 500 ms second-instance handshake: that one is a
+/// process-lifetime decision made before any window exists, this one is on the
+/// path between a click and a flyout.
+const ANCHOR_DEADLINE: Duration = Duration::from_millis(250);
+
+/// Set while a probe is outstanding, so a wedged server costs one parked thread
+/// rather than one per tray click. Per call site, not global - see
+/// [`probe_within`].
+static ANCHOR_OUTSTANDING: AtomicBool = AtomicBool::new(false);
+
 /// The anchor for this X11 session, or [`None`] if the server would not answer.
 ///
 /// [`None`] covers everything from "there is no `DISPLAY`" to "`RandR` reported no
-/// enabled CRTC", because the caller does the same thing with all of them.
+/// enabled CRTC" to "the server did not answer inside [`ANCHOR_DEADLINE`]",
+/// because the caller does the same thing with all of them.
+///
+/// # This runs on the Slint main thread
+///
+/// Which is why the body is behind [`probe_within`] rather than being called
+/// directly. Nothing below is bounded on its own: x11rb sets no connect or read
+/// timeout, `resource_manager::new_from_default` reads files out of `$HOME`, and
+/// either can hang indefinitely - the first on a wedged or remote server, the
+/// second on an unresponsive network mount with no server involved at all. Before
+/// P7 wave 5 the only caller was a CLI invocation and this was the exposure every
+/// X client has; the tray made it the exposure of the whole application.
+///
+/// The deadline is around the **whole** probe deliberately, rather than around the
+/// protocol waits. `docs/debt.md`'s row for this proposed wrapping x11rb's
+/// `Stream` with a deadline-carrying `poll`, which is a real knob and bounds
+/// neither of the two hazards above - the socket connect happens before any
+/// `Stream` exists, and the file reads never touch the server. See
+/// [`crate::linux_deadline`] for the full argument and for what a timeout costs.
 pub(crate) fn cursor_anchor() -> Option<TrayAnchor> {
+    probe_within(&ANCHOR_OUTSTANDING, ANCHOR_DEADLINE, probe_cursor_anchor)
+}
+
+/// The X11 work itself, run on [`probe_within`]'s worker thread.
+///
+/// Split from [`cursor_anchor`] rather than inlined into the closure so the
+/// deadline is one line at the top of the public entry point: the thing a reader
+/// needs to see first about this module is that everything below it is bounded.
+fn probe_cursor_anchor() -> Option<TrayAnchor> {
     let (connection, screen_index) = x11rb::connect(None).ok()?;
     let root = connection.setup().roots.get(screen_index)?.root;
 
