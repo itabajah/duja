@@ -49,6 +49,10 @@ to assert.
   - [UI layout & ruby theme (2026-07-14)](#s22)
   - [v0.1.0 release (2026-07-16)](#s23)
 - [P7 waves, as planned and as they went](#s41)
+  - [Wave 5 - the tray, and what it turned out to own](#s42)
+  - [The one architectural item worth scheduling](#s43)
+  - [Wave 6 - packaging](#s44)
+  - [Wave 7 - the gate](#s45)
 - [P7 gate results](#s36)
   - [What this gate was, and what it was not](#s37)
   - [The one finding that changed nothing, and why that is the result](#s38)
@@ -1202,14 +1206,27 @@ install and stay current on:
   run; authenticity is via the checksums + minisign key + provenance. Binary size
   regressed to ~19 MB (P8 trim).
 
-<a id="s24"></a>
 <a id="s41"></a>
 ## P7 waves, as planned and as they went
 
-Moved here from [plan.md](plan.md) when P8 opened, verbatim. That file's own rule
-is that anything already done is described here rather than there, so it stays
-short enough that reading it is never a research task - and a table of eight
-completed waves is exactly the weight it is meant to shed.
+Moved here from [plan.md](plan.md) when P8 opened. That file's own rule is that
+anything already done is described here rather than there, so it stays short
+enough that reading it is never a research task - and a table of eight completed
+waves is exactly the weight it is meant to shed.
+
+**Exactly two sentences were reworded in the move, and both for the same
+reason**: they pointed at the file they now live in. One said "history.md opens
+the write-up with that distinction" and now points at
+[the write-up below](#s37); the other said `#136` was "larger than **this file**
+said it would be", where "this file" was the plan that had made the prediction,
+and now names it. Nothing else changed - the count is stated because a blanket
+"nothing was reworded" is the kind of claim the section above this one exists to
+correct, and the first version of this paragraph made it.
+
+**Read the imperatives below as P7's, not as yours.** "Read those four before
+wave 6", "the first tool wave 6 reaches for", "do not fold this into wave 5" -
+every one of those numbers is a *P7* wave, and all of them are closed. P8 has a
+wave 5 and a wave 6 of its own and they are unrelated.
 
 The ADRs and commit messages refer to these by number, so they are written down
 rather than left implicit.
@@ -1235,7 +1252,8 @@ tray flyout needs a cursor anchor, `duja-platform` had none for X11, and that is
 a wave-4-shaped job (a display-server query) blocking a wave-5 one. The table
 now says so rather than leaving two PRs unaccounted for.
 
-#### Wave 5 - the tray, and what it turned out to own
+<a id="s42"></a>
+### Wave 5 - the tray, and what it turned out to own
 
 **Done**, in two PRs. `#134` landed the **seam**: `AppState` no longer names a
 tray library, it holds one `PlatformTray` with three methods phrased as outcomes
@@ -1245,7 +1263,7 @@ shape is what [ADR-0010](adr/0010-linux-tray-ksni.md) asked for, because
 written in `tray-icon`'s verbs would have forced the Linux backend to fake
 handles it does not have.
 
-`#136` landed the arm, and it was **larger than this file said it would be**,
+`#136` landed the arm, and it was **larger than the plan said it would be**,
 which is worth recording rather than smoothing over. Un-gating `mod tray` made
 three things reachable on Linux for the first time, and each had to be built or
 widened before the lane would compile:
@@ -1286,7 +1304,8 @@ should be the first tool wave 6 reaches for: an **isolated crate** pulling one
 module in through `#[path]` *can* be cross-checked, clippy'd and rustdoc'd for
 `x86_64-unknown-linux-gnu` locally, in seconds.
 
-#### The one architectural item worth scheduling
+<a id="s43"></a>
+### The one architectural item worth scheduling
 
 Four debt rows ([D-016](debt.md#d-016), [D-040](debt.md#d-040),
 [D-059](debt.md#d-059), [D-065](debt.md#d-065)) all defer on "`AppState` cannot
@@ -1306,7 +1325,8 @@ Do not fold this into wave 5. It touches the same file the ksni un-gate does,
 and `#82` is this project's standing example of what happens when a refactor is
 smuggled into a PR that was about something else.
 
-#### Wave 6 - packaging
+<a id="s44"></a>
+### Wave 6 - packaging
 
 **Done** (`#140`). `xtask dist` has a third target, the release workflow has a
 third job, and the docs say what a Linux user gets.
@@ -1328,7 +1348,8 @@ catch. And `--target linux` refuses on a non-unix host rather than staging a
 tarball whose binaries would extract without their permission bit, which is the
 worst shape a packaging bug takes: clean everywhere except the user's machine.
 
-#### Wave 7 - the gate
+<a id="s45"></a>
+### Wave 7 - the gate
 
 **Run, and narrower than this section used to ask for.** What it asked for was
 several independent adversarial reviewers over the cumulative diff, each finding
@@ -1434,6 +1455,7 @@ at and fine" from "not looked at":
   omission: Wayland has no global cursor query and no client-side toplevel
   positioning, so there is nothing to port.
 
+<a id="s24"></a>
 ## P6 gate results
 
 Four adversarial reviewers over the cumulative `v0.1.5..main` diff (23 commits, 96

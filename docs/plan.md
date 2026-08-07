@@ -9,9 +9,22 @@ enough that reading it is never a research task.
 
 1. **P8** - hardening to `v1.0.0`. Six waves, in [the table below](#p8-waves).
 
-That is the whole list. Every phase before it is closed, and the two that closed
-most recently each left a tag without a release: `m6-macos` (`v0.2.0` held) and
-`m7-linux` (`v0.3.0` held). [STATUS.md](STATUS.md) has why.
+That is the whole list of *phases*. Every one before it is closed, and the two
+that closed most recently each left a tag without a release: `m6-macos`
+(`v0.2.0` held) and `m7-linux` (`v0.3.0` held). [STATUS.md](STATUS.md) has why.
+
+Three things are **held rather than pending**, and none of them blocks P8:
+
+- **`v0.2.0` (macOS)** and **`v0.3.0` (Linux)**, each waiting on one person
+  running the build on the hardware it targets. A decision, not a blocker.
+- **Laptop QA of the v0.1.4 mirror/software-only behaviour**, and a regenerated
+  `social-preview.png`. Both carried from the Windows train, both need a human.
+
+And one row is open and **unscheduled**, which is different from held:
+[D-106](debt.md#d-106) - the tray's X11 path is bounded and no other one is. It
+is not in a wave below because the honest next step for it (`probe_session`)
+needs a *reported* degradation rather than the silent fallback its sibling took,
+and that is a design job rather than a hardening one.
 
 ### What P8 cannot do, said before what it can
 
@@ -54,8 +67,10 @@ phase exits on a milestone tag; a release is a separate decision from a tag, and
 | **P8 Hardening** | `m8-hardening` / `v1.0.0` | **in progress** |
 
 P6 was hardware-blind by construction (CI runners plus community verification)
-and P7 turned out the same way. How each phase actually went, wave by wave, is in
-[history.md](history.md) - including P7's waves table, which used to live here.
+and P7 turned out the same way. How each phase actually went is in
+[history.md](history.md), including P7's wave table, which used to live here.
+P7 is the only phase written up wave by wave; the earlier ones are recorded by
+feature area.
 
 ## P8 waves
 
@@ -68,28 +83,50 @@ and P7 turned out the same way. How each phase actually went, wave by wave, is i
 | 5 | the security pass and the docs-truth sweep | pending |
 | 6 | the phase gate - **the multi-reviewer one** - and `m8-hardening` | pending |
 
-Waves 1 through 3 are independent of each other and of wave 4. Wave 5 wants
-1-4 landed, because half of what it checks is whether the docs still describe
-what those waves left behind. Wave 6 is last by definition.
+Waves 1, 2 and 3 are independent of each other and can land in any order. Wave 4
+is **not** independent of wave 3: one of its rows ([D-005](debt.md#d-005)) is
+deferred until the soak produces a real error-rate threshold, so that row waits
+even though the rest of the wave does not. Wave 5 wants 1 through 4 landed,
+because half of what it checks is whether the docs still describe what those
+waves left behind. Wave 6 is last by definition.
 
 ### Wave 1 - the binary, and checking the ADR's reasoning before following it
 
 [ADR-0012](adr/0012-binary-size-budget-variance.md) raised the budget to 16 MB
 at P4, P5 blew through it, and the ledger has said "P8 must recover it" for two
-releases. `duja.exe` is **19,446,784 bytes** today. That is the whole of the
-debt, and the ADR already lists four levers in expected-payoff order.
+releases. `duja.exe` is **19,446,784 bytes** today. That is the whole of the debt.
+
+The ADR lists levers in expected-payoff order **twice**, and the two lists are
+not the same list: one in its *Decision* section (fat LTO, Slint image formats,
+`env-filter`, and `panic = "unwind"` marked explicitly as not a lever) and a
+second in its *Ledger* (feature-gate the update check, fat LTO, `env-filter`,
+Slint image formats). Every reference below is to the **Decision** list, by name
+rather than by number, because "lever 2" means different things in the two and
+striking the wrong one would remove fat LTO.
 
 **Do not start with the levers, and do not start with `cargo tree` either.** The
 baseline attribution is already done, and it cost one wrong answer on the way,
-which is the part worth writing down. `cargo tree -e normal -i resvg` reports
-that `resvg` reaches the graph only through `i-slint-compiler` behind
-`slint-macros` - a proc macro, so host code, so not one byte of `duja.exe`.
-That answer is **false**, and `cargo bloat` says so: `usvg` is 470.9 KiB of
-`.text` and `resvg` another 141.6. The reason is that **`cargo tree -i` dedupes
-by default**: it printed the proc-macro path and collapsed the runtime one -
-`i-slint-common` is also a normal dependency of `i-slint-core` - into a `(*)`.
-Pass `--no-dedupe` and both appear. A dependency question answered from the tree
-is a guess until a linker confirms it.
+which is the part worth writing down.
+
+`cargo tree -p duja-app -e normal --target x86_64-pc-windows-msvc -i resvg`
+appears to report that `resvg` reaches the graph only through
+`i-slint-compiler` behind `slint-macros` - a proc macro, so host code, so not one
+byte of `duja.exe`. That answer is **false**: `cargo bloat` puts `usvg` at
+470.9 KiB of `.text` and `resvg` at another 141.6.
+
+The mechanism is not deduplication, which is what this section said first and
+what a reviewer disproved by running the command. **Adding `--target` makes
+`cargo tree` print one root tree per feature-resolution universe** - the host
+one, holding build scripts and proc macros, and then the target one - and it
+prints them back to back under the same heading with only a blank line between.
+The proc-macro tree comes first. Reading the first tree and stopping is the whole
+of the error, and `--no-dedupe` does not fix it because nothing was deduplicated:
+both trees were always there. `cargo tree -e normal -i resvg` **without**
+`--target` prints the runtime path first and does not have the problem at all.
+
+So the rule is: count the roots before reading the branches, and treat any
+dependency question answered from the tree as a hypothesis until a linker
+confirms it.
 
 So ADR-0012's list of causes is right where it was doubted. What is genuinely
 absent from the binary is the set nobody suspected: `ravif`/`rav1e` (an AV1
@@ -97,29 +134,40 @@ absent from the binary is the set nobody suspected: `ravif`/`rav1e` (an AV1
 and `qoi` - all of them reaching only the compiler, because `image-default-formats`
 is already off.
 
-**And one of the ADR's four levers does not exist.** Lever 2 is "Slint
-image-format features: the flyout uses no SVG/EXR/animated images - investigate
-disabling the decoder stack Slint pulls by default". Investigated:
+**And one of the ADR's levers does not exist.** The Slint image-format one -
+"the flyout uses no SVG/EXR/animated images - investigate disabling the decoder
+stack Slint pulls by default" - has an answer:
 `slint/std` implies `i-slint-core/std`, which implies `image-decoders` **and**
 `svg`, with no seam between them. The formats that *were* optional are already
 disabled. Removing the rest means patching Slint, which is not a hardening
 change. The lever gets struck from the ADR rather than left there for the next
 person to spend a day on.
 
-That leaves three real levers and an addressable `.text` budget of roughly
-1.1 MiB before LTO, which per-crate looks like this:
+That leaves three levers, and only one of them is a dependency change:
 
-| lever | crates | `.text` |
+| lever | what it removes | measured `.text` |
 |---|---|---|
-| feature-gate the update check | `rustls`, `ring`, `ureq`, `webpki` | ~724 KiB |
-| drop `env-filter` | `regex_syntax`, `regex_automata` | ~345 KiB |
-| fat LTO | - | -1.0 MB measured at P4 |
+| drop `env-filter` | `regex-syntax`, `regex-automata`, `matchers` | 345 KiB |
+| feature-gate the update check | `rustls`, `ring`, `ureq`, `rustls-webpki`, `webpki-roots` | 724 KiB |
+| fat LTO | nothing; it is a profile change | n/a, see below |
 
-`.text` is 11.3 MiB of the 18.5 MiB file, so each crate removed takes its
-read-only data with it and the file delta should exceed the table. That is a
-prediction, and the wave's job is to check it rather than assume it: **apply the
-levers one at a time with a number beside each**, because a combined diff that
-lands 3 MB teaches nothing about which lever to reach for at 1.1.
+The middle row has a catch that decides whether it is worth doing at all.
+[D-011](debt.md#d-011) frames it as "so a *lite* build drops both" the TLS stack
+and the WinRT toast bindings - and a feature that is **on by default in the
+shipped build saves the shipped build nothing**. It creates the possibility of a
+smaller artifact nobody currently builds. So it is not a lever against this
+budget unless a lite artifact is also a decision, and this wave is not the place
+to make that one. The 724 KiB stays in the table as the size of a choice, not of
+a saving.
+
+Fat LTO has no `.text` figure because it removes no crate; the ADR records -1.0
+MB at P4 and the wave re-measures it. `.text` is 11.3 MiB of an 18.5 MiB file,
+so a crate that leaves takes its read-only data with it and the *file* delta
+should exceed the `.text` column - a prediction to check rather than assume.
+
+**Apply each lever alone, with a number beside it**, because one combined diff
+that lands several megabytes teaches nothing about which lever to reach for
+next time.
 
 What the wave owes when it is done:
 
@@ -131,11 +179,21 @@ What the wave owes when it is done:
   14.9 and 17.21 with no unit named. 16 MiB and 16 MB differ by 5%, which is
   larger than the smallest lever on the list, so a budget that does not say
   which one it means cannot be missed *or* met on purpose.
-- **A CI size report that fails the job on a regression.** This is the part that
+- **A size gate that fails a build on a regression.** This is the part that
   matters after the wave ends. Size drifted from 14.9 to 19.4 across two
-  releases with nothing to notice it, and a lever pulled once is a lever that
-  can be given back by any dependency bump. A gate is the only thing that makes
-  the trim durable.
+  releases with nothing to notice it, and a lever pulled once is a lever any
+  dependency bump can give back.
+
+  Where it runs is a real trade rather than a detail. The measurement is only
+  meaningful on the profile that ships - fat LTO, one codegen unit - and that
+  build is roughly twenty minutes on a hosted Windows runner, against a PR
+  matrix that finishes in a fraction of that. Gating the *release* costs nothing
+  and makes shipping over budget impossible; gating every PR catches the
+  dependency bump on the PR that lands it and slows every other PR to do it.
+  Whichever the wave picks, the half it does not pick is a debt row rather than
+  an unstated gap - and if it does add a PR job, note that branch protection's
+  required checks are a repository setting, so a new job is advisory until
+  somebody turns it on.
 
 ### Wave 2 - the fuzz and coverage lanes
 
@@ -180,8 +238,8 @@ code. It runs on the dev box for the long burn, and a short one belongs in CI.
 The rubric time-boxes this at ~15% of the phase. Rows are picked for being
 *fixable without hardware*, per the scheduling rule above.
 
-- **[D-108](debt.md#d-108) first**, because it is the only one that changes what
-  a user sees: every clean quit writes identity gamma to every display, so
+- **[D-108](debt.md#d-108) first**, because it is the one whose damage lands on
+  a bystander: every clean quit writes identity gamma to *every* display, so
   quitting Duja flattens f.lux, redshift or a calibration curve it never
   touched. Test-first, red proven before the fix, and the defect re-inserted
   where it historically occurred rather than where the test can reach it.
@@ -232,8 +290,9 @@ whether this is ready to be called 1.0.
 
 So: several independent adversarial reviewers over the cumulative
 `m7-linux..main` diff, each finding verified by a reviewer that did not raise
-it, weighted toward code over prose - the `#132` lesson, where a 28-round review
-generated defects out of its own corrections after round nine.
+it, weighted toward code over prose - the `#132` lesson, where a 28-round review saw
+a growing share of its later findings become claims that *earlier corrections*
+had introduced, with the code done around round nine.
 
 Then `m8-hardening`, and `v1.0.0` held.
 

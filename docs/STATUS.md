@@ -91,8 +91,9 @@ confirmations per architecture, which no amount of code closes.
 | 6 | the multi-reviewer phase gate, and `m8-hardening` | pending |
 
 [plan.md](plan.md) has what each wave owes and why it is ordered there. P7's
-wave table used to live in this section; it is in
-[history.md](history.md) now, along with every earlier phase's.
+wave table used to live in this section; it is in [history.md](history.md) now.
+It is the only wave table there - P0 through P6 were never written up that way,
+and this file has said so by omission rather than by claiming otherwise.
 
 **The constraint that shaped P7 has not gone away**, and wave 1 runs straight
 into it: **`duja-app` cannot be built for Linux on the Windows dev box**
@@ -211,15 +212,21 @@ cargo doc --workspace --no-deps --all-features --document-private-items
   had been removed in the same PR. When un-gating, grep for the *entry point*
   first and remove blanket allows in the same change, or the lane goes green
   over a feature that is not reachable.
-- **`cargo tree -i` dedupes, and the path it keeps may be the wrong one.**
-  Asking which crates the linker actually sees looks like a job for
-  `cargo tree -e normal -i <crate>`. For `resvg` that reports a single path
-  through `slint-macros`, a proc macro - i.e. "host code, not in the binary",
-  which is false. `i-slint-common` is *also* a normal dependency of
-  `i-slint-core`, and that edge was collapsed into a `(*)`. Pass `--no-dedupe`,
-  and treat the answer as a hypothesis until `cargo bloat` or a measured A/B
-  build confirms it. Resolver 2 really does keep proc-macro and target feature
-  universes apart; that is what makes the wrong answer plausible.
+- **`cargo tree --target` prints TWO root trees, and the proc-macro one comes
+  first.** Asking which crates the linker actually sees looks like a job for
+  `cargo tree -p duja-app -e normal --target <triple> -i <crate>`. For `resvg`
+  the output opens with a path through `slint-macros`, a proc macro - i.e.
+  "host code, not in the binary", which is false; `cargo bloat` puts `usvg` +
+  `resvg` at 612 KiB of `.text`. Resolver 2 keeps the host and target feature
+  universes apart, and `--target` makes cargo emit **a separate root tree for
+  each**, back to back, separated by one blank line. The runtime answer is the
+  second tree.
+
+  The trap is a `head`, not a `(*)`. `--no-dedupe` does **not** help - nothing
+  was deduplicated. Either count the roots (`| grep -c '^<crate> v'`) before
+  reading the branches, or drop `--target`, which prints the runtime path first.
+  Either way, treat the tree as a hypothesis and confirm with `cargo bloat` or a
+  measured A/B build: only a linker knows what is in the binary.
 - **Elevated-token trap**: an elevated process's default object owner is the
   Administrators group, not the user - the pipe's SDDL therefore sets the owner
   explicitly (`O:<sid>`), or the DACL owner assertion fails under CI.
