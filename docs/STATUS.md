@@ -1,11 +1,9 @@
 # Duja - Project Status
 
-_Last updated: 2026-08-07. **P7 (Linux) is in progress**: waves 0 through 6 are
-merged, so Linux has a tray, everything behind it, and a shippable artifact.
-Only the phase gate is left, and it needs a human. Every phase before P7 is
-closed.
-`v0.2.0` is tagged as `m6-macos` and **deliberately unreleased** until someone
-has launched `Duja.app` on a real Mac._
+_Last updated: 2026-08-08. **P7 (Linux) is COMPLETE**: all seven waves merged,
+the gate run, `m7-linux` tagged. **Two releases are now held on the same terms**
+- `v0.2.0` (macOS) and `v0.3.0` (Linux) - each waiting for one person to run it
+on the hardware it targets. Every phase before P8 is closed._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness and display controller in Rust - a no-Electron Twinkle Tray
@@ -39,8 +37,8 @@ verbatim and unpruned, which is where they belong.
 | P4 Windows dimmer + UI (MVP) | `m4-win-mvp` | done |
 | P5 Power features (Windows complete) | `m5-win-full` | done |
 | P6 macOS port | `m6-macos` | done, gate passed, release held |
-| **P7 Linux port** | `m7-linux` / `v0.3.0` | **in progress** |
-| P8 Hardening | `m8-hardening` / `v1.0.0` | pending |
+| P7 Linux port | `m7-linux` | done, gate run, release held |
+| **P8 Hardening** | `m8-hardening` / `v1.0.0` | **next** |
 
 | release | train | state |
 |---|---|---|
@@ -51,15 +49,23 @@ verbatim and unpruned, which is where they belong.
 | `v0.1.4` | Windows | shipped - dark rebrand plus the mirror/software-only pair |
 | `v0.1.5` | Windows | shipped - a live monitor no longer sticks as "software-only"; tray Restart |
 | `v0.2.0` | macOS | **held** - see below |
-| `v0.3.0` | Linux | pending P7 |
+| `v0.3.0` | Linux | **held** - see below |
 | `v1.0.0` | - | pending P8 |
 
 Each release row is written up in [history.md](history.md), including what its
 review found and which of its stated reasons turned out to be wrong.
 
-**Why `v0.2.0` is held.** P6 passed its gate and the phase is closed; the
-release is a separate decision, and it is being withheld until `Duja.app` has
-been launched on real Apple hardware. Nothing in the codebase blocks it.
+**Why `v0.2.0` and `v0.3.0` are held.** Both phases are closed and both
+releases are withheld for the same reason: **nobody has run either build on the
+hardware it targets.** A release is a separate decision from a tag, and this is
+that decision rather than a blocker - nothing in the codebase stops either.
+
+For Linux the artifact exists and the pipeline is proven: a `workflow_dispatch`
+dry run built, staged, tarred, extracted and verified
+`duja-<ver>-linux-x64.tar.gz` alongside the other three, in one `SHA256SUMS`. What
+has never happened is a human extracting it and clicking the tray.
+[qa-checklist.md](qa-checklist.md)'s Linux section opens with the block that run
+has to cover, and it is ordered so the paths that have never executed come first.
 Separately, [ADR-0013](adr/0013-macos-ddc-wrap-vs-vendor.md) keeps the macOS DDC
 path labelled experimental until there are at least three independent community
 confirmations per architecture, which no amount of code closes.
@@ -75,8 +81,8 @@ confirmations per architecture, which no amount of code closes.
 | 4 | software dimming on X11 and Wayland, plus the capability probe | done |
 | 4b-5 | the X11 cursor anchor | done |
 | 5 | the Linux tray (ksni), and the gamma sink it turned out to own | done - `#134`, `#136` |
-| 6 | `xtask dist --target linux`, the release job, the docs | done - `#140` |
-| **7** | **phase gate, adversarial review, tag `m7-linux`** | **next - needs a human** |
+| 6 | `xtask dist --target linux`, the release job, the docs | done - `#140`, `#141` |
+| 7 | phase gate, tag `m7-linux` | done - one finding, [D-108](debt.md#d-108) |
 
 [plan.md](plan.md) has what each remaining wave owes. The constraint that shaped
 wave 5 has not gone away and shapes wave 6 too: **`duja-app` cannot be built for
@@ -112,7 +118,10 @@ Measured on this box, 2026-08-07:
   A closed list of three was wrong within a day of being written.
 - Green on **3 OSes**; clippy `-D warnings` clean; `cargo-deny` clean
   (advisories, bans, licenses, sources); **5 fuzz targets** building on stable.
-- Adversarial gate reviews at **P2, P3, P4, P5 and P6**, plus a full
+- Adversarial gate reviews at **P2, P3, P4, P5 and P6**. **P7's was narrower**
+  - one targeted pass rather than several independent reviewers with separate
+  verification - and [history.md](history.md) says so at the top of its write-up
+  rather than in a footnote. Plus a full
   post-`v0.1.0` deep review (14 module reviewers, every non-low finding
   adversarially verified) with every confirmed finding fixed test-first.
 - Measured at the P4/P5 gates, headless: idle RSS **23.3 MB** (budget 35), idle

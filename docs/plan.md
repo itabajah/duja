@@ -7,12 +7,13 @@ enough that reading it is never a research task.
 
 ## What is left
 
-1. **P7 wave 7** - the phase gate, adversarial review, tag `m7-linux`. This is
-   the one that needs a human: see [below](#wave-7---the-gate).
-2. **`v0.3.0`** - the Linux release, once the gate passes.
-3. **P8** - hardening to `v1.0.0`: fuzz burn-in, a 72 h soak, packaging, the
+1. **P8** - hardening to `v1.0.0`: fuzz burn-in, a 72 h soak, packaging, the
    binary-size trim ([ADR-0012](adr/0012-binary-size-budget-variance.md)), and
    draining what [debt.md](debt.md) still holds.
+
+That is the whole list. **P7 is closed** - `m7-linux` is tagged, the gate is run
+and written up in [history.md](history.md), and its one finding is
+[D-108](debt.md#d-108).
 
 **Nothing is owed before wave 6 any more.** The two rows wave 5 made live are
 both drained: a settings caption that told a Linux user about a macOS hardware
@@ -23,11 +24,16 @@ both were already written down and merely unreachable, which is the shape to
 expect from one. What the second left behind is [D-106](debt.md#d-106): the
 tray's X11 path is bounded and no other one is.
 
-Two things are **held rather than pending**, and neither blocks the list above:
+Three things are **held rather than pending**, and none blocks the list above:
 
 - **`v0.2.0` (macOS)** is tagged as `m6-macos` and deliberately unreleased until
   someone has launched `Duja.app` on a real Mac. The phase is closed; the
   release is not. This is a decision, not a blocker.
+- **`v0.3.0` (Linux)** is tagged as `m7-linux` and held on identical terms. The
+  tarball builds, stages and verifies in the release pipeline - proven by a full
+  dry run, not asserted - and no human has extracted it and clicked the tray.
+  [qa-checklist.md](qa-checklist.md) opens its Linux section with exactly that
+  run, ordered so the never-executed paths come first.
 - **Laptop QA of the v0.1.4 mirror/software-only behaviour**, and a regenerated
   `social-preview.png`, are carried from the Windows train. Both need a human.
 
@@ -71,8 +77,8 @@ rather than left implicit.
 | 4 | software dimming: X11 overlay + `RandR` gamma, Wayland layer-shell + `wlr-gamma-control`, and the ADR-0011 capability probe | done - `#119`, `#121`, `#122`, `#123`, `#124`, `#130`, `#131` |
 | 4b-5 | the X11 cursor anchor, so the flyout has somewhere to open | done - `#132` |
 | 5 | un-gate the tray (ksni as the third arm) | done - `#134`, `#136` |
-| 6 | `xtask dist --target linux`, the release job, and the docs | done - `#140` |
-| **7** | **phase gate, adversarial review, tag `m7-linux`** | **next - needs a human** |
+| 6 | `xtask dist --target linux`, the release job, and the docs | done - `#140`, `#141` |
+| 7 | phase gate, tag `m7-linux` | done - one finding, [D-108](debt.md#d-108) |
 
 **Two corrections to the original table, made at the 2026-08-07 checkpoint.**
 Wave 5 was written as "un-gate the tray **+ `dujactl doctor`'s Linux
@@ -178,14 +184,24 @@ worst shape a packaging bug takes: clean everywhere except the user's machine.
 
 ### Wave 7 - the gate
 
-The phase gate is not a formality and has never once returned nothing. Run it
-the way P6's was run: several independent adversarial reviewers over the
-cumulative `v0.2.0..main` diff, every non-low finding verified by a separate
-agent before it is accepted, every accepted finding fixed test-first. P6's gate
-found a blocker that had been shipping since the macOS DDC work began - every
-Apple Silicon DDC request was malformed - and no per-crate suite had seen it.
-[review-rubric.md](review-rubric.md) is the rubric; [history.md](history.md)
-records what the P5 and P6 gates actually caught.
+**Run, and narrower than this section used to ask for.** What it asked for was
+several independent adversarial reviewers over the cumulative diff, each finding
+verified by a separate agent. What happened was one targeted pass, scoped by hand
+to the Linux code that has never executed and to the cross-crate invariants no
+per-crate suite sees. [history.md](history.md) opens the write-up with that
+distinction rather than burying it.
+
+One finding changed the tree: [D-108](debt.md#d-108), every clean quit writing
+identity gamma to displays Duja never touched. One suspected finding turned out
+to be already guarded, and is recorded as such - the token a Linux display is
+addressed by is stamped in one crate and parsed in another, with every fixture in
+both written in a shape the parser rejects, which is precisely the P6 blocker's
+shape and is held by a round-trip test that already exists.
+
+**The multi-reviewer gate remains available and unrun.** It is the obvious thing
+to spend effort on if `v0.3.0` is ever to ship without hardware verification -
+but the hardware run is the cheaper and larger of the two, because every accept
+path in the tray and the gamma sink is still unexercised on every lane.
 
 ## How work lands
 

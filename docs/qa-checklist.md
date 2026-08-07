@@ -98,11 +98,77 @@ with the phases; keep entries as observable behaviors, not implementation.
       is legitimately larger than the number of screens: the walk deliberately includes
       CRTCs driving nothing, because a gamma table survives its CRTC being disabled.
       Individual CRTCs are named (`DP-1 (CRTC 63)`, or `CRTC-3` for an idle one) only
-      on the failure lines. This is the whole of **X11's** gamma crash recovery today —
-      there is no marker and no automatic recovery until the tray lands — so if this
-      does not work, an X11 user who ever hits a stuck ramp has nothing. A Wayland
+      on the failure lines. This is no longer the whole of **X11's** gamma crash
+      recovery: P7 wave 5 gave Linux the crash marker, so a dirty exit is undone at
+      the next launch (checked by its own row below). This stays a release blocker
+      anyway, because it is the recovery a user reaches for when the automatic one
+      did not happen -- a marker that could not be written, or a screen that has to
+      be fixed without launching the app. A Wayland
       session needs none of it; see the `kill -9` row below for why, and for the
       check that the compositor really does behave that way.
+### The tarball, the tray and the sink (P7 waves 5-6, nothing below has ever run)
+
+Run these **first**: everything under the dimming rows above assumes a Duja that
+started, and none of the code in this block has executed anywhere. A CI runner
+has no display server and no `StatusNotifierWatcher`, so every accept path here is
+unexercised ([`docs/debt.md`](debt.md) D-105).
+
+- [ ] **The tarball installs the way its README says.** Extract
+      `duja-<version>-linux-x64.tar.gz`; it must produce exactly one directory,
+      named for the release. Run the `install -D` block in
+      [`packaging/linux/README.md`](../packaging/linux/README.md) verbatim - if any
+      line needs editing, the README is wrong and that is the finding.
+- [ ] **`dujactl doctor` before anything else.** It must name the transport
+      (X11/Wayland), the overlay and gamma verdicts, and the displays found. A
+      missing shared library shows up here as a launch failure rather than as a
+      Duja bug, which is the whole reason this is the first command.
+- [ ] **The tray icon appears**, and is the accent-coloured monitor glyph rather
+      than a placeholder or a black square. The pixmap is ARGB32 in network byte
+      order and no lane has ever rendered it: a wrong byte order shows as colour
+      channels swapped, a wrong alpha as a black or invisible icon.
+      <!-- KDE Plasma implements StatusNotifierItem natively. On GNOME the
+           AppIndicator extension is required, and its absence is the expected
+           "no icon" case rather than a defect - check `dujactl doctor` still
+           works, which proves the process is alive. -->
+- [ ] **Every menu item does what it says**: Open, Settings, Restore screen,
+      Restart, Quit. Each one dispatches across a thread boundary onto the Slint
+      loop, and none of that path has run - a wrong dispatch is a menu item that
+      silently does nothing.
+- [ ] **Left-click toggles the flyout**, and on **X11** it opens near the cursor
+      on the monitor the cursor is on. On **Wayland** it lands wherever the
+      compositor puts it; that is expected, not a defect (there is no global
+      cursor query and no client-side toplevel positioning).
+- [ ] **The flyout opens promptly on X11 with a slow or absent `$HOME`.** The
+      anchor probe is bounded at 250 ms and falls back; a freeze here means the
+      deadline is not covering what it should.
+- [ ] **The hotkey rows in Settings are greyed out**, with the reason naming the
+      platform rather than "the combination is already in use". Linux registers no
+      global hotkeys at all, and telling a user their combo is taken is a loop with
+      no exit.
+- [ ] **The gamma hazard caption names the display server, not macOS.** Set a
+      display to `dim_mode = "gamma"` in Settings and read the caption underneath:
+      it must talk about the display server reporting an accepted write, and must
+      **not** mention "Automatically adjust brightness", which is a Mac setting.
+- [ ] **`dim_mode = "gamma"` actually dims below the floor** on X11, and the
+      screen returns to normal when the slider comes back up. No lane has ever
+      reached a successful `set_gamma`, on any platform - this is the accept path.
+- [ ] **Crash recovery, X11.** With a display dimmed by gamma, `kill -9` the
+      process. The screen stays dark (an `XRandR` ramp is server state). Relaunch:
+      it must come back to normal by itself, from the crash marker at
+      `$XDG_DATA_HOME/duja/gamma.dirty`. Check the marker is gone afterwards.
+- [ ] **Crash recovery, Wayland: there must be nothing to recover.** Same `kill -9`
+      while dimmed by gamma. The screen must return to normal **immediately**,
+      before any relaunch, because the compositor drops every gamma control a
+      client held when its socket closes. If it does not, that is a compositor
+      behaving differently from what ADR-0010's reasoning assumes, and it is a
+      finding worth writing up rather than a Duja bug to fix.
+- [ ] **Quitting does not flatten a colour-temperature tool.** Start
+      `redshift`/`gammastep`, let it tint the screen, launch and quit Duja without
+      touching gamma. **Expected to fail today on X11** - `docs/debt.md` D-108 has
+      the analysis. Kept on the list because a passing run is what closes that row,
+      and because the tint returning within a minute (the tool's next timer) is
+      what distinguishes it from the `colord` case, which does not.
+
 - [ ] **`sudo duja --restore` does not lie.** sudo drops `XAUTHORITY`, so the X
       connection fails. The command must print the reason on a `failed:` line and exit
       **non-zero**, never "nothing to restore" with exit 0. Same check for `DISPLAY`
