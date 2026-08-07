@@ -7,7 +7,7 @@
 //! therefore engaged only explicitly, through [`ScreenStateGuard`], which:
 //!
 //! - writes a **marker file** (atomic create) before the first gamma engage, so
-//!   a fresh start can detect a dirty exit ([`marker_present`]) and call
+//!   a fresh start can detect a dirty exit ([`crate::marker_present`]) and call
 //!   [`restore_all`] to recover;
 //! - restores identity gamma on every touched display on drop, **including a
 //!   panic unwind**;
@@ -16,9 +16,13 @@
 //! The ramp maths ([`gamma_ramp`]) is pure and unit-tested on every target; the
 //! Win32 calls are Windows-only and covered by the hardware-gated live tests.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use duja_core::dimmer::{DimmerError, clamp_gamma};
+// The marker file itself is three `std::fs` calls with nothing Windows about
+// them, so it lives in `crate::marker` and Linux uses the same three. This module
+// is still the only thing that writes one *automatically*, through the guard.
+use crate::marker::{clear_marker, mark_dirty};
 use windows::Win32::Graphics::Gdi::{
     CreateDCW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW, DeleteDC, EnumDisplayDevicesW,
     HDC,
@@ -305,7 +309,7 @@ pub fn enumerate_gamma_displays() -> Vec<GammaDisplay> {
 /// Best-effort restore of identity gamma on every attached display.
 ///
 /// Used both by `duja-app --restore` and by startup recovery when
-/// [`marker_present`] reports a dirty exit. Never fails as a whole: it reports
+/// [`crate::marker_present`] reports a dirty exit. Never fails as a whole: it reports
 /// which displays it restored and which it could not.
 #[must_use]
 pub fn restore_all() -> RestoreReport {
@@ -326,46 +330,6 @@ pub fn restore_all() -> RestoreReport {
 // there; here a row is a GDI device name and identity gamma, and `failed` really
 // can be non-empty. See `crate::gamma_support`.
 use crate::gamma_support::RestoreReport;
-
-/// Write the crash marker at `path` (atomic create).
-///
-/// The marker's mere existence signals "gamma was engaged and may not have been
-/// restored". Creating it when it already exists is not an error — the previous
-/// run was already dirty.
-///
-/// # Errors
-/// The underlying [`std::io::Error`] if the file could not be created for a
-/// reason other than already existing.
-pub fn mark_dirty(path: &Path) -> std::io::Result<()> {
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-/// Remove the crash marker at `path`. A missing marker is success (idempotent).
-///
-/// # Errors
-/// The underlying [`std::io::Error`] if removal failed for a reason other than
-/// the file already being absent.
-pub fn clear_marker(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-/// Whether a crash marker exists at `path` (a dirty prior exit).
-#[must_use]
-pub fn marker_present(path: &Path) -> bool {
-    path.exists()
-}
 
 /// RAII owner of the screen's software-dimming state.
 ///
@@ -523,6 +487,9 @@ fn wide_to_string(buf: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Not re-exported from this module any more (see `crate::marker`), but the
+    // guard's own tests still assert on what it did to the file.
+    use crate::marker::marker_present;
     use duja_core::dimmer::GAMMA_FLOOR;
 
     #[test]
@@ -666,23 +633,6 @@ mod tests {
         // A factor below the floor produces the same ramp as the floor itself.
         assert_eq!(gamma_ramp(0.0), gamma_ramp(GAMMA_FLOOR));
         assert_eq!(gamma_ramp(f32::NAN), identity_ramp());
-    }
-
-    #[test]
-    fn marker_roundtrip() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("duja-dimmer-marker-{}.tmp", std::process::id()));
-        let _ = clear_marker(&path);
-        assert!(!marker_present(&path));
-        mark_dirty(&path).unwrap();
-        assert!(marker_present(&path));
-        // Idempotent create.
-        mark_dirty(&path).unwrap();
-        assert!(marker_present(&path));
-        clear_marker(&path).unwrap();
-        assert!(!marker_present(&path));
-        // Idempotent clear.
-        clear_marker(&path).unwrap();
     }
 
     #[test]

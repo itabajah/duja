@@ -36,9 +36,12 @@ use duja_core::dimmer::{DimCommand, Dimmer, DimmerError};
 
 use crate::plan::{OverlayEntry, OverlayOp, plan_transition};
 
+// The three marker functions are deliberately absent: they moved to
+// `crate::marker` when Linux needed them, and the crate root exports them from
+// there for every platform.
 pub use gamma::{
-    GammaDisplay, GammaRamp, MIN_ACCEPTED_GAMMA, ScreenStateGuard, clear_marker,
-    enumerate_gamma_displays, mark_dirty, marker_present, restore_all, restore_identity, set_gamma,
+    GammaDisplay, GammaRamp, MIN_ACCEPTED_GAMMA, ScreenStateGuard, enumerate_gamma_displays,
+    restore_all, restore_identity, set_gamma,
 };
 pub use hdr::{display_supports_gamma, is_hdr_active};
 
