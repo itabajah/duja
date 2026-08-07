@@ -312,6 +312,26 @@ pub enum RegisterResult {
     Conflict,
     /// The OS refused the registration (the combo is already owned elsewhere).
     OsRejected,
+    /// Duja registers no global hotkeys on this platform, so nothing was even
+    /// attempted.
+    ///
+    /// Distinct from [`Self::OsRejected`] on purpose, and the distinction is the
+    /// whole reason this variant exists rather than reusing that one. "The OS
+    /// refused it" tells a user their combo is taken and invites them to pick
+    /// another, which on Linux would send them round a loop that cannot succeed:
+    /// `global-hotkey`'s Linux backend is X11-only, and Duja has to work on a
+    /// Wayland session too, so it registers none at all (ADR-0010's dependency
+    /// note). Both render the binding as unavailable; only this one is true here.
+    //
+    // RATIONALE (dead_code): only `tray::hotkey_none`'s registrar produces this,
+    // and that module is Linux-only, so a Windows or macOS *binary* build
+    // genuinely never constructs it. Narrowed to those targets rather than a bare
+    // `allow`, so that the day something on Linux stops producing it the ubuntu
+    // lane says so. The `cfg(test)` builds construct it on every lane —
+    // `UnsupportingRegistrar` below — which is why this is not needed there and
+    // why the variant is not merely unreachable code.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Unsupported,
 }
 
 /// One binding's live-registration outcome, surfaced to the settings UI.
@@ -333,6 +353,20 @@ pub trait HotkeyRegistrar {
     /// Register one accelerator for an action. Returns `false` when the OS
     /// refuses it (already owned by another app, or unsupported key).
     fn register(&mut self, accel: &Accelerator, action: HotkeyAction) -> bool;
+
+    /// What a `false` from [`Self::register`] means for *this* registrar.
+    ///
+    /// Defaulted, so the real backend and every fake keep the behaviour they
+    /// already had. It exists because [`apply_plan`] used to hard-code
+    /// [`RegisterResult::OsRejected`], which is a claim about *why* a
+    /// registration failed — true of a manager that asked the OS and was turned
+    /// down, and false of the Linux registrar, which asks nothing (see
+    /// [`RegisterResult::Unsupported`]). Overriding it here keeps the answer in
+    /// one place; the alternative was post-processing the outcome map at both
+    /// call sites, which is two places that can disagree.
+    fn rejection(&self) -> RegisterResult {
+        RegisterResult::OsRejected
+    }
 }
 
 /// Re-register a whole [`HotkeyPlan`] against a [`HotkeyRegistrar`]: clear the old
@@ -354,7 +388,7 @@ pub fn apply_plan(reg: &mut dyn HotkeyRegistrar, plan: &HotkeyPlan) -> Vec<Regis
             } else if reg.register(&binding.accel, binding.action) {
                 RegisterResult::Registered
             } else {
-                RegisterResult::OsRejected
+                reg.rejection()
             };
             RegisterOutcome {
                 action: binding.action,
@@ -691,6 +725,82 @@ mod tests {
             self.registered.push((accel.clone(), action));
             true
         }
+    }
+
+    /// A registrar that refuses everything and says *why* — the shape the Linux
+    /// backend has, reproduced here so both halves of [`HotkeyRegistrar`]'s
+    /// defaulted `rejection` are exercised on every lane rather than only on the
+    /// one that ships the real thing.
+    struct UnsupportingRegistrar;
+
+    impl HotkeyRegistrar for UnsupportingRegistrar {
+        fn clear(&mut self) {}
+        fn register(&mut self, _accel: &Accelerator, _action: HotkeyAction) -> bool {
+            false
+        }
+        fn rejection(&self) -> RegisterResult {
+            RegisterResult::Unsupported
+        }
+    }
+
+    #[test]
+    fn a_registrar_that_registers_nothing_reports_why_rather_than_a_refusal() {
+        let plan = resolve(&table(&[
+            ("brightness_up", "Ctrl+Alt+Up"),
+            ("brightness_down", "Ctrl+Alt+Down"),
+        ]));
+        let outcomes = apply_plan(&mut UnsupportingRegistrar, &plan);
+        assert_eq!(outcomes.len(), 2);
+        // The distinction this variant exists for. `OsRejected` here would tell a
+        // Linux user their combo is taken and send them to pick another one, which
+        // cannot succeed — so asserting "not OsRejected" is the load-bearing half,
+        // not the equality.
+        assert!(
+            outcomes
+                .iter()
+                .all(|o| o.result == RegisterResult::Unsupported),
+            "an unsupporting registrar must not report an OS refusal"
+        );
+    }
+
+    #[test]
+    fn the_conflict_rule_outranks_the_rejection_reason() {
+        // Policy that holds on every platform: a combo bound to two actions binds
+        // neither, and that verdict is reached before the registrar is consulted
+        // at all. Pinned because the Linux `init_hotkeys` deliberately routes
+        // through this same `apply_plan` instead of hand-building a map of
+        // `Unsupported` — if conflicts stopped outranking rejection, that shortcut
+        // would start looking equivalent when it is not.
+        let plan = resolve(&table(&[
+            ("brightness_up", "Ctrl+Alt+Up"),
+            ("brightness_down", "Ctrl+Alt+Up"),
+        ]));
+        let outcomes = apply_plan(&mut UnsupportingRegistrar, &plan);
+        assert!(
+            outcomes
+                .iter()
+                .all(|o| o.result == RegisterResult::Conflict),
+            "a conflicted binding is skipped before the registrar sees it"
+        );
+    }
+
+    #[test]
+    fn the_default_rejection_is_an_os_refusal() {
+        // The other side of the same seam: a registrar that does not override
+        // `rejection` keeps the meaning every backend had before the method
+        // existed. Without this, deleting the default body and leaving the trait
+        // method unimplemented-but-required would still compile every caller here.
+        let plan = resolve(&table(&[("brightness_up", "Ctrl+Alt+Up")]));
+        let accel = plan.bindings.first().expect("one binding").accel.clone();
+        let mut reg = FakeRegistrar {
+            reject: [accel].into_iter().collect(),
+            ..FakeRegistrar::default()
+        };
+        let outcomes = apply_plan(&mut reg, &plan);
+        assert_eq!(
+            outcomes.first().map(|o| o.result),
+            Some(RegisterResult::OsRejected)
+        );
     }
 
     #[test]

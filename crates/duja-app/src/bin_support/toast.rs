@@ -33,6 +33,18 @@
 //! So on macOS the update surfaces through the tray menu item and tooltip only.
 //! That is a complete path, not a degraded one — see `update_flow`, where the menu
 //! item and tooltip are set *before* this is called and independently of it.
+//!
+//! # Linux — nothing yet, but for a weaker reason than macOS's
+//!
+//! Linux takes the same silent arm, and the honest difference is worth writing
+//! down rather than filing both under "unsupported". macOS is *blocked*: the only
+//! supported API needs a signed bundle and a permission prompt. Linux is not —
+//! `org.freedesktop.Notifications` is a plain session-bus method, and `zbus` is
+//! already in this build's dependency graph for the tray. What stops it is scope:
+//! it is a feature with choices in it (an action button that opens the releases
+//! page, an urgency, a timeout, what to do when no notification daemon is
+//! running), and P7 wave 5 is the wave that gives Linux a tray. `docs/debt.md`
+//! carries it.
 
 #[cfg(windows)]
 use windows::Data::Xml::Dom::XmlDocument;
@@ -56,6 +68,10 @@ const AUMID: &str = "io.github.itabajah.duja";
 /// Best-effort and infallible by construction: a platform failure is logged, and
 /// a platform with no notification path does nothing at all. Callers must not
 /// treat this as the update's delivery mechanism — the tray item is.
+///
+/// Called unconditionally by `update_flow`, on every platform. That is the point
+/// of the no-op arm: the caller states *what should happen*, and which platforms
+/// can do it is this module's business rather than a `cfg` at the call site.
 pub(crate) fn notify_update_available(version: &str) {
     platform::notify(version);
 }

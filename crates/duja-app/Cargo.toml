@@ -57,6 +57,14 @@ windows = { workspace = true, features = [
     "Foundation_Collections",
 ] }
 
+# Linux takes neither of the two crates above (ADR-0010). `tray-icon`'s Linux
+# backend needs a GTK loop; `global-hotkey`'s Linux arm is X11-only, and this
+# wave has to work on a Wayland session as well, so Duja registers no global
+# hotkeys on Linux and says so in the settings window rather than showing
+# bindings that silently do nothing.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 tray-icon.workspace = true
 global-hotkey.workspace = true

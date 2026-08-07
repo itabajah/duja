@@ -46,6 +46,11 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "Unicode-3.0",
+    # `ksni`, the Linux tray (ADR-0010). A public-domain dedication that imposes
+    # no obligations at all, so it belongs in the general allow list rather than
+    # as a crate-scoped exception — scoping it would read as a judgement about
+    # this one crate when the licence is what is being accepted.
+    "Unlicense",
 ]
 # Slint is consumed under its Royalty-Free license (ADR-0008 / plan §8): the
 # tri-license is "GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR
