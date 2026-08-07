@@ -48,6 +48,11 @@ to assert.
   - [Perceptual brightness continuum (v2, ADR-0014)](#s21)
   - [UI layout & ruby theme (2026-07-14)](#s22)
   - [v0.1.0 release (2026-07-16)](#s23)
+- [P7 gate results](#s36)
+  - [What this gate was, and what it was not](#s37)
+  - [The one finding that changed nothing, and why that is the result](#s38)
+  - [The finding that became a row](#s39)
+  - [What was checked and found correct](#s40)
 - [P6 gate results](#s24)
   - [The blocker](#s25)
   - [The other findings that changed code](#s26)
@@ -1197,6 +1202,91 @@ install and stay current on:
   regressed to ~19 MB (P8 trim).
 
 <a id="s24"></a>
+<a id="s36"></a>
+## P7 gate results
+
+The Linux phase gate, run over the cumulative `m6-macos..main` diff (28 commits,
+132 files, +31,135/-3,199).
+
+<a id="s37"></a>
+### What this gate was, and what it was not
+
+**It was one reviewer's targeted pass, not the gate `plan.md` specifies**, and
+that is stated first because the difference matters when reading what follows.
+P5's and P6's gates were several independent adversarial reviewers over the whole
+diff, each finding verified by a separate agent before it was accepted. This one
+was a single pass, scoped by hand to the surfaces most likely to hold a defect
+nothing else could catch: the Linux code that has never executed, and the
+cross-crate invariants no per-crate suite sees.
+
+So the honest claim is **not** "P7 passed a gate of the same strength as P6's".
+It is: the P6-shaped failure was looked for deliberately and not found, two
+specific questions were answered, and the multi-reviewer gate remains available
+and unrun. `m7-linux` is tagged on that basis, with `v0.3.0` held - which is the
+same posture P6 took for a different reason, and the reason both are held is the
+same one: **nothing here has run on the hardware it targets.**
+
+<a id="s38"></a>
+### The one finding that changed nothing, and why that is the result
+
+The first thing looked for was P6's blocker by shape rather than by subject: *a
+fake or a fixture that decodes a bug into the right answer, on a wire someone
+else defined.* P7 has an obvious candidate. `linux::outputs` stamps the X11 gamma
+token, `bin_support::gamma::gamma_address` parses it back, the two are in
+different crates, and **every token fixture in both crates is written `crtc-42`
+-- a shape the production parser rejects outright.**
+
+That is the right thing to be suspicious of, and it turned out to be already
+held: `linux::outputs` stamps through `linux_gamma::crtc_token` rather than
+`to_string`, with a comment saying why, and `crtc_token_round_trips` joins that
+function to `crtc_from_token` across `[1, 63, 4096, u32::MAX]`. A test was written
+to join the app's end as well, proven red by mutating the stamp to match the
+fixtures -- and then **deleted**, because the dimmer's round trip reds on the same
+mutation and the app's `gamma_address` tests already pin the delegation. Recorded
+because a redundant test with a long comment is the `#132` pattern this project
+has a rule against, and because "the gate found nothing here" is a weaker
+statement than "the gate looked for exactly this and found it already guarded".
+
+<a id="s39"></a>
+### The finding that became a row
+
+**Every clean quit writes identity gamma to every display**
+([D-108](debt.md#d-108)). `begin_quit` restores what the session engaged and then
+calls the *global* `duja_dimmer::restore_all()` unconditionally, and that call
+means three different things: macOS reloads the user's colour profile (benign),
+Windows and X11 write identity to every display or CRTC they can enumerate
+(a flatten), and Wayland releases only this process's controls (benign).
+
+It is **not P7's defect** -- the call predates the Windows train -- but P7 is what
+makes it reach the platform where the victims are common, and, more sharply, what
+makes it *redundant* there: leftovers from a dirty run are the crash marker's job,
+and P7 is the wave that gave Linux a marker. Left as a row rather than fixed in
+the gate, because the fix changes shipped Windows quit behaviour and belongs in a
+PR whose subject that is.
+
+<a id="s40"></a>
+### What was checked and found correct
+
+Named because a gate that reports only its findings does not distinguish "looked
+at and fine" from "not looked at":
+
+- **The tray pixmap's byte order**, against `ksni::Icon`'s own doc comment
+  (`"ARGB32 format, network byte order"`) rather than against the belief that
+  produced it. `rgba_to_argb32` writes A, R, G, B positionally, which is correct
+  and would stay correct on a big-endian host.
+- **Menu parity with the Windows backend**: identical item set and order, with the
+  update row rendered from state rather than prepended -- which is the one place
+  the two backends *must* differ, since ksni re-renders on every host refresh.
+- **`spawn_relaunch`** is plain `std::process`, so the Linux "Restart" item is not
+  a menu entry with a Windows-only handler behind it.
+- **The toast's Linux arm** is a documented no-op with a debt row, and is honest
+  about being blocked on scope rather than on the platform -- unlike macOS, which
+  is genuinely blocked.
+- **The Wayland flyout anchor** returns the fallback deliberately, with the
+  `StatusNotifierItem.Activate(x, y)` route recorded as the real answer. Not an
+  omission: Wayland has no global cursor query and no client-side toplevel
+  positioning, so there is nothing to port.
+
 ## P6 gate results
 
 Four adversarial reviewers over the cumulative `v0.1.5..main` diff (23 commits, 96

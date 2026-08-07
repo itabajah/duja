@@ -130,6 +130,7 @@ argument.
 | [D-105](#d-105) | P7 wave 5 (`#136`) | `duja-app` `bin_support/tray/` + `bin_support/gamma.rs` | Nothing on any lane has ever seen the Linux tray appear or a Linux ramp land, and the dev box cannot build the crate that would |
 | [D-106](#d-106) | P7 wave 5 follow-up (`#139`) | `duja-platform` `linux/geometry.rs` + `duja-dimmer` `linux/`, `dujactl` | Only the tray's X11 path is bounded; every other X call in the tree can still hang forever, and a timed-out probe parks a thread |
 | [D-107](#d-107) | P7 wave 6 (`#140`) | `packaging/linux/` + `xtask` `dist.rs` | Linux ships a tarball and no native package, because a package makes a dependency claim nobody here can check |
+| [D-108](#d-108) | P7 gate | `duja-app` `tray/state.rs` `begin_quit` | Every clean quit writes identity gamma to every display, including ones Duja never touched |
 
 ## Rows
 
@@ -934,6 +935,19 @@ The macOS status icon is **not** a template image (`tray-icon`'s `icon_is_templa
 **Linux ships a tarball and no native package, because a package makes a dependency claim nobody here can check.** `xtask dist --target linux` stages `duja-<ver>-linux-x64.tar.gz`: two binaries, both licences, the README, a `.desktop` entry and an icon. That is the Windows portable zip's twin and it is the whole Linux packaging story - no AppImage, no `.deb`, no `.rpm`, no Flatpak, no AUR. A user on a distribution missing `libfontconfig1` or `libxkbcommon0` gets a linker error at launch, with nothing in the artifact to have warned them
 
 **Why deferred.** Not effort, and not a preference for tarballs. A package makes a **claim** an archive does not, and the claim is the part that cannot be checked from here. A `.deb` or `.rpm` declares its runtime dependencies, and a wrong `Depends:` is an install that succeeds followed by an application that will not start; an AppImage bundles its libraries instead, and one missing from the `AppDir` fails the same way, later and with more machinery in between. Both would be a guess presented as a supported package, which is the false-assurance shape this project rates worse than an admitted gap - and the reason it cannot be more than a guess is [D-105](#d-105): no CI runner has a display server or a `StatusNotifierWatcher`, and the Windows development box cannot build `duja-app` for Linux at all. **The tarball is also what unblocks the answer** rather than a placeholder for it: the phase gate needs something a human can extract and run, and what that run reveals about the real dependency set is the input a package needs. So the ordering is deliberate - archive, then hardware, then package - and `packaging/linux/README.md` carries the runtime library list in the meantime, which is the honest version of what a `Depends:` line would assert
+
+### D-108
+
+**Where:** `duja-app` `tray/state.rs` `begin_quit` &nbsp;·&nbsp; **Added:** P7 gate
+
+**Every clean quit writes identity gamma to every display, including ones Duja never touched.** `begin_quit` calls `self.gamma.restore_all()` - which restores exactly what this session engaged, correctly - and then calls `duja_dimmer::restore_all()` **unconditionally**, as a "global identity pass [to clear] any ramp left over from a prior dirty run". What that second call does is not the same on all three platforms, and the comment beside it does not say so:
+
+- **Windows**: enumerates every gamma display and writes the identity ramp to each. A running f.lux loses its tint on every Duja quit.
+- **macOS**: `CGDisplayRestoreColorSyncSettings`, which reloads the user's **profile**. This is a restore rather than a flatten, and is the only benign arm.
+- **Linux/X11**: walks every CRTC on the screen - including ones driving nothing - and writes identity. `redshift`, `gammastep`, GNOME Night Light and a `colord` calibration curve are all clobbered.
+- **Linux/Wayland**: releases only this process's gamma controls. Benign, because there is nothing else to find.
+
+**Why deferred.** Two reasons, and the second is the reason it is a row rather than a fix in the gate that found it. First, it is **not P7's defect**: the call has been there since the Windows train, so a fix changes shipped Windows quit behaviour and belongs in a PR whose subject that is, with its own review - `#82` is this project's standing example of what happens otherwise. Second, the analysis is worth landing before the change, because the *right* fix is not obvious from the symptom. The pass is nearly redundant everywhere: a leftover from a dirty run is what `startup::recover_from_crash_marker` handles, at launch, from the marker - and P7 is what gave **Linux** that marker, so the belt-and-braces argument is now weakest on the platform where the cost is highest. [D-099](#d-099) already carries the victim classification (`redshift` and friends repair themselves on their next timer; a `colord`/`xcalib` curve is loaded once at login and stays flattened), which is what makes this worth doing rather than filing as cosmetic. The likely shape is to drop the unconditional pass entirely and let the marker path own leftovers, keeping the wide walk for the two places a user asks for it: `duja --restore` and the tray's "Restore screen"
 
 ### D-102
 
