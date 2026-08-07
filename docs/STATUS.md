@@ -1,9 +1,11 @@
 # Duja - Project Status
 
-_Last updated: 2026-08-08. **P7 (Linux) is COMPLETE**: all seven waves merged,
-the gate run, `m7-linux` tagged. **Two releases are now held on the same terms**
-- `v0.2.0` (macOS) and `v0.3.0` (Linux) - each waiting for one person to run it
-on the hardware it targets. Every phase before P8 is closed._
+_Last updated: 2026-08-08. **P8 (hardening) is in progress** - six waves to
+`m8-hardening`, laid out in [plan.md](plan.md). Every phase before it is closed.
+**Two releases are held on the same terms** - `v0.2.0` (macOS) and `v0.3.0`
+(Linux) - each waiting for one person to run it on the hardware it targets, and
+`v1.0.0` will make three: ADR-0019 puts cross-platform hardware sign-off in its
+own definition, so P8 can meet every other clause and not that one._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness and display controller in Rust - a no-Electron Twinkle Tray
@@ -38,7 +40,7 @@ verbatim and unpruned, which is where they belong.
 | P5 Power features (Windows complete) | `m5-win-full` | done |
 | P6 macOS port | `m6-macos` | done, gate passed, release held |
 | P7 Linux port | `m7-linux` | done, gate run, release held |
-| **P8 Hardening** | `m8-hardening` / `v1.0.0` | **next** |
+| **P8 Hardening** | `m8-hardening` / `v1.0.0` | **in progress** |
 
 | release | train | state |
 |---|---|---|
@@ -50,15 +52,22 @@ verbatim and unpruned, which is where they belong.
 | `v0.1.5` | Windows | shipped - a live monitor no longer sticks as "software-only"; tray Restart |
 | `v0.2.0` | macOS | **held** - see below |
 | `v0.3.0` | Linux | **held** - see below |
-| `v1.0.0` | - | pending P8 |
+| `v1.0.0` | - | pending P8, and **will be held** - see below |
 
 Each release row is written up in [history.md](history.md), including what its
 review found and which of its stated reasons turned out to be wrong.
 
-**Why `v0.2.0` and `v0.3.0` are held.** Both phases are closed and both
-releases are withheld for the same reason: **nobody has run either build on the
-hardware it targets.** A release is a separate decision from a tag, and this is
-that decision rather than a blocker - nothing in the codebase stops either.
+**Why `v0.2.0` and `v0.3.0` are held, and why `v1.0.0` will be.** Both closed
+phases withheld their release for the same reason: **nobody has run either build
+on the hardware it targets.** A release is a separate decision from a tag, and
+this is that decision rather than a blocker - nothing in the codebase stops
+either.
+
+`v1.0.0` inherits it. [ADR-0019](adr/0019-version-ladder-and-release-trains.md)
+defines that release as "fuzz burn-in, soak, size/perf budgets met, packaging,
+**cross-platform hardware sign-off**", and the last clause is not something a
+repository can satisfy. P8 is planned around that rather than into it: every
+other clause met and measured, so the hold is the only thing left.
 
 For Linux the artifact exists and the pipeline is proven: a `workflow_dispatch`
 dry run built, staged, tarred, extracted and verified
@@ -70,26 +79,27 @@ Separately, [ADR-0013](adr/0013-macos-ddc-wrap-vs-vendor.md) keeps the macOS DDC
 path labelled experimental until there are at least three independent community
 confirmations per architecture, which no amount of code closes.
 
-## Where P7 stands
+## Where P8 stands
 
 | wave | scope | state |
 |---|---|---|
-| 0 | unix IPC + lock-directory hardening | done |
-| 1 | the reserved Linux ADRs (0010, 0011, 0022) | done |
-| 2 | DRM/sysfs enumeration, `/dev/i2c`, backlight | done |
-| 3 | event pump, autostart, desktop, geometry | done |
-| 4 | software dimming on X11 and Wayland, plus the capability probe | done |
-| 4b-5 | the X11 cursor anchor | done |
-| 5 | the Linux tray (ksni), and the gamma sink it turned out to own | done - `#134`, `#136` |
-| 6 | `xtask dist --target linux`, the release job, the docs | done - `#140`, `#141` |
-| 7 | phase gate, tag `m7-linux` | done - one finding, [D-108](debt.md#d-108) |
+| 1 | binary size: measure, trim, then gate it in CI | next |
+| 2 | the fuzz and coverage lanes | pending |
+| 3 | `--soak`, the harness two perf budgets already cite | pending |
+| 4 | the debt drain (`refactor:` PR) | pending |
+| 5 | the security pass and the docs-truth sweep | pending |
+| 6 | the multi-reviewer phase gate, and `m8-hardening` | pending |
 
-[plan.md](plan.md) has what each remaining wave owes. The constraint that shaped
-wave 5 has not gone away and shapes wave 6 too: **`duja-app` cannot be built for
-Linux on the Windows dev box** (`yeslogic-fontconfig-sys` wants a pkg-config
-sysroot; `RUST_FONTCONFIG_DLOPEN=1` gets past it and then `fontique` fails on the
-dlopen module layout, confirmed twice), so anything that has to link that crate
-is a CI-only loop at roughly ten minutes a round.
+[plan.md](plan.md) has what each wave owes and why it is ordered there. P7's
+wave table used to live in this section; it is in [history.md](history.md) now.
+It is the only wave table there - P0 through P6 were never written up that way,
+and this file has said so by omission rather than by claiming otherwise.
+
+**The constraint that shaped P7 has not gone away**, and wave 1 runs straight
+into it: **`duja-app` cannot be built for Linux on the Windows dev box**
+(`yeslogic-fontconfig-sys` wants a pkg-config sysroot; `RUST_FONTCONFIG_DLOPEN=1`
+gets past it and then `fontique` fails on the dlopen module layout, confirmed
+twice), so any size number for a non-Windows target is a CI-only measurement.
 
 **But an isolated crate can be cross-checked, and that is the technique to
 reach for first.** Only the pinned toolchain has the target installed, so:
@@ -102,7 +112,7 @@ RUSTDOCFLAGS="-D warnings" cargo +1.96.1 doc --target x86_64-unknown-linux-gnu  
 
 A throwaway crate that pulls one app module in through `#[path]`, with the
 workspace's `[lints]` copied into its manifest, compiles that module for Linux in
-seconds. Wave 5 validated the entire ksni API surface and later all of
+seconds. P7 wave 5 validated the entire ksni API surface and later all of
 `bin_support/gamma.rs` this way before spending a CI round, and it caught real
 errors both times - including a local named `display` that shadows `tracing`'s
 own `display` helper inside its macros.
@@ -202,6 +212,21 @@ cargo doc --workspace --no-deps --all-features --document-private-items
   had been removed in the same PR. When un-gating, grep for the *entry point*
   first and remove blanket allows in the same change, or the lane goes green
   over a feature that is not reachable.
+- **`cargo tree --target` prints TWO root trees, and the proc-macro one comes
+  first.** Asking which crates the linker actually sees looks like a job for
+  `cargo tree -p duja-app -e normal --target <triple> -i <crate>`. For `resvg`
+  the output opens with a path through `slint-macros`, a proc macro - i.e.
+  "host code, not in the binary", which is false; `cargo bloat` puts `usvg` +
+  `resvg` at 612 KiB of `.text`. Resolver 2 keeps the host and target feature
+  universes apart, and `--target` makes cargo emit **a separate root tree for
+  each**, back to back, separated by one blank line. The runtime answer is the
+  second tree.
+
+  The trap is a `head`, not a `(*)`. `--no-dedupe` does **not** help - nothing
+  was deduplicated. Either count the roots (`| grep -c '^<crate> v'`) before
+  reading the branches, or drop `--target`, which prints the runtime path first.
+  Either way, treat the tree as a hypothesis and confirm with `cargo bloat` or a
+  measured A/B build: only a linker knows what is in the binary.
 - **Elevated-token trap**: an elevated process's default object owner is the
   Administrators group, not the user - the pipe's SDDL therefore sets the owner
   explicitly (`O:<sid>`), or the DACL owner assertion fails under CI.

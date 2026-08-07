@@ -7,35 +7,43 @@ enough that reading it is never a research task.
 
 ## What is left
 
-1. **P8** - hardening to `v1.0.0`: fuzz burn-in, a 72 h soak, packaging, the
-   binary-size trim ([ADR-0012](adr/0012-binary-size-budget-variance.md)), and
-   draining what [debt.md](debt.md) still holds.
+1. **P8** - hardening to `v1.0.0`. Six waves, in [the table below](#p8-waves).
 
-That is the whole list. **P7 is closed** - `m7-linux` is tagged, the gate is run
-and written up in [history.md](history.md), and its one finding is
-[D-108](debt.md#d-108).
+That is the whole list of *phases*. Every one before it is closed, and the two
+that closed most recently each left a tag without a release: `m6-macos`
+(`v0.2.0` held) and `m7-linux` (`v0.3.0` held). [STATUS.md](STATUS.md) has why.
 
-**Nothing is owed before wave 6 any more.** The two rows wave 5 made live are
-both drained: a settings caption that told a Linux user about a macOS hardware
-quirk ([D-101](debt-archive.md#d-101), `#138`) and an X11 call that could block
-indefinitely on what is now the Slint main thread
-([D-091](debt-archive.md#d-091), `#139`). Neither was created by the un-gate -
-both were already written down and merely unreachable, which is the shape to
-expect from one. What the second left behind is [D-106](debt.md#d-106): the
-tray's X11 path is bounded and no other one is.
+Three things are **held rather than pending**, and none of them blocks P8:
 
-Three things are **held rather than pending**, and none blocks the list above:
-
-- **`v0.2.0` (macOS)** is tagged as `m6-macos` and deliberately unreleased until
-  someone has launched `Duja.app` on a real Mac. The phase is closed; the
-  release is not. This is a decision, not a blocker.
-- **`v0.3.0` (Linux)** is tagged as `m7-linux` and held on identical terms. The
-  tarball builds, stages and verifies in the release pipeline - proven by a full
-  dry run, not asserted - and no human has extracted it and clicked the tray.
-  [qa-checklist.md](qa-checklist.md) opens its Linux section with exactly that
-  run, ordered so the never-executed paths come first.
+- **`v0.2.0` (macOS)** and **`v0.3.0` (Linux)**, each waiting on one person
+  running the build on the hardware it targets. A decision, not a blocker.
 - **Laptop QA of the v0.1.4 mirror/software-only behaviour**, and a regenerated
-  `social-preview.png`, are carried from the Windows train. Both need a human.
+  `social-preview.png`. Both carried from the Windows train, both need a human.
+
+And one row is open and **unscheduled**, which is different from held:
+[D-106](debt.md#d-106) - the tray's X11 path is bounded and no other one is. It
+is not in a wave below because the honest next step for it (`probe_session`)
+needs a *reported* degradation rather than the silent fallback its sibling took,
+and that is a design job rather than a hardening one.
+
+### What P8 cannot do, said before what it can
+
+[ADR-0019](adr/0019-version-ladder-and-release-trains.md) defines `v1.0.0` as
+"fuzz burn-in, soak, size/perf budgets met, packaging, **cross-platform hardware
+sign-off**". Duja has never run on a Mac or on a Linux desktop, and no amount of
+work in this repository changes that clause.
+
+So plan for the outcome now rather than discovering it at the gate: **P8 ends
+with `m8-hardening` tagged and `v1.0.0` held**, on the same terms and for the
+same reason as the two tags before it. What P8 *can* do is make the hold the
+only thing standing in the way - every other clause of that definition met and
+measured, so that whoever borrows a Mac and a Linux box is running a build that
+needs nothing else.
+
+The corollary is a scheduling one, and it is why the waves are ordered the way
+they are: **nothing in P8 should be sequenced behind hardware.** A wave that
+cannot finish without a machine this project does not have is a wave that closes
+by being re-triaged, and this plan has enough of those already.
 
 ## The version ladder
 
@@ -55,153 +63,238 @@ phase exits on a milestone tag; a release is a separate decision from a tag, and
 | P4 Windows dimmer + UI (MVP) | `m4-win-mvp` | done |
 | P5 Power features (Windows complete) | `m5-win-full` | done |
 | P6 macOS port | `m6-macos` | done, gate passed, `v0.2.0` held |
-| **P7 Linux port** | `m7-linux` / `v0.3.0` | **in progress** |
-| P8 Hardening | `m8-hardening` / `v1.0.0` | pending |
+| P7 Linux port | `m7-linux` | done, gate run, `v0.3.0` held |
+| **P8 Hardening** | `m8-hardening` / `v1.0.0` | **in progress** |
 
-P6 was hardware-blind by construction (CI runners plus community verification).
-P7 is VM/WSL-assisted, and the GNOME Wayland dimming spike became *verification*
-of [ADR-0011](adr/0011-linux-software-dimming.md)'s runtime probe rather than an
-input to it, so it follows the decision instead of preceding it.
+P6 was hardware-blind by construction (CI runners plus community verification)
+and P7 turned out the same way. How each phase actually went is in
+[history.md](history.md), including P7's wave table, which used to live here.
+P7 is the only phase written up wave by wave; the earlier ones are recorded by
+feature area.
 
-## P7 waves
-
-The ADRs and commit messages refer to these by number, so they are written down
-rather than left implicit.
+## P8 waves
 
 | wave | scope | state |
 |---|---|---|
-| 0 | unix IPC + lock-directory hardening (shared with macOS) | done - `#114` |
-| 1 | the two reserved ADRs (0010 tray, 0011 dimming), plus 0022 | done - `#115`, `#117` |
-| 2 | DRM/sysfs enumeration + EDID identity, `/dev/i2c` bus, backlight (logind primary, sysfs fallback) | done - `#116` |
-| 3 | event pump (`NETLINK_KOBJECT_UEVENT` direct, no libudev) + autostart, desktop, geometry | done - `#118` |
-| 4 | software dimming: X11 overlay + `RandR` gamma, Wayland layer-shell + `wlr-gamma-control`, and the ADR-0011 capability probe | done - `#119`, `#121`, `#122`, `#123`, `#124`, `#130`, `#131` |
-| 4b-5 | the X11 cursor anchor, so the flyout has somewhere to open | done - `#132` |
-| 5 | un-gate the tray (ksni as the third arm) | done - `#134`, `#136` |
-| 6 | `xtask dist --target linux`, the release job, and the docs | done - `#140`, `#141` |
-| 7 | phase gate, tag `m7-linux` | done - one finding, [D-108](debt.md#d-108) |
+| 1 | binary size: measure first, then trim, then gate it ([D-011](debt.md#d-011), [ADR-0012](adr/0012-binary-size-budget-variance.md)) | next |
+| 2 | the fuzz and coverage lanes ([D-002](debt.md#d-002), [D-023](debt.md#d-023)) | pending |
+| 3 | `--soak`, the harness two perf budgets already cite | pending |
+| 4 | the debt drain (`refactor:` PR, the rubric's ~15% time-box) | pending |
+| 5 | the security pass and the docs-truth sweep | pending |
+| 6 | the phase gate - **the multi-reviewer one** - and `m8-hardening` | pending |
 
-**Two corrections to the original table, made at the 2026-08-07 checkpoint.**
-Wave 5 was written as "un-gate the tray **+ `dujactl doctor`'s Linux
-diagnostic**"; the diagnostic half shipped early, in `#120`, because a user with
-no visible monitors needed to be told why before anything could be tested on
-Linux at all. And wave 4 grew a **4b-5** sub-wave that the table never had: the
-tray flyout needs a cursor anchor, `duja-platform` had none for X11, and that is
-a wave-4-shaped job (a display-server query) blocking a wave-5 one. The table
-now says so rather than leaving two PRs unaccounted for.
+Waves 1, 2 and 3 are independent of each other and can land in any order. Wave 4
+is **not** independent of wave 3: one of its rows ([D-005](debt.md#d-005)) is
+deferred until the soak produces a real error-rate threshold, so that row waits
+even though the rest of the wave does not. Wave 5 wants 1 through 4 landed,
+because half of what it checks is whether the docs still describe what those
+waves left behind. Wave 6 is last by definition.
 
-### Wave 5 - the tray, and what it turned out to own
+### Wave 1 - the binary, and checking the ADR's reasoning before following it
 
-**Done**, in two PRs. `#134` landed the **seam**: `AppState` no longer names a
-tray library, it holds one `PlatformTray` with three methods phrased as outcomes
-(`set_accent`, `set_tooltip`, `announce_update`) rather than as menu edits. That
-shape is what [ADR-0010](adr/0010-linux-tray-ksni.md) asked for, because
-`tray-icon`'s menu model is imperative and ksni's is declarative, and a seam
-written in `tray-icon`'s verbs would have forced the Linux backend to fake
-handles it does not have.
+[ADR-0012](adr/0012-binary-size-budget-variance.md) raised the budget to 16 MB
+at P4, P5 blew through it, and the ledger has said "P8 must recover it" for two
+releases. `duja.exe` is **19,446,784 bytes** today. That is the whole of the debt.
 
-`#136` landed the arm, and it was **larger than this file said it would be**,
-which is worth recording rather than smoothing over. Un-gating `mod tray` made
-three things reachable on Linux for the first time, and each had to be built or
-widened before the lane would compile:
+The ADR lists levers in expected-payoff order **twice**, and the two lists are
+not the same list: one in its *Decision* section (fat LTO, Slint image formats,
+`env-filter`, and `panic = "unwind"` marked explicitly as not a lever) and a
+second in its *Ledger* (feature-gate the update check, fat LTO, `env-filter`,
+Slint image formats). Every reference below is to the **Decision** list, by name
+rather than by number, because "lever 2" means different things in the two and
+striking the wrong one would remove fat LTO.
 
-- **`bin_support::gamma` had no Linux arm** - roughly the size of the macOS one.
-  It could not be stubbed: a sink that refused every engage would re-introduce
-  the failure `#96` fixed, because `dimming::plan` substitutes an overlay from
-  `min_gamma_factor()` *ahead* of the engage rather than in response to one.
-- **`ipc::TrayBridge` and `autostart::system()`** carried gates that had been
-  proxies for "wherever the tray is".
-- **`main.rs` still refused to launch the tray**, which is the one that matters:
-  everything above compiled and tested green on the ubuntu lane for two rounds
-  while the binary printed "not available on this platform". See
-  [STATUS.md](STATUS.md)'s note on it - the technique that catches it is
-  removing blanket `allow(dead_code)`s in the same PR as the un-gate.
+**Do not start with the levers, and do not start with `cargo tree` either.** The
+baseline attribution is already done, and it cost one wrong answer on the way,
+which is the part worth writing down.
 
-Two things it deliberately did **not** do. Linux registers no global hotkeys
-(`global-hotkey`'s backend there is X11-only) and now says so through a new
-`RegisterResult::Unsupported` rather than half-working; that is
-[D-103](debt.md#d-103). And it drained no debt rows except the one its own
-deferral note demanded it drain - [D-098](debt-archive.md#d-098), the X11
-crash guard, which landed in the same PR as the sink because a sink without a
-guard ships without a net.
+`cargo tree -p duja-app -e normal --target x86_64-pc-windows-msvc -i resvg`
+appears to report that `resvg` reaches the graph only through
+`i-slint-compiler` behind `slint-macros` - a proc macro, so host code, so not one
+byte of `duja.exe`. That answer is **false**: `cargo bloat` puts `usvg` at
+470.9 KiB of `.text` and `resvg` at another 141.6.
 
-**The four remaining rows wave 5 owed are re-triaged rather than closed**, and
-three of them changed state: [D-094](debt.md#d-094), [D-095](debt.md#d-095),
-[D-096](debt.md#d-096) and [D-097](debt.md#d-097). The pattern is the same in
-each - "deferred until Linux has a gamma sink" was the reason, that sink now
-exists, and what is left is the actual work rather than the wait. Read those
-four before wave 6: [D-097](debt.md#d-097) in particular now means "Wayland
-gamma dimming does not work", where it previously meant "a gate refuses a
-channel nothing was going to call".
+The mechanism is not deduplication, which is what this section said first and
+what a reviewer disproved by running the command. **Adding `--target` makes
+`cargo tree` print one root tree per feature-resolution universe** - the host
+one, holding build scripts and proc macros, and then the target one - and it
+prints them back to back under the same heading with only a blank line between.
+The proc-macro tree comes first. Reading the first tree and stopping is the whole
+of the error, and `--no-dedupe` does not fix it because nothing was deduplicated:
+both trees were always there. `cargo tree -e normal -i resvg` **without**
+`--target` prints the runtime path first and does not have the problem at all.
 
-**The constraint that shaped this wave has not gone away.** `duja-app` cannot be
-built for Linux on the Windows dev box, so anything that links it is a CI-only
-loop. The thing that made wave 5 affordable is in [STATUS.md](STATUS.md) and
-should be the first tool wave 6 reaches for: an **isolated crate** pulling one
-module in through `#[path]` *can* be cross-checked, clippy'd and rustdoc'd for
-`x86_64-unknown-linux-gnu` locally, in seconds.
+So the rule is: count the roots before reading the branches, and treat any
+dependency question answered from the tree as a hypothesis until a linker
+confirms it.
 
-### The one architectural item worth scheduling
+So ADR-0012's list of causes is right where it was doubted. What is genuinely
+absent from the binary is the set nobody suspected: `ravif`/`rav1e` (an AV1
+*encoder*, by some distance the largest thing in `Cargo.lock`), `exr`, `tiff`
+and `qoi` - all of them reaching only the compiler, because `image-default-formats`
+is already off.
 
-Four debt rows ([D-016](debt.md#d-016), [D-040](debt.md#d-040),
-[D-059](debt.md#d-059), [D-065](debt.md#d-065)) all defer on "`AppState` cannot
-be constructed in a test", and the 2026-08-07 checkpoint found that reason is
-out of date. `#134` removed the `tray_icon::TrayIcon` half, and the "two live
-Slint shells" half was never the blocker it was written as - `duja-ui` builds
-both shells headless in its own tests today, under a test backend that is
-already a workspace dependency.
+**And one of the ADR's levers does not exist.** The Slint image-format one -
+"the flyout uses no SVG/EXR/animated images - investigate disabling the decoder
+stack Slint pulls by default" - has an answer:
+`slint/std` implies `i-slint-core/std`, which implies `image-decoders` **and**
+`svg`, with no seam between them. The formats that *were* optional are already
+disabled. Removing the rest means patching Slint, which is not a hardening
+change. The lever gets struck from the ADR rather than left there for the next
+person to spend a day on.
 
-[D-102](debt.md#d-102) carries the re-triage and, importantly, what is *not* yet
-verified. The cheap experiment it names should come before any refactor is
-planned: one ignored-by-default test that calls `PlatformTray`'s constructor
-headless. If it succeeds, three of those four rows close with no refactor at
-all. That is an afternoon, and it decides whether a wave-sized job exists.
+That leaves three levers, and only one of them is a dependency change:
 
-Do not fold this into wave 5. It touches the same file the ksni un-gate does,
-and `#82` is this project's standing example of what happens when a refactor is
-smuggled into a PR that was about something else.
+| lever | what it removes | measured `.text` |
+|---|---|---|
+| drop `env-filter` | `regex-syntax`, `regex-automata`, `matchers` | 345 KiB |
+| feature-gate the update check | `rustls`, `ring`, `ureq`, `rustls-webpki`, `webpki-roots` | 724 KiB |
+| fat LTO | nothing; it is a profile change | n/a, see below |
 
-### Wave 6 - packaging
+The middle row has a catch that decides whether it is worth doing at all.
+[D-011](debt.md#d-011) frames it as "so a *lite* build drops both" the TLS stack
+and the WinRT toast bindings - and a feature that is **on by default in the
+shipped build saves the shipped build nothing**. It creates the possibility of a
+smaller artifact nobody currently builds. So it is not a lever against this
+budget unless a lite artifact is also a decision, and this wave is not the place
+to make that one. The 724 KiB stays in the table as the size of a choice, not of
+a saving.
 
-**Done** (`#140`). `xtask dist` has a third target, the release workflow has a
-third job, and the docs say what a Linux user gets.
+Fat LTO has no `.text` figure because it removes no crate; the ADR records -1.0
+MB at P4 and the wave re-measures it. `.text` is 11.3 MiB of an 18.5 MiB file,
+so a crate that leaves takes its read-only data with it and the *file* delta
+should exceed the `.text` column - a prediction to check rather than assume.
 
-The artifact is a **portable tarball**, `duja-<ver>-linux-x64.tar.gz` - the
-Windows zip's twin, with a `.desktop` entry and an icon added. It is deliberately
-not an AppImage or a `.deb`, and the reason is worth reading before anyone
-"finishes the job": a package declares a dependency set, and that declaration is
-exactly what cannot be checked from a machine which has never run this binary
-([D-107](debt.md#d-107)). The tarball is what unblocks the answer rather than a
-placeholder for it, because the gate below needs something a human can extract
-and run.
+**Apply each lever alone, with a number beside it**, because one combined diff
+that lands several megabytes teaches nothing about which lever to reach for
+next time.
 
-Two things this wave got for free by following the wave-5 split. The artifact
-*names* moved into `xtask`'s `bundle` module, where all three are asserted
-together on every lane - a mislabelled archive builds, uploads and checksums
-exactly like a correct one, so a name is the packaging decision no runner can
-catch. And `--target linux` refuses on a non-unix host rather than staging a
-tarball whose binaries would extract without their permission bit, which is the
-worst shape a packaging bug takes: clean everywhere except the user's machine.
+What the wave owes when it is done:
 
-### Wave 7 - the gate
+- ADR-0012 **corrected in place**: lever 2 struck with the reason, the
+  `cargo bloat` attribution in the ledger, and the `cargo tree` dedupe trap
+  recorded where the next person will hit it. The ADR is what they read first.
+- **Per-lever deltas**, in bytes, so the ledger stops being a list of guesses.
+- The unit ambiguity settled. The budget says "16 MB" and the ledger's rows say
+  14.9 and 17.21 with no unit named. 16 MiB and 16 MB differ by 5%, which is
+  larger than the smallest lever on the list, so a budget that does not say
+  which one it means cannot be missed *or* met on purpose.
+- **A size gate that fails a build on a regression.** This is the part that
+  matters after the wave ends. Size drifted from 14.9 to 19.4 across two
+  releases with nothing to notice it, and a lever pulled once is a lever any
+  dependency bump can give back.
 
-**Run, and narrower than this section used to ask for.** What it asked for was
-several independent adversarial reviewers over the cumulative diff, each finding
-verified by a separate agent. What happened was one targeted pass, scoped by hand
-to the Linux code that has never executed and to the cross-crate invariants no
-per-crate suite sees. [history.md](history.md) opens the write-up with that
-distinction rather than burying it.
+  Where it runs is a real trade rather than a detail. The measurement is only
+  meaningful on the profile that ships - fat LTO, one codegen unit - and that
+  build is roughly twenty minutes on a hosted Windows runner, against a PR
+  matrix that finishes in a fraction of that. Gating the *release* costs nothing
+  and makes shipping over budget impossible; gating every PR catches the
+  dependency bump on the PR that lands it and slows every other PR to do it.
+  Whichever the wave picks, the half it does not pick is a debt row rather than
+  an unstated gap - and if it does add a PR job, note that branch protection's
+  required checks are a repository setting, so a new job is advisory until
+  somebody turns it on.
 
-One finding changed the tree: [D-108](debt.md#d-108), every clean quit writing
-identity gamma to displays Duja never touched. One suspected finding turned out
-to be already guarded, and is recorded as such - the token a Linux display is
-addressed by is stamped in one crate and parsed in another, with every fixture in
-both written in a shape the parser rejects, which is precisely the P6 blocker's
-shape and is held by a round-trip test that already exists.
+### Wave 2 - the fuzz and coverage lanes
 
-**The multi-reviewer gate remains available and unrun.** It is the obvious thing
-to spend effort on if `v0.3.0` is ever to ship without hardware verification -
-but the hardware run is the cheaper and larger of the two, because every accept
-path in the tray and the gamma sink is still unexercised on every lane.
+[D-002](debt.md#d-002) has been open since P2 and names two workflows;
+[D-023](debt.md#d-023) names the sixth fuzz target and says to land it with
+them, which is right - a target nothing runs is a file, not coverage.
+
+- **`fuzz_config_toml`.** `config.toml` is user-editable and parsed through
+  chained `toml_edit` migrations. It is the one untrusted-parse surface with no
+  fuzz target; caps, EDID, quirks, IPC frames and DDC packets all have one.
+- **`fuzz.yml`.** A weekly nightly burn over all six targets, *plus* a cheap
+  PR-time `cargo check` of the fuzz workspace. The second half is the part worth
+  arguing for: `fuzz/` is a separate workspace, so nothing in the normal CI
+  matrix compiles it, and a rename in `duja-core` breaks a target silently until
+  the next Sunday. Checking it on the PR that breaks it costs seconds.
+- **`coverage.yml`.** The rubric asks for core >= 90% and ipc/view-models >= 85%.
+  Wire `cargo llvm-cov` and report per-crate. Whether the thresholds *gate* is a
+  decision for the wave to make against the first real number, not now - and
+  either way it must not become a twelfth required check that a flaky
+  instrumentation run can block a merge on.
+
+### Wave 3 - `--soak`, which the budgets already assume exists
+
+[perf-budgets.md](perf-budgets.md) names `--soak` twice: as the instrument for
+"Idle RSS (flyout closed)" and as the whole of "Soak (24 h) RSS growth < 5 MB;
+flat GDI/USER handle counts". **There is no `--soak` flag.** `--stress` exists
+and does something else (a DDC input flood).
+
+That makes two hard budgets unmeasurable by the method their own row cites,
+which is the [false-assurance](#how-work-lands) shape this project has a rule
+against: a maintainer reads the row, believes the budget is checked, and it
+never has been. Either the harness exists or the rows are wrong; building it is
+the better half of that choice, because ADR-0019 puts a soak in the definition
+of `v1.0.0` and something has to produce that number.
+
+Scope it to what a fake backend can drive unattended: RSS and handle counts
+sampled on a fixed cadence, a growth verdict against the budget, and an exit
+code. It runs on the dev box for the long burn, and a short one belongs in CI.
+
+### Wave 4 - the debt drain
+
+The rubric time-boxes this at ~15% of the phase. Rows are picked for being
+*fixable without hardware*, per the scheduling rule above.
+
+- **[D-108](debt.md#d-108) first**, because it is the one whose damage lands on
+  a bystander: every clean quit writes identity gamma to *every* display, so
+  quitting Duja flattens f.lux, redshift or a calibration curve it never
+  touched. Test-first, red proven before the fix, and the defect re-inserted
+  where it historically occurred rather than where the test can reach it.
+- **[D-102](debt.md#d-102)'s cheap experiment.** One `#[ignore]`d test that
+  constructs `PlatformTray` headless. If it passes, three of the four rows that
+  defer on "`AppState` cannot be constructed in a test"
+  ([D-016](debt.md#d-016), [D-040](debt.md#d-040), [D-059](debt.md#d-059),
+  [D-065](debt.md#d-065)) close with no refactor at all. It is an afternoon, and
+  it decides whether a wave-sized job exists. Run it *before* planning any
+  refactor, not after.
+- **[D-005](debt.md#d-005)** - the `--stress` gate reports FAIL on a run with a
+  single transient DDC error, which real hardware produces 1-2 of per ~300
+  inputs. Its own deferral says to revisit "when the P8 soak numbers set a real
+  threshold", and wave 3 is where those numbers come from, so this row is
+  sequenced after it rather than beside it.
+- **[D-093](debt.md#d-093)** - `WAYLAND_SOCKET` is not consulted, so a client
+  handed a compositor socket is classified X11. Pure, testable, no session
+  needed.
+
+**[D-021](debt.md#d-021) is explicitly not in this wave.** Unifying `windows`
+0.58 to 0.62 in `duja-panel` means rewriting VARIANT-era COM against an API that
+changed, in the one module whose set-path has never executed on real hardware.
+Its deferral note already says to do it in the pass that also runs WMI on a
+borrowed laptop. That laptop is the same one three other rows wait on; the row
+stays open and the reason stays written down.
+
+### Wave 5 - the security pass and the docs-truth sweep
+
+The [rubric](review-rubric.md) singles P5 and P8 out for the **full SECURITY.md
+checklist, item by item** rather than the summary skim every other phase gets.
+Do that, and record what was checked rather than only what failed.
+
+Then the truth sweep, which is cheap and catches the class of drift this project
+keeps paying for. One known instance to start from: `SECURITY.md` still
+describes the release as "the Windows installer `.exe`, a portable `.zip`, and
+(from `v0.2.0`) a macOS universal `.dmg`" and invites the reader to verify
+provenance on "any of the three artifacts". P7 wave 6 made it four. Nobody
+edited the security policy, because the tarball landed in `xtask` and the
+release workflow and there was no reason to look there.
+
+### Wave 6 - the gate
+
+**The multi-reviewer gate, run properly this time.** P7's was one targeted pass,
+and both [history.md](history.md) and its tag message say so at the top rather
+than in a footnote. That was a defensible call for a phase whose code cannot
+execute anywhere; it is not defensible for the phase whose entire subject is
+whether this is ready to be called 1.0.
+
+So: several independent adversarial reviewers over the cumulative
+`m7-linux..main` diff, each finding verified by a reviewer that did not raise
+it, weighted toward code over prose - the `#132` lesson, where a 28-round review saw
+a growing share of its later findings become claims that *earlier corrections*
+had introduced, with the code done around round nine.
+
+Then `m8-hardening`, and `v1.0.0` held.
 
 ## How work lands
 

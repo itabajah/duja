@@ -48,6 +48,11 @@ to assert.
   - [Perceptual brightness continuum (v2, ADR-0014)](#s21)
   - [UI layout & ruby theme (2026-07-14)](#s22)
   - [v0.1.0 release (2026-07-16)](#s23)
+- [P7 waves, as planned and as they went](#s41)
+  - [Wave 5 - the tray, and what it turned out to own](#s42)
+  - [The one architectural item worth scheduling](#s43)
+  - [Wave 6 - packaging](#s44)
+  - [Wave 7 - the gate](#s45)
 - [P7 gate results](#s36)
   - [What this gate was, and what it was not](#s37)
   - [The one finding that changed nothing, and why that is the result](#s38)
@@ -1201,7 +1206,170 @@ install and stay current on:
   run; authenticity is via the checksums + minisign key + provenance. Binary size
   regressed to ~19 MB (P8 trim).
 
-<a id="s24"></a>
+<a id="s41"></a>
+## P7 waves, as planned and as they went
+
+Moved here from [plan.md](plan.md) when P8 opened. That file's own rule is that
+anything already done is described here rather than there, so it stays short
+enough that reading it is never a research task - and a table of eight completed
+waves is exactly the weight it is meant to shed.
+
+**Exactly two sentences were reworded in the move, and both for the same
+reason**: they pointed at the file they now live in. One said "history.md opens
+the write-up with that distinction" and now points at
+[the write-up below](#s37); the other said `#136` was "larger than **this file**
+said it would be", where "this file" was the plan that had made the prediction,
+and now names it. Nothing else changed - the count is stated because a blanket
+"nothing was reworded" is the kind of claim the section above this one exists to
+correct, and the first version of this paragraph made it.
+
+**Read the imperatives below as P7's, not as yours.** "Read those four before
+wave 6", "the first tool wave 6 reaches for", "do not fold this into wave 5" -
+every one of those numbers is a *P7* wave, and all of them are closed. P8 has a
+wave 5 and a wave 6 of its own and they are unrelated.
+
+The ADRs and commit messages refer to these by number, so they are written down
+rather than left implicit.
+
+| wave | scope | state |
+|---|---|---|
+| 0 | unix IPC + lock-directory hardening (shared with macOS) | done - `#114` |
+| 1 | the two reserved ADRs (0010 tray, 0011 dimming), plus 0022 | done - `#115`, `#117` |
+| 2 | DRM/sysfs enumeration + EDID identity, `/dev/i2c` bus, backlight (logind primary, sysfs fallback) | done - `#116` |
+| 3 | event pump (`NETLINK_KOBJECT_UEVENT` direct, no libudev) + autostart, desktop, geometry | done - `#118` |
+| 4 | software dimming: X11 overlay + `RandR` gamma, Wayland layer-shell + `wlr-gamma-control`, and the ADR-0011 capability probe | done - `#119`, `#121`, `#122`, `#123`, `#124`, `#130`, `#131` |
+| 4b-5 | the X11 cursor anchor, so the flyout has somewhere to open | done - `#132` |
+| 5 | un-gate the tray (ksni as the third arm) | done - `#134`, `#136` |
+| 6 | `xtask dist --target linux`, the release job, and the docs | done - `#140`, `#141` |
+| 7 | phase gate, tag `m7-linux` | done - one finding, [D-108](debt.md#d-108) |
+
+**Two corrections to the original table, made at the 2026-08-07 checkpoint.**
+Wave 5 was written as "un-gate the tray **+ `dujactl doctor`'s Linux
+diagnostic**"; the diagnostic half shipped early, in `#120`, because a user with
+no visible monitors needed to be told why before anything could be tested on
+Linux at all. And wave 4 grew a **4b-5** sub-wave that the table never had: the
+tray flyout needs a cursor anchor, `duja-platform` had none for X11, and that is
+a wave-4-shaped job (a display-server query) blocking a wave-5 one. The table
+now says so rather than leaving two PRs unaccounted for.
+
+<a id="s42"></a>
+### Wave 5 - the tray, and what it turned out to own
+
+**Done**, in two PRs. `#134` landed the **seam**: `AppState` no longer names a
+tray library, it holds one `PlatformTray` with three methods phrased as outcomes
+(`set_accent`, `set_tooltip`, `announce_update`) rather than as menu edits. That
+shape is what [ADR-0010](adr/0010-linux-tray-ksni.md) asked for, because
+`tray-icon`'s menu model is imperative and ksni's is declarative, and a seam
+written in `tray-icon`'s verbs would have forced the Linux backend to fake
+handles it does not have.
+
+`#136` landed the arm, and it was **larger than the plan said it would be**,
+which is worth recording rather than smoothing over. Un-gating `mod tray` made
+three things reachable on Linux for the first time, and each had to be built or
+widened before the lane would compile:
+
+- **`bin_support::gamma` had no Linux arm** - roughly the size of the macOS one.
+  It could not be stubbed: a sink that refused every engage would re-introduce
+  the failure `#96` fixed, because `dimming::plan` substitutes an overlay from
+  `min_gamma_factor()` *ahead* of the engage rather than in response to one.
+- **`ipc::TrayBridge` and `autostart::system()`** carried gates that had been
+  proxies for "wherever the tray is".
+- **`main.rs` still refused to launch the tray**, which is the one that matters:
+  everything above compiled and tested green on the ubuntu lane for two rounds
+  while the binary printed "not available on this platform". See
+  [STATUS.md](STATUS.md)'s note on it - the technique that catches it is
+  removing blanket `allow(dead_code)`s in the same PR as the un-gate.
+
+Two things it deliberately did **not** do. Linux registers no global hotkeys
+(`global-hotkey`'s backend there is X11-only) and now says so through a new
+`RegisterResult::Unsupported` rather than half-working; that is
+[D-103](debt.md#d-103). And it drained no debt rows except the one its own
+deferral note demanded it drain - [D-098](debt-archive.md#d-098), the X11
+crash guard, which landed in the same PR as the sink because a sink without a
+guard ships without a net.
+
+**The four remaining rows wave 5 owed are re-triaged rather than closed**, and
+three of them changed state: [D-094](debt.md#d-094), [D-095](debt.md#d-095),
+[D-096](debt.md#d-096) and [D-097](debt.md#d-097). The pattern is the same in
+each - "deferred until Linux has a gamma sink" was the reason, that sink now
+exists, and what is left is the actual work rather than the wait. Read those
+four before wave 6: [D-097](debt.md#d-097) in particular now means "Wayland
+gamma dimming does not work", where it previously meant "a gate refuses a
+channel nothing was going to call".
+
+**The constraint that shaped this wave has not gone away.** `duja-app` cannot be
+built for Linux on the Windows dev box, so anything that links it is a CI-only
+loop. The thing that made wave 5 affordable is in [STATUS.md](STATUS.md) and
+should be the first tool wave 6 reaches for: an **isolated crate** pulling one
+module in through `#[path]` *can* be cross-checked, clippy'd and rustdoc'd for
+`x86_64-unknown-linux-gnu` locally, in seconds.
+
+<a id="s43"></a>
+### The one architectural item worth scheduling
+
+Four debt rows ([D-016](debt.md#d-016), [D-040](debt.md#d-040),
+[D-059](debt.md#d-059), [D-065](debt.md#d-065)) all defer on "`AppState` cannot
+be constructed in a test", and the 2026-08-07 checkpoint found that reason is
+out of date. `#134` removed the `tray_icon::TrayIcon` half, and the "two live
+Slint shells" half was never the blocker it was written as - `duja-ui` builds
+both shells headless in its own tests today, under a test backend that is
+already a workspace dependency.
+
+[D-102](debt.md#d-102) carries the re-triage and, importantly, what is *not* yet
+verified. The cheap experiment it names should come before any refactor is
+planned: one ignored-by-default test that calls `PlatformTray`'s constructor
+headless. If it succeeds, three of those four rows close with no refactor at
+all. That is an afternoon, and it decides whether a wave-sized job exists.
+
+Do not fold this into wave 5. It touches the same file the ksni un-gate does,
+and `#82` is this project's standing example of what happens when a refactor is
+smuggled into a PR that was about something else.
+
+<a id="s44"></a>
+### Wave 6 - packaging
+
+**Done** (`#140`). `xtask dist` has a third target, the release workflow has a
+third job, and the docs say what a Linux user gets.
+
+The artifact is a **portable tarball**, `duja-<ver>-linux-x64.tar.gz` - the
+Windows zip's twin, with a `.desktop` entry and an icon added. It is deliberately
+not an AppImage or a `.deb`, and the reason is worth reading before anyone
+"finishes the job": a package declares a dependency set, and that declaration is
+exactly what cannot be checked from a machine which has never run this binary
+([D-107](debt.md#d-107)). The tarball is what unblocks the answer rather than a
+placeholder for it, because the gate below needs something a human can extract
+and run.
+
+Two things this wave got for free by following the wave-5 split. The artifact
+*names* moved into `xtask`'s `bundle` module, where all three are asserted
+together on every lane - a mislabelled archive builds, uploads and checksums
+exactly like a correct one, so a name is the packaging decision no runner can
+catch. And `--target linux` refuses on a non-unix host rather than staging a
+tarball whose binaries would extract without their permission bit, which is the
+worst shape a packaging bug takes: clean everywhere except the user's machine.
+
+<a id="s45"></a>
+### Wave 7 - the gate
+
+**Run, and narrower than this section used to ask for.** What it asked for was
+several independent adversarial reviewers over the cumulative diff, each finding
+verified by a separate agent. What happened was one targeted pass, scoped by hand
+to the Linux code that has never executed and to the cross-crate invariants no
+per-crate suite sees. [The write-up below](#s37) opens with that distinction
+rather than burying it.
+
+One finding changed the tree: [D-108](debt.md#d-108), every clean quit writing
+identity gamma to displays Duja never touched. One suspected finding turned out
+to be already guarded, and is recorded as such - the token a Linux display is
+addressed by is stamped in one crate and parsed in another, with every fixture in
+both written in a shape the parser rejects, which is precisely the P6 blocker's
+shape and is held by a round-trip test that already exists.
+
+**The multi-reviewer gate remains available and unrun.** It is the obvious thing
+to spend effort on if `v0.3.0` is ever to ship without hardware verification -
+but the hardware run is the cheaper and larger of the two, because every accept
+path in the tray and the gamma sink is still unexercised on every lane.
+
 <a id="s36"></a>
 ## P7 gate results
 
@@ -1287,6 +1455,7 @@ at and fine" from "not looked at":
   omission: Wayland has no global cursor query and no client-side toplevel
   positioning, so there is nothing to port.
 
+<a id="s24"></a>
 ## P6 gate results
 
 Four adversarial reviewers over the cumulative `v0.1.5..main` diff (23 commits, 96
