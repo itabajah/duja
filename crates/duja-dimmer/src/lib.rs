@@ -288,6 +288,61 @@ pub fn min_gamma_factor() -> f32 {
     GAMMA_FLOOR
 }
 
+/// **Which** mechanism makes this platform's gamma write advisory, for a caller
+/// that has to put it into words.
+///
+/// [`gamma_is_advisory`] answers whether there is anything to disclose, which is
+/// what a *guard* needs; this answers what to say, which is what a *caption*
+/// needs. They are deliberately two functions rather than one returning an
+/// `Option`, because the boolean is the older and more widely-called of the two
+/// and had no reason to change shape.
+///
+/// The variants are named for platforms, and that is not laziness. The underlying
+/// fact is the same everywhere it is `true` — a write reported as accepted, not
+/// applied, and not detectable by reading it back — so a variant named for the
+/// *mechanism* would be one variant, and there would be nothing to select on. What
+/// actually differs is the sentence a user needs, including one piece of advice
+/// that exists on exactly one platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GammaAdvisory {
+    /// Nothing to disclose: what this OS accepts, it applies — or it refuses with
+    /// a rule the caller can comply with. Windows, and any target with no gamma
+    /// backend at all.
+    #[default]
+    None,
+    /// macOS: the window server can accept a ramp and leave the curve unchanged.
+    /// Two reported modes, one of which the user can act on ("Automatically adjust
+    /// brightness"), which is why this variant's sentence is longer than the
+    /// other's. See [`gamma_is_advisory`] for the evidence.
+    MacWindowServer,
+    /// Linux: the display server answers success for a write the driver refused —
+    /// `ProcRRSetCrtcGamma` discards `RRCrtcGammaSet`'s result on X11, and on
+    /// wlroots 0.17+ the LUT test moved to a later output commit. Nothing the user
+    /// can act on, so its sentence is the bare fact plus what to do instead.
+    LinuxDisplayServer,
+}
+
+/// Which advisory mechanism, if any, this target has. See [`GammaAdvisory`].
+///
+/// Kept beside [`gamma_is_advisory`] rather than replacing it, and joined to it by
+/// `the_two_advisory_answers_cannot_drift`: two functions that must agree is a
+/// drift risk, and a test is what makes it not one.
+#[must_use]
+pub fn gamma_advisory() -> GammaAdvisory {
+    #[cfg(target_os = "macos")]
+    {
+        GammaAdvisory::MacWindowServer
+    }
+    #[cfg(target_os = "linux")]
+    {
+        GammaAdvisory::LinuxDisplayServer
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        GammaAdvisory::None
+    }
+}
+
 /// Whether this platform's gamma write can report success without applying the
 /// ramp, in a way the caller **cannot pre-empt**.
 ///
@@ -480,5 +535,23 @@ mod tests {
         }
         #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         assert!(!gamma_is_advisory(), "no gamma backend, nothing to fail");
+    }
+
+    #[test]
+    fn the_two_advisory_answers_cannot_drift() {
+        // `gamma_is_advisory` and `gamma_advisory` are separate functions with
+        // separate `cfg` ladders, which is exactly the shape that goes out of step:
+        // a fourth platform, or a re-verdict on one of the three, would be edited
+        // in one ladder and not the other. The failure is silent and asymmetric -
+        // a `None` beside a `true` shows a caption with no text, and a variant
+        // beside a `false` writes a hazard sentence nothing renders.
+        //
+        // Asserted as an equivalence rather than per-target, so this test needs no
+        // edit when a platform is added and still fails if the two disagree there.
+        assert_eq!(
+            gamma_is_advisory(),
+            gamma_advisory() != GammaAdvisory::None,
+            "the boolean and the reason must answer for the same targets"
+        );
     }
 }

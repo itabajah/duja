@@ -26,7 +26,7 @@
 use duja_core::config::{Config, DimMode as ConfigDimMode, MonitorConfig, Theme as ConfigTheme};
 use duja_core::continuum::ContinuumConfig;
 use duja_core::model::{DimMode, DisplayKind};
-use duja_ui::{GammaLimits, Theme as UiTheme};
+use duja_ui::{GammaAdvisory, GammaLimits, Theme as UiTheme};
 
 use crate::bin_support::dimming;
 
@@ -51,7 +51,27 @@ use crate::bin_support::dimming;
 pub(crate) fn platform_gamma_limits() -> GammaLimits {
     GammaLimits {
         cap_pct: dimming::gamma_cap_pct_for_platform(),
-        advisory: duja_dimmer::gamma_is_advisory(),
+        advisory: advisory_kind(duja_dimmer::gamma_advisory()),
+    }
+}
+
+/// Map `duja-dimmer`'s advisory verdict onto `duja-ui`'s.
+///
+/// Two identical enums and a hand-written map between them, which looks like
+/// duplication and is the boundary working as designed: `duja-ui` depends on
+/// neither `duja-dimmer` nor `duja-platform`, so it cannot name the source type.
+/// The same reason [`GammaLimits`] is passed in rather than read, and the reason
+/// the gamma cap was once a hardcoded `50` shown on every platform.
+///
+/// Total and exhaustive on purpose - no `_` arm - so a fourth variant in
+/// `duja-dimmer` fails to compile here rather than silently rendering as "nothing
+/// to disclose", which is what a wildcard would have done and is precisely the
+/// class of failure this whole caption exists to avoid.
+fn advisory_kind(advisory: duja_dimmer::GammaAdvisory) -> GammaAdvisory {
+    match advisory {
+        duja_dimmer::GammaAdvisory::None => GammaAdvisory::None,
+        duja_dimmer::GammaAdvisory::MacWindowServer => GammaAdvisory::MacWindowServer,
+        duja_dimmer::GammaAdvisory::LinuxDisplayServer => GammaAdvisory::LinuxDisplayServer,
     }
 }
 
@@ -184,13 +204,19 @@ mod tests {
         // - `cap_pct: None` reds **here on Windows** (the arm below expects
         //   `Some(50)`) and is invisible elsewhere, since `None` is the right
         //   answer off Windows.
-        // - `advisory: false` reds on the **macOS and ubuntu** lanes, and on
-        //   neither for the same reason: macOS can accept a ramp and not apply it,
-        //   while X11's `ProcRRSetCrtcGamma` discards the driver's result and
-        //   answers `Success` regardless. On Windows `false` is the correct value,
-        //   so no Windows-side assertion can call it a bug — the same shape as
-        //   `gamma_cap_pct_for_platform`'s own test, and the reason this one
-        //   asserts every target instead of just the host.
+        // - `advisory: GammaAdvisory::None` reds on the **macOS and ubuntu**
+        //   lanes, and on neither for the same reason: macOS can accept a ramp and
+        //   not apply it, while X11's `ProcRRSetCrtcGamma` discards the driver's
+        //   result and answers `Success` regardless. On Windows `None` is the
+        //   correct value, so no Windows-side assertion can call it a bug — the
+        //   same shape as `gamma_cap_pct_for_platform`'s own test, and the reason
+        //   this one asserts every target instead of just the host.
+        // - **Swapping the two advisory variants** reds on exactly one lane each,
+        //   which is what the kind buys over the `bool` it replaced. Under the
+        //   `bool`, macOS' and Linux's values were identical and a caption written
+        //   for one platform rendered on the other with nothing able to notice
+        //   (`D-101`). Now the wrong variant is a compile-time-distinct value that
+        //   this assertion pins per target.
         //
         // Asserted as the whole struct rather than field by field, so a future
         // third limit cannot be added and left unpinned.
@@ -201,7 +227,7 @@ mod tests {
             limits,
             GammaLimits {
                 cap_pct: Some(50),
-                advisory: false,
+                advisory: GammaAdvisory::None,
             },
             "Windows caps the ramp at MIN_ACCEPTED_GAMMA and honours what it accepts"
         );
@@ -211,7 +237,7 @@ mod tests {
             limits,
             GammaLimits {
                 cap_pct: None,
-                advisory: true,
+                advisory: GammaAdvisory::MacWindowServer,
             },
             "macOS takes the whole range and can still not apply it"
         );
@@ -228,7 +254,7 @@ mod tests {
             limits,
             GammaLimits {
                 cap_pct: None,
-                advisory: true,
+                advisory: GammaAdvisory::LinuxDisplayServer,
             },
             "X11 takes the whole range and reports success whatever the driver did"
         );

@@ -38,6 +38,7 @@ refusing to renumber.
 | [A-016](#a-016) | ~~post-v0.1.5 (#92, found in passing)~~ | `dujactl` `cli.rs`/`run.rs`/`fmt.rs` + `CONTRIBUTING.md` / `.github/ISSUE_TEMPLATE/monitor-quirk-report.yml` | ~~Both places tell users to run `dujactl doctor --report`, and there is no such flag: `parse` routes `doctor` through… |
 | [A-017](#a-017) | ~~P6 (`#103` CI)~~ | `duja-app` `tests/engine.rs` | ~~**`worker_panic_does_not_kill_engine` is timing-flaky on the Windows CI lane.**~~ — **diagnosed at the P6 gate: a… |
 | [D-098](#d-098) | ~~P7 wave 4 (`#124`), narrowed to X11 `#131`~~ | `duja-dimmer` `linux/gamma.rs` + `duja-app` `bin_support/gamma.rs` | ~~An X11 gamma ramp outlives the process and Linux has no crash guard for it~~ — **drained in `#136`**, in the same PR as the sink, exactly as its deferral note demanded |
+| [D-101](#d-101) | ~~P7 wave 4 (`#124` review)~~ | `duja-ui` `ui/settings.slint` + `duja-app` `bin_support/settings.rs` | ~~The gamma hazard caption names macOS, and `gamma_is_advisory()` is now true on Linux too~~ - **drained in `#138`**: the `bool` that made the two platforms indistinguishable is now a kind |
 
 ## Rows
 
@@ -188,3 +189,43 @@ refusing to renumber.
 **It did, and two things about the delivery are worth keeping.** The marker is written on **both** transports even though only X11 needs one, which this row's own narrowing argues against: the reason is the drift case [D-096](debt.md#d-096) describes, where a process engages X11 ramps and *then* acquires a `WAYLAND_DISPLAY` — a transport check at engage time writes no marker for exactly that run, and it is the run that leaves CRTCs dark permanently. It costs a Wayland-only session nothing measurable, because the next launch's `restore_all` opens no connection on either channel.
 
 And the three functions this needed were not Linux-shaped at all: `mark_dirty`, `clear_marker` and `marker_present` were sitting in `win::gamma` behind a `cfg(windows)`, which framed the marker as a Windows idea. It is an idea about **ramps that outlive the process**, and this row is the record that X11 has those too. They moved to an unconditional `duja_dimmer::marker`, and their idempotence test moved off the Windows lane onto all three
+
+### D-101
+
+**Where:** `duja-ui` `ui/settings.slint` + `duja-app` `bin_support/settings.rs` &nbsp;·&nbsp; **Added:** ~~P7 wave 4 (`#124` review)~~
+
+~~**The gamma hazard caption names macOS, and `gamma_is_advisory()` is now true on Linux too.**~~ - **drained in `#138`**, the wave after the one that made it reachable, and before wave 6 tags anything. `#103` added the caption for one platform and worded it for that platform: *"macOS can accept a ramp and not apply it — on some recent Macs regardless of settings, and on others while 'Automatically adjust brightness' is on"*. `#124` made the predicate true on X11 for a **different and sharper** mechanism: `ProcRRSetCrtcGamma` discards `RRCrtcGammaSet`'s return, which is the driver hook's own result, and answers `Success` regardless — so there is no setting to blame and no hardware subset, it is every X11 write. A Linux user would be shown macOS copy about a Mac feature they do not have
+
+**Why deferred.** It was not reachable, which is why it was a row and not a fix: `platform_gamma_limits()` has one caller, `tray/state.rs`, and `mod tray` was `cfg(any(windows, target_os = "macos"))`. **`#136` un-gated it, so this is now a live defect** rather than a pending one - a Linux user opening the settings window is shown macOS copy about a Mac feature they do not have. Not shipped: Linux has no release until `v0.3.0`, and wave 6 is what makes one. So this is owed **before wave 6 tags anything**, and it is deliberately not folded into the un-gate PR that revealed it, which changed `mod tray`'s gate and a hundred other things. The fix is for the caption to select its text on the platform (or to state the shared fact — an accepted gamma write is not proof of a dimmed screen — and drop the per-OS cause). Recorded because the failure mode is silent: the code is correct, the string is wrong, and nothing tests a translated caption's *content*
+
+**How it drained, and the part that is not the fix.** The row offered two
+remedies - select the text per platform, or state the shared fact and drop the
+per-OS cause - and the first is what landed, for a reason the row did not have:
+**the underlying fact is identical on both platforms**. A write reported as
+accepted, not applied, not detectable by reading it back. So a shared sentence
+would have been correct, and it would have cost the one clause a user can *act*
+on: macOS names "Automatically adjust brightness", a setting they can turn off.
+Linux has nothing equivalent, because `ProcRRSetCrtcGamma`'s behaviour is
+unconditional. Two sentences, one shared opening, different second halves.
+
+`GammaLimits::advisory` went from `bool` to a three-variant `GammaAdvisory`, and
+that type change is the actual fix rather than the strings. Under the `bool`,
+macOS and Linux carried the **same value**, so no fixture could tell them apart
+and no assertion could fail - which is why this shipped through a whole wave with
+a green suite. `duja-dimmer` gained `gamma_advisory()` beside `gamma_is_advisory()`
+(joined by `the_two_advisory_answers_cannot_drift`, because two `cfg` ladders that
+must agree is exactly the shape that stops agreeing), `duja-ui` carries its own
+copy of the enum because it depends on neither dimmer crate, and `duja-app` maps
+between them in one exhaustive `match` with no `_` arm - so a fourth variant
+fails to compile rather than silently rendering as "nothing to disclose".
+
+The new test reads the **rendered** caption and asserts on distinguishing
+substrings rather than whole strings: "macOS" must never appear on the Linux
+caption whatever language it is in, and a test pinned to exact wording would go
+red on a copy edit, get relaxed, and stop guarding anything. Proven red by
+reinstating the defect where it historically sat - one `@tr` string behind
+`gamma-advisory-kind != 0`.
+
+**Still true, and worth carrying forward**: nothing tests a translated caption's
+content. This test would pass against a translation that said the wrong thing in
+any language it does not know the words for

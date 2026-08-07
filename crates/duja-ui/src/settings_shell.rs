@@ -574,7 +574,7 @@ fn monitor_to_data(
         // about), so it is free to carry `None`. `gamma_cap_pct` never yields
         // `Some(0)` — see its docs in `dimming.rs`.
         gamma_cap_pct: i32::from(section.gamma_limits.cap_pct.unwrap_or(0)),
-        gamma_advisory: section.gamma_limits.advisory,
+        gamma_advisory_kind: section.gamma_limits.advisory.caption_index(),
         has_inputs: !section.inputs.is_empty(),
         inputs: ModelRc::from(inputs.clone()),
         // -1 = no selection (an empty dropdown): a snapshot carries no active-input
@@ -638,7 +638,7 @@ use crate::shell::clamp_pct;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings_vm::GammaLimits;
+    use crate::settings_vm::{GammaAdvisory, GammaLimits};
     use duja_core::config::Config;
     use duja_core::id::StableDisplayId;
     use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
@@ -846,12 +846,27 @@ mod tests {
             true,
             GammaLimits {
                 cap_pct: Some(NOT_THE_WINDOWS_CAP),
-                advisory: true,
+                advisory: GammaAdvisory::MacWindowServer,
             },
         );
         let capped = monitor_to_data(vm.monitors().first().expect("one section"), &inputs);
         assert_eq!(capped.gamma_cap_pct, i32::from(NOT_THE_WINDOWS_CAP));
-        assert!(capped.gamma_advisory);
+        assert_eq!(capped.gamma_advisory_kind, 1);
+
+        // The kind is carried, not flattened: a bridge that sent `1` for "any
+        // advisory OS" would pass the line above and show a Linux user macOS copy,
+        // which is the whole of `D-101`.
+        vm.set_displays(
+            &[snapshot("A")],
+            &Config::default(),
+            true,
+            GammaLimits {
+                cap_pct: None,
+                advisory: GammaAdvisory::LinuxDisplayServer,
+            },
+        );
+        let linux = monitor_to_data(vm.monitors().first().expect("one section"), &inputs);
+        assert_eq!(linux.gamma_advisory_kind, 2);
 
         vm.set_displays(
             &[snapshot("A")],
@@ -864,7 +879,7 @@ mod tests {
             uncapped.gamma_cap_pct, 0,
             "no cap must reach Slint as the value its guard suppresses"
         );
-        assert!(!uncapped.gamma_advisory);
+        assert_eq!(uncapped.gamma_advisory_kind, 0);
     }
 
     #[test]
@@ -882,7 +897,7 @@ mod tests {
             dim_mode_index: 0,
             gamma_available: true,
             gamma_cap_pct: 0,
-            gamma_advisory: false,
+            gamma_advisory_kind: 0,
             has_inputs: true,
             inputs: ModelRc::from(inputs.clone()),
             selected_input_index: -1,
@@ -917,7 +932,7 @@ mod binding_tests {
     use super::*;
     use crate::accent::AccentChoice;
     use crate::command::ThemeChoice;
-    use crate::settings_vm::GammaLimits;
+    use crate::settings_vm::{GammaAdvisory, GammaLimits};
     use duja_core::config::Config;
     use duja_core::id::StableDisplayId;
     use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
@@ -930,24 +945,33 @@ mod binding_tests {
     /// A capped-but-reliable OS — Windows' shape.
     const CAPPED_ONLY: GammaLimits = GammaLimits {
         cap_pct: Some(NOT_THE_WINDOWS_CAP),
-        advisory: false,
+        advisory: GammaAdvisory::None,
     };
 
     /// An uncapped OS that can accept a ramp and not apply it — macOS' shape.
     const ADVISORY_ONLY: GammaLimits = GammaLimits {
         cap_pct: None,
-        advisory: true,
+        advisory: GammaAdvisory::MacWindowServer,
+    };
+
+    /// The same, on the Linux mechanism. A separate fixture rather than a
+    /// parameter, because the two are not interchangeable: their captions differ
+    /// and the whole point of the kind is that showing one where the other belongs
+    /// is the defect (`D-101`).
+    const ADVISORY_LINUX: GammaLimits = GammaLimits {
+        cap_pct: None,
+        advisory: GammaAdvisory::LinuxDisplayServer,
     };
 
     /// An OS that is both capped and advisory. No real target is, which is exactly
     /// why it belongs here: it is the only fixture that can catch one guard being
     /// derived from the *other* flag. `CAPPED_ONLY` and `ADVISORY_ONLY` alone
-    /// cannot — under those two, `gamma-advisory` and `gamma-cap-pct == 0` are
+    /// cannot — under those two, an advisory kind and `gamma-cap-pct == 0` are
     /// indistinguishable, so `&& gamma-cap-pct == 0` passes as a stand-in for
-    /// `&& gamma-advisory` and both captions still land where they should.
+    /// `&& gamma-advisory-kind == 1` and both captions still land where they should.
     const BOTH_LIMITS: GammaLimits = GammaLimits {
         cap_pct: Some(NOT_THE_WINDOWS_CAP),
-        advisory: true,
+        advisory: GammaAdvisory::MacWindowServer,
     };
 
     /// The rendered dim-mode captions in `shell`'s element tree whose text starts
@@ -1200,8 +1224,8 @@ mod binding_tests {
     //
     // The two captions are driven against *each other's* fixture, and against an OS
     // that has both limits at once — the case no shipping target is, and the only
-    // one that separates the flags. Under `CAPPED_ONLY`/`ADVISORY_ONLY` alone,
-    // `gamma-advisory` and `gamma-cap-pct == 0` agree on every input, so a guard
+    // one that separates the flags. Under `CAPPED_ONLY`/`ADVISORY_ONLY` alone, an
+    // advisory kind and `gamma-cap-pct == 0` agree on every input, so a guard
     // written in terms of the wrong one passes; `BOTH_LIMITS` is where they part.
     #[test]
     fn the_advisory_caption_renders_only_where_gamma_can_silently_do_nothing() {
@@ -1258,6 +1282,71 @@ mod binding_tests {
             (1, 1),
             "a capped *and* advisory OS discloses both limits"
         );
+    }
+
+    /// `D-101`: the caption said "macOS" on every advisory platform.
+    ///
+    /// The counting test above cannot see this and never could - both platforms
+    /// disclose exactly one caption, so a count of `1` is right either way. What
+    /// was wrong is *which sentence*, and it stayed wrong through a whole wave
+    /// because `GammaLimits::advisory` was a `bool`: macOS and Linux were the same
+    /// value, so no fixture could tell them apart and no assertion could fail.
+    ///
+    /// This reads the rendered text. Deliberately asserting on a *distinguishing
+    /// substring* rather than the whole string: the full sentence is `@tr`-wrapped
+    /// and will change when it is translated, but "macOS" must never appear on the
+    /// Linux caption and "display server" must never appear on the macOS one,
+    /// whatever language they are in. A test pinned to the exact wording would go
+    /// red on a copy edit, get relaxed, and stop guarding the thing it was for.
+    #[test]
+    fn each_advisory_platform_gets_its_own_sentence() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let vm = Rc::new(RefCell::new(SettingsVm::new()));
+        let shell = SettingsShell::new(vm.clone()).expect("settings shell instantiates");
+        let caption = |limits: GammaLimits| {
+            vm.borrow_mut()
+                .set_displays(&[snapshot("A")], &Config::default(), true, limits);
+            shell.update_from_vm(&vm.borrow());
+            let mut found = gamma_advisory_captions(&shell);
+            assert_eq!(found.len(), 1, "exactly one advisory caption");
+            found.remove(0)
+        };
+
+        let mac = caption(ADVISORY_ONLY);
+        assert!(
+            mac.contains("macOS"),
+            "the macOS caption must name the platform whose behaviour it describes: {mac}"
+        );
+        assert!(
+            mac.contains("Automatically adjust brightness"),
+            "and must keep the one piece of advice a user can act on: {mac}"
+        );
+
+        let linux = caption(ADVISORY_LINUX);
+        assert!(
+            !linux.contains("macOS"),
+            "the Linux caption must not describe a Mac feature the user does not have: {linux}"
+        );
+        assert!(
+            linux.contains("display server"),
+            "it must name what actually reports the false success: {linux}"
+        );
+
+        // Both still lead with the same claim, which is the half that IS shared -
+        // and is what `gamma_advisory_captions` matches on, so a rewrite that broke
+        // it would silently empty every count in the test above rather than failing
+        // here.
+        for text in [&mac, &linux] {
+            assert!(
+                text.starts_with("Gamma may not take effect on this system"),
+                "the shared opening clause is what the caption finder keys on: {text}"
+            );
+            assert!(
+                text.contains("use the overlay instead"),
+                "and both must end with the one action available: {text}"
+            );
+        }
     }
 
     // The settings window must follow the resolved theme. Before the fix,

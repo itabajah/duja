@@ -64,8 +64,8 @@ pub use command::{SettingsCommand, ThemeChoice, UiCommand};
 pub use flyout_vm::{DimmingInfo, FlyoutRow, FlyoutVm, Theme};
 pub use settings_shell::SettingsShell;
 pub use settings_vm::{
-    CaptureModifiers, DIM_MODE_ORDER, GammaLimits, HotkeyRow, InputChoice, MAX_FLOOR_PCT,
-    MonitorSection, SettingsVm, THEME_ORDER, UpdateStatus, accelerator_string,
+    CaptureModifiers, DIM_MODE_ORDER, GammaAdvisory, GammaLimits, HotkeyRow, InputChoice,
+    MAX_FLOOR_PCT, MonitorSection, SettingsVm, THEME_ORDER, UpdateStatus, accelerator_string,
 };
 pub use shell::FlyoutShell;
 
