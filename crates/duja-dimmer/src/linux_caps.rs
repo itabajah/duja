@@ -106,7 +106,8 @@ pub enum Transport {
 /// bug.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unavailable {
-    /// No `WAYLAND_DISPLAY` and no `DISPLAY`: there is no display server to ask.
+    /// No `WAYLAND_DISPLAY`, no `WAYLAND_SOCKET` and no `DISPLAY`: there is no
+    /// display server to ask.
     NoDisplayServer,
     /// A display server was named but the connection to it failed.
     ConnectFailed,
@@ -138,7 +139,10 @@ impl fmt::Display for Unavailable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Unavailable::NoDisplayServer => {
-                write!(f, "no display server (neither WAYLAND_DISPLAY nor DISPLAY)")
+                write!(
+                    f,
+                    "no display server (none of WAYLAND_DISPLAY, WAYLAND_SOCKET, DISPLAY)"
+                )
             }
             Unavailable::ConnectFailed => write!(f, "the display server refused the connection"),
             Unavailable::ProtocolAbsent { interface } => {
@@ -272,8 +276,53 @@ pub fn compositor_selection(screen: usize) -> String {
 pub struct SessionEnv<'a> {
     /// `WAYLAND_DISPLAY`.
     pub wayland_display: Option<&'a str>,
+    /// `WAYLAND_SOCKET`.
+    ///
+    /// A pre-connected file descriptor handed over by a parent instead of a
+    /// socket *name*. It is how `wl_display_connect` is meant to be reached in a
+    /// sandbox — Flatpak's `wayland` socket permission, xdg-desktop-portal, and
+    /// anything that launches a client with the compositor connection already
+    /// open — and in that shape `WAYLAND_DISPLAY` may well be unset.
+    pub wayland_socket: Option<&'a str>,
     /// `DISPLAY`.
     pub display: Option<&'a str>,
+}
+
+/// The three environment variables [`SessionEnv`] borrows, owned.
+///
+/// Exists because [`SessionEnv`] borrows and every call site therefore had to
+/// read the variables into locals first — which meant five copies of "read these
+/// and build the struct", and **D-093 was one of them getting the list wrong**:
+/// `WAYLAND_SOCKET` was added to the type and the five sites would each have had
+/// to be found and edited to supply it. One door, so the next variable is added
+/// once.
+#[derive(Debug, Clone, Default)]
+pub struct SessionEnvVars {
+    wayland_display: Option<String>,
+    wayland_socket: Option<String>,
+    display: Option<String>,
+}
+
+impl SessionEnvVars {
+    /// Read them from this process's environment.
+    #[must_use]
+    pub fn from_env() -> Self {
+        SessionEnvVars {
+            wayland_display: std::env::var("WAYLAND_DISPLAY").ok(),
+            wayland_socket: std::env::var("WAYLAND_SOCKET").ok(),
+            display: std::env::var("DISPLAY").ok(),
+        }
+    }
+
+    /// Borrow them as the pure input [`transport`] and [`resolve`] take.
+    #[must_use]
+    pub fn as_session_env(&self) -> SessionEnv<'_> {
+        SessionEnv {
+            wayland_display: self.wayland_display.as_deref(),
+            wayland_socket: self.wayland_socket.as_deref(),
+            display: self.display.as_deref(),
+        }
+    }
 }
 
 /// What connecting actually found. Supplied by the caller, which is the only part
@@ -299,16 +348,29 @@ pub struct Probe<'a> {
 /// would put Duja on the compatibility layer and give it Xwayland's view of the
 /// screen rather than the compositor's.
 ///
-/// An **empty** value is treated as unset. That is not pedantry: `DISPLAY=` is
-/// what a login shell leaves behind when a session script clears it, and treating
-/// it as a display server name produces a connect failure reported as
-/// "the display server refused the connection" instead of "there is no display
-/// server", which sends the user looking for the wrong thing.
+/// **`WAYLAND_SOCKET` counts as Wayland too** (D-093). It carries a
+/// pre-connected file descriptor rather than a socket name, and a client
+/// launched that way — Flatpak, a portal, anything handing over an already-open
+/// compositor connection — may have no `WAYLAND_DISPLAY` at all. Consulting only
+/// `WAYLAND_DISPLAY` classified such a session as **X11** whenever `DISPLAY` was
+/// set, which on a Wayland desktop it almost always is (Xwayland). Duja then
+/// drove `XRandR` gamma and an X11 overlay through the compatibility layer:
+/// exactly the mistake the "Wayland wins" rule above exists to prevent, reached
+/// by the one door that rule did not cover.
+///
+/// An **empty** value is treated as unset, for all three. That is not pedantry:
+/// `DISPLAY=` is what a login shell leaves behind when a session script clears
+/// it, and treating it as a display server name produces a connect failure
+/// reported as "the display server refused the connection" instead of "there is
+/// no display server", which sends the user looking for the wrong thing. The
+/// same applies to `WAYLAND_SOCKET=`, where it would be worse: an empty value
+/// there would claim a Wayland session with no way to reach it.
 #[must_use]
 pub fn transport(env: SessionEnv<'_>) -> Transport {
-    if env.wayland_display.is_some_and(|v| !v.is_empty()) {
+    let set = |value: Option<&str>| value.is_some_and(|v| !v.is_empty());
+    if set(env.wayland_display) || set(env.wayland_socket) {
         Transport::Wayland
-    } else if env.display.is_some_and(|v| !v.is_empty()) {
+    } else if set(env.display) {
         Transport::X11
     } else {
         Transport::None
@@ -436,8 +498,59 @@ mod tests {
     fn env(wayland: Option<&'static str>, x11: Option<&'static str>) -> SessionEnv<'static> {
         SessionEnv {
             wayland_display: wayland,
+            wayland_socket: None,
             display: x11,
         }
+    }
+
+    /// The handed-over-socket shape: `WAYLAND_SOCKET` set, `WAYLAND_DISPLAY` not.
+    fn handed_over(socket: Option<&'static str>, x11: Option<&'static str>) -> SessionEnv<'static> {
+        SessionEnv {
+            wayland_display: None,
+            wayland_socket: socket,
+            display: x11,
+        }
+    }
+
+    /// D-093: a client handed a pre-connected compositor socket is on Wayland,
+    /// even though `WAYLAND_DISPLAY` is unset and `DISPLAY` is set.
+    ///
+    /// This is the Flatpak/portal shape, and before P8 wave 4 it classified as
+    /// **X11** - so Duja drove `XRandR` gamma and an X11 overlay through
+    /// Xwayland. That is exactly what the "Wayland wins when both are set" rule
+    /// exists to prevent, reached through the one door the rule did not cover.
+    #[test]
+    fn a_handed_over_wayland_socket_is_a_wayland_session() {
+        assert_eq!(
+            transport(handed_over(Some("4"), Some(":0"))),
+            Transport::Wayland,
+            "a pre-connected compositor fd was read as X11 because Xwayland set DISPLAY"
+        );
+        // And with no X11 at all, which is the sandbox that forwards only Wayland.
+        assert_eq!(transport(handed_over(Some("4"), None)), Transport::Wayland);
+    }
+
+    /// An empty `WAYLAND_SOCKET` is unset, like the other two. Worse here than
+    /// elsewhere: it would claim a Wayland session with no way to reach it.
+    #[test]
+    fn an_empty_wayland_socket_is_not_a_wayland_session() {
+        assert_eq!(transport(handed_over(Some(""), Some(":0"))), Transport::X11);
+        assert_eq!(transport(handed_over(Some(""), None)), Transport::None);
+    }
+
+    /// The variable list lives in one place now, so the reading of it is pinned
+    /// once rather than at five call sites.
+    #[test]
+    fn session_env_vars_borrows_all_three() {
+        let vars = SessionEnvVars {
+            wayland_display: Some("wayland-1".to_owned()),
+            wayland_socket: Some("4".to_owned()),
+            display: Some(":0".to_owned()),
+        };
+        let env = vars.as_session_env();
+        assert_eq!(env.wayland_display, Some("wayland-1"));
+        assert_eq!(env.wayland_socket, Some("4"));
+        assert_eq!(env.display, Some(":0"));
     }
 
     fn connected<'a>(globals: &'a [&'a str]) -> Probe<'a> {

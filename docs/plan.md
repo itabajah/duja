@@ -79,7 +79,7 @@ feature area.
 | 1 | binary size: measure first, then trim, then gate it ([D-011](debt-archive.md#d-011), [ADR-0012](adr/0012-binary-size-budget-variance.md)) | done - `#144`, D-011 drained |
 | 2 | the fuzz and coverage lanes ([D-002](debt-archive.md#d-002), [D-023](debt-archive.md#d-023)) | done - `#145` |
 | 3 | `--soak`, the harness two perf budgets already cite | done - `#146` |
-| 4 | the debt drain (`refactor:` PR, the rubric's ~15% time-box) | pending |
+| 4 | the debt drain (`refactor:` PR, the rubric's ~15% time-box) | done - `#147` |
 | 5 | the security pass and the docs-truth sweep | pending |
 | 6 | the phase gate - **the multi-reviewer one** - and `m8-hardening` | pending |
 
@@ -238,7 +238,7 @@ code. It runs on the dev box for the long burn, and a short one belongs in CI.
 The rubric time-boxes this at ~15% of the phase. Rows are picked for being
 *fixable without hardware*, per the scheduling rule above.
 
-- **[D-108](debt.md#d-108) first**, because it is the one whose damage lands on
+- **[D-108](debt-archive.md#d-108) first**, because it is the one whose damage lands on
   a bystander: every clean quit writes identity gamma to *every* display, so
   quitting Duja flattens f.lux, redshift or a calibration curve it never
   touched. Test-first, red proven before the fix, and the defect re-inserted
@@ -255,7 +255,7 @@ The rubric time-boxes this at ~15% of the phase. Rows are picked for being
   inputs. Its own deferral says to revisit "when the P8 soak numbers set a real
   threshold", and wave 3 is where those numbers come from, so this row is
   sequenced after it rather than beside it.
-- **[D-093](debt.md#d-093)** - `WAYLAND_SOCKET` is not consulted, so a client
+- **[D-093](debt-archive.md#d-093)** - `WAYLAND_SOCKET` is not consulted, so a client
   handed a compositor socket is classified X11. Pure, testable, no session
   needed.
 

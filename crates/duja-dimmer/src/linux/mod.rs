@@ -47,7 +47,7 @@ pub use overlay::X11Dimmer;
 use duja_core::dimmer::{DimCommand, Dimmer, DimmerError};
 
 use crate::gamma_support::{GammaSupport, RestoreReport, gamma_support_from_hdr};
-use crate::linux_caps::{Probe, SessionEnv, SurfaceCaps, Transport, resolve, transport};
+use crate::linux_caps::{Probe, SessionEnvVars, SurfaceCaps, Transport, resolve, transport};
 use crate::linux_gamma::hdr_active_for;
 
 /// The [`Dimmer`] for a Linux session, chosen at **runtime**.
@@ -76,12 +76,8 @@ impl LinuxDimmer {
     /// they are distinguished because one is a fault worth a log line naming the
     /// cause and the other is an ordinary session.
     pub fn spawn() -> Result<Self, DimmerError> {
-        let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
-        let display = std::env::var("DISPLAY").ok();
-        let env = SessionEnv {
-            wayland_display: wayland_display.as_deref(),
-            display: display.as_deref(),
-        };
+        let vars = SessionEnvVars::from_env();
+        let env = vars.as_session_env();
         match transport(env) {
             Transport::X11 => X11Dimmer::spawn().map(|dimmer| LinuxDimmer {
                 inner: Box::new(dimmer),
@@ -371,12 +367,8 @@ pub fn display_supports_gamma() -> GammaSupport {
 /// Read per call rather than cached: a cached answer is wrong for exactly the
 /// session that changed under a running process, and two `getenv`s cost nothing.
 pub(super) fn session_transport() -> Transport {
-    let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
-    let display = std::env::var("DISPLAY").ok();
-    transport(SessionEnv {
-        wayland_display: wayland_display.as_deref(),
-        display: display.as_deref(),
-    })
+    let vars = SessionEnvVars::from_env();
+    transport(vars.as_session_env())
 }
 
 /// Resolve what this session can actually do.
@@ -390,12 +382,8 @@ pub(super) fn session_transport() -> Transport {
 /// second, contradictory answer for a screen the compositor already owns.
 #[must_use]
 pub fn probe_session() -> SurfaceCaps {
-    let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
-    let display = std::env::var("DISPLAY").ok();
-    let env = SessionEnv {
-        wayland_display: wayland_display.as_deref(),
-        display: display.as_deref(),
-    };
+    let vars = SessionEnvVars::from_env();
+    let env = vars.as_session_env();
     match transport(env) {
         Transport::Wayland => {
             let (connected, interfaces) = wayland::probe();

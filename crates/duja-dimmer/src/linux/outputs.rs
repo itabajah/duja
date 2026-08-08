@@ -13,7 +13,7 @@
 
 use duja_core::dimmer::DisplayBounds;
 
-use crate::linux_caps::{SessionEnv, Transport, transport};
+use crate::linux_caps::{SessionEnvVars, Transport, transport};
 use crate::linux_outputs::ServerOutput;
 
 /// Enumerate the outputs of whichever display server this session is on.
@@ -30,12 +30,8 @@ use crate::linux_outputs::ServerOutput;
 /// set of rectangles for a screen the compositor already owns.
 #[must_use]
 pub fn enumerate_outputs() -> Vec<ServerOutput> {
-    let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
-    let display = std::env::var("DISPLAY").ok();
-    let env = SessionEnv {
-        wayland_display: wayland_display.as_deref(),
-        display: display.as_deref(),
-    };
+    let vars = SessionEnvVars::from_env();
+    let env = vars.as_session_env();
     match transport(env) {
         Transport::Wayland => wayland(),
         Transport::X11 => x11(),

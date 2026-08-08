@@ -1241,7 +1241,7 @@ rather than left implicit.
 | 4b-5 | the X11 cursor anchor, so the flyout has somewhere to open | done - `#132` |
 | 5 | un-gate the tray (ksni as the third arm) | done - `#134`, `#136` |
 | 6 | `xtask dist --target linux`, the release job, and the docs | done - `#140`, `#141` |
-| 7 | phase gate, tag `m7-linux` | done - one finding, [D-108](debt.md#d-108) |
+| 7 | phase gate, tag `m7-linux` | done - one finding, [D-108](debt-archive.md#d-108) |
 
 **Two corrections to the original table, made at the 2026-08-07 checkpoint.**
 Wave 5 was written as "un-gate the tray **+ `dujactl doctor`'s Linux
@@ -1358,7 +1358,7 @@ to the Linux code that has never executed and to the cross-crate invariants no
 per-crate suite sees. [The write-up below](#s37) opens with that distinction
 rather than burying it.
 
-One finding changed the tree: [D-108](debt.md#d-108), every clean quit writing
+One finding changed the tree: [D-108](debt-archive.md#d-108), every clean quit writing
 identity gamma to displays Duja never touched. One suspected finding turned out
 to be already guarded, and is recorded as such - the token a Linux display is
 addressed by is stamped in one crate and parsed in another, with every fixture in
@@ -1419,7 +1419,7 @@ statement than "the gate looked for exactly this and found it already guarded".
 ### The finding that became a row
 
 **Every clean quit writes identity gamma to every display**
-([D-108](debt.md#d-108)). `begin_quit` restores what the session engaged and then
+([D-108](debt-archive.md#d-108)). `begin_quit` restores what the session engaged and then
 calls the *global* `duja_dimmer::restore_all()` unconditionally, and that call
 means three different things: macOS reloads the user's colour profile (benign),
 Windows and X11 write identity to every display or CRTC they can enumerate
