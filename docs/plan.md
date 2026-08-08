@@ -33,12 +33,12 @@ a table produces claims that read as checked and are not, and the corrections
 were worse than the original. What each wave actually drains is decided by
 measurement when it lands, and recorded in [debt.md](debt.md) then.
 
-| wave | what it builds |
-|---|---|
-| 1 | the `AppState` test seam: a fakeable `PlatformTray`, and a fixture that constructs the state |
-| 2 | the same for the gamma channel, which is what the ordering and re-assert properties need |
-| 3 | the instruments behind the performance budgets |
-| 4 | the config cap's write side, and the bounded waits |
+| wave | what it builds | state |
+|---|---|---|
+| 1 | the `AppState` test seam: a fakeable `PlatformTray`, and a fixture that constructs the state | landed |
+| 2 | the same for the gamma channel, which is what the ordering and re-assert properties need | landed |
+| 3 | the instruments behind the performance budgets | not started |
+| 4 | the config cap's write side, and the bounded waits | landed, except [D-076](debt.md#d-076) |
 
 **Wave 1 is the keystone**, and it is the one place a row list is safe, because
 [D-102](debt.md#d-102) had already done the counting: exactly four rows -
@@ -51,11 +51,13 @@ the lowest percentage; seven files are at 0.00 %, all smaller by both measures.
 That distinction is why it was the target and not one of them.
 
 **Waves 1 and 2 have landed, and between them drained three of the four.**
-`tray/state.rs` went 11.27 % to **42.01 %** of regions as of this wave, uncovered 1,031 to 860. (A figure measured per wave rather than kept current: the sibling PRs of the same phase add tests to the same file, so a running total here is stale the day it lands.)
+`tray/state.rs` is at **48.91 %** of regions with 823 uncovered, from 11.27 %
+and 1,031.
 D-040 drained on the `AppState` fixture; D-016 and D-065 on the recording gamma
 channel wave 2 added, which is the seam wave 1's own write-up predicted they
-would need. **D-059 is still open**, and it needs neither: it wants to observe *when*
-`build_tray` ran relative to the loop, which a constructible state is orthogonal
+would need. **D-059 is still open**, and it needs neither: it wants to observe
+*when* `build_tray` ran relative to the loop, which a constructible state is
+orthogonal
 to. Which is this section's warning seen from the inside - a wave drains what it
 turns out to drain, and here the plan happened to be right about all three.
 
@@ -72,6 +74,30 @@ legitimate outcome of this wave and is not a failure of it.
 cannot produce**: beta reports, a locale pass, a display. Those rows stay in
 [debt.md](debt.md), which is where a reader should go for them rather than to a
 summary here.
+
+**Six rows have drained so far** - [D-016](debt-archive.md#d-016),
+[D-040](debt-archive.md#d-040), [D-045](debt-archive.md#d-045),
+[D-065](debt-archive.md#d-065), [D-113](debt-archive.md#d-113) and
+[D-114](debt-archive.md#d-114) - taking `debt.md` from 107 rows to 101. What is
+left of the phase is wave 3 in full, [D-076](debt.md#d-076) from wave 4, and
+[D-059](debt.md#d-059), which wave 1 turned out not to touch.
+
+**Two things are worth carrying out of it, and neither is a row.** Every PR was
+reviewed adversarially and every review found something real - which by now is
+unremarkable. What is not: **every review round after the first found a defect
+the previous round's correction had introduced**, on four of the six. Among them
+a fix for one data-loss path that opened another, tests that launched a browser
+and made a live network call one commit after the seam for that exact hazard
+landed, a correction that replaced a true quotation with a false one and
+labelled it *measured*, and a claim about compiling on all three lanes that
+broke two of them. Corrections are about as defect-prone as the work they
+correct, and only measurement tells them apart.
+
+The second thing follows from it: **`#82`'s rule caught something again.**
+[D-045](debt-archive.md#d-045)'s red-first proof pinned a pure function the fix
+itself introduced, which never carried the bug - the historical defect, restored
+at the site it occupied, leaves the suite green. That row now says so rather
+than reading as protected.
 
 ### 2. The hardware runs
 
@@ -161,7 +187,7 @@ is a phase tag rather than a version.
 | P6 macOS port | `m6-macos` | done, gate passed |
 | P7 Linux port | `m7-linux` | done, gate run |
 | P8 Hardening | `m8-hardening` | done, gate run, `v1.0.0` held |
-| P9 App-layer seam + instruments | `m9-seam` | planned |
+| P9 App-layer seam + instruments | `m9-seam` | in progress |
 
 How each closed phase went is in [history.md](history.md); P9 gets its entry
 when it closes. P7 and P8 are the only ones written up wave by wave. P6 and P7
