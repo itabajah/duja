@@ -86,9 +86,10 @@ pub(super) struct AppState {
     /// throttle on this path was a real shipped defect (P4 gate Finding 1).
     ///
     /// Its tests in [`crate::bin_support::level_forward`] cover only the
-    /// forwarder itself; the callers above it in this file are unpinned. See
-    /// [`set_user_level`](Self::set_user_level) for exactly what is and is not
-    /// covered.
+    /// forwarder itself, which is *downstream* of both callers and so can never
+    /// see a throttle placed above it. Those callers are pinned separately - see
+    /// [`set_user_level`](Self::set_user_level), which names the two tests and
+    /// why there are two.
     pub(super) levels: LevelForwarder<EngineLevelSink>,
     /// The opt-in gamma sub-floor channel (RAII crash-marker owner + engage/
     /// restore executor). Drives [`DimCommand`]s carrying a gamma factor to the
@@ -738,10 +739,11 @@ impl AppState {
     /// This paragraph used to go on to say why that could not change - that
     /// `AppState` "cannot be built off the Slint main thread" because it owns a
     /// [`super::surface::PlatformTray`] and two live Slint shells. **That is no
-    /// longer the reason.** the `fixture` module below (`cfg(test)`, so rustdoc does not render it) builds an `AppState` on every lane, with
-    /// a recording fake behind the tray seam and the headless Slint backend
-    /// behind both shells, and the throttle rows that shared this excuse have
-    /// drained on it. What is left here is an ordinary uncovered call: nothing
+    /// longer the reason.** The `fixture` module below (`cfg(test)`, so rustdoc
+    /// does not render it) builds an `AppState` on every lane, with a recording
+    /// fake behind the tray seam and the headless Slint backend behind both
+    /// shells, and the one throttle row that shared this excuse has drained on
+    /// it. What is left here is an ordinary uncovered call: nothing
     /// stops a test from building a fixture, calling `show_flyout`, and asserting
     /// the palette was re-resolved. It has not been written, which is a different
     /// statement from the one that used to be here and a much cheaper one to act
@@ -1424,9 +1426,23 @@ const fn retires_dimmer(error: &duja_core::dimmer::DimmerError) -> bool {
 ///
 /// # What is real here and what is not
 ///
-/// Nothing reaches an OS except the two Slint shells, which the headless backend
-/// serves, and `OsHotkeyRegistrar::new`, which already degrades to `None` when
-/// no manager can be made. In particular the **gamma sink is real**, and is made
+/// Two things here reach an OS and both are bounded. The Slint shells go through
+/// the headless backend. `OsHotkeyRegistrar::new` builds a real
+/// `GlobalHotKeyManager` on an interactive session - it does *not* merely
+/// degrade to `None`, which an earlier draft of this paragraph implied - but it
+/// registers nothing, because `register()` is never called, and it drops with
+/// the fixture.
+///
+/// **A third thing did reach one, and had to be given a seam.** Windows' update
+/// toast is a real `ToastNotification` under the `AppUserModelID` the installer
+/// stamps on the Start-Menu shortcut. Before `toast`'s `cfg!(test)` diversion
+/// existed, these tests put four fabricated "Duja update available"
+/// notifications into the operator's Action Center on every `cargo test`. A
+/// review found it, not anything that could fail - and the useful part is that
+/// the tray had just been given a fake for this exact hazard while the call
+/// beside it was walked straight past.
+///
+/// In particular the **gamma sink is real**, and is made
 /// inert the only way that is honest: its `resolve` closure answers `None` for
 /// every id, which is the sink's own documented "no device for this display"
 /// path. It returns `false` before any OS call, writes no crash marker and
@@ -1476,8 +1492,10 @@ pub(super) mod fixture {
     /// Per thread, not per process, and that distinction is the whole reason
     /// this is a function rather than a bare call at the top of each test.
     /// `init_no_event_loop` binds the platform to its *calling* thread, and a
-    /// shell built on any other one fails with "The Slint platform was
-    /// initialized in another thread". `cargo test` runs a binary's tests on
+    /// shell built on any other one fails to construct at all - measured, the
+    /// message is "Could not initialize backend. ... No backends configured",
+    /// not the "initialized in another thread" an earlier draft quoted from
+    /// memory. `cargo test` runs a binary's tests on
     /// several threads of one process, so a `std::sync::Once` here - which is
     /// what the first version of this used - initialises for whichever test ran
     /// first and breaks every subsequent one. `cargo nextest`, which CI runs,
@@ -1630,10 +1648,15 @@ mod level_path_tests {
     ///  right: 6
     /// ```
     ///
-    /// Both assertions are load-bearing and for different failures. A throttle
-    /// that merely coalesced would fail the count; one that dropped the trailing
-    /// edge would fail the last value. The defect this exists for did the second
-    /// while looking like the first.
+    /// The **count** is the assertion that catches every shape of throttle,
+    /// including the historical one: a dropped trailing edge is five samples
+    /// where six were sent. The last-value check is defence in depth rather than
+    /// an independent guard - an earlier draft of this comment sold it as
+    /// catching a case the count could not, and it does not. What it is for is a
+    /// future throttle that coalesces *without* changing the count, and it costs
+    /// two lines. The released sample is deliberately not the drag's extreme for
+    /// the same reason: a throttle that happened to keep the minimum would look
+    /// right on value alone.
     #[test]
     fn a_slider_drag_forwards_every_sample_and_the_released_value_last() {
         let mut h = harness(Config::default());

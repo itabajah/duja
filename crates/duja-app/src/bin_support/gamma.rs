@@ -426,11 +426,14 @@ pub(crate) struct GammaTeardown {
 /// version of this comment claimed they did, which was the `#82` shape wearing a
 /// denial of it.
 ///
-/// What would close it is [D-102](https://github.com/itabajah/duja/blob/main/docs/debt.md#d-102)'s
-/// experiment — one `#[ignore]`d test constructing `PlatformTray` headless — and
-/// that experiment is *why* this gap is still open rather than a reason it has to
-/// be: D-102 already records that the "`AppState` cannot be constructed" excuse
-/// went stale when `#134` removed the `tray_icon::TrayIcon` field.
+/// What this needed was [D-102](https://github.com/itabajah/duja/blob/main/docs/debt.md#d-102)'s
+/// refactor, and half of it has landed: `AppState` is constructible now, behind
+/// a fake tray. The half that is still missing is a **fakeable gamma channel**.
+/// The fixture's sink is inert by design - its resolver answers `None` for every
+/// id, so no ramp is touched - which means the engage and restore phases produce
+/// nothing a test can observe, and re-inserting the wrong order at `begin_quit`
+/// would still leave the suite green. So the gap is narrower and its shape is
+/// known, which is not the same as closed.
 pub(crate) fn tear_down_gamma(
     own_restore: impl FnOnce() -> bool,
     wide_rescue: impl FnOnce() -> duja_dimmer::RestoreReport,

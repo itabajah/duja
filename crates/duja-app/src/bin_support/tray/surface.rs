@@ -46,9 +46,10 @@
 //! It is still not a `dyn` trait, and the reason survives the amendment intact:
 //! the second implementation exists only where `cfg(test)` is on, so nothing
 //! shipped ever dispatches, and the enum keeps every backend's methods
-//! *inherent* - a trait would have to name the union of three signatures, two of
-//! which are infallible for backend-specific reasons this module documents at
-//! length.
+//! *inherent* - a trait would have to fix one signature per verb where the
+//! backends disagree about fallibility, for reasons this module documents at
+//! length. All three of Linux's are infallible and keep a `Result` only so
+//! `AppState` needs no `cfg`; the other arm's three genuinely fail.
 
 use anyhow::Result;
 use duja_ui::accent::AccentChoice;

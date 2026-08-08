@@ -982,7 +982,7 @@ Both are remote: `state.toml` is tens of bytes per display, so roughly thirteen 
 
 **Where:** `duja-app` `bin_support/tray/state.rs` &nbsp;·&nbsp; **Added:** 2026-08-07 checkpoint
 
-**Four rows defer on the same sentence, and `#134` falsified half of it.** [D-016](#d-016), [D-040](#d-040), [D-059](#d-059) and [D-065](#d-065) each say `AppState` "cannot be constructed in a test: it owns two live Slint shells and a concrete `tray_icon::TrayIcon` whose only constructor does `CreateWindowExW` + `Shell_NotifyIconW`". Both halves of that need re-triaging, and neither was re-checked when the ground moved.
+**Four rows deferred on the same sentence, and `#134` falsified half of it.** [D-016](#d-016), [D-040](debt-archive.md#d-040), [D-059](#d-059) and [D-065](#d-065) each say `AppState` "cannot be constructed in a test: it owns two live Slint shells and a concrete `tray_icon::TrayIcon` whose only constructor does `CreateWindowExW` + `Shell_NotifyIconW`". Both halves of that need re-triaging, and neither was re-checked when the ground moved.
 
 **The tray half is gone.** `#134` replaced the three concrete `tray-icon` handles with one `PlatformTray`, a concrete type per target with three outcome-shaped methods. `AppState` no longer names `tray_icon` at all. What is left of that half is real but far narrower, and the experiment below sharpened it rather than removing it: `PlatformTray`'s **constructor** still reaches the desktop *session*, so it is a live-session type even though it is no longer a live-session *field type*. What the experiment showed is that it does not additionally require a non-test *process* - which makes the obstacle "a test would answer differently per session" rather than "a test cannot build one".
 

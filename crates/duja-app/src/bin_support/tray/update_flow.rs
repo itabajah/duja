@@ -134,8 +134,24 @@ mod tests {
 
     use super::super::state::fixture::harness;
     use super::update_status_from;
+    use crate::bin_support::toast::recorder as toasts;
     use crate::bin_support::updates::UpdateOutcome;
     use duja_ui::UpdateStatus;
+
+    /// Every toast this thread has been asked to show, and a clean slate first.
+    ///
+    /// The clear is not hygiene. Windows' toast arm is a **real**
+    /// `ToastNotification` under the `AppUserModelID` the installer stamps on the
+    /// Start-Menu shortcut, so before `toast`'s seam existed these tests put four
+    /// fabricated "Duja update available" notifications into the operator's
+    /// Action Center on every `cargo test`. The recorder is what stands in for
+    /// that now, and asserting on it is what keeps the seam from quietly
+    /// regressing to the thing it replaced.
+    fn toasts_after(exercise: impl FnOnce()) -> Vec<String> {
+        toasts::clear();
+        exercise();
+        toasts::shown()
+    }
 
     /// The same version surfaces once, however many times it is announced.
     ///
@@ -152,9 +168,16 @@ mod tests {
     fn the_same_version_is_announced_to_the_tray_only_once() {
         let mut h = harness(Config::default());
 
-        h.app.surface_update_available("v9.9.9");
-        h.app.surface_update_available("v9.9.9");
+        let toasted = toasts_after(|| {
+            h.app.surface_update_available("v9.9.9");
+            h.app.surface_update_available("v9.9.9");
+        });
 
+        assert_eq!(
+            toasted,
+            ["v9.9.9"],
+            "the toast is behind the same guard, and a duplicate one is what a              user would actually notice"
+        );
         let (_, tooltips, updates) = h.app.tray.recorded();
         assert_eq!(updates, ["v9.9.9"], "one announcement, not two");
         assert_eq!(
@@ -191,6 +214,7 @@ mod tests {
     #[test]
     fn a_foreground_check_reflects_but_does_not_surface() {
         let mut h = harness(Config::default());
+        toasts::clear();
 
         h.app.on_update_outcome(
             UpdateOutcome::UpdateAvailable {
@@ -202,6 +226,10 @@ mod tests {
         let (_, tooltips, updates) = h.app.tray.recorded();
         assert!(updates.is_empty(), "the tray must stay quiet: {updates:?}");
         assert!(tooltips.is_empty(), "{tooltips:?}");
+        assert!(
+            toasts::shown().is_empty(),
+            "and so must the desktop: a user who just clicked Check now is              already looking at the answer"
+        );
         assert_eq!(
             h.app.settings_vm.borrow().update_status(),
             &UpdateStatus::Available {
