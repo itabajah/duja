@@ -11,38 +11,68 @@ P0 through P8 are all closed, and their write-ups are in
 [history.md](history.md). What remains splits on a line that is easy to blur and
 expensive to blur: **"no hardware to write" is not "no hardware to trust".**
 
-P6 is the standing proof. A fully green DDC codec suite described a wire no
-display could answer, and the gate found it. Purity buys host-testability, not
-correctness against something external. So what is left sorts into three
-buckets, and only the first can be *closed* from here.
+P6 is where that was paid for, though not in the way it is usually retold.
+`duja-ddc`'s macOS codec suite was fully green while the frames it built
+disagreed with the reference implementations it was modelled on, and what caught
+that was the gate *reading* four of them side by side - no display has ever
+refused those frames, because no display has ever seen them. So the lesson is
+sharper than "test on hardware": the green suite was not evidence, and what
+substituted for the hardware was a review rather than a better test.
+[`#106`'s write-up](history.md#s12) still records the finding as a reading of
+the wire rather than an observation, which is why the macOS rows stayed open.
+
+So what is left sorts as follows: what P9 can finish here, what needs a machine
+this project does not have, the overlap between them, and the remainder.
 
 ### 1. P9 - the app-layer seam and the instruments
 
-The phase that needs no hardware this project lacks. Of the 107 rows open at the
-`v0.1.6` checkpoint, about thirty are hardware-blocked and the rest are in
-reach; they sort into six waves whose order is a dependency order rather than a
-preference.
+The phase that can be *finished* here. It is deliberately narrow: every row
+below was checked against its own "Why deferred" rather than against a guess,
+and the ones whose deferral names something P9 cannot produce - beta reports, a
+locale pass, a design call that is the maintainer's to make, a display - were
+left in [debt.md](debt.md) rather than given a wave they would not close in.
 
 | wave | what | rows |
 |---|---|---|
 | 1 | the `AppState` seam - a fakeable `PlatformTray` | [D-102](debt.md#d-102), draining [D-016](debt.md#d-016) [D-040](debt.md#d-040) [D-059](debt.md#d-059) [D-065](debt.md#d-065) |
-| 2 | the budgets that cannot fail | [D-005](debt.md#d-005) [D-109](debt.md#d-109) [D-110](debt.md#d-110) [D-111](debt.md#d-111) [D-112](debt.md#d-112) |
-| 3 | caps and bounds | [D-113](debt.md#d-113) [D-114](debt.md#d-114) [D-045](debt.md#d-045) [D-076](debt.md#d-076) |
-| 4 | what wave 1 unlocks | ~17 app-layer rows that today read "`AppState` cannot be constructed" |
-| 5 | features with no consumer | [D-003](debt.md#d-003) [D-012](debt.md#d-012) [D-013](debt.md#d-013) [D-025](debt.md#d-025) [D-057](debt.md#d-057) [D-058](debt.md#d-058) |
-| 6 | UI polish | [D-032](debt.md#d-032) and D-034 through D-039 |
+| 2 | the budgets that cannot fail | [D-109](debt.md#d-109) [D-110](debt.md#d-110) [D-111](debt.md#d-111) [D-112](debt.md#d-112), then [D-005](debt.md#d-005) |
+| 3 | caps and bounds | [D-113](debt.md#d-113) [D-045](debt.md#d-045) [D-076](debt.md#d-076); [D-114](debt-archive.md#d-114) is drained |
+| 4 | the hardware-free hoists | [D-018](debt.md#d-018) [D-034](debt.md#d-034) [D-070](debt.md#d-070) |
 
-**Wave 1 is the keystone** and everything in wave 4 is behind it. Wave 3's
-[D-114](debt.md#d-114) is an hour and its deferral reason expired when `v0.1.6`
-was tagged, so it goes first in wall-clock even though it is not first in
-importance.
+**Wave 1 is the keystone.** It is also the only thing that drains those four
+rows, all of which defer on one sentence - "`AppState` cannot be constructed in
+a test" - that [D-102](debt.md#d-102) has already shown to be false in both
+halves. `tray/state.rs` sits at **11.27 %** of regions, which is the largest
+uncovered *surface* in the workspace at 1,031 regions rather than the lowest
+percentage; seven smaller files are at 0.00 %. That distinction is the reason
+this is the target and not one of them.
 
-**Two of wave 2's rows may end in "narrow the row" rather than "build the
-thing"**, and that is a legitimate outcome. [D-110](debt.md#d-110)'s honest cost
-is a ~20-minute fat-LTO build against a PR matrix that finishes in a fraction;
-[D-112](debt.md#d-112) as written needs the soak to drive real overlays on the
-operator's screen for 24 hours. A budget line that is wrong is better deleted
-than instrumented.
+**Wave 2's rows are budgets that cannot fail**, and two of them may honestly end
+in "narrow the row" rather than "build the thing". [D-110](debt.md#d-110)'s cost
+is a ~20-minute fat-LTO build against a PR matrix that finishes in a fraction.
+[D-005](debt.md#d-005) is sequenced last because its own deferral says to
+revisit "when the P8 soak numbers set a real threshold", and 90 seconds is not
+that - so it waits on [D-111](debt.md#d-111) and may then turn out to be a line
+worth deleting rather than tuning. A budget nobody can fail is worse than no
+budget, and an instrument nobody will run is worse than both.
+
+**Wave 4 is three rows that say, in their own text, that the fix needs no
+hardware.** [D-018](debt.md#d-018) calls the hoist "a small, hardware-free
+change and the natural next step" - `duja-panel` already solved the identical
+problem with a pure function that reds on the same swap.
+[D-070](debt.md#d-070)'s preferred remedy of the three it lists is the pure
+`xtask` PNG encoder, "unit-testable on every lane"; only the `sips`/`iconutil`
+option it rejects needs a Mac. What a Mac would still settle is whether Finder
+*renders* the result, so this one lands with tests and its confirmation line
+stays open.
+
+**There is no wave for "what the seam unlocks", and there was one in the first
+draft of this file.** It claimed ~17 app-layer rows wait on `AppState`. Four do,
+and wave 1 drains all four. The rest - D-006, D-007, D-008, D-033, D-043, D-044,
+D-050, D-053, D-060, D-062, D-063, D-064 - defer on design decisions, absent
+consumers, or a hardware tolerance, and not one of them mentions `AppState`. The
+number was inferred from a theme rather than counted, which is the defect class
+this file's last rule is about.
 
 ### 2. The hardware runs
 
@@ -67,27 +97,40 @@ never-executed paths come first. `v1.0.0` needs the first two.
 
 ### 3. Writable here, confirmable only there
 
-A third bucket that is neither of the above, and the one this file most needs to
-name. These fixes can be *written* on this box and are sound on the code's own
-terms - [D-015](debt.md#d-015) says so explicitly - but nothing here can
-*confirm* them: [D-018](debt.md#d-018), the macOS packaging rows D-070 and
-D-072 through D-074, the Linux gamma rows D-094 through D-097 and D-099 through
-D-100 (D-098 is already drained),
-[D-103](debt.md#d-103), [D-104](debt.md#d-104), [D-106](debt.md#d-106),
-[D-107](debt.md#d-107), and
-[D-093](debt.md#d-093), which needs a design rather than a patch because the
-obvious fix made it worse.
+Not a fourth pile: this is the **writable subset of the section above**, and
+saying so is the point. A row can appear in both because writing a remedy and
+trusting it are different events on different days.
+[D-015](debt.md#d-015) is the clearest case - the row itself says its remedy "is
+the one that does not need a Mac to write (it still needs one to confirm)" -
+and it is listed under the macOS run in the table above for the confirmation
+half. [D-106](debt.md#d-106)'s `probe_session` deadline is the same shape on the
+Linux side.
 
-They may be worked at any time. **They do not close when they land.** Marking
-one drained on the strength of a green suite is precisely the P6 failure, and a
-row that overstates its own evidence is what [debt.md](debt.md) exists to
-prevent.
+Others of this kind, and this is a sample rather than a census: parts of the
+Linux gamma cluster (D-094 through D-097, D-099, D-100 - D-098 is already
+drained), and the Linux tray and platform rows around them.
+[D-093](debt.md#d-093) is adjacent but different: it needs a *design* rather
+than a patch, because P8 wave 4 tried the obvious fix and a review caught it
+making things worse.
+
+**They do not close when they land.** Marking one drained on the strength of a
+green suite is the P6 shape exactly, and a row that overstates its own evidence
+is what [debt.md](debt.md) exists to prevent.
+
+Two rows are deliberately **not** here, because their own text rules the writing
+out rather than the confirming. [D-107](debt.md#d-107) says a native package
+built from a machine that has never run the binary "would be a guess presented
+as a supported package, which is the false-assurance shape this project rates
+worse than an admitted gap", and fixes the ordering: archive, then hardware,
+then package. [D-104](debt.md#d-104) makes the softer version of the same
+argument about a `StatusNotifierItem` tooltip no lane can host.
 
 ### 4. [debt.md](debt.md)
 
-Everything else. It is not a queue to burn down - several rows are deliberately
-open, and a few record a deferral reason that later turned out to be false,
-which is the part worth reading.
+Everything else, and it is by some way the largest of these. It is not a
+queue to burn down - several rows are deliberately open, and a few record a
+deferral reason that later turned out to be false, which is the part worth
+reading.
 
 ## The version ladder
 
@@ -97,6 +140,10 @@ Re-mapped twice. [ADR-0019](adr/0019-version-ladder-and-release-trains.md) set
 platform rows: preview artifacts ship on the patch train, and `v0.2.0` /
 `v0.3.0` now mean **hardware-confirmed** rather than first-shipped. A phase
 exits on a milestone tag; a release is a separate decision from a tag.
+
+**P9 does not move the ladder**, which is why ADR-0019 needs no amendment for
+it. Its work is app-layer and tooling on the Windows train, so it lands on
+`v0.1.x` like every other patch; `m9-seam` is a phase tag and not a version.
 
 ## The phases
 
@@ -111,13 +158,14 @@ exits on a milestone tag; a release is a separate decision from a tag.
 | P6 macOS port | `m6-macos` | done, gate passed |
 | P7 Linux port | `m7-linux` | done, gate run |
 | P8 Hardening | `m8-hardening` | done, gate run, `v1.0.0` held |
-| P9 App-layer seam + instruments | `m9-seam` | in progress |
+| P9 App-layer seam + instruments | `m9-seam` | planned |
 
-How each went is in [history.md](history.md). P6 and P7 were both
-hardware-blind by construction; P7 and P8 are the only ones written up wave by
-wave. P6 and P7 were ports that happened to be hardware-blind; P9 is the first
-phase whose *scope was chosen* by that constraint, which is why its section
-above opens on the two-kinds-of-blind distinction rather than on a wave table.
+How each went is in [history.md](history.md). P7 and P8 are the only ones
+written up wave by wave. P6 and P7 were hardware-blind by construction - they
+were ports to machines nobody here has - whereas P9 is the first phase whose
+*scope was chosen* by that constraint rather than merely limited by it. Which is
+why its section above is short: most of what a maintainer might expect to find
+in it is in [debt.md](debt.md) instead, on purpose.
 
 ## How work lands
 
