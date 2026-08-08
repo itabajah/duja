@@ -26,7 +26,7 @@ use duja_ipc::Request;
 use duja_platform::PipeServer;
 use duja_platform::ipc::PipeClient;
 
-pub(crate) use duja_app::ipc::{HeadlessBridge, IpcBridge, handle_request};
+pub(crate) use duja_app::ipc::{HeadlessBridge, IpcBridge, find_by_id, handle_request};
 
 // `TrayBridge` and its three imports carried a `cfg(any(windows, target_os =
 // "macos"))` that was only ever a proxy for "wherever the tray is built" — its
@@ -121,14 +121,18 @@ impl IpcBridge for TrayBridge {
     fn set_level(&self, id: &str, pct: u8) -> bool {
         // Resolve the stable id off the engine snapshot (also the existence
         // check), then apply on the main thread through the flyout's own path.
-        let Some(target) = self
-            .snapshot()
-            .into_iter()
-            .find(|snap| snap.id.as_str() == id)
-        else {
+        //
+        // The lookup itself is `find_by_id` rather than a local `find`, because
+        // this used to be a verbatim copy of the one in
+        // `HeadlessBridge::set_level` and this copy was the untested one. Two
+        // spellings of "which display does this id name" *on the IPC surface* is
+        // one more than the protocol has. (The hardware path deliberately has a
+        // second, slot-aware rule — see `find_by_id`'s own doc.)
+        let snapshot = self.snapshot();
+        let Some(target) = find_by_id(&snapshot, id) else {
             return false;
         };
-        crate::bin_support::tray::ipc_apply_set_level(target.id, pct);
+        crate::bin_support::tray::ipc_apply_set_level(target.id.clone(), pct);
         true
     }
 

@@ -203,9 +203,17 @@ impl PlatformTray {
 
 #[cfg(test)]
 mod tests {
-    //! `PlatformTray` itself cannot be constructed in a test on any lane — every
-    //! backend needs a live desktop session — so what is pinned here is the seam's
-    //! *shape*, which is the part a second implementation has to match.
+    //! What is pinned here is the seam's *shape*, which is the part a second
+    //! implementation has to match.
+    //!
+    //! This used to say `PlatformTray` "cannot be constructed in a test on any
+    //! lane — every backend needs a live desktop session". The first half is
+    //! now known false: D-102's experiment (`wiring.rs`) builds one in a test
+    //! process and drives all three verbs. The second half is what is actually
+    //! true, and it is why the tests here are still shape-only — the constructor
+    //! needs a live *session*, not merely a non-test process, so a test that
+    //! built one would pass on a developer's desktop and answer differently on
+    //! CI. A fake is the way out, and D-102 carries that.
 
     use super::update_label;
 

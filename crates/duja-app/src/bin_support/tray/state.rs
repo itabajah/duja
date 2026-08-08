@@ -738,7 +738,12 @@ impl AppState {
     ///
     /// The tray is behind a seam now and that changes **nothing** here: the seam
     /// exists so a second backend can exist, not so the field can be faked. Every
-    /// `PlatformTray` a build can construct still needs a live desktop session.
+    /// `PlatformTray` a build can construct still needs a live desktop **session**
+    /// — which D-102's experiment sharpened rather than removed. It does *not*
+    /// need a non-test process: `build_tray` succeeds inside a test binary and
+    /// all three verbs work. That makes the obstacle "a test would depend on the
+    /// session it ran in", which is worse for CI than an outright refusal would
+    /// have been, and it is why the way out is a fake rather than a constructor.
     /// The two Slint shells are untouched — but do not read that as a second
     /// obstacle, because `duja-ui` builds both of them headless in its own tests
     /// under `i_slint_backend_testing::init_no_event_loop`. The `docs/debt.md`

@@ -116,3 +116,80 @@ fn update_status_from(outcome: UpdateOutcome) -> UpdateStatus {
         UpdateOutcome::Failed(_) => UpdateStatus::Failed,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The one item in this file that is not an [`AppState`] method, and so the
+    //! one a test can reach until [`D-102`]'s refactor lands. The rest of the
+    //! module measured 0 % of regions on 2026-08-08, for that reason.
+    //!
+    //! [`D-102`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-102
+
+    use super::update_status_from;
+    use crate::bin_support::updates::UpdateOutcome;
+    use duja_ui::UpdateStatus;
+
+    #[test]
+    fn every_outcome_maps_to_its_own_status() {
+        assert_eq!(
+            update_status_from(UpdateOutcome::UpToDate),
+            UpdateStatus::UpToDate
+        );
+        assert_eq!(
+            update_status_from(UpdateOutcome::UpdateAvailable {
+                version: "v9.9.9".to_owned()
+            }),
+            UpdateStatus::Available {
+                version: "v9.9.9".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_failure_reports_failed_rather_than_up_to_date() {
+        // The arm worth pinning, though not for the reason first written here.
+        // That comment said the two "both render as 'no update', so transposing
+        // them is invisible in the settings window" - and review disproved it:
+        // `settings_shell.rs` renders "Up to date" and "Couldn't check for
+        // updates", which are plainly different lines. What is true is the
+        // consequence: a user whose check failed is told they are current, which
+        // is the one wrong answer this mapping can give that a user will act on.
+        // What genuinely collapses the two is `SettingsVm::has_update()`, a
+        // different surface with its own tests.
+        assert_eq!(
+            update_status_from(UpdateOutcome::Failed("connection refused".to_owned())),
+            UpdateStatus::Failed
+        );
+        // The reason string is deliberately dropped rather than surfaced: the
+        // settings window shows a neutral line, per `UpdateOutcome::Failed`'s own
+        // doc. Pinned so a future "helpful" change to show it has to change this
+        // test and read that doc on the way past.
+        assert_eq!(
+            update_status_from(UpdateOutcome::Failed(String::new())),
+            UpdateStatus::Failed
+        );
+    }
+
+    #[test]
+    fn the_version_string_is_carried_through_unaltered() {
+        // The settings window prints this string, so trimming or re-formatting
+        // it here changes what a user reads.
+        //
+        // It does NOT desynchronise the tray menu, which is what this comment
+        // claimed until review: `on_update_outcome` passes the tray its version
+        // from `outcome` directly, never from this function's output, so the two
+        // paths are independent. Worth keeping the correction rather than the
+        // tidier wrong reason, because "these two surfaces share a string" is
+        // exactly the kind of belief that makes a later refactor merge them.
+        for v in ["v1.0.0", "0.1.6", "v2.0.0-rc.1"] {
+            assert_eq!(
+                update_status_from(UpdateOutcome::UpdateAvailable {
+                    version: v.to_owned()
+                }),
+                UpdateStatus::Available {
+                    version: v.to_owned()
+                }
+            );
+        }
+    }
+}
