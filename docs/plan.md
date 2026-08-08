@@ -9,7 +9,7 @@ enough that reading it is never a research task.
 
 **No phase.** P0 through P8 are all closed, and P8's write-up - six waves, the
 multi-reviewer gate, and the nine reviews that every one of found something -
-is in [history.md](history.md). This file carried 240 lines of that detail until
+is in [history.md](history.md). This file carried 244 lines of that detail until
 the `v0.1.6` checkpoint, which is exactly the shape its own opening paragraph
 forbids; the P7 wave table was moved for the same reason one checkpoint earlier.
 
@@ -54,7 +54,9 @@ step one rather than an aside.
 
 Closing it drains [D-016](debt.md#d-016), [D-040](debt.md#d-040),
 [D-059](debt.md#d-059) and [D-065](debt.md#d-065), and moves
-`tray/state.rs` off the worst coverage number in the workspace. It is the
+`tray/state.rs` off **11.27 %**, which is the largest uncovered *surface* in the
+workspace at 1,031 regions rather than the lowest percentage - seven smaller
+files sit at 0.00 %. It is the
 largest single piece of work left that needs no hardware.
 
 ### 3. [debt.md](debt.md)

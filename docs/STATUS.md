@@ -40,8 +40,8 @@ verbatim and unpruned, which is where they belong.
 | P3 Windows hardware slice | `m3-win-hw` | done |
 | P4 Windows dimmer + UI (MVP) | `m4-win-mvp` | done |
 | P5 Power features (Windows complete) | `m5-win-full` | done |
-| P6 macOS port | `m6-macos` | done, gate passed, release held |
-| P7 Linux port | `m7-linux` | done, gate run, release held |
+| P6 macOS port | `m6-macos` | done, gate passed |
+| P7 Linux port | `m7-linux` | done, gate run |
 | P8 Hardening | `m8-hardening` | done, gate run, `v1.0.0` held |
 
 | release | train | state |
@@ -86,8 +86,7 @@ the artifact those runs need is downloadable at last.
 
 ## The build constraint that has not gone away
 
-**The constraint that shaped P7 has not gone away**, and P8 ran straight into
-it more than once: **`duja-app` cannot be built for Linux on the Windows dev box**
+P8 ran straight into it more than once, and so did this checkpoint: **`duja-app` cannot be built for Linux on the Windows dev box**
 (`yeslogic-fontconfig-sys` wants a pkg-config sysroot; `RUST_FONTCONFIG_DLOPEN=1`
 gets past it and then `fontique` fails on the dlopen module layout, confirmed
 twice), so any size number for a non-Windows target is a CI-only measurement.
@@ -113,7 +112,9 @@ own `display` helper inside its macros.
 Measured on this box, 2026-08-08:
 
 - **1,413 tests** pass in a local `cargo test --workspace --all-features`,
-  8 of them `#[ignore]`d. Re-measured at the `v0.1.6` checkpoint; the P8 gate
+  with a further **8 `#[ignore]`d** on top of that rather than among them - an
+  ignored test does not pass, and writing it as "8 of them" was wrong for one
+  edit's lifetime. Re-measured at the `v0.1.6` checkpoint; the P8 gate
   had found the figure before it 36 low, so it is now re-counted with every
   release rather than carried forward.
   The per-OS count differs, and deliberately is not enumerated here: the
@@ -124,9 +125,10 @@ Measured on this box, 2026-08-08:
   (advisories, bans, licenses, sources); **6 fuzz targets** building on stable,
   burned weekly by `fuzz.yml` and compile-checked on every PR.
 - Adversarial review of **every PR** at the `v0.1.6` checkpoint as well, and
-  both found major defects: two false capability claims in the file published
-  verbatim to users, and a test whose *name* asserted the one thing its
-  experiment did not measure. Adversarial gate reviews at
+  every one found major defects: two false capability claims in the file
+  published verbatim to users; a test whose *name* asserted the one thing its
+  experiment did not measure; and, in the docs sweep itself, two false
+  superlatives about coverage plus a link the reorganisation broke. Adversarial gate reviews at
   **P2, P3, P4, P5, P6 and P8**. **P7's was
   narrower** - one targeted pass rather than several independent reviewers - and
   [history.md](history.md) says so at the top of its write-up rather than in a

@@ -49,6 +49,12 @@ to assert.
   - [UI layout & ruby theme (2026-07-14)](#s22)
   - [v0.1.0 release (2026-07-16)](#s23)
 - [P8 waves, as planned and as they went](#s52)
+  - [Wave 1 - the binary](#s53)
+  - [Wave 2 - the fuzz and coverage lanes](#s54)
+  - [Wave 3 - `--soak`](#s55)
+  - [Wave 4 - the debt drain](#s56)
+  - [Wave 5 - the security pass](#s57)
+  - [Wave 6 - the gate](#s58)
 - [P8 gate results](#s47)
   - [What this gate was](#s48)
   - [The finding no single-PR review could have found](#s49)
@@ -1219,9 +1225,25 @@ install and stay current on:
 Moved here from [plan.md](plan.md) at the `v0.1.6` checkpoint, exactly as
 P7's table was when P8 opened. That file's own opening rule is that anything
 already done is described here rather than there; six completed waves were
-240 of its 350 lines, which is the weight it exists to shed. The text is
+244 of its 351 lines, which is the weight it exists to shed. The text is
 unchanged from what it said while the work was in flight, including the
 wave-4 `partial` verdict and the reasoning that turned out to be wrong.
+
+**Four things were reworded in the move, and the first draft claimed nothing
+was** - which is the same slightly-too-clean claim the P7 preamble below had to
+qualify, made again one section up. Three sentences pointed at `history.md`,
+the file they now live in, and one pointed at `plan.md` for a specification that
+had moved here; a fifth, wave 3's link on the words "false assurance", was a
+*broken* link on arrival, because the `## How work lands` heading that resolved
+it stayed behind in `plan.md`. All five are repointed. No other prose changed.
+
+**Read the imperatives below as P8's, not as yours.** "Do not start with the
+levers", "apply each lever alone", "it should be the next thing anybody does
+here" - all were addressed to whoever was executing P8, and several are now
+done. D-102's experiment in particular, which wave 4's text calls the next thing
+anybody should do, was **run** at the `v0.1.6` checkpoint. Note also that this
+file now contains two `### Wave 5` and two `### Wave 6` headings, ~450 lines
+apart: the near ones are P8's, the far ones P7's.
 
 | wave | scope | state |
 |---|---|---|
@@ -1239,6 +1261,7 @@ even though the rest of the wave does not. Wave 5 wants 1 through 4 landed,
 because half of what it checks is whether the docs still describe what those
 waves left behind. Wave 6 is last by definition.
 
+<a id="s53"></a>
 ### Wave 1 - the binary, and checking the ADR's reasoning before following it
 
 [ADR-0012](adr/0012-binary-size-budget-variance.md) raised the budget to 16 MB
@@ -1344,6 +1367,7 @@ What the wave owes when it is done:
   required checks are a repository setting, so a new job is advisory until
   somebody turns it on.
 
+<a id="s54"></a>
 ### Wave 2 - the fuzz and coverage lanes
 
 [D-002](debt-archive.md#d-002) has been open since P2 and names two workflows;
@@ -1364,6 +1388,7 @@ them, which is right - a target nothing runs is a file, not coverage.
   either way it must not become a twelfth required check that a flaky
   instrumentation run can block a merge on.
 
+<a id="s55"></a>
 ### Wave 3 - `--soak`, which the budgets already assume exists
 
 [perf-budgets.md](perf-budgets.md) names `--soak` twice: as the instrument for
@@ -1372,7 +1397,7 @@ flat GDI/USER handle counts". **There is no `--soak` flag.** `--stress` exists
 and does something else (a DDC input flood).
 
 That makes two hard budgets unmeasurable by the method their own row cites,
-which is the [false-assurance](#how-work-lands) shape this project has a rule
+which is the [false-assurance](plan.md#how-work-lands) shape this project has a rule
 against: a maintainer reads the row, believes the budget is checked, and it
 never has been. Either the harness exists or the rows are wrong; building it is
 the better half of that choice, because ADR-0019 puts a soak in the definition
@@ -1382,10 +1407,11 @@ Scope it to what a fake backend can drive unattended: RSS and handle counts
 sampled on a fixed cadence, a growth verdict against the budget, and an exit
 code. It runs on the dev box for the long burn, and a short one belongs in CI.
 
+<a id="s56"></a>
 ### Wave 4 - the debt drain
 
 The rubric time-boxes this at ~15% of the phase. Rows are picked for being
-*fixable without hardware*, per the scheduling rule above.
+*fixable without hardware*, per the scheduling rule P8's plan stated up front and that did not travel with this text: **nothing in P8 should be sequenced behind hardware**, because a wave that cannot finish without a machine this project does not have is a wave that closes by being re-triaged.
 
 - **[D-108](debt-archive.md#d-108) first**, because it is the one whose damage lands on
   a bystander: every clean quit writes identity gamma to *every* display, so
@@ -1427,6 +1453,7 @@ Its deferral note already says to do it in the pass that also runs WMI on a
 borrowed laptop. That laptop is the same one three other rows wait on; the row
 stays open and the reason stays written down.
 
+<a id="s57"></a>
 ### Wave 5 - the security pass and the docs-truth sweep
 
 The [rubric](review-rubric.md) singles P5 and P8 out for the **full SECURITY.md
@@ -1440,20 +1467,21 @@ three", when P7 wave 6 had made it four. Nobody edited the security policy,
 because the tarball landed in `xtask` and the release workflow and there was no
 reason to look there - and `release.yml`'s own comment carried the same stale
 count, which is how far that kind of drift travels. Both fixed in `#148`; the
-write-up is in [history.md](history.md).
+write-up is below.
 
+<a id="s58"></a>
 ### Wave 6 - the gate
 
 **Run.** Three independent reviewers over the cumulative diff, each with a
 distinct lens, on top of a per-PR adversarial review of all six waves. Nine
 reviews; every one found something that would otherwise have shipped. The
-write-up is in [history.md](history.md), including the one finding no single-PR
+write-up is below, including the one finding no single-PR
 review could have seen - `--soak` printing to a console a release build does not
 have - and the honest gap: no mutation-based test-strength pass ran at the gate,
 because it needs to write to the tree the other reviewers were reading.
 
 What it asked for, for the record: P7's was one targeted pass,
-and both [history.md](history.md) and its tag message say so at the top rather
+and both this file and its tag message say so at the top rather
 than in a footnote. That was a defensible call for a phase whose code cannot
 execute anywhere; it is not defensible for the phase whose entire subject is
 whether this is ready to be called 1.0.
@@ -1475,7 +1503,7 @@ The hardening phase gate, over the cumulative `m7-linux..main` diff: 6 commits,
 <a id="s48"></a>
 ### What this gate was
 
-**The multi-reviewer gate [plan.md](plan.md) specifies, run properly.** P7's was
+**The multi-reviewer gate the plan specified, run properly** (that specification is now [the wave-6 entry above](#s52) rather than in `plan.md`). P7's was
 one targeted pass and said so at the top of its own write-up; that was
 defensible for a phase whose code cannot execute anywhere, and it was not
 defensible for the phase whose entire subject is whether this is ready to be

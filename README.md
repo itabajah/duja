@@ -81,8 +81,8 @@ all the way to true black. Tiny, native, and instant.**
 
 > [!NOTE]
 > **Gatekeeper.** The app is signed ad-hoc rather than with a Developer ID, so macOS blocks the
-> first open of a downloaded copy. Allow it in **System Settings > Privacy & Security > Open
-> Anyway**. macOS 15 Sequoia removed the older Control-click > Open shortcut, so guides that still
+> first open of a downloaded copy. Allow it in **System Settings → Privacy & Security → Open
+> Anyway**. macOS 15 Sequoia removed the older Control-click → Open shortcut, so guides that still
 > say "right-click, Open" no longer work.
 
 `dujactl` ships inside the bundle at `Duja.app/Contents/MacOS/dujactl`, so it is not on your
@@ -205,6 +205,7 @@ would be worse than none. Duja registers nothing on Linux and says so: the three
 hotkey settings parse and validate, the rows grey out with the reason, and no
 combination is claimed. The route to a real implementation is the XDG desktop
 portal's `GlobalShortcuts` interface.
+
 ## Build from source
 
 ```sh

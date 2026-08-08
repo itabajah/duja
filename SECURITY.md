@@ -113,6 +113,16 @@ release that carries an unconfirmed platform says so in its own notes, from a
 committed file rather than from whoever cut it.
 
 What that means for this page is narrow and worth stating: **the integrity story
-is identical across all four**, because it is a property of the pipeline rather
-than of the code inside. Verifying a `.dmg` proves it is the artifact this
-repository built at that tag. It does not prove the program in it behaves.
+is identical across all four by design**, because it is a property of the
+pipeline rather than of the code inside. Verifying a `.dmg` proves it is the
+artifact this repository built at that tag. It does not prove the program in it
+behaves.
+
+**One thing about that story is new rather than proven, and deleting the
+sentence that said so would be the wrong kind of tidying.** The minisign and
+attestation steps are gated on a real tag push (`if: env.PUBLISH == 'true'`), and
+until `v0.1.6` no tag had ever carried a `.dmg` or a `.tar.gz` - so those two
+artifacts had never been signed or attested by any run. `v0.1.6` is the first
+release where that path executes for them. If you are verifying one of those two
+and something does not check out, that is worth reporting as a pipeline bug
+rather than assumed to be your mistake.
