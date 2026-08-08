@@ -132,6 +132,7 @@ argument.
 | [D-111](#d-111) | P8 wave 3 | `duja-app` `--soak` + `.github/workflows/` | The soak has never been run for longer than 30 seconds, and nothing runs a short one in CI |
 | [D-112](#d-112) | P8 gate | `duja-app` `--soak` + `duja-dimmer` `win/` | The soak's GDI/USER counters are structurally near-zero: everything that moves them lives in the dimmer and gamma sink, which it does not build |
 | [D-113](#d-113) | P8 gate | `duja-core` `config/persist.rs` | The 1 MiB cap is on reads only, so Duja can write a config it will then refuse to read - and the state path overwrites rather than propagates |
+| [D-114](#d-114) | `v0.1.6` checkpoint | `xtask` `size.rs`/`dist.rs` + `main.rs` | Both subcommands take `std::env::Args`, a type no test can construct, so neither one's argument parsing is reachable by a test |
 
 ## Rows
 
@@ -1045,3 +1046,13 @@ Be precise about what did the work there, because the first version of this para
 **Nothing on any lane has ever seen the Linux tray appear or a Linux ramp land, and the dev box cannot build the crate that would.** The ubuntu runner has no `StatusNotifierWatcher`, no X server and no compositor, so every accept path is unexercised: the tray never registers, a menu item never fires, `set_gamma` always fails. What the lane proves is that it compiles and that the *refusal* paths behave - the marker bookkeeping, the correlation rules, the ARGB32 conversion. This is at parity with Windows and macOS, whose sink tests also only ever drive a failing write, and it is worse than parity in one respect: those two platforms have `tests/windows_live.rs` and `tests/macos_live.rs` for exactly this, and Linux has no equivalent
 
 **Why deferred.** The second half of the headline is the reason: `duja-app` cannot be cross-compiled for Linux on the Windows dev box - `yeslogic-fontconfig-sys` wants a pkg-config sysroot, `RUST_FONTCONFIG_DLOPEN=1` gets past it and then `fontique` fails on the dlopen module layout, confirmed twice. So there is no local loop for this at all, and CI cannot run it either. Two things reduce the cost rather than remove it. An **isolated crate can** be cross-checked (`cargo +1.96.1 check --target x86_64-unknown-linux-gnu`, which only the pinned toolchain has the target for), which is how `#136` validated the whole ksni surface and later all of `gamma.rs` - including clippy and rustdoc - before spending a CI round; that technique belongs in wave 6's toolkit and is written down in [STATUS.md](STATUS.md). And a `linux_live.rs` on the `windows_live.rs` model, gated behind an env var and run by a human on the WSL distro or a VM, is the actual answer - which is wave 7's phase-gate work, not something to bolt on here
+
+### D-114
+
+**Where:** `xtask` `size.rs`/`dist.rs` + `main.rs` &nbsp;·&nbsp; **Added:** `v0.1.6` checkpoint
+
+**Both xtask subcommands take `std::env::Args`, and nothing can construct one.** `size::run(mut args: std::env::Args)` and `dist::run(args: std::env::Args)` are handed the real iterator by `main`, and `std::env::Args` has no public constructor - so every line of argument parsing in both is unreachable from a test by construction rather than by omission. Measured at this checkpoint: `xtask/src/dist.rs` is **41.78 %** of regions, the lowest non-FFI number in the workspace, and `xtask/src/size.rs` is **60.10 %**. Both files' *pure* logic is well covered; the uncovered part is disproportionately the arg loop and the error strings it produces.
+
+What is unguarded is not hypothetical. `size::run` rejects an unknown argument and fails when `--target` is given no value; `dist::run` has its own set. Those are the paths a maintainer hits at 2am while cutting a release, and they are exactly the paths a typo in a `match` arm would break silently.
+
+**Why deferred.** The fix is small and mechanical - change both signatures to `impl Iterator<Item = String>`, which `std::env::Args` already satisfies, so `main` needs no change at all and a test can pass `["--target", "x"].into_iter().map(String::from)`. It is deferred only because it was found during a release checkpoint and touches the tool that *performs* the release, including the binary-size gate. Doing it in the same change that cuts `v0.1.6` would mean the release ran on a version of `xtask` that no release had ever used. It should be the first thing after the tag, and it is an hour.

@@ -96,13 +96,16 @@ Linux `.tar.gz`) with `gh attestation verify <file> --repo itabajah/duja`.
 (`SHA256SUMS` and the `.minisig` files are not attested; they are covered by
 minisign above.)
 
-Two of the four have never been published: `v0.2.0` (macOS) and `v0.3.0` (Linux)
-are deliberately held until someone has run each build on the hardware it
-targets. **They are not tagged**; the phases they close are, as `m6-macos` and
-`m7-linux`, and a release is a separate decision from a milestone tag.
+All four are published as of `v0.1.6`, and **two of them are previews**. The
+macOS `.dmg` and the Linux `.tar.gz` carry the same checksums, minisign
+signatures and provenance attestation as the Windows artifacts, and **nobody has
+run either one on the hardware it targets**. They were held until `v0.1.6` for
+exactly that reason; [ADR-0024](docs/adr/0024-preview-artifacts-on-the-patch-train.md)
+records why holding them was self-defeating and what shipping them costs. Every
+release that carries an unconfirmed platform says so in its own notes, from a
+committed file rather than from whoever cut it.
 
-What is proven for all four is that the pipeline **builds, stages and checksums**
-them, by a `workflow_dispatch` dry run rather than by assertion. What is not
-proven for the last two is the signing path: the minisign and attestation steps
-are gated on a real tag push, so no run has ever attested a `.dmg` or a
-`.tar.gz`.
+What that means for this page is narrow and worth stating: **the integrity story
+is identical across all four**, because it is a property of the pipeline rather
+than of the code inside. Verifying a `.dmg` proves it is the artifact this
+repository built at that tag. It does not prove the program in it behaves.
