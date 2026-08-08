@@ -17,6 +17,26 @@ pub enum ConfigError {
     #[error("config file I/O error: {0}")]
     Io(#[source] std::io::Error),
 
+    /// The file is larger than [`crate::config::persist::MAX_CONFIG_LEN`].
+    ///
+    /// Its own error rather than an [`Io`](Self::Io): a caller logging "config
+    /// unreadable" for a 4 GB `config.toml` sends the reader looking for a
+    /// permissions problem.
+    ///
+    /// `at_least` rather than an exact size, because the two ways this is
+    /// reached know different amounts. The metadata pre-check knows the real
+    /// length; the bounded read only knows it stopped one byte past the cap and
+    /// cannot say how much more there was. A field called `bytes` carrying
+    /// `1048577` for a 4 GB file would read as "one byte over", so it says what
+    /// it can stand behind.
+    #[error("config file is at least {at_least} bytes, over the {max} byte cap")]
+    TooLarge {
+        /// A lower bound on the file's size, exact when it came from metadata.
+        at_least: u64,
+        /// The cap it exceeded.
+        max: usize,
+    },
+
     /// The file was not syntactically valid TOML.
     ///
     /// The wrapped [`toml_edit::TomlError`] carries a human-readable message

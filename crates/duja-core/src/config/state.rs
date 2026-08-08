@@ -85,6 +85,7 @@ impl StateFile {
     /// Load the state file, returning defaults when the file is missing.
     ///
     /// # Errors
+    /// [`ConfigError::TooLarge`] if the file is over `persist::MAX_CONFIG_LEN`,
     /// [`ConfigError::Io`] on a read failure, or [`ConfigError::Deserialize`]
     /// if the file exists but is not valid state TOML. The caller decides
     /// whether to treat a corrupt (disposable) state file as "reset to
