@@ -1,12 +1,28 @@
 //! `cargo xtask` — workspace automation.
 //!
-//! Tasks land alongside the phases that need them:
-//! `dist` (portable Windows packaging and the macOS `.app`/DMG), `licenses`
-//! (cargo-about bundling, P5), `tr-extract` (Slint translation extraction, P4).
+//! **The task list lives in [`HELP`], and only there.** Tasks land alongside the
+//! phases that need them; what exists today is what `cargo xtask help` prints.
+//!
+//! This paragraph used to enumerate them, and got the enumeration wrong three
+//! times in a row. `size` was missing from the day it shipped (P8 wave 1).
+//! `dist`'s entry named two of its three targets from the day the third landed
+//! (P7 wave 6). And the correction for those two left `licenses` and `tr-extract`
+//! listed with `(P5)` / `(P4)` markers in the same shape used for tasks that
+//! exist, when **neither has ever been written** - no module, no match arm - and
+//! `HELP`'s own last line says so.
+//!
+//! `HELP` was right every time, which is the whole lesson: it is what a user
+//! reads when the tool disappoints them, so it gets fixed; a module doc that
+//! enumerates is read by nobody until it is wrong, and then it reads as a
+//! complete list. Three corrections is the point at which this project's own
+//! rule applies - remove the thing rather than correct it again - so the list is
+//! gone and `every_task_in_help_has_a_module` (a `cfg(test)` item, so
+//! unlinked here) pins what replaced it.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+mod args;
 mod bundle;
 mod dist;
 mod macho;
@@ -96,6 +112,78 @@ fn read_repo_file(parts: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+
+    /// Every task [`HELP`](crate::HELP) advertises is one `main` can dispatch,
+    /// and every task `main` dispatches is one `HELP` advertises.
+    ///
+    /// Written because the *prose* version of this coupling drifted three times
+    /// (the module doc omitted `size`, then named two of `dist`'s three targets,
+    /// then listed two tasks that have never existed) and each drift was found
+    /// by a human reading the diff rather than by anything that could fail.
+    /// `HELP` was correct throughout, so what was missing is not a better
+    /// comment but a comparison.
+    ///
+    /// Both directions matter and they fail differently. A task in `HELP` that
+    /// `main` cannot dispatch is a documented command that answers `unknown
+    /// task`; a task `main` dispatches that `HELP` omits is a feature nobody can
+    /// find. The second is what shipped for four months.
+    ///
+    /// `HELP`'s "arrive in later phases" line is deliberately *excluded* by the
+    /// two-space-indent rule below, and that exclusion is the interesting part:
+    /// it is how `HELP` stays able to name work that does not exist yet without
+    /// this test demanding a module for it.
+    #[test]
+    fn every_task_in_help_has_a_module() {
+        // A task line in HELP is indented exactly two spaces and starts with the
+        // task word. Deeper indents are that task's options, and the trailing
+        // parenthetical about later phases starts with `(`.
+        let advertised: Vec<&str> = crate::HELP
+            .lines()
+            .filter_map(|line| line.strip_prefix("  "))
+            .filter(|rest| !rest.starts_with(' ') && !rest.starts_with('('))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .filter(|task| *task != "help")
+            .collect();
+
+        // What `main` actually routes. Restated here rather than parsed out of
+        // the match, because a test that derived both sides from the same source
+        // would compare a thing with itself.
+        let dispatched = ["dist", "size"];
+
+        assert_eq!(
+            advertised, dispatched,
+            "HELP advertises {advertised:?} and main dispatches {dispatched:?}. A \
+             task in HELP that main cannot run answers `unknown task`; one main \
+             runs that HELP omits is a feature nobody can find."
+        );
+
+        // The tripwire. Both sides are short lists, so a parse that silently
+        // matched nothing would make the comparison above vacuously true against
+        // an equally empty `dispatched` only if someone emptied that too - but a
+        // changed HELP layout could empty just the left side, and then this fires
+        // instead of the assertion above passing for the wrong reason.
+        assert!(
+            advertised.len() >= 2,
+            "only {} task lines parsed out of HELP - the parse is broken, not the \
+             list",
+            advertised.len()
+        );
+
+        // And the module doc must not have grown its own list back. The three
+        // drifts were all in that block; the rule now is that it names no tasks.
+        let source = crate::read_repo_file(&["xtask", "src", "main.rs"]);
+        let header: String = source
+            .lines()
+            .take_while(|line| line.starts_with("//!"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            header.contains("only there"),
+            "the module header no longer says the task list lives in HELP alone; \
+             if it has grown an enumeration back, that is the drift this test \
+             exists for"
+        );
+    }
 
     /// The number of `|`-delimited fields a GitHub-flavoured Markdown row splits
     /// into, with a leading and a trailing pipe discounted.
