@@ -1,11 +1,13 @@
 # Duja - Project Status
 
-_Last updated: 2026-08-08. **P8 (hardening) is COMPLETE** - six waves merged,
-the multi-reviewer gate run, `m8-hardening` tagged. **Every phase is closed.**
-**Two releases are held on the same terms** - `v0.2.0` (macOS) and `v0.3.0`
-(Linux) - each waiting for one person to run it on the hardware it targets, and
-`v1.0.0` will make three: ADR-0019 puts cross-platform hardware sign-off in its
-own definition, so P8 can meet every other clause and not that one._
+_Last updated: 2026-08-08. **Every phase is closed** through P8, and the
+`v0.1.6` checkpoint releases the two ports that had been held. They ship as
+**unverified previews** rather than as confirmed platforms
+([ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md)): the hold was
+self-defeating, because the community confirmations macOS needs to leave
+"experimental" cannot arrive for a build nobody can install. `v0.2.0` and
+`v0.3.0` are re-mapped to mean **hardware-confirmed**, and `v1.0.0` still waits
+on the same clause it always did._
 
 Duja is an ultra-lightweight, cross-platform (Windows/macOS/Linux) system-tray
 monitor brightness and display controller in Rust - a no-Electron Twinkle Tray
@@ -38,8 +40,8 @@ verbatim and unpruned, which is where they belong.
 | P3 Windows hardware slice | `m3-win-hw` | done |
 | P4 Windows dimmer + UI (MVP) | `m4-win-mvp` | done |
 | P5 Power features (Windows complete) | `m5-win-full` | done |
-| P6 macOS port | `m6-macos` | done, gate passed, release held |
-| P7 Linux port | `m7-linux` | done, gate run, release held |
+| P6 macOS port | `m6-macos` | done, gate passed |
+| P7 Linux port | `m7-linux` | done, gate run |
 | P8 Hardening | `m8-hardening` | done, gate run, `v1.0.0` held |
 
 | release | train | state |
@@ -50,53 +52,41 @@ verbatim and unpruned, which is where they belong.
 | `v0.1.3` | Windows | shipped - the built-in panel no longer vanishes on a GPU-driven backlight |
 | `v0.1.4` | Windows | shipped - dark rebrand plus the mirror/software-only pair |
 | `v0.1.5` | Windows | shipped - a live monitor no longer sticks as "software-only"; tray Restart |
-| `v0.2.0` | macOS | **held** - see below |
-| `v0.3.0` | Linux | **held** - see below |
+| `v0.1.6` | Windows + previews | **shipping** - the first release to carry a macOS `.dmg` and a Linux `.tar.gz`, both labelled unverified. Flips to `shipped` when the tag is pushed, per [release-checklist.md](release-checklist.md) |
+| `v0.2.0` | macOS | **re-mapped** - now means hardware-confirmed, not first shipped |
+| `v0.3.0` | Linux | **re-mapped** - same |
 | `v1.0.0` | - | **held** - see below |
 
 Each release row is written up in [history.md](history.md), including what its
 review found and which of its stated reasons turned out to be wrong.
 
-**Why `v0.2.0` and `v0.3.0` are held, and why `v1.0.0` will be.** Both closed
-phases withheld their release for the same reason: **nobody has run either build
-on the hardware it targets.** A release is a separate decision from a tag, and
-this is that decision rather than a blocker - nothing in the codebase stops
-either.
+**What `v0.1.6` changed, and what it did not.** `v0.2.0` and `v0.3.0` were held
+for one reason: **nobody has run either build on the hardware it targets.** That
+is still true. What changed is the recognition that holding was self-defeating -
+[ADR-0013](adr/0013-macos-ddc-wrap-vs-vendor.md) keeps the macOS DDC path
+experimental until at least three independent community confirmations per
+architecture exist, and those come from other people's machines running an
+artifact that was never on the Releases page. The condition for releasing was
+confirmation; the mechanism for getting confirmation was releasing.
 
-`v1.0.0` inherits it. [ADR-0019](adr/0019-version-ladder-and-release-trains.md)
-defines that release as "fuzz burn-in, soak, size/perf budgets met, packaging,
-**cross-platform hardware sign-off**", and the last clause is not something a
-repository can satisfy. P8 is planned around that rather than into it: every
-other clause met and measured, so the hold is the only thing left.
+So [ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md) ships both on the
+patch train as labelled previews, and re-maps `v0.2.0` / `v0.3.0` to mean
+**hardware-confirmed** rather than first-shipped. Every release carrying an
+unconfirmed platform says so in its own notes, from
+[release-notes-preamble.md](release-notes-preamble.md) rather than from whoever
+cut it - a label is weaker than a hold, so it gets a mechanism.
 
-For Linux the artifact exists and the pipeline is proven: a `workflow_dispatch`
-dry run built, staged, tarred, extracted and verified
-`duja-<ver>-linux-x64.tar.gz` alongside the other three, in one `SHA256SUMS`. What
-has never happened is a human extracting it and clicking the tray.
-[qa-checklist.md](qa-checklist.md)'s Linux section opens with the block that run
-has to cover, and it is ordered so the paths that have never executed come first.
-Separately, [ADR-0013](adr/0013-macos-ddc-wrap-vs-vendor.md) keeps the macOS DDC
-path labelled experimental until there are at least three independent community
-confirmations per architecture, which no amount of code closes.
+**`v1.0.0` is unchanged and still held.**
+[ADR-0019](adr/0019-version-ladder-and-release-trains.md) defines it as "fuzz
+burn-in, soak, size/perf budgets met, packaging, **cross-platform hardware
+sign-off**", and a preview is the opposite of a sign-off. What is different is
+that the sign-off is now *obtainable*: [qa-checklist.md](qa-checklist.md) says
+what each run must cover, ordered so the never-executed paths come first, and
+the artifact those runs need is downloadable at last.
 
-## Where P8 stands
+## The build constraint that has not gone away
 
-| wave | scope | state |
-|---|---|---|
-| 1 | binary size: measure, trim, then gate it | done - `#144` |
-| 2 | the fuzz and coverage lanes | done - `#145` |
-| 3 | `--soak`, the harness two perf budgets already cite | done - `#146` |
-| 4 | the debt drain (`refactor:` PR) | **partial** - `#147` |
-| 5 | the security pass and the docs-truth sweep | done - `#148` |
-| 6 | the multi-reviewer phase gate, and `m8-hardening` | done - `#149` |
-
-[plan.md](plan.md) has what each wave owes and why it is ordered there. P7's
-wave table used to live in this section; it is in [history.md](history.md) now.
-It is the only wave table there - P0 through P6 were never written up that way,
-and this file has said so by omission rather than by claiming otherwise.
-
-**The constraint that shaped P7 has not gone away**, and P8 ran straight into
-it more than once: **`duja-app` cannot be built for Linux on the Windows dev box**
+P8 ran straight into it more than once, and so did this checkpoint: **`duja-app` cannot be built for Linux on the Windows dev box**
 (`yeslogic-fontconfig-sys` wants a pkg-config sysroot; `RUST_FONTCONFIG_DLOPEN=1`
 gets past it and then `fontique` fails on the dlopen module layout, confirmed
 twice), so any size number for a non-Windows target is a CI-only measurement.
@@ -121,9 +111,12 @@ own `display` helper inside its macros.
 
 Measured on this box, 2026-08-08:
 
-- **1,406 tests** pass in a local `cargo test --workspace --all-features`
-  (1,390 without). Re-measured at the P8 gate, which found the previous figure
-  36 low - it was written at wave 1 and four waves added tests after it.
+- **1,413 tests** pass in a local `cargo test --workspace --all-features`,
+  with a further **8 `#[ignore]`d** on top of that rather than among them - an
+  ignored test does not pass, and writing it as "8 of them" was wrong for one
+  edit's lifetime. Re-measured at the `v0.1.6` checkpoint; the P8 gate
+  had found the figure before it 36 low, so it is now re-counted with every
+  release rather than carried forward.
   The per-OS count differs, and deliberately is not enumerated here: the
   `#![cfg(windows)]` and `#![cfg(unix)]` integration suites compile out on the
   other lanes, as do per-OS unit tests spread across roughly two dozen modules.
@@ -131,7 +124,12 @@ Measured on this box, 2026-08-08:
 - Green on **3 OSes**; clippy `-D warnings` clean; `cargo-deny` clean
   (advisories, bans, licenses, sources); **6 fuzz targets** building on stable,
   burned weekly by `fuzz.yml` and compile-checked on every PR.
-- Adversarial gate reviews at **P2, P3, P4, P5, P6 and P8**. **P7's was
+- Adversarial review of **every PR** at the `v0.1.6` checkpoint as well, and
+  every one found major defects: two false capability claims in the file
+  published verbatim to users; a test whose *name* asserted the one thing its
+  experiment did not measure; and, in the docs sweep itself, two false
+  superlatives about coverage plus a link the reorganisation broke. Adversarial gate reviews at
+  **P2, P3, P4, P5, P6 and P8**. **P7's was
   narrower** - one targeted pass rather than several independent reviewers - and
   [history.md](history.md) says so at the top of its write-up rather than in a
   footnote. **P8's was the widest yet**: three independent gate reviewers over
@@ -143,16 +141,34 @@ Measured on this box, 2026-08-08:
 - Measured at the P4/P5 gates, headless: idle RSS **23.3 MB** (budget 35), idle
   CPU **0 ms over 20 s** - zero wakeups, by construction.
 - **`duja --soak <secs>` is the instrument those RSS budgets have cited since
-  P4** and did not have until P8 wave 3. A 30-second run on this box: peak RSS
-  **18,169,856 bytes** against a 35,000,000 budget, zero growth, flat GDI and
-  USER. Read it for what it is - the **headless** process, not the tray one, and
-  the *whole* resident set rather than the "private" the row asks for. The
-  24-hour run the budget names has not been done ([D-111](debt.md#d-111)), and
-  when it is, its measured handle drift should replace the harness's tolerance
-  constant, which is a reasoned guess and says so.
-- `duja.exe` is **15,709,696 bytes** (14.98 MiB) release, **within**
-  its 16 MiB budget with 1,067,520 bytes to spare; `dujactl.exe` is 643,584
-  (2 MiB budget, down from 851,968). P8 wave 1 took 3,737,088 bytes off
+  P4** and did not have until P8 wave 3. Re-run on the **release** build at the
+  `v0.1.6` checkpoint, 90 seconds sampling every 10: peak RSS **16,936,960
+  bytes** against a 35,000,000 budget, **0 bytes growth**, flat GDI and USER,
+  10 samples and none unreadable. Verdict `PASS`, exit 0.
+  Read it for what it is - the **headless** process, not the tray one, and the
+  *whole* resident set rather than the "private" the row asks for. Two further
+  limits this run made visible rather than assumed: the IPC server did **not**
+  start, because another Duja held the endpoint, and the report says so instead
+  of quietly measuring less; and a 20-second run over the same build returned
+  `UNMEASURABLE` with **exit 1**, which is the guarantee that a run measuring
+  nothing cannot be read as a pass. The 24-hour run the budget names is still
+  undone ([D-111](debt.md#d-111)) - 90 seconds is the longest yet, against the
+  30 that row records - and when it happens its measured handle drift should
+  replace the harness's tolerance constant, which is a reasoned guess and says
+  so.
+- **[D-102](debt.md#d-102)'s experiment has been run**, and it settles the
+  sentence four rows defer on. `build_tray` succeeds in a test process on an
+  interactive Windows session and all three tray-seam verbs work, so "`AppState`
+  cannot be constructed in a test" is false in both halves. Read the scope
+  literally: it is **not** the headless answer, and a CI runner on a different
+  window station is still unmeasured. What the rows now need is a fakeable tray
+  rather than proof it is possible.
+- `duja.exe` is **15,729,664 bytes** (15.00 MiB) release, **within**
+  its 16 MiB budget with 1,047,552 bytes to spare; `dujactl.exe` is 644,608
+  (2 MiB budget, down from 851,968). Re-measured on the `v0.1.6` tree rather
+  than carried over from P8 wave 1, which is why it is 19,968 bytes above the
+  figure that ledger records - the checkpoint added code, and the budget
+  absorbed it. P8 wave 1 took 3,737,088 bytes off
   the tray binary, 19.2 %, and the budget is now enforced by
   `cargo xtask size` in the release workflow rather than remembered - **on the
   Windows job only**, which is what that workflow builds and measures.

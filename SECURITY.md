@@ -35,7 +35,14 @@ Local attack surface and mitigations:
   for an attacker to reach. (The plan has long named a user override file; it
   does not exist, and `docs/debt.md` carries that as D-012.)
 - **Screen-state restitution**: gamma/overlay state is guarded so a crash
-  cannot leave the screen unusable (`duja --restore`, crash-marker recovery).
+  cannot leave the screen unusable, and the guard is **not uniform across
+  platforms**. Windows and Linux/X11 write a crash marker that a later start
+  reads, plus `duja --restore` on demand. On Linux/Wayland neither is needed:
+  a `wlr-gamma-control` ramp lives only as long as the process that set it, so
+  the compositor restores the output even after a hard kill. **macOS writes no
+  marker**, so there is no automatic recovery there and `duja --restore` is the
+  only route. That asymmetry is stated rather than averaged over, because the
+  platform with the weakest recovery is also the one nobody has run.
 
 ## Supply chain
 
@@ -96,13 +103,26 @@ Linux `.tar.gz`) with `gh attestation verify <file> --repo itabajah/duja`.
 (`SHA256SUMS` and the `.minisig` files are not attested; they are covered by
 minisign above.)
 
-Two of the four have never been published: `v0.2.0` (macOS) and `v0.3.0` (Linux)
-are deliberately held until someone has run each build on the hardware it
-targets. **They are not tagged**; the phases they close are, as `m6-macos` and
-`m7-linux`, and a release is a separate decision from a milestone tag.
+From `v0.1.6` onward all four are published, and **two of them are previews**.
+The macOS `.dmg` and the Linux `.tar.gz` carry the same checksums, minisign
+signatures and provenance attestation as the Windows artifacts, and **nobody has
+run either one on the hardware it targets**. They were held until `v0.1.6` for
+exactly that reason; [ADR-0024](docs/adr/0024-preview-artifacts-on-the-patch-train.md)
+records why holding them was self-defeating and what shipping them costs. Every
+release that carries an unconfirmed platform says so in its own notes, from a
+committed file rather than from whoever cut it.
 
-What is proven for all four is that the pipeline **builds, stages and checksums**
-them, by a `workflow_dispatch` dry run rather than by assertion. What is not
-proven for the last two is the signing path: the minisign and attestation steps
-are gated on a real tag push, so no run has ever attested a `.dmg` or a
-`.tar.gz`.
+What that means for this page is narrow and worth stating: **the integrity story
+is identical across all four by design**, because it is a property of the
+pipeline rather than of the code inside. Verifying a `.dmg` proves it is the
+artifact this repository built at that tag. It does not prove the program in it
+behaves.
+
+**One thing about that story is new rather than proven, and deleting the
+sentence that said so would be the wrong kind of tidying.** The minisign and
+attestation steps are gated on a real tag push (`if: env.PUBLISH == 'true'`), and
+until `v0.1.6` no tag had ever carried a `.dmg` or a `.tar.gz` - so those two
+artifacts had never been signed or attested by any run. `v0.1.6` is the first
+release where that path executes for them. If you are verifying one of those two
+and something does not check out, that is worth reporting as a pipeline bug
+rather than assumed to be your mistake.

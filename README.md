@@ -22,10 +22,12 @@ all the way to true black. Tiny, native, and instant.**
 
 > **Windows is ready today.** An early build, but a real one: hardware control, software dimming,
 > tray + flyout, settings, global hotkeys, input switching, and the `dujactl` CLI all work on
-> Windows. The macOS and Linux ports are both complete and both unreleased, waiting on someone to
-> run them on the hardware they target. Automatic update notifications are built
-> in, so you stay on the latest. The current version is always on the
-> [releases page](https://github.com/itabajah/duja/releases/latest); see
+> Windows. **macOS and Linux now ship too, as unverified previews**: the code is complete and
+> CI-tested on both, and nobody has yet run either one on the hardware it targets, so treat a first
+> run as an experiment and please
+> [tell us what you find](https://github.com/itabajah/duja/issues/new?template=monitor-quirk-report.yml).
+> Automatic update notifications are built in, so you stay on the latest. The current version is
+> always on the [releases page](https://github.com/itabajah/duja/releases/latest); see
 > [docs/STATUS.md](docs/STATUS.md) for the live picture.
 
 ## Why Duja
@@ -74,11 +76,26 @@ all the way to true black. Tiny, native, and instant.**
 > *"Windows protected your PC"* on first run. Choose **More info → Run anyway**. You can confirm
 > the download is authentic first; see [Verify your download](#verify-your-download).
 
-**Linux (x64).** No release yet, and the artifact the release will carry now
-exists: `duja-<version>-linux-x64.tar.gz`, a portable tarball with both binaries,
-a `.desktop` entry and an icon. Extract it, put `duja` and `dujactl` on your
-`PATH`, and run `dujactl doctor` first: it reports what your session can actually
-do, which on Linux varies more than on the other two platforms.
+**macOS 11+ (Universal).** Download **`duja-<version>-macos-universal.dmg`**, open it, and drag
+*Duja* to Applications. One Intel and one Apple Silicon slice in the same bundle.
+
+> [!NOTE]
+> **Gatekeeper.** The app is signed ad-hoc rather than with a Developer ID, so macOS blocks the
+> first open of a downloaded copy. Allow it in **System Settings → Privacy & Security → Open
+> Anyway**. macOS 15 Sequoia removed the older Control-click → Open shortcut, so guides that still
+> say "right-click, Open" no longer work.
+
+`dujactl` ships inside the bundle at `Duja.app/Contents/MacOS/dujactl`, so it is not on your
+`PATH`. Symlink it if you want the CLI:
+
+```sh
+sudo ln -s /Applications/Duja.app/Contents/MacOS/dujactl /usr/local/bin/dujactl
+```
+
+**Linux (x64).** Download **`duja-<version>-linux-x64.tar.gz`**, a portable tarball with both
+binaries, a `.desktop` entry and an icon. Extract it, put `duja` and `dujactl` on your `PATH`,
+and run `dujactl doctor` first: it reports what your session can actually do, which on Linux
+varies more than on the other two platforms.
 [`packaging/linux/README.md`](packaging/linux/README.md) has the install commands,
 the libraries the binary links against, and why there is no AppImage or `.deb`.
 
@@ -128,12 +145,13 @@ The public key and full instructions live in [SECURITY.md](SECURITY.md).
 
 ✅ shipping · 🧪 written and CI-tested, **never run on real hardware** · ❌ not available
 
-**There is no macOS or Linux download yet.** Every 🧪 cell above describes code
-that exists and builds, not a release you can install: the `.dmg` and the
-`.tar.gz` are produced by the release workflow but have not been published, so
-both are source-only for now (see [Build from source](#build-from-source)). The
-matrix answers "is it implemented". For those two, the answer to "can I install
-it" is still no.
+**macOS and Linux are downloadable now, and still unverified.** Every 🧪 cell above describes
+code that exists, builds and passes CI on that platform, and that **no one has run on the hardware
+it targets**. [ADR-0024](docs/adr/0024-preview-artifacts-on-the-patch-train.md) is why they ship
+anyway: the macOS DDC path leaves "experimental" only on independent community confirmations, and
+those cannot arrive for a build nobody can install. So the matrix answers "is it implemented", the
+download answers "can I try it", and neither answers "has this worked on a machine like mine".
+Reports are what closes that gap.
 
 ¹ Apple-Silicon DDC uses private APIs (same approach as MonitorControl / Lunar).
 On macOS `dujactl` lives inside `Duja.app/Contents/MacOS/`, so it is not on
@@ -143,17 +161,6 @@ On macOS `dujactl` lives inside `Duja.app/Contents/MacOS/`, so it is not on
 root-only and no `i2c` group exists: installing `i2c-tools` (or `ddcutil`) adds the
 rule and the group together, and you then join it. Without both steps external
 monitors do not appear at all; the built-in panel is unaffected.
-⁴ The tray speaks the freedesktop `StatusNotifierItem` protocol
-([ADR-0010](docs/adr/0010-linux-tray-ksni.md)). KDE Plasma implements it natively;
-GNOME needs the AppIndicator extension; most wlroots panels support it directly.
-Without a host the icon never appears - the process runs and `dujactl` works, and
-there is nothing to click.
-⁵ The `global-hotkey` backend is X11-only, and Duja ships Wayland dimming, so a
-registrar that worked on one transport and silently did nothing on the other
-would be worse than none. Duja registers nothing on Linux and says so: the three
-hotkey settings parse and validate, the rows grey out with the reason, and no
-combination is claimed. The route to a real implementation is the XDG desktop
-portal's `GlobalShortcuts` interface.
 ³ Software dimming on
 Wayland needs the `wlr-layer-shell` and `wlr-gamma-control` protocols. Duja asks the
 session which of them it offers, and for gamma whether it can actually take it: a
@@ -187,6 +194,18 @@ Wayland session, and that is not a gap: a `wlr-gamma-control` ramp lives only as
 long as the program that set it, so the compositor puts the output back by itself
 the moment that program exits, even if it was killed.
 
+⁴ The tray speaks the freedesktop `StatusNotifierItem` protocol
+([ADR-0010](docs/adr/0010-linux-tray-ksni.md)). KDE Plasma implements it natively;
+GNOME needs the AppIndicator extension; most wlroots panels support it directly.
+Without a host the icon never appears - the process runs and `dujactl` works, and
+there is nothing to click.
+⁵ The `global-hotkey` backend is X11-only, and Duja ships Wayland dimming, so a
+registrar that worked on one transport and silently did nothing on the other
+would be worse than none. Duja registers nothing on Linux and says so: the three
+hotkey settings parse and validate, the rows grey out with the reason, and no
+combination is claimed. The route to a real implementation is the XDG desktop
+portal's `GlobalShortcuts` interface.
+
 ## Build from source
 
 ```sh
@@ -201,7 +220,7 @@ To reproduce a release build locally:
 
 ```sh
 cargo build --release -p duja-app -p dujactl
-cargo run   --release -p xtask -- dist --version 0.1.0   # → target/dist/ (portable zip)
+cargo run   --release -p xtask -- dist --version 0.1.6   # → target/dist/ (portable zip)
 ```
 
 The installer is built in CI with [Inno Setup](packaging/windows/duja.iss); the full pipeline is
