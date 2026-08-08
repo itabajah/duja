@@ -7,9 +7,23 @@ enough that reading it is never a research task.
 
 ## What is left
 
-1. **P8** - hardening to `v1.0.0`. Six waves, in [the table below](#p8-waves).
+**Nothing.** P8 is complete: all six waves merged, the multi-reviewer gate run
+and written up in [history.md](history.md), `m8-hardening` tagged. Every phase in
+[the ladder](#the-version-ladder) is closed.
 
-That is the whole list of *phases*. Every one before it is closed, and the two
+**`v1.0.0` is held**, exactly as this file said it would be on the way in rather
+than at the gate. [ADR-0019](adr/0019-version-ladder-and-release-trains.md)
+defines that release as including "cross-platform hardware sign-off", and Duja
+has still never run on a Mac or a Linux desktop. Three releases are now held on
+one condition between them, and it is the same condition: somebody with the
+hardware. [qa-checklist.md](qa-checklist.md) has what each run has to cover, and
+the Linux and soak sections are ordered so the never-executed paths come first.
+
+What is left is therefore **not a phase**. It is [debt.md](debt.md), which P8
+drained four rows from, re-opened one into something more useful, and added five
+to - a net gain in rows and a large gain in what they say.
+
+That was the whole list of *phases*. Every one before it is closed, and the two
 that closed most recently each left a tag without a release: `m6-macos`
 (`v0.2.0` held) and `m7-linux` (`v0.3.0` held). [STATUS.md](STATUS.md) has why.
 
@@ -64,7 +78,7 @@ phase exits on a milestone tag; a release is a separate decision from a tag, and
 | P5 Power features (Windows complete) | `m5-win-full` | done |
 | P6 macOS port | `m6-macos` | done, gate passed, `v0.2.0` held |
 | P7 Linux port | `m7-linux` | done, gate run, `v0.3.0` held |
-| **P8 Hardening** | `m8-hardening` / `v1.0.0` | **in progress** |
+| P8 Hardening | `m8-hardening` | done, gate run, `v1.0.0` held |
 
 P6 was hardware-blind by construction (CI runners plus community verification)
 and P7 turned out the same way. How each phase actually went is in
@@ -81,7 +95,7 @@ feature area.
 | 3 | `--soak`, the harness two perf budgets already cite | done - `#146` |
 | 4 | the debt drain (`refactor:` PR, the rubric's ~15% time-box) | **partial** - `#147`, see below |
 | 5 | the security pass and the docs-truth sweep | done - `#148` |
-| 6 | the phase gate - **the multi-reviewer one** - and `m8-hardening` | pending |
+| 6 | the phase gate - **the multi-reviewer one** - and `m8-hardening` | done - `#149` |
 
 Waves 1, 2 and 3 are independent of each other and can land in any order. Wave 4
 is **not** independent of wave 3: one of its rows ([D-005](debt.md#d-005)) is
@@ -295,7 +309,15 @@ write-up is in [history.md](history.md).
 
 ### Wave 6 - the gate
 
-**The multi-reviewer gate, run properly this time.** P7's was one targeted pass,
+**Run.** Three independent reviewers over the cumulative diff, each with a
+distinct lens, on top of a per-PR adversarial review of all six waves. Nine
+reviews; every one found something that would otherwise have shipped. The
+write-up is in [history.md](history.md), including the one finding no single-PR
+review could have seen - `--soak` printing to a console a release build does not
+have - and the honest gap: no mutation-based test-strength pass ran at the gate,
+because it needs to write to the tree the other reviewers were reading.
+
+What it asked for, for the record: P7's was one targeted pass,
 and both [history.md](history.md) and its tag message say so at the top rather
 than in a footnote. That was a defensible call for a phase whose code cannot
 execute anywhere; it is not defensible for the phase whose entire subject is

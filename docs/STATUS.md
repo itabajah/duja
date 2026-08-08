@@ -1,7 +1,7 @@
 # Duja - Project Status
 
-_Last updated: 2026-08-08. **P8 (hardening) is in progress** - six waves to
-`m8-hardening`, laid out in [plan.md](plan.md). Every phase before it is closed.
+_Last updated: 2026-08-08. **P8 (hardening) is COMPLETE** - six waves merged,
+the multi-reviewer gate run, `m8-hardening` tagged. **Every phase is closed.**
 **Two releases are held on the same terms** - `v0.2.0` (macOS) and `v0.3.0`
 (Linux) - each waiting for one person to run it on the hardware it targets, and
 `v1.0.0` will make three: ADR-0019 puts cross-platform hardware sign-off in its
@@ -40,7 +40,7 @@ verbatim and unpruned, which is where they belong.
 | P5 Power features (Windows complete) | `m5-win-full` | done |
 | P6 macOS port | `m6-macos` | done, gate passed, release held |
 | P7 Linux port | `m7-linux` | done, gate run, release held |
-| **P8 Hardening** | `m8-hardening` / `v1.0.0` | **in progress** |
+| P8 Hardening | `m8-hardening` | done, gate run, `v1.0.0` held |
 
 | release | train | state |
 |---|---|---|
@@ -52,7 +52,7 @@ verbatim and unpruned, which is where they belong.
 | `v0.1.5` | Windows | shipped - a live monitor no longer sticks as "software-only"; tray Restart |
 | `v0.2.0` | macOS | **held** - see below |
 | `v0.3.0` | Linux | **held** - see below |
-| `v1.0.0` | - | pending P8, and **will be held** - see below |
+| `v1.0.0` | - | **held** - see below |
 
 Each release row is written up in [history.md](history.md), including what its
 review found and which of its stated reasons turned out to be wrong.
@@ -88,7 +88,7 @@ confirmations per architecture, which no amount of code closes.
 | 3 | `--soak`, the harness two perf budgets already cite | done - `#146` |
 | 4 | the debt drain (`refactor:` PR) | **partial** - `#147` |
 | 5 | the security pass and the docs-truth sweep | done - `#148` |
-| 6 | the multi-reviewer phase gate, and `m8-hardening` | pending |
+| 6 | the multi-reviewer phase gate, and `m8-hardening` | done - `#149` |
 
 [plan.md](plan.md) has what each wave owes and why it is ordered there. P7's
 wave table used to live in this section; it is in [history.md](history.md) now.
@@ -121,8 +121,9 @@ own `display` helper inside its macros.
 
 Measured on this box, 2026-08-08:
 
-- **1,370 tests** pass in a local `cargo test --workspace --all-features`
-  (1,354 without `--all-features`).
+- **1,406 tests** pass in a local `cargo test --workspace --all-features`
+  (1,390 without). Re-measured at the P8 gate, which found the previous figure
+  36 low - it was written at wave 1 and four waves added tests after it.
   The per-OS count differs, and deliberately is not enumerated here: the
   `#![cfg(windows)]` and `#![cfg(unix)]` integration suites compile out on the
   other lanes, as do per-OS unit tests spread across roughly two dozen modules.
@@ -130,10 +131,13 @@ Measured on this box, 2026-08-08:
 - Green on **3 OSes**; clippy `-D warnings` clean; `cargo-deny` clean
   (advisories, bans, licenses, sources); **6 fuzz targets** building on stable,
   burned weekly by `fuzz.yml` and compile-checked on every PR.
-- Adversarial gate reviews at **P2, P3, P4, P5 and P6**. **P7's was narrower**
-  - one targeted pass rather than several independent reviewers with separate
-  verification - and [history.md](history.md) says so at the top of its write-up
-  rather than in a footnote. Plus a full
+- Adversarial gate reviews at **P2, P3, P4, P5, P6 and P8**. **P7's was
+  narrower** - one targeted pass rather than several independent reviewers - and
+  [history.md](history.md) says so at the top of its write-up rather than in a
+  footnote. **P8's was the widest yet**: three independent gate reviewers over
+  the cumulative diff *plus* a per-PR adversarial review of all six waves, nine
+  in total, and every one found something that would otherwise have shipped.
+  Plus a full
   post-`v0.1.0` deep review (14 module reviewers, every non-low finding
   adversarially verified) with every confirmed finding fixed test-first.
 - Measured at the P4/P5 gates, headless: idle RSS **23.3 MB** (budget 35), idle

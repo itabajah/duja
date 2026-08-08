@@ -48,6 +48,11 @@ to assert.
   - [Perceptual brightness continuum (v2, ADR-0014)](#s21)
   - [UI layout & ruby theme (2026-07-14)](#s22)
   - [v0.1.0 release (2026-07-16)](#s23)
+- [P8 gate results](#s47)
+  - [What this gate was](#s48)
+  - [The finding no single-PR review could have found](#s49)
+  - [The pattern across all six reviews](#s50)
+  - [What was checked and found correct](#s51)
 - [P8 wave 5: the SECURITY.md checklist, item by item](#s46)
 - [P7 waves, as planned and as they went](#s41)
   - [Wave 5 - the tray, and what it turned out to own](#s42)
@@ -1206,6 +1211,114 @@ install and stay current on:
 - **Not signed.** No Authenticode certificate yet, so SmartScreen warns on first
   run; authenticity is via the checksums + minisign key + provenance. Binary size
   regressed to ~19 MB (P8 trim).
+
+<a id="s47"></a>
+## P8 gate results
+
+The hardening phase gate, over the cumulative `m7-linux..main` diff: 6 commits,
+42 files, +3,707/-383.
+
+<a id="s48"></a>
+### What this gate was
+
+**The multi-reviewer gate [plan.md](plan.md) specifies, run properly.** P7's was
+one targeted pass and said so at the top of its own write-up; that was
+defensible for a phase whose code cannot execute anywhere, and it was not
+defensible for the phase whose entire subject is whether this is ready to be
+called 1.0.
+
+Three independent reviewers over the whole diff, each with a distinct lens -
+cross-wave correctness, a claims audit, and safety/supply-chain - and none
+briefed on what the others were looking at. That is on top of a per-PR
+adversarial review of **every one of the six waves**, which is itself more than
+any previous phase received.
+
+What it did not include: a mutation-based test-strength pass, which was scoped
+and not run because it needs to modify the tree while the others were reading it.
+Individual waves got mutation testing where a regression test was the deliverable
+(wave 4's D-108 proof, wave 5's cap enforcement), so this is a gap in the gate's
+coverage rather than in the phase's.
+
+<a id="s49"></a>
+### The finding no single-PR review could have found
+
+**`--soak` printed to a console that a release build does not have.**
+
+`main.rs` sets `windows_subsystem = "windows"` on a Windows release binary, so
+the shipped `duja.exe` has no console. `GetStdHandle` returns an invalid handle,
+std maps `ERROR_INVALID_HANDLE` to `Ok(len)`, and every line the harness printed
+was silently discarded - no panic, no diagnostic. The shell does not wait for a
+GUI-subsystem process either, so the exit code, which is the whole of the
+"UNMEASURABLE is not a pass" guarantee, was unobservable too.
+
+This is the shape a phase gate exists for. Wave 3 built the harness and reviewed
+it hard - three blockers were found and fixed in its own PR. Wave 1 is what made
+the *release* build the one that must be measured, because that is what the
+35 MB budget is written against and what `opt-level = "s"` changed. Neither
+review could see it, because the defect is in the seam between them. And
+`main.rs` had documented the fact since P4: *"under a `windows_subsystem =
+"windows"` release binary the CLI subcommands cannot write to a console"*. The
+fact was in the tree; two waves wrote past it.
+
+The report is now written to `soak-report.txt` beside the rotating log as well,
+and [qa-checklist.md](qa-checklist.md) carries the `start /wait` invocation that
+also yields the exit code.
+
+<a id="s50"></a>
+### The pattern across all six reviews
+
+Nine reviews ran in this phase - six per-PR, three at the gate - and **every one
+found something that would otherwise have shipped**. Worth recording as a
+measurement rather than a sentiment, because it is the strongest evidence this
+project has produced for its own review discipline:
+
+| review | the finding that mattered most |
+|---|---|
+| wave 0 | the `cargo tree` mechanism written into the plan was false - `--target` prints two root trees, and the first is the proc-macro one |
+| wave 1 | dropping `tracing-log` silently stopped capturing every `log::` record; `SubscriberInitExt::try_init` installs the bridge itself |
+| wave 2 | the corpus seed the branch documented was never committed - `.gitignore` covers `fuzz/corpus/` |
+| wave 3 | the Linux lane did not compile, and two verdicts reported PASS on runs where the budgeted thing measurably grew |
+| wave 4 | the `WAYLAND_SOCKET` fix made its own target case *worse*: the variable is single-use |
+| wave 5 | the security wave wrote two new false claims into the security policy |
+| gate: cross-wave | the soak's output goes nowhere on the build it exists to measure |
+| gate: claims | `perf-budgets.md` named "tracing span" as the instrument for three rows, and there is no `span!` in this repository |
+| gate: safety | `None` handle counts meant two different things, and the doc claimed one |
+
+**Three of those nine are the same species**: a claim that read as verified and
+was not. That is the failure mode this project's first rule names, and the honest
+conclusion is that writing the rule down does not prevent it - only a reader who
+did not write the text does.
+
+<a id="s51"></a>
+### What was checked and found correct
+
+Named because a gate reporting only findings cannot distinguish "verified" from
+"not looked at":
+
+- **Both new `unsafe` blocks are sound**, checked against the `windows 0.62`
+  bindings on disk and Microsoft's contracts rather than against the comments
+  that describe them: `&raw mut` forms no reference so there is no `noalias`
+  claim to violate, `cb` is the pointee's own size so the callee cannot overflow
+  it, the pseudo-handle needs no `CloseHandle`, and the last-error window is
+  thread-correct because last-error is thread-local.
+- **Every arithmetic claim in ADR-0012's ledger** - all seven rows' deltas, the
+  superadditivity figure, the exemption cost, the percentage - verified
+  independently. So were the two binaries on disk, to the byte, and the
+  25,600-byte targeted/untargeted gap the ADR itself flags.
+- **`cargo deny` clean on all four checks**; the lockfile *gained* nothing (its
+  entire diff is 23 deleted lines); no RUSTSEC ignore went stale; all 35 `uses:`
+  across four workflows are SHA-pinned.
+- **`coverage.yml`'s threshold script traced as a program** - `set -e`
+  interactions, the `local` declaration order that would have masked a failing
+  `jq`, the awk comparison sense at exactly the floor, the zero-files guard, and
+  the reachability of `exit "$fail"`.
+- **Every caller of the global `duja_dimmer::restore_all()` judged individually**
+  (five of them), and the crash-marker paths confirmed to be the same file, so
+  wave 4's change cannot have made two of them disagree.
+- **The `#[cfg]` matrix of every new module**, so that "tested on all three
+  lanes" is true where it is claimed.
+- **`SECURITY.md` end to end**, including which artifacts are actually attested
+  versus minisigned and which steps are tag-gated.
 
 <a id="s46"></a>
 ## P8 wave 5: the SECURITY.md checklist, item by item
