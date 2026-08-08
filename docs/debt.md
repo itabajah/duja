@@ -898,6 +898,14 @@ That was tolerable while the release profile was `opt-level = 3` and nobody was 
 
 **Why deferred.** Scope discipline rather than difficulty. Wave 1's subject is the binary, and a benchmark harness is a wave-sized job with its own review - `#82` is this project's standing example of what a smuggled second subject costs. The interim cover is honest rather than absent: [`docs/qa-checklist.md`](qa-checklist.md)'s "All platforms" section now opens by saying those two rows are the only instrument these budgets have, and asks for a timed number rather than an impression
 
+**Advanced in P9 wave 3, and narrowed rather than drained, because the remedy above does not close either budget it names.** `duja_ui::frame_probe` is built and measures exactly what the paragraph above describes: the real `FlyoutShell`, three monitors, 360 x 260, through `MinimalSoftwareWindow` and the software renderer, into a plain buffer, with no display server, on any lane. What it renders is the flyout. **"Overlay alpha update" is `duja-dimmer`'s layered Win32 window, which is not a Slint surface**, and **"Cold start to tray icon visible" needs an interactive session a headless renderer cannot see**. So the two rows this entry opens with still have no instrument, and saying the harness closed them would have been the false-assurance shape rather than a drain. `perf-budgets.md` gains a *fourth* row - the frame render - which has one.
+
+**Two counts in this row were wrong, and the second is why the first matters.** It says "the four crates on the frame path" and lists four; there are **five**, because `swash` was added by the same P8 wave that noticed the original list credited `zeno` with a job half of which is `swash`'s, and nobody came back to this row. The frame probe's own module header copied the four straight out of here before the workspace manifest was read, which is how a stale count in a debt row becomes a stale count in new code.
+
+**What the measurement said, including the half nobody predicted.** On this box, release profile: min **177 us**, mean **186-193 us** across runs, worst frame **222-306 us** - two orders of magnitude inside the 16 ms budget. With the five `opt-level = 3` overrides removed, the same probe reports min **253 us**, mean **285 us**, worst **390 us**. So the exemption is worth about **1.4x to 1.5x** and does what wave 1 argued it would; **and** both builds clear the budget with room to spare, so the budget never depended on it. The row's claim was that the exemption "is an argument, not a measurement". It is now a measurement, and it survived - which is the outcome an argument like that is least often checked for.
+
+**What stays open.** The three rows in `perf-budgets.md` that name no instrument, all three of which need a real session. This row is the place to look when one of them gets one
+
 ### D-110
 
 **Where:** `.github/workflows/` + `xtask` `size.rs` &nbsp;·&nbsp; **Added:** P8 wave 1

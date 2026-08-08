@@ -11,6 +11,7 @@ exit unless an ADR records the variance and the recovery plan.
 | Cold start → tray icon visible | < 300 ms | **no live instrument** - by hand, see below |
 | Slider → DDC write dispatched | ≤ 1 coalesce interval (~100 ms) | **no live instrument** - by hand, see below |
 | Overlay alpha update | < 16 ms (one frame) | **no live instrument** - by hand, see below |
+| Flyout frame render (3 monitors, headless) | < 16 ms (one frame) | `cargo test -p duja-ui --release --test frame_probe -- --ignored --nocapture` |
 | Stripped release binary (`duja`) | ≤ 16,777,216 bytes (16 MiB; [ADR-0012](adr/0012-binary-size-budget-variance.md)) | `cargo xtask size`, gated in the release workflow |
 | Stripped release binary (`dujactl`) | ≤ 2,097,152 bytes (2 MiB) | same |
 | Soak (24 h) RSS growth | < 5,000,000 bytes; flat GDI/USER handle counts | `duja --soak 86400` |
@@ -68,9 +69,51 @@ of them.
 A span would not have been much of an instrument anyway: it is a thing a human
 reads while watching the app, not a thing that fails a build. The honest column
 is the one now there, and [qa-checklist.md](qa-checklist.md) is where these get
-measured until [D-109](debt.md#d-109)'s benchmark exists. A budget row that names
-an instrument which does not exist is worse than one that admits it has none -
-which is the rule this project states, applied to the file that states it.
+measured. A budget row that names an instrument which does not exist is worse
+than one that admits it has none - which is the rule this project states,
+applied to the file that states it.
+
+**The frame row is new, and it is not one of those three.** [D-109](debt.md#d-109)
+proposed a software-renderer harness as the remedy for "Overlay alpha update"
+and "Cold start", and that was wrong on both: the overlay is `duja-dimmer`'s
+layered Win32 window and is not a Slint surface at all, and a cold start to a
+*tray icon* needs an interactive session that no headless renderer can see. The
+harness got built anyway, because the thing it does measure is the exposure the
+row was actually arguing about - the frame path that P8 wave 1 exempted from
+`opt-level = "s"` by name. So the three rows above still have no instrument, and
+the row added here is a fourth thing that now does. D-109 is narrowed rather
+than drained.
+
+`cargo test -p duja-ui --release --test frame_probe -- --ignored --nocapture`
+renders the real `FlyoutShell` - three monitors, 360 x 260, the app's own design
+size - through Slint's software renderer into a plain buffer, with no display
+server, on any lane. It discards a warm-up tenth and times the rest.
+
+**Measured on this box (Windows, release profile):** min **177 us**, mean
+**186-193 us** across runs, worst frame **222-306 us**. Two orders of magnitude
+inside the budget.
+
+**And the exemption it exists to check is worth about 1.4x to 1.5x.** With the
+five per-package `opt-level = 3` overrides removed - `-Os` everywhere - the same
+probe reports min **253 us**, mean **285 us**, worst **390 us**. So the
+exemption does what P8 wave 1 argued it would, at the 1,429,504 bytes that
+section already prices; and *also*, both builds clear this budget with room to
+spare, so nothing here depends on it. Both halves are the measurement, and only
+the first was ever predicted.
+
+Two limits on that number, because a budget row that overstates its instrument
+is worse than one with no instrument at all:
+
+- **It is a full redraw, which the shipped app does not always do.** The probe
+  asks for `NewBuffer`, so every frame repaints all 93,600 pixels; the windowed
+  path can repaint a dirty region instead. It over-states against this row,
+  which is the safe direction, and the probe asserts the full area was drawn on
+  every frame - a partial redraw quoted as a frame time is the one way this
+  number could be wrong in the direction nobody checks.
+- **It is a reflection, not a drag.** A headless harness has no input to
+  inject, so the probe dirties the tree through `update_from_vm`, the same path
+  the app's external-change reflection takes. The Slint callback a real thumb
+  drives is not exercised here; `shell.rs`'s own tests are what cover that.
 
 Design rules that protect the budgets:
 

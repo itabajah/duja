@@ -37,7 +37,7 @@ thing - it is measured when the wave lands, and recorded below once it has.
 |---|---|---|
 | 1 | the `AppState` test seam: a fakeable `PlatformTray`, and a fixture that constructs the state | landed |
 | 2 | the same for the gamma channel, which is what the ordering and re-assert properties need | landed |
-| 3 | the instruments behind the performance budgets | not started |
+| 3 | the instruments behind the performance budgets | partly landed |
 | 4 | the config cap's write side, and the bounded waits | partly landed |
 
 **Wave 1 is the keystone**, and it is the one place a row list is safe, because
@@ -114,8 +114,20 @@ seven minutes before this plan did, and its review had already struck one
 attempt to file it under P9. It is counted here because it is P9-era work, not
 because the wave table accounts for it.
 
-What is left of the phase is wave 3 in full, [D-076](debt.md#d-076) from wave 4,
-and [D-059](debt.md#d-059), which wave 1 turned out not to touch.
+What is left of the phase is the rest of wave 3, [D-076](debt.md#d-076) from
+wave 4, and [D-059](debt.md#d-059), which wave 1 turned out not to touch.
+
+**Wave 3 opened on [D-109](debt.md#d-109), which narrowed rather than drained**,
+and the reason is the shape this section keeps meeting: the row proposed a
+software-renderer harness as the remedy for the two budgets it names, and the
+harness closes neither. The overlay is a Win32 layered window rather than a
+Slint surface, and a cold start to a tray icon needs a session. What the harness
+does measure is the frame path P8 wave 1 exempted from `opt-level = "s"` by
+name, which is the exposure the row was arguing about even though it is not the
+budget the row cited. The exemption had never been measured, is worth about 1.4x
+to 1.5x, and the budget clears by two orders of magnitude either way - so the
+argument was right and nothing depended on it. `perf-budgets.md` gains a row
+that has an instrument; the three that do not, still do not.
 
 **Two things are worth carrying out of it, and neither is a row.** Every PR was
 reviewed adversarially and every review found something real - which by now is
