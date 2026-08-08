@@ -26,19 +26,19 @@ some way the largest.
 
 ### 1. P9 - the seams and the instruments
 
-**This section names what the phase builds, not which rows it drains.** Two
+**This section names what the phase builds, not which rows it will drain.** Two
 drafts of it did the latter and both were wrong about it, in the same way each
 time: a row's deferral reason is an argument, summarising a hundred of them into
 a table produces claims that read as checked and are not, and the corrections
-were worse than the original. What each wave actually drains is decided by
-measurement when it lands, and recorded in [debt.md](debt.md) then.
+were worse than the original. What a wave *turned out* to drain is a different
+thing - it is measured when the wave lands, and recorded below once it has.
 
-| wave | what it builds |
-|---|---|
-| 1 | the `AppState` test seam: a fakeable `PlatformTray`, and a fixture that constructs the state |
-| 2 | the same for the gamma channel, which is what the ordering and re-assert properties need |
-| 3 | the instruments behind the performance budgets |
-| 4 | the config cap's write side, and the bounded waits |
+| wave | what it builds | state |
+|---|---|---|
+| 1 | the `AppState` test seam: a fakeable `PlatformTray`, and a fixture that constructs the state | landed |
+| 2 | the same for the gamma channel, which is what the ordering and re-assert properties need | landed |
+| 3 | the instruments behind the performance budgets | not started |
+| 4 | the config cap's write side, and the bounded waits | partly landed |
 
 **Wave 1 is the keystone**, and it is the one place a row list is safe, because
 [D-102](debt.md#d-102) had already done the counting: exactly four rows -
@@ -51,13 +51,42 @@ the lowest percentage; seven files are at 0.00 %, all smaller by both measures.
 That distinction is why it was the target and not one of them.
 
 **Waves 1 and 2 have landed, and between them drained three of the four.**
-`tray/state.rs` went 11.27 % to **42.01 %** of regions as of this wave, uncovered 1,031 to 860. (A figure measured per wave rather than kept current: the sibling PRs of the same phase add tests to the same file, so a running total here is stale the day it lands.)
 D-040 drained on the `AppState` fixture; D-016 and D-065 on the recording gamma
 channel wave 2 added, which is the seam wave 1's own write-up predicted they
-would need. **D-059 is still open**, and it needs neither: it wants to observe *when*
-`build_tray` ran relative to the loop, which a constructible state is orthogonal
-to. Which is this section's warning seen from the inside - a wave drains what it
-turns out to drain, and here the plan happened to be right about all three.
+would need. **D-059 is still open**, and it needs neither: it wants to observe
+*when* `build_tray` ran relative to the loop, which a constructible state is
+orthogonal to. Which is this section's warning seen from the inside - a wave
+drains what it turns out to drain, and here the plan happened to be right about
+all three.
+
+`tray/state.rs`'s **uncovered regions went 1,031 to 823**, and what each PR
+contributed is given as a delta rather than a total, because three of P9's PRs
+add tests to this one file:
+
+| PR | wave | uncovered regions removed |
+|---|---|---|
+| `#157` | 1 | 108 |
+| `#158` | 4 | 37 |
+| `#159` | 2 | 63 |
+
+**Read the merge order, not the wave numbers.** Those PRs landed 157, 158, 159,
+so the cumulative percentage after each is 32.28, 40.58 and 48.91 - and `#159`'s
+own commit message says *42.01 %, uncovered 860*, which is neither wrong nor
+this. It measured on a branch cut from `#157`, before `#158` existed; its
+**delta of 63 regions is the same either way**, which is why a delta is what
+belongs here.
+
+The **uncovered count is the honest column** and the percentage is the flattered
+one. That mechanism is [D-102](debt.md#d-102)'s - a fixture's own body counts as
+covered - though the figures are measured here rather than there: the file grew
+from 1,162 regions to 1,611, so against the original denominator 823 uncovered
+is nearer 29 %.
+
+A first version of this paragraph bolded 48.91 %, credited the whole rise to
+waves 1 and 2 when `#158` produced roughly a fifth of it, and dropped the
+caveat. Three mistakes in one sentence about measurement. (An intermediate
+version then put "8 of the 37 points" near a table whose `#158` row reads 37 -
+two different 37s, one percentage points and one regions.)
 
 **Wave 3's rows are budgets that cannot fail**, and some of that work may
 honestly end in "narrow the row" rather than "build the thing".
@@ -72,6 +101,82 @@ legitimate outcome of this wave and is not a failure of it.
 cannot produce**: beta reports, a locale pass, a display. Those rows stay in
 [debt.md](debt.md), which is where a reader should go for them rather than to a
 summary here.
+
+**Six rows have drained so far**, taking `debt.md` from 107 to 101: wave 1's
+[D-040](debt-archive.md#d-040), wave 2's [D-016](debt-archive.md#d-016) and
+[D-065](debt-archive.md#d-065), and wave 4's [D-113](debt-archive.md#d-113) and
+[D-045](debt-archive.md#d-045). This is the recording the section's opening
+defers to, and it is why the **wave table** carries no rows: what a wave turns
+out to drain is written down here, after it lands.
+
+The sixth, [D-114](debt-archive.md#d-114), belongs to **no wave** - it landed
+seven minutes before this plan did, and its review had already struck one
+attempt to file it under P9. It is counted here because it is P9-era work, not
+because the wave table accounts for it.
+
+What is left of the phase is wave 3 in full, [D-076](debt.md#d-076) from wave 4,
+and [D-059](debt.md#d-059), which wave 1 turned out not to touch.
+
+**Two things are worth carrying out of it, and neither is a row.** Every PR was
+reviewed adversarially and every review found something real - which by now is
+unremarkable. What is not: **on all six, a later round found a defect an earlier
+round's correction had introduced.** Not four of six, which is what a first
+version of this paragraph said - an unmeasured count, inside the paragraph
+arguing that counts must be measured, which is precisely what `#156`'s review
+convicted [D-114](debt-archive.md#d-114) of. The evidence is spread across
+review comments, squashed commit messages and the archived rows themselves -
+`#155` and `#160` carry no PR comments at all - so it is collected here rather
+than left as a pointer:
+
+| PR | what a later round found |
+|---|---|
+| `#155` | nine of round 2's seventeen findings were introduced by round 1 |
+| `#156` | round 2 found seven, **two of them round 1's**; round 3 then found defects in round 2's corrections in turn |
+| `#157` | round 1's correction replaced a **true** quotation with a false one and stamped it "measured" |
+| `#158` | its commit message: three rounds, "each found a defect the previous round's correction introduced" - the second of the three was self-found, between the two posted reviews |
+| `#159` | a correction landed in one of the two places it claimed; and a vacuous test's **replacement** was vacuous too |
+| `#160` | the first repair of a mangled log line moved the gap rather than closing it; a correction described an edit that had not been made |
+
+Among them: a fix for one data-loss path that opened another, and tests that
+launched a browser and made a live network call one commit after a seam for the
+same hazard landed - both `#158`. A correction stamped *measured* that was not,
+in `#157`. A claim about compiling on all three lanes that broke two of them, in
+`#160`.
+
+Three more, all of a kind a green gate cannot report. `#157`'s first fixture was
+**green on CI and red locally**. `#159` shipped two vacuous tests, the second
+written as the fix for the first. And `#156`'s round 3 found a **live bug on the
+tool that gates releases**: `cargo xtask size --target ""` joined to
+`target/release` and measured whatever the last host build had left there, which
+`release_dir`'s own doc calls the one failure mode a size check must not have.
+The suite was green throughout. That one belongs here more than the other two,
+because it could have shipped a wrong artifact, and a first version of this
+paragraph left it out.
+
+Corrections are about as defect-prone as the work they correct, and only
+measurement tells them apart.
+
+**Seven, counting this file.** Its review rounds are not counted here. The
+count that was here was accurate when written, stale one round later, and wrong
+the moment it was corrected, so what replaces it is nothing. The first round
+found defects of the original draft - a coverage figure credited to the wrong
+waves, an unmeasured count. **Every round after that found a defect the round
+before it had introduced.** Among them: a table whose rows disagreed with a
+merged commit message; a stale percentage in the same sentence as the stale
+count it was correcting; a false "every one staled" in the footnote written to
+be the accurate account of all that; and a de-duplication that deleted the
+corrected copy of a paragraph and kept the false one.
+
+The per-file counts are deleted rather than corrected again, which is
+[D-114](debt-archive.md#d-114)'s own rule arriving late. A document
+recording that corrections are defect-prone had no business being an exception,
+and was not.
+
+The second thing follows from it: **`#82`'s rule caught something again.**
+[D-045](debt-archive.md#d-045)'s red-first proof pinned a pure function the fix
+itself introduced, which never carried the bug - the historical defect, restored
+at the site it occupied, leaves the suite green. That row now says so rather
+than reading as protected.
 
 ### 2. The hardware runs
 
@@ -161,7 +266,7 @@ is a phase tag rather than a version.
 | P6 macOS port | `m6-macos` | done, gate passed |
 | P7 Linux port | `m7-linux` | done, gate run |
 | P8 Hardening | `m8-hardening` | done, gate run, `v1.0.0` held |
-| P9 App-layer seam + instruments | `m9-seam` | planned |
+| P9 App-layer seam + instruments | `m9-seam` | in progress - 6 rows drained |
 
 How each closed phase went is in [history.md](history.md); P9 gets its entry
 when it closes. P7 and P8 are the only ones written up wave by wave. P6 and P7
