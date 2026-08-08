@@ -76,10 +76,25 @@ jobs:
       # reportable hang rather than something that quietly eats the budget.
       # `-rss_limit_mb=2048` is libFuzzer's default and is restated so that an
       # OOM is attributable to the input rather than to the runner.
+      # `timeout-minutes` because `-max_total_time=0` means *no limit* to
+      # libFuzzer and 0 is a value a dispatcher can type. Without it that run
+      # burns to GitHub's 6-hour job ceiling.
       - name: Burn
+        timeout-minutes: 30
+        # The dispatch input goes through `env:` rather than into the run body.
+        # `release.yml`'s header states the rule for this repository - "github.*
+        # context is NEVER interpolated into a run body" - and it applies to
+        # `inputs` for the same reason: a value a user can type must not be able
+        # to become shell. The blast radius here is small (dispatch needs write
+        # access, this job holds no secrets and has `contents: read`), which is
+        # an argument for the cost being negligible, not for the exception.
+        env:
+          SECONDS_PER_TARGET: ${{ inputs.seconds || '300' }}
+          TARGET: ${{ matrix.target }}
         run: |
-          cargo +nightly fuzz run ${{ matrix.target }} -- \
-            -max_total_time=${{ inputs.seconds || '300' }} \
+          set -euo pipefail
+          cargo +nightly fuzz run "$TARGET" -- \
+            -max_total_time="$SECONDS_PER_TARGET" \
             -timeout=25 \
             -rss_limit_mb=2048
       # A crash is worthless without the input that produced it, and the runner

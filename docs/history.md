@@ -1308,9 +1308,12 @@ reason**: they pointed at the file they now live in. One said "history.md opens
 the write-up with that distinction" and now points at
 [the write-up below](#s37); the other said `#136` was "larger than **this file**
 said it would be", where "this file" was the plan that had made the prediction,
-and now names it. Nothing else changed - the count is stated because a blanket
-"nothing was reworded" is the kind of claim the section above this one exists to
-correct, and the first version of this paragraph made it.
+and now names it. No other *prose* changed. Two **link targets** did, later: both
+D-108 references in the wave-7 table and its prose were repointed from `debt.md`
+to `debt-archive.md` when P8 wave 4 drained that row. The count is stated, and
+now qualified, because a blanket "nothing was reworded" is the kind of claim the
+section above this one exists to correct - and a P8 gate reviewer caught this
+paragraph making a slightly smaller version of it.
 
 **Read the imperatives below as P7's, not as yours.** "Read those four before
 wave 6", "the first tool wave 6 reaches for", "do not fold this into wave 5" -

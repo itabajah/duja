@@ -32,6 +32,8 @@ levers, in expected-payoff order, are recorded for P8:
 ## Consequences
 
 - `docs/perf-budgets.md` now reads ≤ 16 MB (aspiration 12) for `duja.exe`.
+  *(P8 note: it reads `≤ 16,777,216 bytes (16 MiB)` today, and the aspiration
+  was dropped when the unit was pinned. See the P8 section.)*
 - If P8's levers get the binary back under 12 MB, this ADR is superseded and
   the original budget is restored.
 - The RAM budget — the budget users actually feel, and the reason Electron was
@@ -39,12 +41,12 @@ levers, in expected-payoff order, are recorded for P8:
 
 ## Ledger
 
-| Gate | `duja.exe` (stripped, thin LTO) | Verdict |
+| Gate | `duja.exe` (stripped) | Verdict |
 |---|---|---|
-| P4 (tray + flyout + dimmer) | 14.9 MB | within the raised 16 MB budget |
+| P4 (tray + flyout + dimmer) | 14.9 MB (thin LTO) | within the raised 16 MB budget |
 | P5 (+ settings, autostart, ureq/rustls update check) | **17.21 MB** | **over by 1.2 MB** |
-| P7 (+ the Linux tray and gamma sink) | 19,446,784 bytes | over by 2,669,568 |
-| **P8 (hardening)** | **15,709,696 bytes** | **within, by 1,067,520** |
+| P7 (+ the Linux tray and gamma sink) | 19,446,784 bytes (thin LTO) | over by 2,669,568 |
+| **P8 (hardening)** | **15,709,696 bytes** (fat LTO, `opt-level = "s"`) | **within, by 1,067,520** |
 
 P5's overage is entirely the opt-in update check's TLS stack
 (`ureq` + `rustls` + `ring` + `webpki-roots`). It is **not** accepted as a new
@@ -93,8 +95,11 @@ decoder stack Slint pulls by default." Investigated, and there is nothing to
 disable: `slint/std` implies
 `i-slint-core/std`, which implies `image-decoders` **and** `svg`, with no seam
 between them. The formats that *were* optional are already off - which is why
-`exr`, `tiff`, `qoi` and AVIF are absent from the binary while JPEG, WebP, PNG
-and GIF remain. Removing the rest means patching Slint, which is not a hardening
+`exr`, `tiff`, `qoi`, AVIF, WebP and GIF are all absent from the binary. Only
+**PNG and JPEG** remain, which is what `i-slint-core` asks for by name
+(`features = ["png", "jpeg"], default-features = false`). An earlier version of
+this paragraph listed WebP and GIF as present; they reach only the build-dep
+universe, which resolver 2 keeps out of the link. Removing the rest means patching Slint, which is not a hardening
 change. Struck rather than left for the next person to spend a day on.
 
 ### And one thing the Context missed entirely
@@ -111,12 +116,19 @@ split are the same file. An earlier draft mixed a targeted build's byte count
 with an untargeted build's sections - 25,600 bytes apart, which changed no
 conclusion and would still have been two measurements presented as one.)
 
-That section is dominated by static data tables arriving with the same
-`i-slint-core/std` feature as the SVG stack: ICU segmentation, normalization,
-properties and locale data, plus font and shaping tables. **The attribution is
-by dependency graph rather than by symbol** - nothing here can read a stripped
-PE's `.rdata` per crate, and that limitation is the finding as much as the number
-is.
+That section is dominated by static data tables: ICU segmentation,
+normalization, properties and locale data, plus font and shaping tables. **The
+attribution is by dependency graph rather than by symbol** - nothing here can
+read a stripped PE's `.rdata` per crate, and that limitation is the finding as
+much as the number is. It is also why "the largest single component" below should
+be read as "the largest contributor we can name", not as a measured ranking:
+`.text` is the larger *section*.
+
+They do not all arrive with `std`, which an earlier draft claimed. `svg` and
+`image-decoders` do; `unicode` (segmentation) and `shared-parley` (normalization)
+come from `i-slint-core/default` and from the software renderer's `systemfonts`.
+The conclusion survives intact - every one of those features is on a path a
+desktop GUI cannot turn off - but the single feature name was wrong.
 
 It reframes the problem either way. **The binary is not code-bound, it is
 data-bound**, and the data is welded to a feature a desktop GUI cannot turn off.
@@ -201,8 +213,13 @@ point; the alternative was to take the bytes and say nothing.
 
 ### What now protects it
 
-`cargo xtask size`, called by the release workflow after it builds. A release
-cannot ship over budget. It deliberately does not run per PR - the check needs a
+`cargo xtask size`, called by the release workflow's **Windows** job after it
+builds. A *Windows* release cannot ship over budget; the macOS and Linux jobs
+build their own binaries and measure nothing, and because `release` declares
+`needs: [macos, linux]` both are already built when the gate runs. macOS cannot
+use this number at all - its artifact is a universal binary carrying two
+architectures - and neither platform has a measured budget. `docs/debt.md` D-110
+carries that gap. It deliberately does not run per PR - the check needs a
 fat-LTO release build, roughly twenty minutes on a hosted runner - so a
 dependency bump that adds a megabyte is caught at the next release rather than
 at the PR that lands it. That gap is a debt row too.

@@ -83,7 +83,7 @@ confirmations per architecture, which no amount of code closes.
 
 | wave | scope | state |
 |---|---|---|
-| 1 | binary size: measure, trim, then gate it in CI | next |
+| 1 | binary size: measure, trim, then gate it | done - `#144` |
 | 2 | the fuzz and coverage lanes | done - `#145` |
 | 3 | `--soak`, the harness two perf budgets already cite | done - `#146` |
 | 4 | the debt drain (`refactor:` PR) | **partial** - `#147` |
@@ -95,8 +95,8 @@ wave table used to live in this section; it is in [history.md](history.md) now.
 It is the only wave table there - P0 through P6 were never written up that way,
 and this file has said so by omission rather than by claiming otherwise.
 
-**The constraint that shaped P7 has not gone away**, and wave 1 runs straight
-into it: **`duja-app` cannot be built for Linux on the Windows dev box**
+**The constraint that shaped P7 has not gone away**, and P8 ran straight into
+it more than once: **`duja-app` cannot be built for Linux on the Windows dev box**
 (`yeslogic-fontconfig-sys` wants a pkg-config sysroot; `RUST_FONTCONFIG_DLOPEN=1`
 gets past it and then `fontique` fails on the dlopen module layout, confirmed
 twice), so any size number for a non-Windows target is a CI-only measurement.

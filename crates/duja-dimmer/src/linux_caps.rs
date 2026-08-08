@@ -106,8 +106,14 @@ pub enum Transport {
 /// bug.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unavailable {
-    /// No `WAYLAND_DISPLAY`, no `WAYLAND_SOCKET` and no `DISPLAY`: there is no
-    /// display server to ask.
+    /// No `WAYLAND_DISPLAY` and no `DISPLAY`: there is no display server to ask.
+    ///
+    /// `WAYLAND_SOCKET` is **not** in that list, because [`transport`] does not
+    /// consult it - see its docs for why a single-use fd cannot be a durable
+    /// session marker. Naming it here was worse than untidy: a Flatpak or portal
+    /// client, which is exactly the case D-093 describes, would be told by
+    /// `dujactl doctor` that `WAYLAND_SOCKET` is unset when it is set, and sent
+    /// to fix the one variable that was already correct.
     NoDisplayServer,
     /// A display server was named but the connection to it failed.
     ConnectFailed,
@@ -139,10 +145,7 @@ impl fmt::Display for Unavailable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Unavailable::NoDisplayServer => {
-                write!(
-                    f,
-                    "no display server (none of WAYLAND_DISPLAY, WAYLAND_SOCKET, DISPLAY)"
-                )
+                write!(f, "no display server (neither WAYLAND_DISPLAY nor DISPLAY)")
             }
             Unavailable::ConnectFailed => write!(f, "the display server refused the connection"),
             Unavailable::ProtocolAbsent { interface } => {

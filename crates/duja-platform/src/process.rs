@@ -62,11 +62,21 @@ mod imp {
     use super::ProcessMetrics;
 
     pub(super) fn self_metrics() -> Option<ProcessMetrics> {
+        // All three or nothing. `gui_objects` answers `None` on a *failed
+        // query*, and `Option` cannot tell that apart from "this platform has no
+        // such concept" - which is what `None` means on Linux. Returning a
+        // half-read sample here made the soak print "not counted on this
+        // platform" about Windows, which counts them fine, and skip the handle
+        // budget entirely while still reporting PASS. A sample missing half the
+        // budget is not a measurement, so it is reported as unreadable and the
+        // soak's own `unreadable` tally sees it.
         let rss = crate::win::sys::working_set_bytes()?;
+        let gdi = crate::win::sys::gui_objects(true)?;
+        let user = crate::win::sys::gui_objects(false)?;
         Some(ProcessMetrics {
             rss_bytes: rss,
-            gdi_objects: crate::win::sys::gui_objects(true),
-            user_objects: crate::win::sys::gui_objects(false),
+            gdi_objects: Some(gdi),
+            user_objects: Some(user),
         })
     }
 }
