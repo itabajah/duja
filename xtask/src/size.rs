@@ -114,25 +114,67 @@ fn mib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
+/// One resolved `size` command line.
+///
+/// Parsing is separated from measuring for the reason [`dist`](crate::dist)
+/// separated its own: a test can obtain an `std::env::Args` but cannot choose
+/// what is *in* one, so every argument rule below was unreachable by
+/// construction rather than by omission. `docs/debt-archive.md` D-114 has the
+/// measurement.
+#[derive(Debug, PartialEq, Eq)]
+struct Invocation {
+    /// The target triple from `--target`, if one was named.
+    triple: Option<String>,
+}
+
+impl Invocation {
+    /// Parse the arguments following `size`.
+    ///
+    /// # Errors
+    /// A message for an unknown argument, or for a `--target` whose value is
+    /// missing, empty, or itself flag-shaped.
+    fn parse<I: Iterator<Item = String>>(mut args: I) -> Result<Invocation, String> {
+        let mut triple: Option<String> = None;
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                // Last one wins, which is the GNU convention and what `dist`
+                // does with its own repeated flags.
+                "--target" => {
+                    let named = crate::args::value(&mut args, "--target")
+                        .map_err(|e| format!("{e} (a target triple)"))?;
+                    // An empty triple is refused here rather than in the shared
+                    // rule, because it means different things to the two
+                    // subcommands. `dist --target ""` already fails on its own -
+                    // the value has to be one of three words. Here it would
+                    // *silently succeed*: `release_dir` joins `Some("")` to
+                    // `target/release`, the host directory, so `--target ""`
+                    // measures whatever the last host build left there and
+                    // reports a pass. `release_dir`'s own doc calls that "the one
+                    // failure mode a size check must not have". Last-wins makes
+                    // it worse rather than better: `--target aarch64-... --target
+                    // ""` discards the triple the caller meant.
+                    if named.is_empty() {
+                        return Err("`--target` needs a target triple, not an empty \
+                                    string (which would measure the host directory)"
+                            .to_owned());
+                    }
+                    triple = Some(named);
+                }
+                other => return Err(format!("unknown argument `{other}`")),
+            }
+        }
+        Ok(Invocation { triple })
+    }
+}
+
 /// `cargo xtask size [--target <triple>]`.
 ///
 /// # Errors
 /// Returns a message when an argument is unrecognised, when a binary is missing
 /// (with the `cargo build` line that would produce it), or when any binary is
 /// over budget.
-pub(crate) fn run(mut args: std::env::Args) -> Result<(), String> {
-    let mut triple: Option<String> = None;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--target" => {
-                triple = Some(
-                    args.next()
-                        .ok_or_else(|| "--target needs a target triple".to_owned())?,
-                );
-            }
-            other => return Err(format!("unknown argument `{other}`")),
-        }
-    }
+pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let Invocation { triple } = Invocation::parse(args)?;
 
     let root = repo_root()?;
     let dir = release_dir(&root, triple.as_deref());
@@ -207,6 +249,120 @@ fn measure(dir: &Path, name: &str, budget: u64) -> Result<Measured, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parse a command line written the way it would be typed, on `dist`'s own
+    /// test helper's model.
+    fn args(argv: &[&str]) -> Result<Invocation, String> {
+        Invocation::parse(argv.iter().map(|s| (*s).to_owned()))
+    }
+
+    /// No `--target` means no triple, which is what
+    /// [`naming_a_target_moves_where_the_binaries_are_looked_for`] then turns
+    /// into `target/release`. Two steps, pinned separately, because the parse and
+    /// the path join are different decisions.
+    #[test]
+    fn no_arguments_names_no_target() {
+        assert_eq!(args(&[]), Ok(Invocation { triple: None }));
+    }
+
+    #[test]
+    fn a_target_triple_is_carried_through() {
+        assert_eq!(
+            args(&["--target", "aarch64-apple-darwin"]),
+            Ok(Invocation {
+                triple: Some("aarch64-apple-darwin".to_owned())
+            })
+        );
+    }
+
+    /// The message names the argument, because the reader is a maintainer who
+    /// has just typed something at a release.
+    #[test]
+    fn an_unknown_argument_is_rejected_by_name() {
+        let err = args(&["--bogus"]).expect_err("`--bogus` is not an argument");
+        assert!(err.contains("--bogus"), "{err}");
+    }
+
+    /// The message says what `--target` wants, not merely that it wants
+    /// something.
+    ///
+    /// The shared rule's text is "`--target` needs a value", which is right for
+    /// `dist`'s three flags and loses information here: this argument's value is
+    /// a **build triple**, and the pre-hoist message said so. Asserting only
+    /// `contains("--target")` would let that regress silently, which is how it
+    /// regressed in the first place.
+    #[test]
+    fn a_target_with_no_value_is_told_what_it_wanted() {
+        let err = args(&["--target"]).expect_err("nothing follows `--target`");
+        assert!(err.contains("--target"), "{err}");
+        assert!(err.contains("target triple"), "{err}");
+    }
+
+    /// An empty triple is refused rather than silently meaning "the host".
+    ///
+    /// `release_dir(root, Some(""))` joins to `target/release` - the host
+    /// directory - so `size --target ""` would measure whatever the last host
+    /// build left there and report a pass for a target it never looked at. That
+    /// is the stale-binary failure `release_dir`'s own doc says a size check must
+    /// not have. `dist --target ""` already fails, because its value must be one
+    /// of three words; the two subcommands disagreed and now do not.
+    #[test]
+    fn an_empty_target_is_refused_rather_than_meaning_the_host() {
+        let err = args(&["--target", ""]).expect_err("an empty triple is not a triple");
+        assert!(err.contains("--target"), "{err}");
+
+        // And last-wins must not launder it: the caller named a real triple and
+        // a later empty one would discard it.
+        let laundered = args(&["--target", "aarch64-apple-darwin", "--target", ""])
+            .expect_err("the empty one is still empty");
+        assert!(laundered.contains("--target"), "{laundered}");
+    }
+
+    /// A flag-shaped value is refused rather than used as a directory name.
+    ///
+    /// Red before [`crate::args::value`] was routed in here, and red at the
+    /// site where it mattered: `size`'s own argument loop took the next token
+    /// unconditionally, so `--target --release` measured
+    /// `target/--release/release` and reported a missing binary at a path the
+    /// user never typed - a message about the wrong problem entirely.
+    /// `dist` had already decided this was wrong and guarded it; the two
+    /// subcommands simply disagreed, and now share the rule.
+    #[test]
+    fn a_flag_shaped_target_value_is_refused_rather_than_used_as_a_directory() {
+        let err = args(&["--target", "--release"]).expect_err("a flag is not a target triple");
+        assert!(err.contains("--target"), "{err}");
+        assert!(
+            err.contains("--release"),
+            "the message names what it found instead: {err}"
+        );
+    }
+
+    /// A repeated flag takes the last value, matching `dist` and the GNU
+    /// convention. Pinned rather than left to chance: it is the one argument
+    /// rule here that is a *choice* rather than a rejection, so nothing else
+    /// records it.
+    #[test]
+    fn a_repeated_target_takes_the_last_one() {
+        assert_eq!(
+            args(&["--target", "first", "--target", "second"]),
+            Ok(Invocation {
+                triple: Some("second".to_owned())
+            })
+        );
+    }
+
+    /// `run` refuses a bad command line before it touches the filesystem, so
+    /// the rejection is not contingent on a release build existing.
+    #[test]
+    fn run_rejects_a_bad_command_line_without_measuring_anything() {
+        let err = run(["--bogus"].into_iter().map(String::from))
+            .expect_err("`--bogus` is not an argument");
+        assert!(err.contains("--bogus"), "{err}");
+        assert!(
+            !err.contains("cargo build"),
+            "it must not have got as far as looking for a binary: {err}"
+        );
+    }
 
     #[test]
     fn a_binary_on_its_budget_exactly_is_within_it() {

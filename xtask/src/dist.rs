@@ -46,6 +46,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use self::verified::Verified;
+use crate::args::value;
 use crate::bundle::{self, BundleInputs};
 use crate::macho;
 use crate::repo_root;
@@ -153,7 +154,7 @@ impl Target {
 /// Returns a human-readable message if `--version` is missing or malformed, a
 /// source file is absent (usually: the release build has not run), or an I/O,
 /// archiving, or packaging-tool step fails.
-pub(crate) fn run(args: std::env::Args) -> Result<(), String> {
+pub(crate) fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
     let parsed = Invocation::parse(args)?;
     let root = repo_root()?;
     let dist = root.join("target").join("dist");
@@ -214,21 +215,6 @@ impl Invocation {
             target,
             identity: identity.unwrap_or_else(|| AD_HOC.to_owned()),
         })
-    }
-}
-
-/// The value following `flag`.
-///
-/// # Errors
-/// Rejects a missing value, and one that is itself flag-shaped: `--version
-/// --target macos` would otherwise parse as the *version* `--target` — every
-/// character in it is in [`Version`]'s alphabet — and then fail with a message
-/// about the wrong argument entirely.
-fn value<I: Iterator<Item = String>>(args: &mut I, flag: &str) -> Result<String, String> {
-    match args.next() {
-        Some(v) if !v.starts_with("--") => Ok(v),
-        Some(v) => Err(format!("`{flag}` needs a value, but got the flag `{v}`")),
-        None => Err(format!("`{flag}` needs a value")),
     }
 }
 

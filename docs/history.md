@@ -1338,10 +1338,16 @@ from "not looked at":
 ### What it cost, and what it did not do
 
 `plan.md` shed 244 of its 351 lines to `history.md`, which is this file. The
-[D-114](debt.md#d-114) row was added rather than paid: both `xtask` subcommands
-take `std::env::Args`, so their argument parsing is unreachable from a unit test
-by construction. The fix is an hour and it was deliberately not taken here,
-because `xtask` is the tool that *performs* the release, including the size
+[D-114](debt-archive.md#d-114) row was added rather than paid: both `xtask`
+subcommands take `std::env::Args`, so their argument parsing is unreachable from
+a unit test by construction. (Half of that was false, and `#156` established it
+by measuring rather than by reading: `dist` delegates to a parser that has been
+generic since it arrived, and four tests in that file already drove it. The row
+was written from two signatures rather than from what was behind them - and the
+correction then took three review rounds to get right, which
+[debt-archive.md](debt-archive.md#d-114) records rather than tidies away.) The
+fix is an hour and it was deliberately not taken here, because `xtask` is the
+tool that *performs* the release, including the size
 gate, and cutting `v0.1.6` with an `xtask` no release had ever used is the wrong
 trade on the wrong day.
 
