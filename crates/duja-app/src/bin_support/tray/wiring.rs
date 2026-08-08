@@ -354,7 +354,8 @@ mod tests {
     //! one sentence: that `AppState` "cannot be constructed in a test". D-102
     //! re-triaged that sentence and found half of it already false — `#134`
     //! removed the `tray_icon::TrayIcon` field, and `duja-ui` had been building
-    //! both Slint shells headless in its own suite all along. What D-102 listed
+    //! both Slint shells headless in its own suite all along, behind its `smoke`
+    //! feature. What D-102 listed
     //! as **not verified** was the remaining half: whether `build_tray` actually
     //! refuses in a test process, or whether that had only ever been assumed.
     //!

@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(
             toasted,
             ["v9.9.9"],
-            "the toast is behind the same guard, and a duplicate one is what a              user would actually notice"
+            "the toast is behind the same guard, and a duplicate one is what a user would actually notice"
         );
         let (_, tooltips, updates) = h.app.tray.recorded();
         assert_eq!(updates, ["v9.9.9"], "one announcement, not two");
@@ -196,11 +196,14 @@ mod tests {
     fn a_newer_version_announces_again() {
         let mut h = harness(Config::default());
 
-        h.app.surface_update_available("v9.9.9");
-        h.app.surface_update_available("v9.9.10");
+        let toasted = toasts_after(|| {
+            h.app.surface_update_available("v9.9.9");
+            h.app.surface_update_available("v9.9.10");
+        });
 
         let (_, _, updates) = h.app.tray.recorded();
         assert_eq!(updates, ["v9.9.9", "v9.9.10"]);
+        assert_eq!(toasted, ["v9.9.9", "v9.9.10"], "and the desktop hears both");
         assert_eq!(h.app.update_available.as_deref(), Some("v9.9.10"));
     }
 
@@ -228,7 +231,7 @@ mod tests {
         assert!(tooltips.is_empty(), "{tooltips:?}");
         assert!(
             toasts::shown().is_empty(),
-            "and so must the desktop: a user who just clicked Check now is              already looking at the answer"
+            "and so must the desktop: a user who just clicked Check now is already looking at the answer"
         );
         assert_eq!(
             h.app.settings_vm.borrow().update_status(),
@@ -239,20 +242,27 @@ mod tests {
         );
     }
 
-    /// And the background one does both.
+    /// And the background one does both - the tray **and** the toast.
+    ///
+    /// Asserting both is the point. An earlier version of this checked only the
+    /// tray while its doc said "does both", and a review proved the gap: deleting
+    /// the `toast::notify_update_available` call left this test green.
     #[test]
-    fn a_background_check_surfaces_to_the_tray() {
+    fn a_background_check_surfaces_to_the_tray_and_the_desktop() {
         let mut h = harness(Config::default());
 
-        h.app.on_update_outcome(
-            UpdateOutcome::UpdateAvailable {
-                version: "v9.9.9".to_owned(),
-            },
-            true,
-        );
+        let toasted = toasts_after(|| {
+            h.app.on_update_outcome(
+                UpdateOutcome::UpdateAvailable {
+                    version: "v9.9.9".to_owned(),
+                },
+                true,
+            );
+        });
 
         let (_, _, updates) = h.app.tray.recorded();
         assert_eq!(updates, ["v9.9.9"]);
+        assert_eq!(toasted, ["v9.9.9"]);
     }
 
     #[test]

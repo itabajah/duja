@@ -42,7 +42,8 @@
 //! the reason this section gave for it — that `AppState` "owns two live Slint
 //! shells and a real tray icon and cannot be constructed off the tray thread" —
 //! was wrong in both halves by the time it was last edited: `duja-ui` builds
-//! both shells headless in its own suite, and `#134` had already replaced the
+//! both shells headless in its own suite (under its `smoke` feature, which CI
+//! enables), and `#134` had already replaced the
 //! tray handles with a seam. `docs/debt-archive.md` D-040 carries the re-triage.
 //!
 //! What has **not** changed is the sentence this section exists for: the tests

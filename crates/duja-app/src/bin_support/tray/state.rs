@@ -1415,7 +1415,10 @@ const fn retires_dimmer(error: &duja_core::dimmer::DimmerError) -> bool {
 ///
 /// - **The Slint half was never true.** `duja-ui` has been instantiating both
 ///   shells headless in its own suite since before three of those rows existed,
-///   through `i_slint_backend_testing::init_no_event_loop`.
+///   through `i_slint_backend_testing::init_no_event_loop` - under its `smoke`
+///   feature, which CI's `--all-features` turns on and a bare `cargo test` does
+///   not. The fixture here is deliberately not gated that way: a seam four debt
+///   rows waited on should not need a flag to exercise.
 /// - **The tray half stopped being true, and then the opposite problem
 ///   appeared.** `#134` replaced the three `tray-icon` handles with one
 ///   `PlatformTray`, and D-102's experiment then showed `build_tray`
@@ -1426,8 +1429,10 @@ const fn retires_dimmer(error: &duja_core::dimmer::DimmerError) -> bool {
 ///
 /// # What is real here and what is not
 ///
-/// Two things here reach an OS and both are bounded. The Slint shells go through
-/// the headless backend. `OsHotkeyRegistrar::new` builds a real
+/// Three things here reach an OS and all are bounded. `tempfile::tempdir()`
+/// creates a real directory, which the `Harness` drops last so the files under
+/// it outlive everything that writes them. The Slint shells go through the
+/// headless backend. `OsHotkeyRegistrar::new` builds a real
 /// `GlobalHotKeyManager` on an interactive session - it does *not* merely
 /// degrade to `None`, which an earlier draft of this paragraph implied - but it
 /// registers nothing, because `register()` is never called, and it drops with
@@ -1492,10 +1497,14 @@ pub(super) mod fixture {
     /// Per thread, not per process, and that distinction is the whole reason
     /// this is a function rather than a bare call at the top of each test.
     /// `init_no_event_loop` binds the platform to its *calling* thread, and a
-    /// shell built on any other one fails to construct at all - measured, the
-    /// message is "Could not initialize backend. ... No backends configured",
-    /// not the "initialized in another thread" an earlier draft quoted from
-    /// memory. `cargo test` runs a binary's tests on
+    /// shell built on any other one fails with "The Slint platform was
+    /// initialized in another thread". That string is what a `Once` here
+    /// actually produces, reproduced by swapping the latch back and running the
+    /// suite. A review round replaced it with a different message and labelled
+    /// the replacement "measured"; it was not, and the correction was the defect
+    /// - which is worth leaving written down, because this file argues at length
+    /// that a claim reading as verified and not being so is the expensive kind.
+    /// `cargo test` runs a binary's tests on
     /// several threads of one process, so a `std::sync::Once` here - which is
     /// what the first version of this used - initialises for whichever test ran
     /// first and breaks every subsequent one. `cargo nextest`, which CI runs,
