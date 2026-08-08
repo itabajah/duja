@@ -87,7 +87,7 @@ confirmations per architecture, which no amount of code closes.
 | 2 | the fuzz and coverage lanes | done - `#145` |
 | 3 | `--soak`, the harness two perf budgets already cite | done - `#146` |
 | 4 | the debt drain (`refactor:` PR) | **partial** - `#147` |
-| 5 | the security pass and the docs-truth sweep | pending |
+| 5 | the security pass and the docs-truth sweep | done - `#148` |
 | 6 | the multi-reviewer phase gate, and `m8-hardening` | pending |
 
 [plan.md](plan.md) has what each wave owes and why it is ordered there. P7's

@@ -96,6 +96,7 @@ impl ConfigDocument {
     /// file is never rewritten here — the caller decides when to save.
     ///
     /// # Errors
+    /// - [`ConfigError::TooLarge`] if the file is over `persist::MAX_CONFIG_LEN`.
     /// - [`ConfigError::Io`] if the file exists but cannot be read.
     /// - [`ConfigError::Parse`] if the file is not valid TOML.
     /// - [`ConfigError::UnsupportedVersion`] if it was written by a newer build.

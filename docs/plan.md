@@ -80,7 +80,7 @@ feature area.
 | 2 | the fuzz and coverage lanes ([D-002](debt-archive.md#d-002), [D-023](debt-archive.md#d-023)) | done - `#145` |
 | 3 | `--soak`, the harness two perf budgets already cite | done - `#146` |
 | 4 | the debt drain (`refactor:` PR, the rubric's ~15% time-box) | **partial** - `#147`, see below |
-| 5 | the security pass and the docs-truth sweep | pending |
+| 5 | the security pass and the docs-truth sweep | done - `#148` |
 | 6 | the phase gate - **the multi-reviewer one** - and `m8-hardening` | pending |
 
 Waves 1, 2 and 3 are independent of each other and can land in any order. Wave 4
@@ -285,12 +285,13 @@ checklist, item by item** rather than the summary skim every other phase gets.
 Do that, and record what was checked rather than only what failed.
 
 Then the truth sweep, which is cheap and catches the class of drift this project
-keeps paying for. One known instance to start from: `SECURITY.md` still
-describes the release as "the Windows installer `.exe`, a portable `.zip`, and
-(from `v0.2.0`) a macOS universal `.dmg`" and invites the reader to verify
-provenance on "any of the three artifacts". P7 wave 6 made it four. Nobody
-edited the security policy, because the tarball landed in `xtask` and the
-release workflow and there was no reason to look there.
+keeps paying for. The instance this wave started from: `SECURITY.md` described
+the release as three artifacts and invited provenance verification on "any of the
+three", when P7 wave 6 had made it four. Nobody edited the security policy,
+because the tarball landed in `xtask` and the release workflow and there was no
+reason to look there - and `release.yml`'s own comment carried the same stale
+count, which is how far that kind of drift travels. Both fixed in `#148`; the
+write-up is in [history.md](history.md).
 
 ### Wave 6 - the gate
 

@@ -25,9 +25,15 @@ Local attack surface and mitigations:
   assumed), peer-identity verification, anti-squatting flags, length-prefixed
   frames with a 64 KiB cap enforced before allocation, strict parameter
   validation, connection and read-timeout limits.
-- **Config & quirks files**: typed parsing only, size caps, no user-supplied
-  regex, parse failures fall back to embedded defaults: never abort, never
-  execute content.
+- **Config files**: `config.toml` and `state.toml` are typed-parsed only, and
+  capped at 1 MiB each, enforced by a bounded read rather than after the file is
+  in memory. No user-supplied regex anywhere in the process. Parse failures fall
+  back to embedded defaults: never abort, never execute content.
+- **The quirk database is compiled in**, not read: `include_str!` at build time,
+  and every runtime call site uses the embedded copy. Its 1 MiB cap therefore
+  guards a parser rather than a file, and there is no user-supplied quirk file
+  for an attacker to reach. (The plan has long named a user override file; it
+  does not exist, and `docs/debt.md` carries that as D-012.)
 - **Screen-state restitution**: gamma/overlay state is guarded so a crash
   cannot leave the screen unusable (`duja --restore`, crash-marker recovery).
 
@@ -37,8 +43,8 @@ Pinned lockfile; `cargo-deny` (advisories + license allowlist) on every PR **and
 again on the tagged commit at release time**; GitHub Actions pinned by commit SHA.
 Each tagged release
 ([`.github/workflows/release.yml`](.github/workflows/release.yml)) ships the
-Windows installer `.exe`, a portable `.zip`, and (from `v0.2.0`) a macOS
-universal `.dmg`, each carrying a GitHub **build-provenance attestation**.
+Windows installer `.exe`, a portable `.zip`, a macOS universal `.dmg` and a Linux
+`.tar.gz`, each carrying a GitHub **build-provenance attestation**.
 Alongside them a **SHA256SUMS** file lists their hashes, and a **minisign**
 signature (`.minisig`) covers each binary *and* `SHA256SUMS` itself. The
 minisigned `SHA256SUMS` is the root of trust: verify it, then its hashes chain to
@@ -84,7 +90,19 @@ So the verify command is:
 minisign -Vm SHA256SUMS -P RWSeL0en/zyHopbYOTmC4nwO4pLW0WN6awWsuhwoUZnSM+D0zukOl0UK
 ```
 
-You can also verify the build-provenance attestation on any of the three
-artifacts (the installer `.exe`, the portable `.zip`, or the macOS `.dmg`) with
-`gh attestation verify <file> --repo itabajah/duja`. (`SHA256SUMS` and the
-`.minisig` files are not attested; they are covered by minisign above.)
+You can also verify the build-provenance attestation on any of the four
+artifacts (the installer `.exe`, the portable `.zip`, the macOS `.dmg`, or the
+Linux `.tar.gz`) with `gh attestation verify <file> --repo itabajah/duja`.
+(`SHA256SUMS` and the `.minisig` files are not attested; they are covered by
+minisign above.)
+
+Two of the four have never been published: `v0.2.0` (macOS) and `v0.3.0` (Linux)
+are deliberately held until someone has run each build on the hardware it
+targets. **They are not tagged**; the phases they close are, as `m6-macos` and
+`m7-linux`, and a release is a separate decision from a milestone tag.
+
+What is proven for all four is that the pipeline **builds, stages and checksums**
+them, by a `workflow_dispatch` dry run rather than by assertion. What is not
+proven for the last two is the signing path: the minisign and attestation steps
+are gated on a real tag push, so no run has ever attested a `.dmg` or a
+`.tar.gz`.

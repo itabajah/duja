@@ -48,6 +48,7 @@ to assert.
   - [Perceptual brightness continuum (v2, ADR-0014)](#s21)
   - [UI layout & ruby theme (2026-07-14)](#s22)
   - [v0.1.0 release (2026-07-16)](#s23)
+- [P8 wave 5: the SECURITY.md checklist, item by item](#s46)
 - [P7 waves, as planned and as they went](#s41)
   - [Wave 5 - the tray, and what it turned out to own](#s42)
   - [The one architectural item worth scheduling](#s43)
@@ -1205,6 +1206,94 @@ install and stay current on:
 - **Not signed.** No Authenticode certificate yet, so SmartScreen warns on first
   run; authenticity is via the checksums + minisign key + provenance. Binary size
   regressed to ~19 MB (P8 trim).
+
+<a id="s46"></a>
+## P8 wave 5: the SECURITY.md checklist, item by item
+
+[review-rubric.md](review-rubric.md) singles out P5 and P8 for the **full**
+`SECURITY.md` checklist rather than the summary skim every other phase gets. This
+is that pass, and it records what was **checked and found true** as well as what
+was not - a security review that lists only its findings does not distinguish
+"verified" from "not looked at", which is the distinction the reader needs.
+
+### The one claim that was false
+
+**"Config & quirks files: typed parsing only, size caps..."** The quirk DB had
+`MAX_QUIRKS_LEN` (1 MiB). `config.toml` and `state.toml` had **none**:
+`persist::read_to_string_opt` was `fs::read_to_string`, which allocates whatever
+the file is. The threat is modest - a process that can write there is already the
+user - but the shape is not: a policy document asserting a control that does not
+exist is the serious kind of wrong, and the cheap fix is to make the sentence
+true rather than to edit it out.
+
+Capped at 1 MiB. Two checks rather than one, which is the part worth keeping: the
+metadata length is only a pre-check, and `read_capped` is the enforcement,
+because a file can grow between the two calls and because `/proc` reports a
+length of zero for files with content - so a metadata-only cap is one a symlink
+walks straight past.
+
+**Three things about that were wrong in the first draft, and a review found all
+three.** The enforcing branch had *no test*: deleting it left the suite green,
+because the metadata pre-check shadows it for every ordinary file. It returned
+the wrong error when it did fire - cutting at the limit can land mid-UTF-8, so
+`Take::read_to_string` failed as `InvalidData` and the over-cap file came back as
+`Io`, defeating the entire reason `TooLarge` exists. And the claim that "both
+callers fall back to defaults" was false in three places: `ConfigDocument::load`
+and `StateFile::load` **propagate**, and among *their* callers,
+`settings_apply::persist_config_change` propagates too. `read_capped` is now a
+separate function taking a reader, so the enforcement is testable and is pinned
+by a mutation; it reads bytes and length-checks before converting; and the error
+field is `at_least` rather than `bytes`, because the bounded read genuinely does
+not know how big the file was.
+
+The quirk DB is a different thing and the first draft conflated them. It is
+`include_str!`-compiled, so there is no runtime file to cap and its
+`MAX_QUIRKS_LEN` guards a parser rather than a read. Writing "1 MiB each for
+config.toml, state.toml and the quirk DB, enforced before the file is read into
+memory" made the policy *more* specific and thereby false - in the wave whose job
+was to stop exactly that.
+
+### The one that had gone stale
+
+`SECURITY.md` described the release as "the Windows installer `.exe`, a portable
+`.zip`, and (from `v0.2.0`) a macOS universal `.dmg`", and invited the reader to
+verify provenance on "any of the **three** artifacts". P7 wave 6 made it four.
+Nobody edited the security policy, because the tarball landed in `xtask` and the
+release workflow and there was no reason to look there. Now four, with the note
+that two of them are tagged and held.
+
+### What was checked and found true
+
+- **"The only network code is the update check."** Verified by exclusion:
+  `TcpStream`, `UdpSocket`, `reqwest`, `hyper`, `curl` appear nowhere in
+  `crates/`, and the only `ureq` call site is `bin_support/updates.rs`.
+- **Its stated bounds all hold.** `MAX_RESPONSE_BYTES = 64 * 1024` applied
+  through `Read::take` before the buffer is filled; `NETWORK_TIMEOUT_SECS = 5` on
+  connect, read *and* write; `UPDATE_CHECK_INTERVAL_SECS = 24 * 60 * 60`. It
+  parses `tag_name` and opens a page; nothing downloads or executes.
+- **"No user-supplied regex"** - now stronger than the sentence claims. There is
+  no regex *engine* in the binary at all: P8 wave 1 removed the last one with
+  `tracing-subscriber`'s `env-filter`, which was pulling `regex-automata` and
+  `regex-syntax` for a grammar Duja never used.
+- **"Duja runs unprivileged."** No `runas`, no `AdjustTokenPrivileges`, no
+  `CreateProcessAsUser`, no `setuid`. The single `setuid` string in the tree is a
+  comment in `unix_dir` saying Duja never wants that bit on its own state
+  directory.
+- **The IPC controls are all present**: `MAX_FRAME_LEN = 64 * 1024` checked
+  before any body buffer is allocated, `SO_PEERCRED`/`getpeereid` euid checks on
+  unix and a PID/session check on Windows, `FILE_FLAG_FIRST_PIPE_INSTANCE` and
+  `O_NOFOLLOW` against squatting, a 5 s per-read timeout and a connection cap.
+- **Supply chain**: `cargo deny check` clean on all four (advisories, bans,
+  licenses, sources); every third-party action in every workflow pinned by commit
+  SHA.
+
+### What this pass did not do
+
+It read the code against the policy. It did not attempt exploitation, it did not
+review the `unsafe` blocks for soundness beyond their `// SAFETY:` comments, and
+it is a single reviewer rather than the independent pass the phase gate runs. The
+IPC transport in particular has never been exercised by a hostile client - only
+by `dujactl` and its own tests.
 
 <a id="s41"></a>
 ## P7 waves, as planned and as they went

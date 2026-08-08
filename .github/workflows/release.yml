@@ -497,7 +497,9 @@ jobs:
       # macOS .dmg and the Linux .tar.gz are not PE files. They stay covered by
       # minisign and
       # provenance; SHA256SUMS is covered by minisign ONLY -- subject-path lists
-      # the three binaries and deliberately excludes it.
+      # the four shippable artifacts and deliberately excludes it. (Four since
+      # P7 wave 6 added the Linux tarball; this comment said three until P8
+      # wave 5 -- the same drift SECURITY.md had, and for the same reason.)
       - name: Sign installer (Azure Trusted Signing)
         if: env.PUBLISH == 'true' && vars.AZURE_SIGN == 'true'
         uses: azure/trusted-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
