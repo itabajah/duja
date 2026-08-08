@@ -23,9 +23,10 @@
 //!   (see the crash-safety note below); Linux' `LinuxSink` reads the token as a
 //!   CRTC id or a `wl_output` name depending on the session's transport, and does
 //!   carry a marker, for the reason set out on the sink itself.
-//! - `GammaBackend` bundles the two and is what the tray owns. All three
-//!   platforms' versions expose the same constructor and methods, so the tray
-//!   wires the gamma channel without a `cfg`.
+//! - `OsGamma` bundles the two per target, and the one `GammaBackend` the tray
+//!   owns wraps it. All three platforms' `OsGamma`s expose the same constructor
+//!   and methods, so the tray wires the gamma channel without a `cfg` - and the
+//!   wrapper is what lets a test substitute a recorder for the lot.
 //!
 //! # One token, three formats, and only Linux decides at runtime
 //!
@@ -426,14 +427,31 @@ pub(crate) struct GammaTeardown {
 /// version of this comment claimed they did, which was the `#82` shape wearing a
 /// denial of it.
 ///
-/// What this needed was [D-102](https://github.com/itabajah/duja/blob/main/docs/debt.md#d-102)'s
-/// refactor, and half of it has landed: `AppState` is constructible now, behind
-/// a fake tray. The half that is still missing is a **fakeable gamma channel**.
-/// The fixture's sink is inert by design - its resolver answers `None` for every
-/// id, so no ramp is touched - which means the engage and restore phases produce
-/// nothing a test can observe, and re-inserting the wrong order at `begin_quit`
-/// would still leave the suite green. So the gap is narrower and its shape is
-/// known, which is not the same as closed.
+/// **What this gap needs is two seams, and neither of them exists.** The first
+/// version of this paragraph said the fakeable gamma channel "is still missing"
+/// and was left standing in the commit that built one; the correction then
+/// implied that channel was enough. It is not, and the arithmetic is worth
+/// having before anyone starts:
+///
+/// - `AppState` is constructible and [`GammaBackend`] records - but its
+///   `restore_all` counter is bumped identically by the correct spelling and the
+///   defective one, so it is not the signal this property needs.
+/// - The property turns on whether the **wide** pass ran, and `begin_quit` hands
+///   `duja_dimmer::restore_all` - a per-platform free function with no seam at
+///   all - straight in as the closure. A test driving `begin_quit` today would
+///   flatten the operator's real displays trying to observe it.
+/// - `FakeGamma::restore_all` answers `true` unconditionally, so the
+///   not-clean branch is unreachable through the fixture.
+/// - And nothing drives `begin_quit`: only `handle_action`'s `Quit` arm and
+///   `restart()` call it, and no test reaches either.
+///
+/// So the honest shape is a seam on the **wide rescue**, plus a fake that can
+/// answer "not clean", plus a test that reaches `begin_quit`. The gamma
+/// recorder is where the second of those would go, so it is a starting point
+/// rather than a contribution - what it records today is the wrong signal for
+/// this property. A third draft of this paragraph said "only one of them exists"
+/// while its own bullets disqualified both. Narrower than "no `AppState`", and wider than one
+/// test by two seams rather than one.
 pub(crate) fn tear_down_gamma(
     own_restore: impl FnOnce() -> bool,
     wide_rescue: impl FnOnce() -> duja_dimmer::RestoreReport,
@@ -594,8 +612,161 @@ impl GammaCoordinator {
     }
 }
 
+/// The gamma channel, as [`AppState`](crate::bin_support::tray) sees it.
+///
+/// # Why this is a wrapper and not just the per-target type
+///
+/// The same reason `PlatformTray` grew one, and the same shape. Each target's
+/// [`OsGamma`] owns a real sink that writes real ramps to real screens, so an
+/// `AppState` test that held one could only be safe by making the sink inert -
+/// and an inert sink observes nothing, which is precisely why
+/// `docs/debt-archive.md` D-016 and D-065 did **not** drain on the `AppState`
+/// fixture that landed with D-040. Both turn on phases *inside* this channel: whether `invalidate` was
+/// called before a re-apply, and whether `apply_overlays` routed through
+/// `apply_batch` at all.
+///
+/// So there is a second implementation under `cfg(test)` that records instead
+/// of writing. Exactly one is reachable in a shipping build, which is the same
+/// caveat `super::tray::surface` documents at length; the enum is here rather
+/// than a `dyn` trait for the same reason too.
+pub(crate) struct GammaBackend {
+    /// The channel this stands in front of.
+    channel: Channel,
+}
+
+/// Which gamma channel is behind [`GammaBackend`].
+enum Channel {
+    /// The real one for this target.
+    Os(OsGamma),
+    /// A recorder that touches no ramp, in test builds only.
+    #[cfg(test)]
+    Fake(FakeGamma),
+}
+
+impl GammaBackend {
+    /// Build the real channel for this target.
+    ///
+    /// # Arguments
+    /// `marker` is where the crash marker lives; `resolve` maps a resolved
+    /// display id to whatever token this platform's sink addresses displays by.
+    pub(crate) fn new(
+        marker: std::path::PathBuf,
+        resolve: impl FnMut(&StableDisplayId) -> Option<String> + 'static,
+    ) -> Self {
+        GammaBackend {
+            channel: Channel::Os(OsGamma::new(marker, resolve)),
+        }
+    }
+
+    /// Drive one apply batch across the gamma channel **and** `overlays`, in the
+    /// order that never brightens the screen mid-transition.
+    ///
+    /// # Errors
+    /// Whatever the overlay backend returns; the gamma phases never fail the
+    /// batch, because a refused ramp is recorded and retried rather than raised.
+    pub(crate) fn apply_batch(
+        &mut self,
+        commands: &[DimCommand],
+        overlays: Option<&mut dyn Dimmer>,
+    ) -> Result<(), DimmerError> {
+        match &mut self.channel {
+            Channel::Os(os) => os.apply_batch(commands, overlays),
+            #[cfg(test)]
+            Channel::Fake(fake) => fake.apply_batch(commands, overlays),
+        }
+    }
+
+    /// Declare that the OS may have reset every ramp, so the next batch rewrites
+    /// instead of diffing.
+    pub(crate) fn invalidate(&mut self) {
+        match &mut self.channel {
+            Channel::Os(os) => os.invalidate(),
+            #[cfg(test)]
+            Channel::Fake(fake) => fake.invalidations = fake.invalidations.saturating_add(1),
+        }
+    }
+
+    /// Restore every display this session engaged and clear the crash marker,
+    /// returning whether every restore succeeded (`true` = clean).
+    pub(crate) fn restore_all(&mut self) -> bool {
+        match &mut self.channel {
+            Channel::Os(os) => os.restore_all(),
+            #[cfg(test)]
+            Channel::Fake(fake) => {
+                fake.restore_alls = fake.restore_alls.saturating_add(1);
+                true
+            }
+        }
+    }
+}
+
+/// A gamma channel that records what it was asked to do and writes no ramps.
+///
+/// Records rather than merely accepting, for the reason the fake tray does: a
+/// channel that silently swallowed every call would let a caller stop making one
+/// and leave every test green, which is the failure mode D-016 and D-065 are
+/// about.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct FakeGamma {
+    /// One entry per [`GammaBackend::apply_batch`], in order: the commands it
+    /// carried, and whether an overlay backend was handed through with them.
+    ///
+    /// The overlay flag is what makes D-065 observable. The batch's *internal*
+    /// ordering is `apply_dimming_batch`'s and is already pinned by its own
+    /// tests on every lane; what was unpinned is that `apply_overlays` reaches
+    /// it at all rather than driving the phases itself at the call site.
+    batches: Vec<(Vec<DimCommand>, bool)>,
+    /// How many times [`GammaBackend::invalidate`] was called.
+    invalidations: usize,
+    /// How many times [`GammaBackend::restore_all`] was called.
+    restore_alls: usize,
+}
+
+#[cfg(test)]
+impl FakeGamma {
+    /// Record one batch. Never fails: an overlay backend a test supplies is
+    /// driven for real, so a `FakeDimmer` behind it still sees its commands.
+    fn apply_batch(
+        &mut self,
+        commands: &[DimCommand],
+        overlays: Option<&mut dyn Dimmer>,
+    ) -> Result<(), DimmerError> {
+        let had_overlays = overlays.is_some();
+        self.batches.push((commands.to_vec(), had_overlays));
+        match overlays {
+            Some(dimmer) => dimmer.apply(commands),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl GammaBackend {
+    /// A channel that records and writes nothing.
+    pub(crate) fn fake() -> Self {
+        GammaBackend {
+            channel: Channel::Fake(FakeGamma::default()),
+        }
+    }
+
+    /// What the fake recorded: the batches, the invalidate count, the
+    /// restore-all count.
+    ///
+    /// # Panics
+    /// If this is not a fake. A test reaching for the recording of a real
+    /// channel has confused its fixture for the thing it stands in for, and a
+    /// silent empty answer would read as "nothing happened".
+    pub(crate) fn recorded(&self) -> (&[(Vec<DimCommand>, bool)], usize, usize) {
+        match &self.channel {
+            Channel::Fake(fake) => (&fake.batches, fake.invalidations, fake.restore_alls),
+            Channel::Os(_) => panic!("recorded() on a real gamma channel"),
+        }
+    }
+}
+
 #[cfg(windows)]
-pub(crate) use platform::GammaBackend;
+pub(crate) use platform::OsGamma;
 
 #[cfg(windows)]
 mod platform {
@@ -709,12 +880,12 @@ mod platform {
     /// Dropping it restores every engaged display and clears the crash marker
     /// (the [`ScreenStateGuard`]'s `Drop`), so an abnormal teardown still leaves
     /// identity gamma behind.
-    pub(crate) struct GammaBackend {
+    pub(crate) struct OsGamma {
         coord: GammaCoordinator,
         sink: GuardSink,
     }
 
-    impl GammaBackend {
+    impl OsGamma {
         /// Build a gamma channel whose guard writes/clears its crash marker at
         /// `marker`, using `resolve` to map a resolved display id to its GDI
         /// device name.
@@ -722,7 +893,7 @@ mod platform {
             marker: PathBuf,
             resolve: impl FnMut(&StableDisplayId) -> Option<String> + 'static,
         ) -> Self {
-            GammaBackend {
+            OsGamma {
                 coord: GammaCoordinator::default(),
                 sink: GuardSink {
                     guard: ScreenStateGuard::new(Some(marker)),
@@ -792,8 +963,7 @@ mod platform {
             // session — the marker is already written). A clean quit clears it.
             let dir = tempfile::tempdir().expect("tempdir");
             let marker = dir.path().join("gamma.dirty");
-            let mut backend =
-                GammaBackend::new(marker.clone(), |_id| Some(r"\\.\DUJA_TEST".to_owned()));
+            let mut backend = OsGamma::new(marker.clone(), |_id| Some(r"\\.\DUJA_TEST".to_owned()));
 
             assert!(!marker.exists(), "no marker before any engage");
             backend
@@ -818,7 +988,7 @@ mod platform {
             // not write a marker (nothing was engaged).
             let dir = tempfile::tempdir().expect("tempdir");
             let marker = dir.path().join("gamma.dirty");
-            let mut backend = GammaBackend::new(marker.clone(), |_id| None);
+            let mut backend = OsGamma::new(marker.clone(), |_id| None);
 
             backend
                 .apply_batch(&[gamma_cmd("A", 0.6)], None)
@@ -907,7 +1077,7 @@ mod platform {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use platform::GammaBackend;
+pub(crate) use platform::OsGamma;
 
 #[cfg(target_os = "macos")]
 mod platform {
@@ -1136,12 +1306,12 @@ mod platform {
     /// module docs for how well that is actually established; it is the assumption
     /// the whole no-marker design rests on. A clean teardown still calls
     /// [`Self::restore_all`] so the screen is right *before* the process goes away.
-    pub(crate) struct GammaBackend {
+    pub(crate) struct OsGamma {
         coord: GammaCoordinator,
         sink: MacSink,
     }
 
-    impl GammaBackend {
+    impl OsGamma {
         /// Build a gamma channel using `resolve` to map a resolved display id to its
         /// **gamma** token (`BoundsMap::gamma_token_for`).
         ///
@@ -1155,7 +1325,7 @@ mod platform {
             _marker: PathBuf,
             resolve: impl FnMut(&StableDisplayId) -> Option<String> + 'static,
         ) -> Self {
-            GammaBackend {
+            OsGamma {
                 coord: GammaCoordinator::default(),
                 sink: MacSink {
                     resolve: Box::new(resolve),
@@ -1354,7 +1524,7 @@ mod platform {
         /// covered below.
         #[test]
         fn a_batch_for_an_unaddressable_display_succeeds_and_engages_nothing() {
-            let mut backend = GammaBackend::new(PathBuf::from("ignored"), |_id| None);
+            let mut backend = OsGamma::new(PathBuf::from("ignored"), |_id| None);
             backend
                 .apply_batch(&[gamma_cmd("A", 0.6)], None)
                 .expect("no overlay backend ⇒ no failure");
@@ -1420,7 +1590,7 @@ mod platform {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use platform::GammaBackend;
+pub(crate) use platform::OsGamma;
 
 #[cfg(target_os = "linux")]
 mod platform {
@@ -1715,12 +1885,12 @@ mod platform {
     /// Dropping it restores every display it engaged and clears the crash marker if
     /// that was clean — see [`LinuxSink`]'s `Drop`, which is this platform's stand-in
     /// for the Windows guard.
-    pub(crate) struct GammaBackend {
+    pub(crate) struct OsGamma {
         coord: GammaCoordinator,
         sink: LinuxSink,
     }
 
-    impl GammaBackend {
+    impl OsGamma {
         /// Build a gamma channel whose crash marker is at `marker`, using `resolve`
         /// to map a resolved display id to its **gamma** token
         /// (`BoundsMap::gamma_token_for`).
@@ -1728,7 +1898,7 @@ mod platform {
             marker: PathBuf,
             resolve: impl FnMut(&StableDisplayId) -> Option<String> + 'static,
         ) -> Self {
-            GammaBackend {
+            OsGamma {
                 coord: GammaCoordinator::default(),
                 sink: LinuxSink {
                     resolve: Box::new(resolve),
@@ -1887,7 +2057,7 @@ mod platform {
 
         #[test]
         fn the_backend_the_tray_builds_reaches_the_same_sink() {
-            // `GammaBackend::new` + `apply_batch` is the only path the tray uses, and
+            // `OsGamma::new` + `apply_batch` is the path `GammaBackend` wraps, and
             // it is a different one from every test above: the coordinator decides
             // what to engage and the sink is reached through `apply_dimming_batch`.
             // With no token nothing correlates, so this pins the wiring rather than
@@ -1895,7 +2065,7 @@ mod platform {
             // fail here and nowhere else.
             let dir = tempfile::tempdir().expect("tempdir");
             let marker = dir.path().join("gamma.dirty");
-            let mut backend = GammaBackend::new(marker.clone(), |_id| None);
+            let mut backend = OsGamma::new(marker.clone(), |_id| None);
 
             backend
                 .apply_batch(

@@ -364,19 +364,23 @@ mod tests {
     //! and D-102's whole point is that the refactor should not be planned before
     //! the measurement exists.
     //!
-    //! **The refactor has since landed and this module is unchanged by it**,
+    //! **Three of those four rows have since drained** - D-040 on the `AppState`
+    //! fixture, D-016 and D-065 on the recording gamma channel that followed it -
+    //! and D-059 remains, because what it needs is to observe *when* `build_tray`
+    //! ran relative to the loop rather than a constructible state.
+    //!
+    //! **The refactor landed and this module is unchanged by it**,
     //! which is the intended outcome. The way in was a fake behind the tray seam
     //! rather than a real tray, precisely *because* the answer here was "it
     //! succeeds" — so [`crate::bin_support::tray::state::fixture`] never calls
     //! `build_tray`, and this experiment stays what it was: a record of one
-    //! measurement, run by hand, asserting nothing. D-040 drained on the fixture;
-    //! the other three did not, and their rows now name what each still needs.
+    //! measurement, run by hand, asserting nothing. Which rows drained is above.
     //!
     //! [`D-102`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-102
-    //! [`D-016`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-016
+    //! [`D-016`]: https://github.com/itabajah/duja/blob/main/docs/debt-archive.md#d-016
     //! [`D-040`]: https://github.com/itabajah/duja/blob/main/docs/debt-archive.md#d-040
     //! [`D-059`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-059
-    //! [`D-065`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-065
+    //! [`D-065`]: https://github.com/itabajah/duja/blob/main/docs/debt-archive.md#d-065
 
     /// Does `build_tray` succeed inside a **test process**, on a live desktop
     /// session?
