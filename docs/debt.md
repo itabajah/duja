@@ -27,7 +27,6 @@ argument.
 | # | Added | Where | What |
 |---|---|---|---|
 | [D-001](#d-001) | P1 | P4 QA | Manually verify tray menu-click delivery (not scriptable; identical dispatch path as verified hotkey) |
-| [D-002](#d-002) | P2 | `.github/workflows/` | Add `coverage.yml` (llvm-cov ≥90% gate) and `fuzz.yml` (weekly nightly burn) CI jobs |
 | [D-003](#d-003) | P2 | `duja-core` `sync`↔`config` | Wire `MonitorConfig.sync_offset` (now persisted) into the app's `SyncGroups` load/save path |
 | [D-004](#d-004) | P3 | `duja-ddc` `win/sys.rs` | Validate `classify_failure`'s `GetLastError`-after-VCP-call assumption on real hardware; a gone monitor may classify… |
 | [D-005](#d-005) | P6 | `duja-app` `--stress` harness | The stress report gates on **absolute zero** hardware errors ⇒ PASS |
@@ -47,7 +46,6 @@ argument.
 | [D-020](#d-020) | P6 → narrowed by `#104` (C6 packaging) | `duja-platform` `autostart/mac.rs` | Migrate macOS autostart from the `launchd` LaunchAgent plist to `SMAppService.loginItem` (the modern login-item API).… |
 | [D-021](#d-021) | P6 (audit 2026-07-13) | `duja-panel` `Cargo.toml`/`wmi.rs` | Unify the `windows` crate version: panel is pinned to 0.58 while the rest of the workspace is on 0.62 (a cargo-deny… |
 | [D-022](#d-022) | P6 (audit 2026-07-13) | `duja-app` `tray.rs` / `duja-ui` `dpi.rs` | Decide whether the visible-window buffer re-assert (`enforce_logical_size` on the flyout re-enumeration path) is still… |
-| [D-023](#d-023) | P6 (audit 2026-07-13) | `fuzz/` | Add the `fuzz_config_toml` target (plan §4 names it) — `config.toml` is user-editable and parsed through chained… |
 | [D-024](#d-024) | v0.1.0 | release signing | Release binaries are **unsigned** (no Authenticode cert) → SmartScreen warns on first run |
 | [D-025](#d-025) | v0.1.0 | update channels | The checker uses GitHub `/releases/latest` (stable only), so a future `-beta` never prompts stable users |
 | [D-026](#d-026) | P6 (audit 2026-07-13) → narrowed in `#87`, again in the macOS OS-hook hoist | `duja-app` `toast.rs` | ~~Win32 cursor/work-area geometry~~ **hoisted to `duja-platform::geometry` in `#87`**; ~~`ShellExecuteW` (open the… |
@@ -143,14 +141,6 @@ Manually verify tray menu-click delivery (not scriptable; identical dispatch pat
 
 **Why deferred.** Needs human hand on shell tray
 
-### D-002
-
-**Where:** `.github/workflows/` &nbsp;·&nbsp; **Added:** P2
-
-Add `coverage.yml` (llvm-cov ≥90% gate) and `fuzz.yml` (weekly nightly burn) CI jobs
-
-**Why deferred.** Ran locally at the P2 gate; wire into CI in a P8 hardening pass
-
 ### D-003
 
 **Where:** `duja-core` `sync`↔`config` &nbsp;·&nbsp; **Added:** P2
@@ -214,7 +204,6 @@ Watchdog deadline re-stamps on every dispatch, so continuous slider input agains
 Suspend/resume DDC re-push: on resume the display set is usually unchanged, so the manager emits no `Added`/`Reattached` and the engine never re-applies levels — a monitor that forgot its brightness across sleep (or a laptop panel reset by the firmware) stays wrong until the user nudges the slider
 
 **Why deferred.** Needs hardware evidence (which monitors drop DDC state across S3/modern-standby) before choosing a policy: re-push all levels on `PlatformEvent::Resume`, or only after a resume-triggered enumeration diff
-
 
 ### D-012
 
@@ -303,14 +292,6 @@ Unify the `windows` crate version: panel is pinned to 0.58 while the rest of the
 Decide whether the visible-window buffer re-assert (`enforce_logical_size` on the flyout re-enumeration path) is still needed now that Slint sizes windows natively (PR #29). If redundant, removing it makes the whole `enforce_*`/`size_to` show-path chain dead and deletable
 
 **Why deferred.** Needs a live hot-plug-while-the-flyout-is-open test on the real monitor to confirm native sizing covers the row-count change; the current code works, so this is cleanup not a fix
-
-### D-023
-
-**Where:** `fuzz/` &nbsp;·&nbsp; **Added:** P6 (audit 2026-07-13)
-
-Add the `fuzz_config_toml` target (plan §4 names it) — `config.toml` is user-editable and parsed through chained `toml_edit` migrations, an untrusted-parse surface currently without fuzz coverage (caps/edid/quirks/ipc/ddc are covered)
-
-**Why deferred.** Low marginal value until `fuzz.yml` runs targets in CI (also deferred, see the coverage/fuzz row above); add both together in the P8 hardening pass
 
 ### D-024
 

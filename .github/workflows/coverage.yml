@@ -1,0 +1,157 @@
+# Coverage, with the three thresholds `docs/review-rubric.md` has asked for since
+# P2 (docs/debt.md D-002).
+#
+# # Why this is its own workflow and what that costs
+#
+# A new workflow is a new status context, and a new context is **advisory** until
+# somebody edits branch protection - so a red run here does not block a merge
+# today. That is stated rather than implied, because an unenforced check people
+# learn to ignore is worse than no check: it reads as coverage while protecting
+# nothing.
+#
+# It is not folded into an existing required job the way the fuzz-workspace check
+# is, and the reason is instrumentation. `cargo llvm-cov` rebuilds the whole
+# workspace with coverage instrumentation and runs it, which is a second full
+# build and test cycle; hanging that off `clippy (ubuntu-latest)` would roughly
+# triple the wall-clock of a check every PR waits on, to protect a number that
+# moves slowly.
+#
+# # The numbers, and where they came from
+#
+# Measured on the dev box (Windows, `--all-features`) at P8 wave 2:
+#
+#     area          Windows    Linux    floor
+#     duja-core     97.49 %   97.46 %     90     (rubric: "core >= 90%")
+#     duja-ipc      94.66 %   94.54 %     85     (rubric: "ipc/view-models >= 85%")
+#     view-models   98.81 %      ~98      85     (flyout_vm.rs + settings_vm.rs)
+#
+# The Linux column is from this job's own first run, so the platform question is
+# answered rather than hedged: every `#[cfg(windows)]` item compiles out here and
+# the denominators differ, but for these three areas it moves the number by
+# hundredths. (Elsewhere it does not - `duja-dimmer` is 94.7 % on Windows and
+# 51.6 % on Linux, because its Linux gamma and overlay backends have never run
+# anywhere. That crate is reported, not gated, and D-105 is why.)
+#
+# The floors are the rubric's numbers rather than a ratchet set to today's
+# measurement. If one turns out to be wrong on this lane, fix the floor with the
+# run that proved it rather than deleting the check.
+#
+# All third-party actions are pinned by commit SHA (supply-chain policy).
+
+name: coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: llvm-cov
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Slint system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libxkbcommon-dev libxcb1-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libwayland-dev
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@1beb33eee6d086258184383af9a538940be190ed # v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Measure
+        run: |
+          cargo llvm-cov --workspace --all-features --locked \
+            --json --summary-only --output-path coverage.json
+      # Region coverage rather than line coverage: it counts every branch of a
+      # `match` separately, which is what a crate full of state machines and
+      # typed error enums is actually made of. Line coverage would score a
+      # never-taken arm on a one-line body as covered.
+      - name: Enforce the rubric's floors
+        run: |
+          set -euo pipefail
+          fail=0
+          # $1 label, $2 floor, $3 include regex, $4 exclude regex ("" = none).
+          #
+          # Two regexes rather than one with a negative lookahead: jq's `test` is
+          # Oniguruma and would probably accept `(?!...)`, and "probably" is not
+          # a thing to put in a gate that runs where this repo cannot execute jq
+          # to check it. Two `select`s need no regex extension at all.
+          check() {
+            local label="$1" floor="$2" filter="$3" drop="${4:-}"
+            local files covered total pct pick
+            pick='[.data[0].files[] | select(.filename | test($f))
+                   | select($d == "" or (.filename | test($d) | not))]'
+            files=$(jq --arg f "$filter" --arg d "$drop" \
+              "$pick | length" coverage.json)
+            # A filter that matches nothing would otherwise divide by zero, or
+            # worse, be silently treated as a pass. This is the check on the
+            # check: rename a crate and this fires instead of going green.
+            if [ "$files" -eq 0 ]; then
+              echo "::error::$label matched no files - the filter is stale, not the coverage"
+              # The summary row too, not just the log: a missing row is the one
+              # shape a reader is least likely to notice.
+              printf '| %-14s | %8s | %6s | %s |\n' \
+                "$label" "STALE" "$floor" "filter matched nothing" >> "$GITHUB_STEP_SUMMARY"
+              fail=1
+              return
+            fi
+            covered=$(jq --arg f "$filter" --arg d "$drop" \
+              "$pick | map(.summary.regions.covered) | add" coverage.json)
+            total=$(jq --arg f "$filter" --arg d "$drop" \
+              "$pick | map(.summary.regions.count) | add" coverage.json)
+            pct=$(awk -v c="$covered" -v t="$total" 'BEGIN { printf "%.4f", 100 * c / t }')
+            printf '| %-14s | %8s %% | %6s | %s |\n' \
+              "$label" "$pct" "$floor" "$files files" >> "$GITHUB_STEP_SUMMARY"
+            # Also to the log. The step summary is only readable in the web UI,
+            # and the number is what anyone reading a failed run actually wants.
+            echo "$label: $pct % regions across $files files (floor $floor)"
+            if awk -v p="$pct" -v f="$floor" 'BEGIN { exit !(p < f) }'; then
+              echo "::error::$label region coverage $pct % is below the $floor % floor (docs/review-rubric.md)"
+              fail=1
+            fi
+          }
+
+          {
+            echo "### Region coverage"
+            echo
+            echo "| area | measured | floor | scope |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # `src/` and not `src/testing/`: `duja-core`'s test-support fakes are
+          # behind `cfg(any(test, feature = "test-support"))` and its own docs
+          # say they are "never part of a release build", but `--all-features`
+          # compiles them and they are 9.8 % of the crate's regions. Gating on a
+          # number that includes code which never ships measures the wrong crate.
+          # The anchor also stops the filter absorbing `tests/` if llvm-cov ever
+          # starts emitting integration targets here.
+          check "duja-core"   90 "/crates/duja-core/src/" "/crates/duja-core/src/testing/"
+          check "duja-ipc"    85 "/crates/duja-ipc/src/"
+          check "view-models" 85 "/crates/duja-ui/src/(flyout|settings)_vm\\.rs$"
+
+          {
+            echo
+            echo "Floors are \`docs/review-rubric.md\`'s. Everything else is reported"
+            echo "below but not gated."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$fail"
+      # The whole picture, ungated, so a crate sliding is visible before it is a
+      # problem. Printed after the gate so a failure above is the last thing in
+      # the log rather than buried under a table.
+      - name: Report every crate
+        if: always()
+        run: cargo llvm-cov report --summary-only

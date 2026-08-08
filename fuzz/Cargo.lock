@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "duja-core"
-version = "0.0.1"
+version = "0.1.5"
 dependencies = [
  "serde",
  "tempfile",
@@ -84,13 +84,14 @@ dependencies = [
 
 [[package]]
 name = "duja-ddc"
-version = "0.0.1"
+version = "0.1.5"
 dependencies = [
  "core-foundation",
  "core-foundation-sys",
  "core-graphics",
  "duja-core",
  "io-kit-sys",
+ "libc",
  "thiserror",
  "windows",
 ]
@@ -107,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "duja-ipc"
-version = "0.0.1"
+version = "0.1.5"
 dependencies = [
  "duja-core",
  "serde",

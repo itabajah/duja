@@ -1,0 +1,95 @@
+# Weekly coverage-guided fuzz burn (docs/debt.md D-002, open since P2).
+#
+# This runs the fuzzers. It does NOT keep them compiling: that is a step in the
+# `clippy (ubuntu-latest)` job of ci.yml, deliberately, because `fuzz/` is a
+# SEPARATE Cargo workspace and nothing in the normal matrix compiles it. A rename
+# in `duja-core` breaks a target silently, and the difference between finding out
+# on the pull request and finding out the following Sunday is the difference
+# between a one-line fix and an archaeology session. It lives inside an existing
+# *required* check for the reason ci.yml already documents about rustdoc: a new
+# job is a new status context, and a new context is advisory until somebody edits
+# branch protection.
+#
+# All third-party actions are pinned by commit SHA (supply-chain policy).
+
+name: fuzz
+
+on:
+  schedule:
+    # Sundays, 03:17 UTC. The odd minute is deliberate - GitHub queues scheduled
+    # workflows across all of its users and the top of the hour is the worst
+    # place to be in that queue.
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds to run each target"
+        required: false
+        default: "300"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  burn:
+    name: burn (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Every target runs even when one crashes: a crash in the EDID parser says
+      # nothing about the IPC frame decoder, and cancelling the rest would throw
+      # away the run that would have found the second bug.
+      fail-fast: false
+      matrix:
+        # Kept in step with `fuzz/Cargo.toml`'s `[[bin]]` entries by an xtask
+        # test that reads both files - a target added to the manifest and not to
+        # this list is a fuzzer that exists and never runs, which is the silent
+        # half of this workflow's failure modes.
+        target:
+          - fuzz_caps_string
+          - fuzz_ddc_packet
+          - fuzz_edid_parse
+          - fuzz_ipc_frame
+          - fuzz_quirks_toml
+          - fuzz_config_toml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # libfuzzer-sys needs SanitizerCoverage instrumentation, which is nightly
+      # only. `fuzz/README.md` says the same thing to a human.
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: nightly
+      - uses: taiki-e/install-action@1beb33eee6d086258184383af9a538940be190ed # v2
+        with:
+          tool: cargo-fuzz
+      # The committed seeds in `fuzz/corpus/<target>/` are the starting point;
+      # libFuzzer writes its own growth there for the run and it is thrown away
+      # with the runner, per the corpus policy in `fuzz/README.md`.
+      #
+      # `-timeout=25` makes a single input that takes longer than 25 s a
+      # reportable hang rather than something that quietly eats the budget.
+      # `-rss_limit_mb=2048` is libFuzzer's default and is restated so that an
+      # OOM is attributable to the input rather than to the runner.
+      - name: Burn
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} -- \
+            -max_total_time=${{ inputs.seconds || '300' }} \
+            -timeout=25 \
+            -rss_limit_mb=2048
+      # A crash is worthless without the input that produced it, and the runner
+      # is about to be deleted. `if: failure()` rather than `always()`: a green
+      # run leaves an empty directory and uploading it would train everyone to
+      # ignore the artifact.
+      - name: Upload the crashing input
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: warn
