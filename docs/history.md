@@ -1553,8 +1553,8 @@ The rubric time-boxes this at ~15% of the phase. Rows are picked for being
 - **[D-102](debt.md#d-102)'s cheap experiment.** One `#[ignore]`d test that
   constructs `PlatformTray` headless. If it passes, three of the four rows that
   defer on "`AppState` cannot be constructed in a test"
-  ([D-016](debt.md#d-016), [D-040](debt-archive.md#d-040), [D-059](debt.md#d-059),
-  [D-065](debt.md#d-065)) close with no refactor at all. It is an afternoon, and
+  ([D-016](debt-archive.md#d-016), [D-040](debt-archive.md#d-040), [D-059](debt.md#d-059),
+  [D-065](debt-archive.md#d-065)) close with no refactor at all. It is an afternoon, and
   it decides whether a wave-sized job exists. Run it *before* planning any
   refactor, not after.
 - **[D-005](debt.md#d-005)** - the `--stress` gate reports FAIL on a run with a
@@ -1926,8 +1926,8 @@ module in through `#[path]` *can* be cross-checked, clippy'd and rustdoc'd for
 <a id="s43"></a>
 ### The one architectural item worth scheduling
 
-Four debt rows ([D-016](debt.md#d-016), [D-040](debt-archive.md#d-040),
-[D-059](debt.md#d-059), [D-065](debt.md#d-065)) all defer on "`AppState` cannot
+Four debt rows ([D-016](debt-archive.md#d-016), [D-040](debt-archive.md#d-040),
+[D-059](debt.md#d-059), [D-065](debt-archive.md#d-065)) all defer on "`AppState` cannot
 be constructed in a test", and the 2026-08-07 checkpoint found that reason is
 out of date. `#134` removed the `tray_icon::TrayIcon` half, and the "two live
 Slint shells" half was never the blocker it was written as - `duja-ui` builds

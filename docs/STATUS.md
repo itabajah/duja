@@ -160,12 +160,17 @@ Measured on this box, 2026-08-08:
   replace the harness's tolerance constant, which is a reasoned guess and says
   so.
 - **[D-102](debt.md#d-102)'s fixture has landed.** `AppState` is constructible
-  in a test on every lane, behind a recording fake tray and the headless Slint
-  backend, and `tray/state.rs` went **11.27 % to 32.28 %** of regions.
-  [D-040](debt-archive.md#d-040) drained on it, proven red at both of the two
-  sites it named. Three of the four did not: D-016 and D-065 need the same
-  treatment for the **gamma** channel, and D-059 needs neither. What the
-  experiment behind it settled is still a limit rather than an answer:
+  in a test on every lane, behind a recording fake tray, a recording gamma
+  channel and the headless Slint backend, and `tray/state.rs` went **32.28 % to
+  42.01 %** of regions on the gamma seam, and 11.27 % to 32.28 % on the fixture
+  before it. Two per-wave deltas rather than one running total, because the
+  phase's PRs add tests to the same file and a cumulative figure here is stale
+  the day the next one lands. [D-040](debt-archive.md#d-040) drained on the fixture,
+  and [D-016](debt-archive.md#d-016) plus [D-065](debt-archive.md#d-065) on the
+  gamma seam that followed it, each proven red at its historical site.
+  [D-059](debt.md#d-059) is the one still open, and it needs neither - it wants
+  to observe *when* `build_tray` ran relative to the loop. What the experiment
+  behind all this settled is still a limit rather than an answer:
   `build_tray` succeeding in a test process was measured on an interactive
   Windows session only, and a CI runner's window station remains unmeasured -
   much less pressing now that no test builds a real tray.

@@ -39,11 +39,15 @@ use crate::bin_support::dimming;
 /// be pinned by a test rather than sitting at an `AppState` call site no test can
 /// reach. It was in `tray/state.rs` for one commit, and a review showed what that
 /// costs — hardcoding `advisory: false` there deletes the macOS hazard disclosure
-/// entirely while the whole suite and every CI lane stay green, because no test
-/// reaches `tray/state.rs` at all. (That module was `cfg`-gated to Windows and
-/// macOS when this was written and is now built everywhere, which changes nothing
-/// about the argument: it is untested either way, and untested is what made the
-/// deletion invisible.)
+/// entirely while the whole suite and every CI lane stay green.
+///
+/// **The reason given for that used to be "no test reaches `tray/state.rs` at
+/// all", and that stopped being true** when the `AppState` fixture landed; the
+/// file has three test modules now. What is still true is the narrower claim the
+/// argument actually needs: none of *this function's* three callers there is
+/// driven by anything - verified by inserting a `panic!` at each and finding the
+/// suite green. So the choice still belongs here, and the sentence that made it
+/// look permanent has been replaced by one that can be re-checked.
 ///
 /// Building the struct in one place also keeps the three `set_displays` call sites
 /// from disagreeing — the failure being one refresh path that discloses a limit and
