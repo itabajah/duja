@@ -22,11 +22,18 @@ use core::ffi::c_void;
 use crossbeam_channel::Sender;
 use windows::Win32::Devices::Display::GUID_DEVINTERFACE_MONITOR;
 use windows::Win32::Foundation::{
-    ERROR_CLASS_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
+    ERROR_CLASS_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
+    SetLastError, WIN32_ERROR, WPARAM,
 };
+// `--soak`'s two measurements (P8 wave 3): the working set, and the GDI/USER
+// object counts that are the leak a long-running tray app actually has.
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
+};
+use windows::Win32::System::Threading::{
+    GR_GDIOBJECTS, GR_USEROBJECTS, GetCurrentProcess, GetGuiResources,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE,
@@ -311,4 +318,68 @@ fn unregister_all(hwnd: HWND) {
     // SAFETY: `hwnd` is still valid during WM_DESTROY; unregistering a session
     // notification that was never registered is harmless.
     let _ = unsafe { WTSUnRegisterSessionNotification(hwnd) };
+}
+
+/// This process's working-set size in bytes, or `None` if the query failed.
+///
+/// The **whole** working set: private pages plus resident shareable ones. Not
+/// Task Manager's "active private working set", which no PSAPI field yields -
+/// `PrivateUsage` is private *commit* rather than resident. It therefore
+/// over-counts against a budget written as "private", which is the safe
+/// direction against a ceiling; [`crate::process`] carries the measured gap. A
+/// failure is `None` rather than 0, so a soak says "could not read" instead of
+/// claiming a process with no memory.
+pub(crate) fn working_set_bytes() -> Option<u64> {
+    let mut counters = PROCESS_MEMORY_COUNTERS::default();
+    let size = u32::try_from(size_of::<PROCESS_MEMORY_COUNTERS>()).ok()?;
+    // SAFETY: the only pointer crossing the boundary is `&raw mut counters`,
+    // which points at a fully initialized, correctly aligned local that outlives
+    // the call and is not aliased; `cb` is that same type's size, so the callee
+    // cannot write past it. `GetCurrentProcess` is a pseudo-handle constant that
+    // is always valid for the calling process, carries the
+    // PROCESS_QUERY_LIMITED_INFORMATION access this needs, and must not be
+    // closed - so there is no handle lifetime to get wrong.
+    let result = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &raw mut counters, size) };
+    result.ok().map(|()| counters.WorkingSetSize as u64)
+}
+
+/// The count of live GDI (`gdi = true`) or USER (`gdi = false`) objects owned by
+/// this process, or `None` if the query failed.
+///
+/// These are the "flat GDI/USER handle counts" half of the soak budget. They are
+/// the leak that a long-running tray application actually has: a window, a
+/// bitmap or a device context created per event and never released climbs here
+/// long before it is visible in the working set, and Windows kills a process at
+/// 10,000 of either.
+///
+/// `GetGuiResources` reports failure as `0`, which is also a legitimate count
+/// for a process that has created no GUI objects - and this process reports
+/// exactly 0 GDI objects when headless, so the ambiguous value is the common
+/// one rather than a corner. Microsoft documents the ambiguity ("If the function
+/// fails, the return value is zero. To get extended error information, call
+/// `GetLastError`") without prescribing a recipe; clearing the last-error first
+/// is the standard way to make that advice usable, and is why this is not a
+/// one-liner.
+pub(crate) fn gui_objects(gdi: bool) -> Option<u32> {
+    let flags = if gdi { GR_GDIOBJECTS } else { GR_USEROBJECTS };
+    // SAFETY: no pointers and no handles - `SetLastError` writes one word of
+    // this thread's own TEB, which is sound to call at any time from any thread.
+    // It is here so the zero-versus-failure test below reads only what
+    // `GetGuiResources` set.
+    unsafe { SetLastError(WIN32_ERROR(0)) };
+    // SAFETY: no pointers cross the boundary. The pseudo-handle is a constant
+    // that is always valid for the calling process and must not be closed, and
+    // `flags` is one of the two `GET_GUI_RESOURCES_FLAGS` constants the API
+    // defines, so the callee cannot be handed a value it does not enumerate.
+    let count = unsafe { GetGuiResources(GetCurrentProcess(), flags) };
+    if count != 0 {
+        return Some(count);
+    }
+    // SAFETY: reads the calling thread's last-error code, set by the call above.
+    let last = unsafe { GetLastError() };
+    if last == WIN32_ERROR(0) {
+        Some(0)
+    } else {
+        None
+    }
 }
