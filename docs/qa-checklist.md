@@ -33,12 +33,30 @@ benchmark is [D-109](debt.md#d-109).
 ### The soak, once per release train (P8 wave 3)
 
 - [ ] **`duja --soak 86400 --every 60`**, on an idle desktop, from a real tray
-      build's box. It exits non-zero on a budget miss and prints every budget it
-      broke rather than the first. Two things to record even on a pass: the
-      **peak RSS**, which is the headless figure and not the tray one the idle
-      budget asks for, and the **handle drift**, which is what should replace
-      `HANDLE_GROWTH_TOLERANCE` - that constant is a guess today and its own
-      docs ask for this run.
+      build's box. **On Windows the invocation matters**, because a release
+      `duja.exe` is a GUI-subsystem binary with no console: it prints to nowhere
+      and the shell does not wait for it. Use
+
+      ```
+      start /wait duja.exe --soak 86400 --every 60
+      echo %ERRORLEVEL%
+      ```
+
+      and read the report from `soak-report.txt` beside the rotating log, which
+      the run writes regardless. The exit code is the verdict: non-zero on a
+      budget miss **or** on a run that could not measure.
+
+      **Quit any running Duja first.** The soak takes the IPC endpoint, and an
+      already-running instance holds it - the report says `ipc server NOT
+      started` when that happened, which means the run measured a smaller
+      assembly than it is supposed to.
+
+      Two things to record even on a pass: the **peak RSS**, which is the
+      headless figure and not the tray one the idle budget asks for, and the
+      **handle drift**, which is what should replace `HANDLE_GROWTH_TOLERANCE` -
+      that constant is a guess today and its own docs ask for this run. Note the
+      handle half is weak evidence here ([D-112](debt.md#d-112)): nothing the
+      soak assembles creates a GUI object.
 - [ ] **The tray build's idle RSS, by hand.** Task Manager, flyout closed, after
       a few minutes. This is the number `perf-budgets.md`'s idle row actually
       names, and `--soak` cannot produce it: it builds no window.

@@ -8,9 +8,9 @@ exit unless an ADR records the variance and the recovery plan.
 |---|---|---|
 | Idle RSS (flyout closed) | ≤ 35,000,000 bytes private (aspiration 25) | by hand for the tray build; `duja --soak <secs>` for the headless one |
 | Idle CPU | 0 periodic wakeups | Process Explorer context-switch delta over 60 s; design rule: no polling loops anywhere |
-| Cold start → tray icon visible | < 300 ms | tracing span; DDC probing must be off the startup path |
-| Slider → DDC write dispatched | ≤ 1 coalesce interval (~100 ms) | tracing span |
-| Overlay alpha update | < 16 ms (one frame) | tracing span |
+| Cold start → tray icon visible | < 300 ms | **no live instrument** - by hand, see below |
+| Slider → DDC write dispatched | ≤ 1 coalesce interval (~100 ms) | **no live instrument** - by hand, see below |
+| Overlay alpha update | < 16 ms (one frame) | **no live instrument** - by hand, see below |
 | Stripped release binary (`duja`) | ≤ 16,777,216 bytes (16 MiB; [ADR-0012](adr/0012-binary-size-budget-variance.md)) | `cargo xtask size`, gated in the release workflow |
 | Stripped release binary (`dujactl`) | ≤ 2,097,152 bytes (2 MiB) | same |
 | Soak (24 h) RSS growth | < 5,000,000 bytes; flat GDI/USER handle counts | `duja --soak 86400` |
@@ -57,13 +57,20 @@ On a platform that cannot read its own usage the verdict is `UNMEASURABLE` with
 a non-zero exit - **not** a pass. macOS is that platform today (`task_info` is
 Mach FFI nobody here has run).
 
-**Two rows still name no instrument.** "Overlay alpha update" and "Cold start"
-were measured by hand at the P4 gate and not since; P8 wave 1 changed the
-optimization level, which plausibly moves both. There is no automated render
-benchmark in this repository ([D-109](debt.md#d-109)), and until there is,
-[qa-checklist.md](qa-checklist.md) is where those two get measured. A budget row
-that names no live instrument is a claim about the past, not a guarantee about
-the build in front of you.
+**Three rows name no instrument, and until the P8 gate they named one that does
+not exist.** "Cold start", "Slider to DDC write" and "Overlay alpha update" all
+said *tracing span* in the How-measured column. **There is not a single
+`tracing::span!` or `#[instrument]` in this repository** - `tracing` is used here
+purely for events. All three were measured by hand at the P4 gate and not since,
+and P8 wave 1 changed the optimization level, which plausibly moves at least two
+of them.
+
+A span would not have been much of an instrument anyway: it is a thing a human
+reads while watching the app, not a thing that fails a build. The honest column
+is the one now there, and [qa-checklist.md](qa-checklist.md) is where these get
+measured until [D-109](debt.md#d-109)'s benchmark exists. A budget row that names
+an instrument which does not exist is worse than one that admits it has none -
+which is the rule this project states, applied to the file that states it.
 
 Design rules that protect the budgets:
 

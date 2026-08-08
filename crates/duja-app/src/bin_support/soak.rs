@@ -7,20 +7,34 @@
 //! rule against: a maintainer reads the row, believes the budget is checked, and
 //! it never was.
 //!
+//! # Where the report goes, which on Windows is not the console
+//!
+//! **A release `duja.exe` is a GUI-subsystem binary** (`main.rs`'s
+//! `windows_subsystem = "windows"`), so it has no console: `eprintln!` lands on
+//! an invalid handle, std maps that to `Ok`, and every line this harness prints
+//! is silently discarded. The shell does not wait for it either, so the exit
+//! code — the whole of the "UNMEASURABLE is not a pass" guarantee — is
+//! unobservable too. `main.rs` has said this since P4 and P8 wave 3 wrote past
+//! it, which made the instrument useless on the one build worth soaking: the
+//! release one, since that is what the 35 MB budget is written against.
+//!
+//! So the report is also **written to a file** — `soak-report.txt` beside the
+//! rotating log — and the path is printed. A run whose output went nowhere still
+//! leaves the numbers on disk. `docs/qa-checklist.md` carries the invocation
+//! that also gets you the exit code.
+//!
 //! # What it runs
 //!
-//! `start_platform` + the engine + the IPC server: the same three pieces
-//! `run::headless` assembles, minus nothing. The IPC server is on the list
-//! deliberately rather than incidentally — it is a named-pipe listener holding a
-//! kernel handle per connection, which makes it the single most plausible source
-//! of the handle leak the GDI/USER counters exist to catch, and a soak that
-//! omitted it would have been quietest about the thing it is best placed to find.
+//! `backend::discover()` for a display count, then the three pieces
+//! `run::headless` assembles: `start_platform`, the engine, the IPC server. So
+//! it is headless **plus** that one enumeration, which matters for the peak
+//! below.
 //!
 //! Then it goes **idle**. That is the budget's own definition rather than a
 //! shortcut: ADR-0005 parks every thread on `recv` and the design rule is "no
 //! polling loops anywhere", so an idle soak tests exactly that.
 //!
-//! # Three things it does not measure, said plainly
+//! # Four things it does not measure, said plainly
 //!
 //! - **A busy Duja.** A soak that drives level changes and hot-plug for hours is
 //!   a different harness and does not exist. `--stress` floods for seconds,
@@ -35,6 +49,17 @@
 //!   is the *whole* resident set, private plus resident shareable pages. Against
 //!   a budget written as "private" that over-counts, which is the safe direction
 //!   to be wrong in, but it is not the same number.
+//! - **GUI objects, in any meaningful sense.** This is the one an earlier version
+//!   of this header got backwards. It justified including the IPC server as "the
+//!   single most plausible source of the handle leak the GDI/USER counters exist
+//!   to catch" — but a named-pipe instance is a *kernel* handle, which
+//!   `GetGuiResources` does not count at all. What moves those counters is
+//!   `CreateWindowExW`, `CreateSolidBrush` and the per-ramp device contexts, all
+//!   of which live in the overlay dimmer and the gamma sink, and this harness
+//!   builds neither. `duja_platform`'s own note that a headless Duja "reports
+//!   exactly 0 GDI objects" is the same fact from the other side. So the handle
+//!   half of the budget is **structurally near-zero here**, and passing it is
+//!   weak evidence rather than strong. `docs/debt.md` D-112 carries it.
 //!
 //! # The split
 //!
@@ -103,8 +128,9 @@ pub(crate) struct Sample {
 /// leak; a fixed fraction would give a 24-hour run a 2.4-hour warm-up and hide a
 /// slow leak inside it. So: a tenth of the run, capped at a minute.
 pub(crate) fn warmup(total: Duration) -> Duration {
-    // `checked_div` because `arithmetic_side_effects` is denied by the workspace
-    // lint wall and does not know the divisor is a literal. The `None` arm is
+    // `checked_div` because `arithmetic_side_effects` is a workspace lint that CI
+    // promotes to an error (`-D warnings`), and it does not know the divisor is a
+    // literal. The `None` arm is
     // unreachable (`Duration::checked_div` fails only on a zero divisor); `ZERO`
     // is the conservative fallback anyway, since it measures more rather than
     // less.
@@ -126,12 +152,25 @@ pub(crate) struct SoakRun {
     duration: Duration,
     /// Displays the pipeline saw at the start.
     displays: usize,
+    /// Whether the IPC server actually started.
+    ///
+    /// `ipc::start` returns `None` rather than an error when the endpoint is
+    /// taken, and **any already-running Duja holds it** - which is exactly the
+    /// situation the QA checklist describes ("on an idle desktop, from a real
+    /// tray build's box"). Without recording this, a run could report PASS for an
+    /// assembly smaller than the one this module argues for, leaving only a WARN
+    /// line that on a release Windows build goes nowhere at all.
+    ipc_started: bool,
     /// Samples taken, readable or not.
     samples: usize,
     /// Samples the OS could not answer.
     unreadable: usize,
-    /// Highest resident bytes seen.
+    /// Highest resident bytes seen at or after the warm-up. This is the budgeted
+    /// one.
     peak_rss: Option<u64>,
+    /// Highest resident bytes seen *before* the warm-up. Reported, never gated:
+    /// it is the startup residue the warm-up exists to exclude.
+    startup_peak_rss: Option<u64>,
     /// The first **readable** sample at or after the warm-up window.
     baseline: Option<Sample>,
     /// The last **readable** sample.
@@ -157,9 +196,11 @@ impl SoakRun {
         SoakRun {
             duration,
             displays,
+            ipc_started: false,
             samples: 0,
             unreadable: 0,
             peak_rss: None,
+            startup_peak_rss: None,
             baseline: None,
             last: None,
         }
@@ -178,11 +219,22 @@ impl SoakRun {
             self.unreadable = self.unreadable.saturating_add(1);
             return;
         };
-        self.peak_rss = Some(
-            self.peak_rss
-                .map_or(metrics.rss_bytes, |peak| peak.max(metrics.rss_bytes)),
-        );
-        if self.baseline.is_none() && sample.elapsed >= warmup(self.duration) {
+        // Peak is measured over the same window as growth, deliberately. The
+        // budgeted peak used to include t=0 - taken right after discovery, the
+        // pump, the engine and the IPC server were all assembled - so the highest
+        // point of a perfectly healthy run was the startup residue, and the
+        // budget most likely to trip was tripped by the very thing the warm-up
+        // exists to exclude. That is the D-005 shape this module cites,
+        // reintroduced on the other budget. Startup is still measured; it is
+        // reported rather than gated.
+        let after_warmup = sample.elapsed >= warmup(self.duration);
+        let slot = if after_warmup {
+            &mut self.peak_rss
+        } else {
+            &mut self.startup_peak_rss
+        };
+        *slot = Some(slot.map_or(metrics.rss_bytes, |peak| peak.max(metrics.rss_bytes)));
+        if after_warmup && self.baseline.is_none() {
             self.baseline = Some(sample);
         }
         self.last = Some(sample);
@@ -196,9 +248,16 @@ impl SoakRun {
         Some(last.saturating_sub(base))
     }
 
-    /// GDI and USER handle growth from the baseline. `None` means the platform
-    /// does not count them — which, now that the baseline is always a readable
-    /// sample, is the only thing it can mean.
+    /// GDI and USER handle growth from the baseline.
+    ///
+    /// `None` means the platform does not count them, and **only** that. It used
+    /// to be able to mean "the Windows query failed" as well, because
+    /// `gui_objects` answers `None` on failure and `self_metrics` passed that
+    /// through - so a single failed `GetGuiResources` made the report say "not
+    /// counted on this platform" about Windows, skip the handle budget, and pass.
+    /// `duja_platform::process` now refuses to build a half-read sample, so the
+    /// two cases are distinguishable again: a failed query is an *unreadable*
+    /// sample and is counted as one.
     pub(crate) fn handle_growth(&self) -> (Option<u32>, Option<u32>) {
         let (Some(base), Some(last)) = (
             self.baseline.and_then(|s| s.metrics),
@@ -327,6 +386,7 @@ pub(crate) fn run(secs: u64, interval_secs: u64) -> anyhow::Result<ExitCode> {
     let ipc_server = crate::bin_support::ipc::start(std::sync::Arc::new(
         crate::bin_support::ipc::HeadlessBridge::new(engine.sender()),
     ));
+    let ipc_started = ipc_server.is_some();
     // Drain notifications rather than printing them: hours of output is not a
     // report, and an undrained channel is itself a leak this harness would then
     // be measuring instead of Duja.
@@ -340,6 +400,7 @@ pub(crate) fn run(secs: u64, interval_secs: u64) -> anyhow::Result<ExitCode> {
 
     let started = Instant::now();
     let mut soak = SoakRun::new(duration, displays);
+    soak.ipc_started = ipc_started;
     loop {
         let elapsed = started.elapsed();
         let sample = Sample {
@@ -369,11 +430,35 @@ pub(crate) fn run(secs: u64, interval_secs: u64) -> anyhow::Result<ExitCode> {
     forwarder.shutdown();
     let _ = drain.join();
 
-    print!("{soak}");
+    let report = soak.to_string();
+    print!("{report}");
+    // Also to a file, because on a release Windows build the line above went
+    // nowhere: `windows_subsystem = "windows"` means no console, and std maps the
+    // invalid handle to `Ok`. See the module header.
+    match write_report(&report) {
+        Ok(path) => eprintln!("report written to {}", path.display()),
+        Err(e) => eprintln!("could not write the report file: {e}"),
+    }
     match soak.verdict().0 {
         Verdict::Pass => Ok(ExitCode::SUCCESS),
         Verdict::Fail | Verdict::Unmeasurable => Ok(ExitCode::from(1)),
     }
+}
+
+/// Write `report` beside the rotating log, returning where it landed.
+///
+/// The console is not a reliable sink for this binary (see the module header),
+/// and a 24-hour run whose output vanished is 24 hours wasted. Best-effort: a
+/// failure here is reported and does not change the verdict.
+///
+/// # Errors
+/// Any failure to create the directory or write the file.
+fn write_report(report: &str) -> std::io::Result<std::path::PathBuf> {
+    let paths = crate::bin_support::paths::DujaPaths::resolve_or_fallback();
+    std::fs::create_dir_all(&paths.log_dir)?;
+    let path = paths.log_dir.join("soak-report.txt");
+    std::fs::write(&path, report)?;
+    Ok(path)
 }
 
 /// One sample as a log line.
@@ -401,6 +486,15 @@ impl fmt::Display for SoakRun {
         let (verdict, reasons) = self.verdict();
         writeln!(f, "\n--- duja soak report ---")?;
         writeln!(f, "displays         {}", self.displays)?;
+        writeln!(
+            f,
+            "ipc server       {}",
+            if self.ipc_started {
+                "started"
+            } else {
+                "NOT started - another Duja holds the endpoint, so this run measured less"
+            }
+        )?;
         writeln!(f, "duration         {:?}", self.duration)?;
         writeln!(
             f,
@@ -415,6 +509,13 @@ impl fmt::Display for SoakRun {
                  process - see the module docs)"
             )?,
             None => writeln!(f, "peak RSS         never read")?,
+        }
+        match self.startup_peak_rss {
+            Some(peak) => writeln!(
+                f,
+                "startup peak     {peak} bytes (before the warm-up; reported, not budgeted)"
+            )?,
+            None => writeln!(f, "startup peak     not sampled")?,
         }
         match self.rss_growth() {
             Some(growth) => writeln!(

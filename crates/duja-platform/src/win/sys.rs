@@ -334,11 +334,17 @@ pub(crate) fn working_set_bytes() -> Option<u64> {
     let size = u32::try_from(size_of::<PROCESS_MEMORY_COUNTERS>()).ok()?;
     // SAFETY: the only pointer crossing the boundary is `&raw mut counters`,
     // which points at a fully initialized, correctly aligned local that outlives
-    // the call and is not aliased; `cb` is that same type's size, so the callee
-    // cannot write past it. `GetCurrentProcess` is a pseudo-handle constant that
-    // is always valid for the calling process, carries the
-    // PROCESS_QUERY_LIMITED_INFORMATION access this needs, and must not be
-    // closed - so there is no handle lifetime to get wrong.
+    // the call and is not aliased (`&raw mut` forms no reference, so there is no
+    // `noalias` claim to violate); `cb` is that same type's size, so the callee
+    // cannot write past it. `GetCurrentProcess` is a pseudo-handle constant,
+    // always valid for the calling process and documented as needing no
+    // `CloseHandle`, so there is no handle lifetime to get wrong.
+    //
+    // Access rights are not a soundness precondition - too few yields
+    // ERROR_ACCESS_DENIED, not UB - but for the record the pseudo-handle carries
+    // PROCESS_ALL_ACCESS, which subsumes both halves of what this API documents
+    // it needs: PROCESS_QUERY_INFORMATION (or _LIMITED_) *and* PROCESS_VM_READ.
+    // An earlier version of this comment quoted only the first half.
     let result = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &raw mut counters, size) };
     result.ok().map(|()| counters.WorkingSetSize as u64)
 }
@@ -349,8 +355,10 @@ pub(crate) fn working_set_bytes() -> Option<u64> {
 /// These are the "flat GDI/USER handle counts" half of the soak budget. They are
 /// the leak that a long-running tray application actually has: a window, a
 /// bitmap or a device context created per event and never released climbs here
-/// long before it is visible in the working set, and Windows kills a process at
-/// 10,000 of either.
+/// long before it is visible in the working set. The default per-process quota
+/// is 10,000 of each, and crossing it makes further object creation *fail* — the
+/// OS does not kill the process, which is worse for diagnosis rather than
+/// better: the app stays up and stops being able to draw.
 ///
 /// `GetGuiResources` reports failure as `0`, which is also a legitimate count
 /// for a process that has created no GUI objects - and this process reports
@@ -362,16 +370,25 @@ pub(crate) fn working_set_bytes() -> Option<u64> {
 /// one-liner.
 pub(crate) fn gui_objects(gdi: bool) -> Option<u32> {
     let flags = if gdi { GR_GDIOBJECTS } else { GR_USEROBJECTS };
+    // Resolved BEFORE the last-error is cleared. `GetCurrentProcess` is a
+    // two-instruction constant and Microsoft does not document it as touching
+    // last-error, but the zero-versus-failure test below depends on nothing at
+    // all running inside that window, and an undocumented assumption is a
+    // cheaper thing to remove than to rely on.
+    // SAFETY: returns the `(HANDLE)-1` pseudo-handle constant. No pointers, no
+    // allocation, and nothing to close.
+    let process = unsafe { GetCurrentProcess() };
     // SAFETY: no pointers and no handles - `SetLastError` writes one word of
     // this thread's own TEB, which is sound to call at any time from any thread.
     // It is here so the zero-versus-failure test below reads only what
-    // `GetGuiResources` set.
+    // `GetGuiResources` set. Last-error is thread-local, so a concurrent thread
+    // cannot clobber the window.
     unsafe { SetLastError(WIN32_ERROR(0)) };
-    // SAFETY: no pointers cross the boundary. The pseudo-handle is a constant
-    // that is always valid for the calling process and must not be closed, and
+    // SAFETY: no pointers cross the boundary. `process` is the pseudo-handle
+    // resolved above, always valid for the calling process and never closed, and
     // `flags` is one of the two `GET_GUI_RESOURCES_FLAGS` constants the API
     // defines, so the callee cannot be handed a value it does not enumerate.
-    let count = unsafe { GetGuiResources(GetCurrentProcess(), flags) };
+    let count = unsafe { GetGuiResources(process, flags) };
     if count != 0 {
         return Some(count);
     }

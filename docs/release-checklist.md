@@ -42,6 +42,13 @@ release** rather than quietly publishing a Windows-only one.
 - [ ] **Bump the version and changelog.** Update the workspace `version` in
       `Cargo.toml` (refresh `Cargo.lock`), and move the `CHANGELOG.md` unreleased
       entries under a new `vX.Y.Z` heading. Merge that through CI first.
+- [ ] **Refresh `fuzz/Cargo.lock` too**, with
+      `cargo update --manifest-path fuzz/Cargo.toml -w`. It is a *separate*
+      workspace and pins the path dependencies by version, so a workspace bump
+      leaves it stale. Since P8 wave 2 that is not merely untidy: CI's required
+      `clippy (ubuntu-latest)` job runs `cargo check --manifest-path
+      fuzz/Cargo.toml --locked`, which fails on a stale lock - so forgetting this
+      reds a required check on the release-prep PR itself.
 - [ ] **Sync `docs/STATUS.md` and `docs/history.md`.** In `STATUS.md`: refresh
       the "last updated" stamp, flip the previous release's row from "shipping"
       to "shipped", add a row for the new one, and update the measured test
