@@ -210,9 +210,36 @@ zbus = { version = "5.17", default-features = false, features = [
 # thread); the CoreGraphics display-reconfiguration and IOKit system-power
 # externs are hand-declared in `duja-platform`'s `mac/sys.rs`.
 # Structured logging (duja-app, P4): a WARN rotating file log by default,
-# DEBUG-to-stderr under `--verbose`. EnvFilter for level control.
+# DEBUG-to-stderr under `--verbose`.
+#
+# The feature set is a size decision (P8 wave 1). Two defaults are dropped, two
+# are kept, and the difference is whether anything observable changes:
+#
+# - `env-filter` is DROPPED. It pulls `regex-automata` + `regex-syntax` +
+#   `matchers` - 345 KiB of `.text`, and 664,064 bytes of file - to parse a
+#   grammar Duja uses none of. `filter::Targets` needs no feature at all (`std`
+#   is enough). `bin_support::logging`'s header has the one behaviour difference
+#   that survives, and the normalization that removes the other two.
+# - `ansi` is DROPPED. It pulls `nu-ansi-term` for colour codes all three call
+#   sites already turn off with `.with_ansi(false)`.
+# - `tracing-log` is KEPT, and the first version of this comment dropped it with
+#   the justification that "that bridge needs a `LogTracer` installed and Duja
+#   installs none". That is false: `SubscriberInitExt::try_init` - the call this
+#   crate makes - installs one **itself** under that exact feature gate
+#   (`tracing-subscriber/src/util.rs`). Dropping it would have silently stopped
+#   capturing every `log::` record from `rustls`, `fontdb` and `i-slint-core`,
+#   which is a diagnostics regression bought for a few kilobytes.
+# - `smallvec` is KEPT. With `env-filter` gone its remaining job is the registry's
+#   ancestor buffer in `Scope::from_root`, which is small but is on a logging
+#   path; this wave is about bytes, not about making the logger slower. (Not, as
+#   this comment first said, "per-span storage" - that is `sharded-slab`.)
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "fmt",
+    "smallvec",
+    "std",
+    "tracing-log",
+] }
 # Build-only (duja-app build.rs, P4): embeds the PerMonitorV2 DPI-awareness
 # application manifest into the executable.
 embed-manifest = "1"
@@ -250,11 +277,59 @@ undocumented_unsafe_blocks = "deny"
 indexing_slicing = "warn"
 arithmetic_side_effects = "warn"
 
+# ---------------------------------------------------------------------------
+# Release profile. Budget: `duja` <= 16,777,216 bytes, `dujactl` <= 2,097,152,
+# enforced by `cargo xtask size` in the release workflow rather than remembered.
+# The full measured ledger, and what this profile cost to get there, is the P8
+# section of ADR-0012.
+# ---------------------------------------------------------------------------
 [profile.release]
-# Budget: stripped binary <= 16 MB (aspiration 12; ADR-0012 / docs/perf-budgets.md).
-lto = "thin"        # try "fat" at P8 hardening
+lto = "fat"
 codegen-units = 1
 strip = true
-opt-level = 3
+# `-Os`: `-O2`'s pipeline with size-aware inlining and vectorization thresholds.
+# Measured at -3,277,312 bytes against `opt-level = 3`, which is the single
+# largest lever there is here and the only one that reached the budget. It is
+# also the only one that is a *trade* rather than a free win, which is why the
+# next block exists.
+opt-level = "s"
 # Keep unwinding: thread supervision relies on catch_unwind (ADR-0005).
 panic = "unwind"
+
+# The per-frame path stays at full speed. `-Os` costs real time in a tight
+# per-pixel loop, and ADR-0009 chose a *software* renderer - so the crates that
+# execute while a frame is being produced are exempted by name:
+#
+#   i-slint-core                 item-tree traversal and the software renderer's
+#                                shared scanline machinery
+#   i-slint-renderer-software    the blitter itself
+#   swash                        glyph outline loading, scaling and hinting. The
+#                                first version of this list omitted it and
+#                                credited `zeno` with "glyph rasterization",
+#                                which is only the last step:
+#                                `fonts/vectorfont.rs` calls
+#                                `swash::scale::Render` and hands `zeno` the
+#                                filled mask. Text is on the flyout's frame path,
+#                                so half the glyph pipeline at `-Os` would have
+#                                been an exemption that missed its own target.
+#   zeno                         the path/mask rasterizer that call ends in
+#   duja-ui                      Slint's generated component code, whose property
+#                                getters are read *during* that traversal - it is
+#                                on the frame path, not merely near it
+#
+# This costs 1,429,504 bytes against `-Os` everywhere, and buying it is the point:
+# the alternative is guessing about the renderer. What it does NOT prove is that
+# a per-package override under fat LTO produces codegen identical to a
+# whole-program `-O3` build; rustc writes per-function `optsize` attributes that
+# the LTO pipeline honours, and functions from these four carry none, but
+# "reaches the linker" is not "identical to -O3". ADR-0012 says so too.
+[profile.release.package.i-slint-core]
+opt-level = 3
+[profile.release.package.i-slint-renderer-software]
+opt-level = 3
+[profile.release.package.swash]
+opt-level = 3
+[profile.release.package.zeno]
+opt-level = 3
+[profile.release.package.duja-ui]
+opt-level = 3

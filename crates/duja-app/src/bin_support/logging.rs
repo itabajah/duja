@@ -10,6 +10,45 @@
 //!
 //! Levels honour `RUST_LOG` when set, else default to WARN (file) / DEBUG
 //! (`--verbose`, stderr). Callers log stable ids only — never raw EDID bytes.
+//!
+//! # Why [`Targets`] and not `EnvFilter`
+//!
+//! `EnvFilter` is the usual choice and it is the one this module used until P8.
+//! It parses a strictly larger grammar — span-field predicates like
+//! `target[span{field=value}]=level` — and it pays for that with a regex engine:
+//! turning the `env-filter` feature off drops `regex-automata`, `regex-syntax`
+//! and `matchers`, which measured 345 KiB of `.text` and 664,064 bytes of file
+//! in a binary that was over its budget. See
+//! <https://github.com/itabajah/duja/blob/main/docs/adr/0012-binary-size-budget-variance.md>.
+//!
+//! [`Targets`] parses the part of the grammar Duja actually uses: a
+//! comma-separated list of `target=level`, or a bare `level`. Swapping the two
+//! is **not** transparent, and the three differences are worth knowing before
+//! debugging a filter that did not do what you expected. Two of them are
+//! repaired here; one is not, because it cannot be.
+//!
+//! - **Repaired: whitespace.** `EnvFilter` trims every directive.
+//!   [`Targets`] does not, and — this is the sharp edge — an unrecognised token
+//!   does not become an *error*, it becomes a **target name at TRACE**. So
+//!   `RUST_LOG="duja_app=debug, warn"` would silently read `" warn"` as a module
+//!   to log at TRACE and leave everything else off, and `RUST_LOG="warn "` would
+//!   turn logging off entirely. [`level_filter`] trims each segment first.
+//! - **Repaired: empty segments.** `LevelFilter::from_str` maps `""` to
+//!   `ERROR`, so a bare `RUST_LOG=` (set, empty) parses *successfully* as a
+//!   global `error` directive and silences the WARN file log — no fallback would
+//!   fire, because nothing failed. `EnvFilter` dropped empty directives and fell
+//!   back. [`level_filter`] drops them too, so `RUST_LOG=` and `RUST_LOG=a,,b`
+//!   behave as they did.
+//! - **Not repaired: rejection is all-or-nothing.** Given
+//!   `RUST_LOG=duja_app=nonsense,debug`, `EnvFilter::from_env_lossy` drops the
+//!   unparseable directive and honours `debug`; [`level_filter`] discards the
+//!   whole string and uses `default_level`. Restoring that would mean
+//!   re-implementing per-directive validation, and the failure it prevents —
+//!   logging at a level nobody asked for — is the one worth defaulting to safe.
+//!
+//! What is **not** a difference: a bare unknown token like `RUST_LOG=nonsense`
+//! means "the target `nonsense` at TRACE" under both, which is why the trimming
+//! above matters so much.
 
 use std::backtrace::Backtrace;
 use std::fs::{self, OpenOptions};
@@ -18,7 +57,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::filter::{LevelFilter, Targets};
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 /// The rotating log file's base name.
 const LOG_FILE: &str = "duja.log";
@@ -38,30 +80,34 @@ const MAX_FILES: usize = 3;
 /// Idempotent-ish: `tracing` allows the global subscriber to be set once; a
 /// second call is a no-op (the error is swallowed).
 pub(crate) fn init(log_dir: Option<&Path>, verbose: bool) {
+    // Read the environment once: three call sites asking separately would be
+    // three chances for them to disagree.
+    let rust_log = std::env::var("RUST_LOG").ok();
+    let spec = rust_log.as_deref();
+
     if verbose {
-        let filter = env_filter("debug");
-        let _ = tracing_subscriber::fmt()
+        let layer = tracing_subscriber::fmt::layer()
             .with_writer(io::stderr)
-            .with_env_filter(filter)
             .with_ansi(false)
-            .try_init();
+            .with_filter(level_filter(spec, LevelFilter::DEBUG));
+        let _ = tracing_subscriber::registry().with(layer).try_init();
         return;
     }
 
     if let Some(dir) = log_dir {
         let _ = fs::create_dir_all(dir);
         let writer = RotatingWriter::new(dir.to_path_buf(), LOG_FILE, MAX_BYTES, MAX_FILES);
-        let _ = tracing_subscriber::fmt()
+        let layer = tracing_subscriber::fmt::layer()
             .with_writer(move || writer.clone())
-            .with_env_filter(env_filter("warn"))
             .with_ansi(false)
-            .try_init();
+            .with_filter(level_filter(spec, LevelFilter::WARN));
+        let _ = tracing_subscriber::registry().with(layer).try_init();
     } else {
-        let _ = tracing_subscriber::fmt()
+        let layer = tracing_subscriber::fmt::layer()
             .with_writer(io::stderr)
-            .with_env_filter(env_filter("warn"))
             .with_ansi(false)
-            .try_init();
+            .with_filter(level_filter(spec, LevelFilter::WARN));
+        let _ = tracing_subscriber::registry().with(layer).try_init();
     }
 }
 
@@ -131,11 +177,36 @@ fn write_crash_record(path: &Path, record: &str) -> io::Result<()> {
     file.flush()
 }
 
-/// Build an [`EnvFilter`] honouring `RUST_LOG`, defaulting to `default_level`.
-fn env_filter(default_level: &str) -> EnvFilter {
-    EnvFilter::builder()
-        .with_default_directive(default_level.parse().unwrap_or_default())
-        .from_env_lossy()
+/// Resolve `RUST_LOG` (already read, so this stays pure) into a [`Targets`]
+/// filter, falling back to `default_level` for everything.
+///
+/// `rust_log` is `None` when the variable is unset. The normalization below is
+/// not cosmetic — it is what keeps two `EnvFilter` behaviours that [`Targets`]
+/// silently drops, and the module header says what each one costs without it.
+///
+/// Note what this does **not** do: a spec that parses is used *as it stands*,
+/// with no default merged into it. `RUST_LOG=duja_app=debug` therefore silences
+/// every other target, which is what `EnvFilter` did too — its default directive
+/// applied only when the variable was empty or unset.
+fn level_filter(rust_log: Option<&str>, default_level: LevelFilter) -> Targets {
+    let fallback = Targets::new().with_default(default_level);
+    let Some(spec) = rust_log else {
+        return fallback;
+    };
+    // Trim each directive and drop the empty ones, both of which `EnvFilter` did
+    // and `Targets` does not. Rejoined rather than parsed piecewise so that
+    // `Targets`'s own parser stays the only thing that decides what a directive
+    // means.
+    let normalized = spec
+        .split(',')
+        .map(str::trim)
+        .filter(|directive| !directive.is_empty())
+        .collect::<Vec<_>>()
+        .join(",");
+    if normalized.is_empty() {
+        return fallback;
+    }
+    normalized.parse::<Targets>().unwrap_or(fallback)
 }
 
 /// Whether a write of `incoming` bytes to a file already `current` bytes long
@@ -231,6 +302,116 @@ impl Rotator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use tracing::Level;
+
+    #[test]
+    fn unset_rust_log_applies_the_default_level_to_everything() {
+        let filter = level_filter(None, LevelFilter::WARN);
+        assert!(filter.would_enable("duja_app::tray", &Level::WARN));
+        assert!(filter.would_enable("some_dependency", &Level::ERROR));
+        assert!(!filter.would_enable("duja_app::tray", &Level::INFO));
+    }
+
+    #[test]
+    fn rust_log_overrides_the_default_level() {
+        let filter = level_filter(Some("debug"), LevelFilter::WARN);
+        assert!(filter.would_enable("duja_app::tray", &Level::DEBUG));
+    }
+
+    #[test]
+    fn rust_log_scopes_a_level_to_one_target() {
+        let filter = level_filter(Some("duja_app=debug,warn"), LevelFilter::WARN);
+        assert!(filter.would_enable("duja_app::tray", &Level::DEBUG));
+        // The trailing bare `warn` is the default for everything else, so a
+        // chatty dependency stays quiet.
+        assert!(!filter.would_enable("i_slint_core", &Level::DEBUG));
+        assert!(filter.would_enable("i_slint_core", &Level::WARN));
+    }
+
+    /// The one behaviour that still differs from the `EnvFilter` this replaced,
+    /// pinned rather than left to be rediscovered.
+    ///
+    /// `duja_app=nonsense` is an unparseable **level**, which is the case that
+    /// separates the two: `EnvFilter::from_env_lossy` drops that directive and
+    /// honours the trailing `debug`; [`level_filter`] discards the whole string
+    /// and the default stands. (An earlier version of this test used
+    /// `[worker{id=3}]=trace` and claimed `EnvFilter` "would drop it" — wrong on
+    /// both counts. `EnvFilter` *parses* span-field predicates, that being the
+    /// grammar it exists for, and what makes `Targets` reject that string is
+    /// simply the second `=`. It demonstrated the grammar difference while
+    /// claiming to demonstrate the leniency one.)
+    #[test]
+    fn an_unparseable_level_falls_back_rather_than_dropping_one_directive() {
+        let filter = level_filter(Some("duja_app=nonsense,debug"), LevelFilter::WARN);
+        assert!(!filter.would_enable("duja_app::tray", &Level::DEBUG));
+        assert!(filter.would_enable("duja_app::tray", &Level::WARN));
+    }
+
+    /// The span-field grammar `Targets` does not have. Separate from the test
+    /// above because it fails for a different reason and would otherwise be
+    /// covered only by accident.
+    #[test]
+    fn a_span_field_predicate_is_not_supported_and_falls_back() {
+        let filter = level_filter(Some("[worker{id=3}]=trace"), LevelFilter::WARN);
+        assert!(!filter.would_enable("duja_app::tray", &Level::TRACE));
+        assert!(filter.would_enable("duja_app::tray", &Level::WARN));
+    }
+
+    /// `RUST_LOG=` set-but-empty must not silence the log.
+    ///
+    /// This is the regression the normalization exists for, and it is invisible
+    /// without it: `LevelFilter::from_str("")` is `Ok(ERROR)`, so a bare
+    /// `RUST_LOG=` parses **successfully** into a global `error` directive and
+    /// the WARN file log goes quiet. No fallback fires, because nothing failed.
+    /// `EnvFilter` dropped empty directives and fell back to the default.
+    /// `RUST_LOG= duja` is an ordinary thing to type.
+    #[test]
+    fn an_empty_rust_log_is_the_same_as_an_unset_one() {
+        for spec in ["", "   ", ",", " , "] {
+            let filter = level_filter(Some(spec), LevelFilter::WARN);
+            assert!(
+                filter.would_enable("duja_app::tray", &Level::WARN),
+                "RUST_LOG={spec:?} silenced the WARN log"
+            );
+        }
+    }
+
+    /// Whitespace around a directive must not turn a level into a target.
+    ///
+    /// The other half of what the normalization repairs, and the more dangerous
+    /// half: `Targets` does not trim, and an unrecognised token becomes a
+    /// **target name at TRACE** rather than an error. Untrimmed,
+    /// `"duja_app=debug, warn"` reads `" warn"` as a module to log at TRACE and
+    /// turns everything else off, and `"warn "` disables logging entirely -
+    /// both silently, and both shapes a person types by hand.
+    #[test]
+    fn whitespace_around_a_directive_does_not_change_what_it_means() {
+        let spaced = level_filter(Some("duja_app=debug, warn"), LevelFilter::ERROR);
+        assert!(spaced.would_enable("duja_app::tray", &Level::DEBUG));
+        assert!(spaced.would_enable("i_slint_core", &Level::WARN));
+        assert!(!spaced.would_enable("i_slint_core", &Level::DEBUG));
+
+        let trailing = level_filter(Some("warn "), LevelFilter::ERROR);
+        assert!(trailing.would_enable("anything", &Level::WARN));
+    }
+
+    /// A spec that parses is used as it stands, with no default merged in.
+    ///
+    /// Written because every other test here passes if [`level_filter`] ends
+    /// with `.map(|t| t.with_default(default_level))` - a materially different
+    /// filter, and one that would make `RUST_LOG=duja_app=debug` keep logging
+    /// every dependency at WARN. `EnvFilter`'s default directive applied only
+    /// when the variable was empty or unset, and so does this.
+    #[test]
+    fn a_parsed_spec_does_not_inherit_the_default_level() {
+        let filter = level_filter(Some("duja_app=debug"), LevelFilter::WARN);
+        assert!(filter.would_enable("duja_app::tray", &Level::DEBUG));
+        assert!(
+            !filter.would_enable("i_slint_core", &Level::WARN),
+            "the default level leaked into a spec that parsed"
+        );
+    }
 
     #[test]
     fn empty_file_never_rotates() {

@@ -427,6 +427,24 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked -p duja-app -p dujactl
 
+      # ADR-0012's budget, enforced on the bytes this job just produced rather
+      # than remembered. The binary went from 14.9 MB at P4 to 19.4 MB by P7 with
+      # nothing in the path to notice, and it was a human reading a ledger months
+      # later that caught it.
+      #
+      # This runs before the WINDOWS packaging steps, so an over-budget binary
+      # fails before it is zipped, installed into an Inno Setup tree, checksummed
+      # and signed. Be precise about the scope, because it is narrower than "a
+      # release cannot ship over budget": this job `needs: [macos, linux]`, so
+      # by the time it runs the disk image and the tarball are already built -
+      # and neither of those jobs measures anything. macOS cannot use this number
+      # at all (its artifact is a universal binary carrying two architectures)
+      # and no budget has ever been measured for either platform. Gating them on
+      # a guess would be worse than not gating them; `docs/debt.md` D-110 carries
+      # both that gap and the per-PR one.
+      - name: Gate (binary size budget)
+        run: cargo run --release --locked -p xtask -- size
+
       # Portable zip (staging + Compress-Archive), via the dependency-free xtask.
       - name: Stage portable archive
         shell: pwsh
