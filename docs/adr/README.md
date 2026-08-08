@@ -38,11 +38,12 @@ leaves its decision standing.
 | [0016](0016-windows-distribution-and-signing.md) | Windows distribution & signing (Inno + minisign + provenance) | accepted |
 | [0017](0017-engine-shutdown-lifecycle-contract.md) | Engine shutdown & worker-lifecycle contract (generation + retired + bounded shutdown) | accepted |
 | [0018](0018-app-owns-continuum-engine-owns-pacing.md) | App owns the continuum; the engine owns pacing (single write authority) | accepted |
-| [0019](0019-version-ladder-and-release-trains.md) | Version ladder & release trains (v0.1.x Windows, v0.2 macOS, v0.3 Linux, v1.0) | accepted |
+| [0019](0019-version-ladder-and-release-trains.md) | Version ladder & release trains (v0.1.x Windows, v0.2 macOS, v0.3 Linux, v1.0) | accepted (its platform rows and its "no new platform" rule for patch releases superseded by [0024](0024-preview-artifacts-on-the-patch-train.md); the `v1.0.0` row stands) |
 | [0020](0020-release-integrity-and-signing-readiness.md) | Release integrity & signing readiness (no injection, gated publish, hermetic, Azure-ready) | accepted |
 | [0021](0021-tray-anchor-coordinate-contract.md) | Tray-anchor coordinate contract (y-down normalized, unit named, two derived factors) | accepted |
 | [0022](0022-linux-dbus-and-the-executor-already-there.md) | Linux D-Bus: zbus, and the async executor already in the build | accepted |
 | [0023](0023-x11rb-stays-on-0-13.md) | x11rb stays on 0.13 until the Slint graph moves (declining #128) | accepted |
+| [0024](0024-preview-artifacts-on-the-patch-train.md) | Preview artifacts ship on the patch train (v0.2/v0.3 re-mapped to "hardware-confirmed") | accepted |
 
 Spike evidence lives on branches `spike/eventloop`, `spike/ddc`,
 `spike/overlay` (code is not merged; findings are).

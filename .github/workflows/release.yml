@@ -607,6 +607,20 @@ jobs:
         uses: taiki-e/install-action@1beb33eee6d086258184383af9a538940be190ed # v2
         with:
           tool: git-cliff
+      # The published notes are the preamble followed by the generated changelog.
+      #
+      # ADR-0024 requires the preamble: a release carrying an artifact for a
+      # platform nobody has run on real hardware must say so in its own notes,
+      # from a reviewed file rather than from whoever cut the release. It cannot
+      # be a cliff.toml template — `--strip all` is what drops the configured
+      # header and footer, and it is wanted for the changelog half.
+      #
+      # The missing/empty preamble is caught by an explicit throw rather than by
+      # relying on the runner's `$ErrorActionPreference`, matching how every other
+      # precondition in this job is written (the minisign key, the minisign zip
+      # hash). Deleting the file fails the release instead of quietly publishing
+      # notes without it, and that is the point: under ADR-0024 the label is what
+      # replaced the hold, so losing it silently is the failure mode to prevent.
       - name: Generate release notes
         if: env.PUBLISH == 'true'
         shell: pwsh
@@ -614,7 +628,30 @@ jobs:
           # Same rule as Resolve version: the tag reaches git-cliff via env and is
           # passed as a single quoted argument, never spliced into the run body.
           REF_NAME: ${{ github.ref_name }}
-        run: git cliff --tag "$env:REF_NAME" --latest --strip all -o RELEASE_NOTES.md
+        run: |
+          $preamblePath = 'docs/release-notes-preamble.md'
+          if (-not (Test-Path -LiteralPath $preamblePath)) {
+            throw "$preamblePath is missing - see ADR-0024"
+          }
+          # ReadAllText, not `Get-Content -Raw`: Get-Content decodes with the
+          # system ANSI codepage under Windows PowerShell and only defaults to
+          # UTF-8 under pwsh 7. `shell: pwsh` is the 7 here, but the changelog
+          # half is full of em dashes and arrows from commit messages, so a step
+          # that renders the public release page should not depend on which
+          # PowerShell ran it. ReadAllText is BOM-aware and UTF-8 by default,
+          # and symmetric with the WriteAllText below.
+          $preamble = [System.IO.File]::ReadAllText((Resolve-Path $preamblePath).Path)
+          if ([string]::IsNullOrWhiteSpace($preamble)) {
+            throw "$preamblePath is empty - see ADR-0024"
+          }
+          git cliff --tag "$env:REF_NAME" --latest --strip all -o CHANGES.md
+          $changes = [System.IO.File]::ReadAllText((Resolve-Path 'CHANGES.md').Path)
+          # WriteAllText, not `>`: it emits UTF-8 with no BOM, and a BOM would
+          # land in the first heading of the rendered release page.
+          [System.IO.File]::WriteAllText(
+            (Join-Path (Get-Location) 'RELEASE_NOTES.md'),
+            $preamble + "`n" + $changes)
+          Get-Content RELEASE_NOTES.md
 
       - name: Create GitHub Release
         if: env.PUBLISH == 'true'
