@@ -35,7 +35,14 @@ Local attack surface and mitigations:
   for an attacker to reach. (The plan has long named a user override file; it
   does not exist, and `docs/debt.md` carries that as D-012.)
 - **Screen-state restitution**: gamma/overlay state is guarded so a crash
-  cannot leave the screen unusable (`duja --restore`, crash-marker recovery).
+  cannot leave the screen unusable, and the guard is **not uniform across
+  platforms**. Windows and Linux/X11 write a crash marker that a later start
+  reads, plus `duja --restore` on demand. On Linux/Wayland neither is needed:
+  a `wlr-gamma-control` ramp lives only as long as the process that set it, so
+  the compositor restores the output even after a hard kill. **macOS writes no
+  marker**, so there is no automatic recovery there and `duja --restore` is the
+  only route. That asymmetry is stated rather than averaged over, because the
+  platform with the weakest recovery is also the one nobody has run.
 
 ## Supply chain
 
