@@ -123,7 +123,9 @@ pub(crate) fn plan(
 /// [`plan`] with **this platform's** gamma minimum supplied.
 ///
 /// This is what the tray calls, and the seam exists so the *choice* of minimum is
-/// pinned by a test instead of living at an `AppState` call site no test can reach:
+/// pinned by a test here rather than left at the `AppState` call site. (That
+/// call site *is* reachable now - `gamma_path_tests` drives it - but the choice
+/// still belongs where it can be observed directly rather than through a batch.)
 /// [`plan`]'s own tests drive the parameter directly with a literal, and
 /// `plan_for_platform_uses_the_dimmer_crates_gamma_minimum` pins that this wrapper
 /// passes `duja_dimmer::min_gamma_factor()` rather than, say, `GAMMA_FLOOR` — the
@@ -194,7 +196,11 @@ pub(crate) fn gamma_cap_pct(min_gamma: f32) -> Option<u8> {
 /// [`gamma_cap_pct`] with **this platform's** gamma minimum supplied.
 ///
 /// The same seam as [`plan_for_platform`], for the same reason: the *choice* of
-/// minimum is pinned by a test instead of living at a call site no test can reach.
+/// minimum is pinned by a test here rather than left at the call site. (A
+/// correction once called that call site "reachable now"; it is not - inserting
+/// a `panic!` at all three `AppState` callers of `platform_gamma_limits` leaves
+/// the suite green. Its sibling `plan_for_platform` *is* reached, which is what
+/// the correction was actually about.)
 /// `duja-ui` cannot make this call itself — it depends on neither `duja-dimmer`
 /// nor `duja-platform`, which is why the figure used to be a hardcoded `50` in
 /// `settings.slint` shown on every platform.

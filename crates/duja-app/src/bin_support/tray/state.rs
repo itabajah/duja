@@ -22,7 +22,6 @@ use duja_core::dimmer::{DimCommand, Dimmer};
 use duja_core::id::StableDisplayId;
 use duja_core::manager::DEFAULT_USER_LEVEL_PCT;
 use duja_core::model::{DimMode, DisplayKind, DisplaySnapshot};
-use duja_dimmer::PlatformDimmer;
 use duja_platform::Autostart;
 use duja_ui::{
     FlyoutShell, FlyoutVm, SettingsCommand, SettingsShell, SettingsVm, ThemeChoice, UiCommand,
@@ -64,7 +63,23 @@ pub(super) struct AppState {
     /// The most recent full snapshots (with capabilities), for the settings
     /// per-monitor sections.
     pub(super) snapshots: Vec<DisplaySnapshot>,
-    pub(super) dimmer: Option<PlatformDimmer>,
+    /// The overlay dimmer, if one spawned.
+    ///
+    /// `Box<dyn Dimmer>` rather than the concrete `PlatformDimmer`. Every use of
+    /// this field already went through the trait and `apply_overlays` coerced to
+    /// `&mut dyn Dimmer` on the very next line, so the cost is one allocation at
+    /// startup, plus three call sites that become virtual: `restore_screen`'s
+    /// and `begin_quit`'s `clear()` and the retirement path's drop. An earlier
+    /// version of this doc claimed the vtable cost nothing new, and a correction
+    /// then called those "two calls per process lifetime" - `restore_screen` is
+    /// the tray's "Restore screen" item, which a user can press as often as they
+    /// like. Still nothing next to a `SetDeviceGammaRamp`, which is the point,
+    /// but the count was wrong twice before it was small. What it buys is a fixture that
+    /// can hold `duja_core::testing::FakeDimmer`, which is how the overlay half
+    /// of `docs/debt-archive.md` D-065 becomes observable at all - a batch that carries
+    /// no overlay backend and a batch driven beside one look identical from
+    /// outside otherwise.
+    pub(super) dimmer: Option<Box<dyn Dimmer>>,
     pub(super) config: Config,
     /// The live HDR gamma verdict: `false` forces every gamma-mode display onto
     /// the overlay path. Seeded at startup and re-probed on enumeration by
@@ -1254,11 +1269,23 @@ impl AppState {
     /// One line, then software dimming is off and hardware control carries on.
     fn apply_overlays(&mut self) {
         let commands = self.plan_commands();
-        let overlays = self
-            .dimmer
-            .as_mut()
-            .map(|dimmer| dimmer as &mut dyn duja_core::dimmer::Dimmer);
-        if let Err(e) = self.gamma.apply_batch(&commands, overlays) {
+        // The reborrow is what does the work here, and the block is only
+        // punctuation - an earlier version of this comment credited the scope,
+        // and a review showed that hoisting the reborrow out compiles fine
+        // because NLL ends it at the call. What is load-bearing:
+        // `Box<dyn Dimmer>` is `Box<dyn Dimmer + 'static>`, so a bare
+        // `as_deref_mut()` hands `apply_batch` a borrow that must outlive
+        // `'static` and then blocks the `self.dimmer = None` below it - two
+        // errors, E0521 and E0506. Reborrowing at the shorter lifetime is the
+        // fix.
+        let outcome = {
+            let overlays = self
+                .dimmer
+                .as_mut()
+                .map(|dimmer| &mut **dimmer as &mut dyn Dimmer);
+            self.gamma.apply_batch(&commands, overlays)
+        };
+        if let Err(e) = outcome {
             let retire = retires_dimmer(&e);
             warn!(error = %e, retire, "overlay apply failed");
             if retire {
@@ -1292,8 +1319,11 @@ impl AppState {
             .collect();
         let guard = self.bounds.lock().ok();
         // `plan_for_platform`, not `plan`: the *choice* of gamma minimum belongs
-        // in the cross-platform module where a test can observe it, not at this
-        // (untestable) call site. See its doc.
+        // in the cross-platform module where a test can observe it directly. The
+        // parenthetical here used to read "(untestable) call site", which stopped
+        // being true when `gamma_path_tests` started executing this function -
+        // the choice is still better placed there, for the same reason, but the
+        // call site is now reachable.
         let plan = dimming::plan_for_platform(
             &inputs,
             |d| {
@@ -1406,7 +1436,7 @@ const fn retires_dimmer(error: &duja_core::dimmer::DimmerError) -> bool {
 ///
 /// # Why a fixture rather than one constructor
 ///
-/// `docs/debt.md` D-016, D-040, D-059 and D-065 all defer on the same sentence:
+/// `docs/debt-archive.md` D-016, D-040 and D-065 and `docs/debt.md` D-059 all deferred on the same sentence:
 /// *"`AppState` cannot be constructed in a test: it owns two live Slint shells
 /// and a concrete `tray_icon::TrayIcon` whose only constructor does
 /// `CreateWindowExW` + `Shell_NotifyIconW`."* Both halves were false by the time
@@ -1447,13 +1477,13 @@ const fn retires_dimmer(error: &duja_core::dimmer::DimmerError) -> bool {
 /// the tray had just been given a fake for this exact hazard while the call
 /// beside it was walked straight past.
 ///
-/// In particular the **gamma sink is real**, and is made
-/// inert the only way that is honest: its `resolve` closure answers `None` for
-/// every id, which is the sink's own documented "no device for this display"
-/// path. It returns `false` before any OS call, writes no crash marker and
-/// touches no ramp. So a test drives the same `GammaBackend` the app does, and
-/// the reason nothing lands on a screen is a rule the sink already had rather
-/// than a branch added for tests.
+/// The **gamma channel is a recording fake**, and the first
+/// version of this fixture used the real one with a resolver that answered
+/// `None` for every id. That was safe - the sink returns `false` before any OS
+/// call, writes no marker and touches no ramp - and it was *blind*, which is why
+/// D-016 and D-065 stayed open when D-040 drained: both turn on phases inside
+/// the channel, and a sink that refuses everything produces nothing to observe.
+/// Safety was never the hard part; observability was.
 #[cfg(test)]
 pub(super) mod fixture {
     use std::cell::{Cell, RefCell};
@@ -1568,10 +1598,13 @@ pub(super) mod fixture {
             crash_marker: dir.path().join("crash.marker"),
             engine_tx: engine_tx.clone(),
             levels: LevelForwarder::new(EngineLevelSink::new(engine_tx)),
-            // Real coordinator, real sink, and a resolver that answers `None` for
-            // every id - see this module's header for why that is the honest way
-            // to make it inert.
-            gamma: gamma::GammaBackend::new(dir.path().join("gamma.marker"), |_| None),
+            // A recording channel, not the real one with an inert resolver.
+            // The inert-resolver trick made the fixture *safe* and left it
+            // *blind*, which is exactly why D-016 and D-065 did not drain on the
+            // first version of this fixture: both turn on phases inside the
+            // channel, and a sink that refuses every id produces nothing to
+            // observe. See `gamma::GammaBackend`.
+            gamma: gamma::GammaBackend::fake(),
             displays: Vec::new(),
             groups: CloneGrouping::default(),
             unresponsive: BTreeSet::new(),
@@ -1589,6 +1622,18 @@ pub(super) mod fixture {
             engine_rx,
             _dir: dir,
         }
+    }
+
+    /// Install a recording overlay backend on `app`.
+    ///
+    /// Separate from [`harness`] rather than always-on, because "no overlay
+    /// dimmer" is a supported state - a machine whose dimmer failed to spawn, or
+    /// one whose backend was retired mid-session - and most tests want the
+    /// simpler shape. What this buys is the one property that needs a dimmer to
+    /// exist at all: that `apply_overlays` hands it *through* `apply_batch`
+    /// rather than driving it beside the gamma phases.
+    pub(in crate::bin_support::tray) fn with_fake_dimmer(app: &mut AppState) {
+        app.dimmer = Some(Box::new(duja_core::testing::FakeDimmer::new()));
     }
 
     /// Every `SetUserLevel` sent so far, in order, as `(id, pct)`.
@@ -1610,7 +1655,7 @@ pub(super) mod fixture {
 
 /// The app layer between the two ends everything else already pins.
 ///
-/// `docs/debt.md` D-040 is precise about the gap, and the value of these tests
+/// `docs/debt-archive.md` D-040 is precise about the gap, and the value of these tests
 /// is exactly its shape. The throttle-final-value contract - P4 gate Finding 1,
 /// where a leading-edge UI throttle dropped the *final* sample of a slider drag
 /// and stranded the hardware mid-drag - is pinned at the `duja-ui` end by
@@ -1753,6 +1798,204 @@ mod level_path_tests {
         let key = id("A");
         assert!(h.app.user_controlled.contains(key.as_str()));
         assert_eq!(h.app.state.level(key.as_str()), Some(60));
+    }
+}
+
+/// The two properties that live between `AppState` and the gamma channel.
+///
+/// `docs/debt-archive.md` D-016 and D-065 both deferred on "`AppState` cannot be
+/// constructed in a test", which the fixture answered, and then both stayed open
+/// for a second reason: the fixture's gamma sink was the real one made inert by
+/// a resolver that refused every id, so the phases they turn on produced nothing
+/// to observe. A recording channel is what closes that, and it is the same shape
+/// as the fake tray.
+#[cfg(test)]
+mod gamma_path_tests {
+    use duja_core::config::Config;
+    use duja_core::id::StableDisplayId;
+    use duja_core::model::DisplayKind;
+
+    use super::fixture::harness;
+
+    fn id(serial: &str) -> StableDisplayId {
+        StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).expect("a valid id")
+    }
+
+    /// A display the app knows about, grouped, **and** driven by the user.
+    ///
+    /// All three are needed and each for its own reason: `plan_commands` walks
+    /// `groups` rather than `displays`, it emits only for ids in
+    /// `user_controlled`, and `meta_of` reads `displays` so a level has somewhere
+    /// to go. A fixture missing any one of them records an *empty* batch, which
+    /// is indistinguishable from a call site that stopped planning - so the
+    /// assertions below check the batch's contents rather than its existence.
+    fn user_controlled_display(app: &mut super::AppState, serial: &str) {
+        app.displays
+            .push((id(serial), DisplayKind::ExternalDdc, false));
+        app.groups = crate::bin_support::clone_group::group_clones(&[
+            crate::bin_support::clone_group::GroupMember {
+                id: id(serial),
+                kind: DisplayKind::ExternalDdc,
+                name: format!("Monitor {serial}"),
+                software_only: false,
+                device: Some(format!(r"\.\DISPLAY-{serial}")),
+            },
+        ]);
+        // `plan_for_platform` asks the bounds map where the surface is, and a
+        // display it cannot place gets no overlay command at all. Without this
+        // the batch is recorded *empty*, which is indistinguishable from a call
+        // site that stopped planning - so the assertions below check contents.
+        *app.bounds.lock().expect("fresh mutex") =
+            crate::bin_support::bounds::BoundsMap::new(vec![
+                crate::bin_support::backend::DisplayGeom {
+                    id: id(serial).as_str().to_owned(),
+                    bounds: Some(duja_core::dimmer::DisplayBounds {
+                        x: 0,
+                        y: 0,
+                        width: 1920,
+                        height: 1080,
+                    }),
+                    gamma_token: Some(format!(r"\.\DISPLAY-{serial}")),
+                    surface_token: Some(format!(r"\.\DISPLAY-{serial}")),
+                },
+            ]);
+        app.set_user_level(&id(serial), 40);
+    }
+
+    /// **A resume re-asserts the ramp**, which is `on_platform_wake`'s whole job.
+    ///
+    /// D-016: the coordinator half (`GammaCoordinator::invalidate`) and the
+    /// engine half (`a_platform_event_announces_itself_before_any_enumeration_settles`)
+    /// were both covered and both proven red. The three-line function that joins
+    /// them was not - deleting `self.gamma.invalidate()` or `self.apply_overlays()`
+    /// from it left the whole suite green. Both halves are load-bearing:
+    /// `invalidate` alone changes nothing until something else triggers a batch,
+    /// and a resume that changes no display produces no snapshot, which is
+    /// exactly the case that was broken.
+    ///
+    /// So this asserts both, and each is red on its own line being removed.
+    #[test]
+    fn a_platform_wake_invalidates_the_ramp_and_re_applies() {
+        let mut h = harness(Config::default());
+        user_controlled_display(&mut h.app, "A");
+
+        let (before, _, _) = h.app.gamma.recorded();
+        let batches_before = before.len();
+
+        h.app.on_platform_wake();
+
+        let (batches, invalidations, _) = h.app.gamma.recorded();
+        assert_eq!(
+            invalidations, 1,
+            "the ramp must be declared stale, or the next batch diffs against \
+             state the OS has already thrown away"
+        );
+        assert!(
+            batches.len() > batches_before,
+            "and something must actually re-apply, or invalidating changed \
+             nothing until the next unrelated event"
+        );
+    }
+
+    /// The batch carries the planned command rather than being an empty call.
+    ///
+    /// Named for what it measures, which an earlier name did not: it says
+    /// nothing about *routing*. A call site that drove the overlay itself and
+    /// then asked for the gamma phases still passes this - the sibling test
+    /// below is what catches that. What this pins is that something was
+    /// **planned**, so a batch reaching `apply_batch` at all is not mistaken for
+    /// the property, and so the sibling's assertion has content to be about.
+    #[test]
+    fn the_batch_carries_the_planned_command() {
+        let mut h = harness(Config::default());
+        user_controlled_display(&mut h.app, "A");
+
+        let (batches, _, _) = h.app.gamma.recorded();
+        let last = batches.last().expect("a user-driven level applies a batch");
+        assert!(
+            !last.0.is_empty(),
+            "the batch carries the planned command rather than being an empty \
+             call the sequencing has nothing to order: {last:?}"
+        );
+        assert!(
+            last.0.iter().any(|c| c.id == id("A")),
+            "and it is for the display the user drove: {last:?}"
+        );
+    }
+
+    /// The overlay backend is handed **through** the batch rather than driven
+    /// beside it.
+    ///
+    /// D-065's property: engage new ramps, then diff overlays, then restore
+    /// stale ramps - the order that makes a mechanism switch mid-drag dip rather
+    /// than flash bright. The sequencing lives in `gamma::apply_dimming_batch`
+    /// and is pinned there on every lane; what was unpinned is that
+    /// `apply_overlays` reaches it. A call site that drove the overlay itself and
+    /// then asked the channel for its gamma phases still records a batch here -
+    /// but **without the overlay handle**, because it has nothing left to pass.
+    /// The flag is what separates "routed through" from "called alongside".
+    ///
+    /// **The row's mitigation is weaker than the row claimed, and a review
+    /// proved it.** D-065 said `GammaBackend` exposes no gamma-only `apply`, so
+    /// "the wrong order cannot be written without also re-adding a method". The
+    /// historical defect needs no new method at all: `dimmer.apply(&commands)`
+    /// followed by `self.gamma.apply_batch(&commands, None)` uses only what is
+    /// already there, drives the overlay to completion *before* the engage phase,
+    /// and restores the flash. So the API shape prevented one spelling rather
+    /// than the wrong order, and this test - not the shape - is what protects the
+    /// property.
+    #[test]
+    fn the_overlay_backend_is_carried_by_the_batch_rather_than_driven_beside_it() {
+        let mut h = harness(Config::default());
+        super::fixture::with_fake_dimmer(&mut h.app);
+        user_controlled_display(&mut h.app, "A");
+
+        let (batches, _, _) = h.app.gamma.recorded();
+        let last = batches.last().expect("a batch");
+        assert!(
+            last.1,
+            "the overlay backend must reach `apply_batch`, which is what orders \
+             it between the two gamma phases"
+        );
+    }
+
+    /// A display nobody has driven gets no command, even when it is grouped and
+    /// placed.
+    ///
+    /// Duja adopts the current screen on launch and never restores an overlay for
+    /// a display the user has not touched (item 5).
+    ///
+    /// **The setup is fussy on purpose, because the obvious version proved
+    /// nothing.** A fixture that only pushes to `displays` leaves `groups` empty,
+    /// and `plan_commands` walks *groups* - so the batch is empty whatever the
+    /// `user_controlled` filter does. A review measured that: defeating the
+    /// filter outright left the entire suite green while this test's own doc
+    /// claimed to pin it. So the display is grouped and placed first, and only
+    /// then is the user's control taken away.
+    #[test]
+    fn an_untouched_display_produces_no_batch_content() {
+        let mut h = harness(Config::default());
+        user_controlled_display(&mut h.app, "A");
+        // Everything a planned command needs is now present except the one thing
+        // under test.
+        h.app.user_controlled.clear();
+        h.app.gamma = crate::bin_support::gamma::GammaBackend::fake();
+
+        h.app.on_platform_wake();
+
+        let (batches, _, _) = h.app.gamma.recorded();
+        // Both halves. `all()` over an empty `Vec` is true, so without the first
+        // assertion this passes with `on_platform_wake` reduced to `{}` - which a
+        // review measured, and which would be a vacuous test written as the fix
+        // for a vacuous test.
+        assert!(
+            !batches.is_empty(),
+            "the wake must have applied a batch for this to be about its contents"
+        );
+        assert!(
+            batches.iter().all(|(commands, _)| commands.is_empty()),
+            "and nothing is dimmed until the user drives it: {batches:?}"
+        );
     }
 }
 

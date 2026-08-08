@@ -99,9 +99,13 @@ slint-build = "1.17.1"
 # active/position plumbing. Same version + license as `slint` (already allowed
 # in deny.toml); it is the very backend `slint`'s `backend-winit` feature pulls.
 i-slint-backend-winit = "1.17.1"
-# Dev-only (duja-ui, feature `smoke`): experimental headless backend for the
-# component instantiation smoke test. Optional so the default build never pulls
-# it; enabled under `--all-features`. The smoke test itself is `#[ignore]`.
+# Dev-only: the experimental headless Slint backend. Two consumers with two
+# shapes, and the difference matters. `duja-ui` takes it optionally behind its
+# `smoke` feature, so a bare `cargo test -p duja-ui` builds neither shell and
+# CI's `--all-features` is what runs those; the smoke test itself is `#[ignore]`.
+# `duja-app` takes it as an **unconditional dev-dependency**, because the
+# `AppState` fixture four debt rows waited on should not need a flag to
+# exercise. Neither reaches a shipping build.
 i-slint-backend-testing = "1.17.1"
 # Tray icon (duja-app, P4): the tray + menu on the Slint main thread. Version
 # pinned to the P1 `spike/eventloop` recipe (tray-icon 0.24.1 + slint 1.17.1).

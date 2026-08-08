@@ -42,22 +42,22 @@ measurement when it lands, and recorded in [debt.md](debt.md) then.
 
 **Wave 1 is the keystone**, and it is the one place a row list is safe, because
 [D-102](debt.md#d-102) had already done the counting: exactly four rows -
-[D-016](debt.md#d-016), [D-040](debt-archive.md#d-040),
-[D-059](debt.md#d-059), [D-065](debt.md#d-065) - deferred on the single
+[D-016](debt-archive.md#d-016), [D-040](debt-archive.md#d-040),
+[D-059](debt.md#d-059), [D-065](debt-archive.md#d-065) - deferred on the single
 sentence "`AppState` cannot be constructed in a test", and D-102 showed that
 sentence false in both halves. `tray/state.rs` sat at **11.27 %** of regions,
 the largest uncovered *surface* in the workspace at 1,031 regions rather than
 the lowest percentage; seven files are at 0.00 %, all smaller by both measures.
 That distinction is why it was the target and not one of them.
 
-**It has landed, and it drained one of the four.** `tray/state.rs` is now at
-32.28 % with 923 regions uncovered, and D-040 is in
-[debt-archive.md](debt-archive.md#d-040). The other three did not drain, and
-their rows say why rather than repeating the sentence that is no longer true of
-any of them: D-016 and D-065 need wave 2's gamma seam, and D-059 needs neither -
-it wants to observe *when* `build_tray` ran relative to the loop, which the
-fixture is orthogonal to. Which is the pattern this section warned about, seen
-from the inside: a wave drains what it turns out to drain.
+**Waves 1 and 2 have landed, and between them drained three of the four.**
+`tray/state.rs` went 11.27 % to **42.01 %** of regions, uncovered 1,031 to 860.
+D-040 drained on the `AppState` fixture; D-016 and D-065 on the recording gamma
+channel wave 2 added, which is the seam wave 1's own write-up predicted they
+would need. **D-059 is still open**, and it needs neither: it wants to observe *when*
+`build_tray` ran relative to the loop, which a constructible state is orthogonal
+to. Which is this section's warning seen from the inside - a wave drains what it
+turns out to drain, and here the plan happened to be right about all three.
 
 **Wave 3's rows are budgets that cannot fail**, and some of that work may
 honestly end in "narrow the row" rather than "build the thing".
