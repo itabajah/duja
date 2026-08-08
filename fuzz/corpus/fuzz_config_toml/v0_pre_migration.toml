@@ -1,0 +1,28 @@
+# Seed for `fuzz_config_toml`: a config as a pre-schema_version build wrote it.
+#
+# Deliberately v0 rather than current. The target's reason to exist is the
+# migration chain, and a file already at CURRENT_VERSION walks none of it - so a
+# current-shaped seed would bootstrap coverage of the parser and the serde
+# deserialize while leaving the interesting stage untouched. This one carries the
+# old `min_gap_ms` key name, an unknown section the document layer must preserve,
+# and a monitor id in each of the two shapes ids come in.
+[general]
+autostart = true
+update_check = false
+theme = "dark"
+
+[monitors."GSM-5B09-312NTAB1C234"]
+name = "Left LG"
+hw_floor_pct = 10
+min_gap_ms = 120
+
+[monitors."DEL-A131-s12345"]
+name = "Right Dell"
+min_gap_ms = 100
+dim_mode = "overlay"
+
+[hotkeys]
+brightness_up = "Ctrl+Alt+Up"
+
+[future_section]
+experimental = true

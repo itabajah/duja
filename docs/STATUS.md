@@ -84,7 +84,7 @@ confirmations per architecture, which no amount of code closes.
 | wave | scope | state |
 |---|---|---|
 | 1 | binary size: measure, trim, then gate it in CI | next |
-| 2 | the fuzz and coverage lanes | pending |
+| 2 | the fuzz and coverage lanes | done - `#145` |
 | 3 | `--soak`, the harness two perf budgets already cite | pending |
 | 4 | the debt drain (`refactor:` PR) | pending |
 | 5 | the security pass and the docs-truth sweep | pending |
@@ -128,7 +128,8 @@ Measured on this box, 2026-08-08:
   other lanes, as do per-OS unit tests spread across roughly two dozen modules.
   A closed list of three was wrong within a day of being written.
 - Green on **3 OSes**; clippy `-D warnings` clean; `cargo-deny` clean
-  (advisories, bans, licenses, sources); **5 fuzz targets** building on stable.
+  (advisories, bans, licenses, sources); **6 fuzz targets** building on stable,
+  burned weekly by `fuzz.yml` and compile-checked on every PR.
 - Adversarial gate reviews at **P2, P3, P4, P5 and P6**. **P7's was narrower**
   - one targeted pass rather than several independent reviewers with separate
   verification - and [history.md](history.md) says so at the top of its write-up

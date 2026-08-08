@@ -20,17 +20,21 @@
 #
 # Measured on the dev box (Windows, `--all-features`) at P8 wave 2:
 #
-#     duja-core   97.49 %   floor 90   (rubric: "core >= 90%")
-#     duja-ipc    94.66 %   floor 85   (rubric: "ipc/view-models >= 85%")
-#     view-models 98.8 %    floor 85   (flyout_vm.rs + settings_vm.rs)
+#     area          Windows    Linux    floor
+#     duja-core     97.49 %   97.46 %     90     (rubric: "core >= 90%")
+#     duja-ipc      94.66 %   94.54 %     85     (rubric: "ipc/view-models >= 85%")
+#     view-models   98.81 %      ~98      85     (flyout_vm.rs + settings_vm.rs)
 #
-# **This job runs on Linux, and those figures are from Windows.** Every
-# `#[cfg(windows)]` item compiles out here, so the denominators differ and the
-# percentages will not match exactly. The floors sit well below the measured
-# values for that reason - they are the rubric's numbers, not a ratchet set to
-# today's measurement, and the margin is what absorbs the platform difference.
-# If a floor turns out to be wrong on this lane, fix the floor with the run that
-# proved it rather than deleting the check.
+# The Linux column is from this job's own first run, so the platform question is
+# answered rather than hedged: every `#[cfg(windows)]` item compiles out here and
+# the denominators differ, but for these three areas it moves the number by
+# hundredths. (Elsewhere it does not - `duja-dimmer` is 94.7 % on Windows and
+# 51.6 % on Linux, because its Linux gamma and overlay backends have never run
+# anywhere. That crate is reported, not gated, and D-105 is why.)
+#
+# The floors are the rubric's numbers rather than a ratchet set to today's
+# measurement. If one turns out to be wrong on this lane, fix the floor with the
+# run that proved it rather than deleting the check.
 #
 # All third-party actions are pinned by commit SHA (supply-chain policy).
 
@@ -80,26 +84,41 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
+          # $1 label, $2 floor, $3 include regex, $4 exclude regex ("" = none).
+          #
+          # Two regexes rather than one with a negative lookahead: jq's `test` is
+          # Oniguruma and would probably accept `(?!...)`, and "probably" is not
+          # a thing to put in a gate that runs where this repo cannot execute jq
+          # to check it. Two `select`s need no regex extension at all.
           check() {
-            local label="$1" floor="$2" filter="$3"
-            local files covered total pct
-            files=$(jq --arg f "$filter" \
-              '[.data[0].files[] | select(.filename | test($f))] | length' coverage.json)
+            local label="$1" floor="$2" filter="$3" drop="${4:-}"
+            local files covered total pct pick
+            pick='[.data[0].files[] | select(.filename | test($f))
+                   | select($d == "" or (.filename | test($d) | not))]'
+            files=$(jq --arg f "$filter" --arg d "$drop" \
+              "$pick | length" coverage.json)
             # A filter that matches nothing would otherwise divide by zero, or
             # worse, be silently treated as a pass. This is the check on the
             # check: rename a crate and this fires instead of going green.
             if [ "$files" -eq 0 ]; then
               echo "::error::$label matched no files - the filter is stale, not the coverage"
+              # The summary row too, not just the log: a missing row is the one
+              # shape a reader is least likely to notice.
+              printf '| %-14s | %8s | %6s | %s |\n' \
+                "$label" "STALE" "$floor" "filter matched nothing" >> "$GITHUB_STEP_SUMMARY"
               fail=1
               return
             fi
-            covered=$(jq --arg f "$filter" \
-              '[.data[0].files[] | select(.filename | test($f)) | .summary.regions.covered] | add' coverage.json)
-            total=$(jq --arg f "$filter" \
-              '[.data[0].files[] | select(.filename | test($f)) | .summary.regions.count] | add' coverage.json)
-            pct=$(awk -v c="$covered" -v t="$total" 'BEGIN { printf "%.2f", 100 * c / t }')
-            printf '| %-14s | %6s %% | %6s | %s |\n' \
+            covered=$(jq --arg f "$filter" --arg d "$drop" \
+              "$pick | map(.summary.regions.covered) | add" coverage.json)
+            total=$(jq --arg f "$filter" --arg d "$drop" \
+              "$pick | map(.summary.regions.count) | add" coverage.json)
+            pct=$(awk -v c="$covered" -v t="$total" 'BEGIN { printf "%.4f", 100 * c / t }')
+            printf '| %-14s | %8s %% | %6s | %s |\n' \
               "$label" "$pct" "$floor" "$files files" >> "$GITHUB_STEP_SUMMARY"
+            # Also to the log. The step summary is only readable in the web UI,
+            # and the number is what anyone reading a failed run actually wants.
+            echo "$label: $pct % regions across $files files (floor $floor)"
             if awk -v p="$pct" -v f="$floor" 'BEGIN { exit !(p < f) }'; then
               echo "::error::$label region coverage $pct % is below the $floor % floor (docs/review-rubric.md)"
               fail=1
@@ -113,8 +132,15 @@ jobs:
             echo "|---|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          check "duja-core"   90 "/crates/duja-core/"
-          check "duja-ipc"    85 "/crates/duja-ipc/"
+          # `src/` and not `src/testing/`: `duja-core`'s test-support fakes are
+          # behind `cfg(any(test, feature = "test-support"))` and its own docs
+          # say they are "never part of a release build", but `--all-features`
+          # compiles them and they are 9.8 % of the crate's regions. Gating on a
+          # number that includes code which never ships measures the wrong crate.
+          # The anchor also stops the filter absorbing `tests/` if llvm-cov ever
+          # starts emitting integration targets here.
+          check "duja-core"   90 "/crates/duja-core/src/" "/crates/duja-core/src/testing/"
+          check "duja-ipc"    85 "/crates/duja-ipc/src/"
           check "view-models" 85 "/crates/duja-ui/src/(flyout|settings)_vm\\.rs$"
 
           {

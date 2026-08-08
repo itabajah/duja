@@ -46,6 +46,14 @@ jobs:
             libfontconfig1-dev libxkbcommon-dev libxcb1-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libwayland-dev
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # `fuzz/` is a separate workspace with its own `target/`, and the fuzz
+          # check below is in a *required* job. Without this its whole dependency
+          # tree recompiles on every run, which is a minute-scale cost added to a
+          # check every PR waits on.
+          workspaces: |
+            .
+            fuzz
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # `fuzz/` is a SEPARATE Cargo workspace (its own `[workspace]` table), so
       # `--workspace` above does not reach it and no other job compiles it. A
@@ -62,9 +70,15 @@ jobs:
       # `cargo check`, not `cargo fuzz build`: running a fuzzer needs nightly for
       # SanitizerCoverage, but *compiling* the targets works on stable, and stale
       # API is the failure this is defending against.
+      #
+      # `--locked` because `fuzz/Cargo.lock` had drifted too - it still named
+      # `duja-core 0.0.1` - and a lockfile nothing checks is the same rot one
+      # directory down. No `--all-targets`: the package is six `[[bin]]`s with
+      # `test`, `bench` and `doc` all false, so it selects exactly what plain
+      # `cargo check` already does and only reads as though it broadened.
       - name: Check the fuzz workspace still compiles
         if: runner.os == 'Linux'
-        run: cargo check --manifest-path fuzz/Cargo.toml --all-targets
+        run: cargo check --manifest-path fuzz/Cargo.toml --locked
       # rustdoc only sees what the target compiles, so the Linux-only `docs` job
       # below has never doc-checked a single `#[cfg(windows)]` or
       # `#[cfg(target_os = "macos")]` item — the whole Windows tray assembly and

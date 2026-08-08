@@ -23,7 +23,7 @@ anything - it looks exactly like coverage and is none. This
 crate is a **separate Cargo workspace** (see the `[workspace]` table in
 `Cargo.toml`) so the `libfuzzer-sys` dependency never enters the main build
 graph or release lockfile. It compiles under stable
-(`cargo check --manifest-path fuzz/Cargo.toml --all-targets`), which is a step in
+(`cargo check --manifest-path fuzz/Cargo.toml --locked`), which is a step in
 CI's `clippy (ubuntu-latest)` job - inside an already-required check rather than
 in a job of its own, so it is enforced from the first PR - but **running** a
 fuzzer needs a nightly toolchain for SanitizerCoverage instrumentation.

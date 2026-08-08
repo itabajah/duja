@@ -141,7 +141,6 @@ Manually verify tray menu-click delivery (not scriptable; identical dispatch pat
 
 **Why deferred.** Needs human hand on shell tray
 
-
 ### D-003
 
 **Where:** `duja-core` `sync`↔`config` &nbsp;·&nbsp; **Added:** P2
@@ -205,7 +204,6 @@ Watchdog deadline re-stamps on every dispatch, so continuous slider input agains
 Suspend/resume DDC re-push: on resume the display set is usually unchanged, so the manager emits no `Added`/`Reattached` and the engine never re-applies levels — a monitor that forgot its brightness across sleep (or a laptop panel reset by the firmware) stays wrong until the user nudges the slider
 
 **Why deferred.** Needs hardware evidence (which monitors drop DDC state across S3/modern-standby) before choosing a policy: re-push all levels on `PlatformEvent::Resume`, or only after a resume-triggered enumeration diff
-
 
 ### D-012
 
@@ -294,7 +292,6 @@ Unify the `windows` crate version: panel is pinned to 0.58 while the rest of the
 Decide whether the visible-window buffer re-assert (`enforce_logical_size` on the flyout re-enumeration path) is still needed now that Slint sizes windows natively (PR #29). If redundant, removing it makes the whole `enforce_*`/`size_to` show-path chain dead and deletable
 
 **Why deferred.** Needs a live hot-plug-while-the-flyout-is-open test on the real monitor to confirm native sizing covers the row-count change; the current code works, so this is cleanup not a fix
-
 
 ### D-024
 

@@ -334,8 +334,8 @@ mod tests {
     ///
     /// Three files have to agree about this list and none of them can see the
     /// others: the manifest declares the `[[bin]]`s, the workflow enumerates a
-    /// matrix, and `fuzz/README.md` tells a human how many there are. The
-    /// interesting direction is **manifest-only**: a target added to the
+    /// matrix, and `fuzz/README.md` tells a human how many there are - all three
+    /// are checked here. The interesting direction is **manifest-only**: a target added to the
     /// manifest and forgotten in the matrix compiles, passes the `cargo check`
     /// step in CI, appears in `cargo fuzz list`, and is never run by anything.
     /// It looks exactly like coverage and is none.
@@ -391,6 +391,25 @@ mod tests {
             declared.len() >= 5,
             "only {} fuzz targets parsed out of fuzz/Cargo.toml - the parse is \
              broken, not the list",
+            declared.len()
+        );
+
+        // The third file. `fuzz/README.md` opens by telling a human how many
+        // targets there are, and a reader who counts on that sentence is the
+        // one this catches - the number is prose, so nothing else can.
+        let readme = crate::read_repo_file(&["fuzz", "README.md"]);
+        let spelled = [
+            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "eleven", "twelve",
+        ]
+        .get(declared.len())
+        .copied()
+        .unwrap_or("many");
+        let sentence = format!("There are {spelled} targets");
+        assert!(
+            readme.contains(&sentence),
+            "fuzz/README.md does not say `{sentence}`, and there are {} targets. \
+             The count is prose: nothing but this test reads it.",
             declared.len()
         );
     }

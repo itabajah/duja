@@ -41,7 +41,7 @@ refusing to renumber.
 | [D-098](#d-098) | ~~P7 wave 4 (`#124`), narrowed to X11 `#131`~~ | `duja-dimmer` `linux/gamma.rs` + `duja-app` `bin_support/gamma.rs` | ~~An X11 gamma ramp outlives the process and Linux has no crash guard for it~~ — **drained in `#136`**, in the same PR as the sink, exactly as its deferral note demanded |
 | [D-101](#d-101) | ~~P7 wave 4 (`#124` review)~~ | `duja-ui` `ui/settings.slint` + `duja-app` `bin_support/settings.rs` | ~~The gamma hazard caption names macOS, and `gamma_is_advisory()` is now true on Linux too~~ - **drained in `#138`**: the `bool` that made the two platforms indistinguishable is now a kind |
 | [D-011](#d-011) | ~~P5 / v0.1.0~~ | `duja-app` binary size | ~~`duja.exe` is **~19 MB** vs the ≤16 MB ADR-0012 budget~~ - **drained in P8 wave 1**: 15,709,696 bytes, within, and the budget is now enforced by `cargo xtask size`. Two of the three levers this row named were wrong |
-| [D-002](#d-002) | ~~P2~~ | `.github/workflows/` | ~~Add `coverage.yml` (llvm-cov >=90% gate) and `fuzz.yml` (weekly nightly burn) CI jobs~~ - **drained in P8 wave 2**, plus a third lane the row did not ask for |
+| [D-002](#d-002) | ~~P2~~ | `.github/workflows/` | ~~Add `coverage.yml` (llvm-cov ≥90% gate) and `fuzz.yml` (weekly nightly burn) CI jobs~~ - **drained in P8 wave 2**, plus a third lane the row did not ask for |
 | [D-023](#d-023) | ~~P6 (audit 2026-07-13)~~ | `fuzz/` | ~~Add the `fuzz_config_toml` target~~ - **drained in P8 wave 2**, landed with the workflow that runs it, exactly as the row asked |
 
 ## Rows
@@ -292,17 +292,15 @@ What actually reached the budget was none of them: `opt-level = "s"` with the fr
 
 **Where:** `.github/workflows/` &nbsp;·&nbsp; **Added:** P2 &nbsp;·&nbsp; **Drained:** P8 wave 2
 
-~~**Where:** `.github/workflows/` &nbsp;·&nbsp; **Added:** P2~~
+~~Add `coverage.yml` (llvm-cov ≥90% gate) and `fuzz.yml` (weekly nightly burn) CI jobs~~
 
-Add `coverage.yml` (llvm-cov ≥90% gate) and `fuzz.yml` (weekly nightly burn) CI jobs
-
-**Why deferred.** Ran locally at the P2 gate; wire into CI in a P8 hardening pass~~
+~~**Why deferred.** Ran locally at the P2 gate; wire into CI in a P8 hardening pass~~
 
 **How it drained.** Both workflows, plus a third lane this row did not think to ask for.
 
 `fuzz.yml` runs all six targets on a nightly toolchain every Sunday and uploads the crashing input on failure. `coverage.yml` runs `cargo llvm-cov` and enforces the three floors [review-rubric.md](review-rubric.md) has been asking for since P2 - core >= 90 %, ipc and view-models >= 85 % - which measured 97.49 %, 94.66 % and 98.8 % on the dev box, so the floors were set from the rubric rather than ratcheted to today's number.
 
-**The third lane is the one worth recording, because the row's framing would have missed it.** A weekly burn only runs code that still compiles, and `fuzz/` is a *separate Cargo workspace*: nothing in the PR matrix touches it, so a rename in `duja-core` breaks a target silently and the only thing that notices is a scheduled run the following Sunday, attributed to whatever merged since. So `cargo check --manifest-path fuzz/Cargo.toml --all-targets` is now a step in the **existing** `clippy (ubuntu-latest)` job. Inside a required check it is enforced from the first PR; as a job of its own it would have been a new status context, and a new context is advisory until somebody edits branch protection.
+**The third lane is the one worth recording, because the row's framing would have missed it.** A weekly burn only runs code that still compiles, and `fuzz/` is a *separate Cargo workspace*: nothing in the PR matrix touches it, so a rename in `duja-core` breaks a target silently and the only thing that notices is a scheduled run the following Sunday, attributed to whatever merged since. So `cargo check --manifest-path fuzz/Cargo.toml --locked` is now a step in the **existing** `clippy (ubuntu-latest)` job. `--locked` because `fuzz/Cargo.lock` had itself drifted - it still named `duja-core 0.0.1` - which is the same class of rot one directory further down. Inside a required check it is enforced from the first PR; as a job of its own it would have been a new status context, and a new context is advisory until somebody edits branch protection.
 
 **What is honestly not enforced.** `coverage.yml` is exactly that new-context case and is therefore advisory today. It is a workflow rather than a step because `cargo llvm-cov` rebuilds and re-runs the whole workspace instrumented, which would roughly triple the wall-clock of a check every PR waits on. Making it required is a repository setting, and the workflow's own header says so instead of implying enforcement it does not have
 
@@ -310,14 +308,14 @@ Add `coverage.yml` (llvm-cov ≥90% gate) and `fuzz.yml` (weekly nightly burn) C
 
 **Where:** `fuzz/` &nbsp;·&nbsp; **Added:** P6 (audit 2026-07-13) &nbsp;·&nbsp; **Drained:** P8 wave 2
 
-~~**Where:** `fuzz/` &nbsp;·&nbsp; **Added:** P6 (audit 2026-07-13)~~
+~~Add the `fuzz_config_toml` target (plan §4 names it) — `config.toml` is user-editable and parsed through chained `toml_edit` migrations, an untrusted-parse surface currently without fuzz coverage (caps/edid/quirks/ipc/ddc are covered)~~
 
-Add the `fuzz_config_toml` target (plan §4 names it) — `config.toml` is user-editable and parsed through chained `toml_edit` migrations, an untrusted-parse surface currently without fuzz coverage (caps/edid/quirks/ipc/ddc are covered)
-
-**Why deferred.** Low marginal value until `fuzz.yml` runs targets in CI (also deferred, see the coverage/fuzz row above); add both together in the P8 hardening pass~~
+~~**Why deferred.** Low marginal value until `fuzz.yml` runs targets in CI (also deferred, see the coverage/fuzz row above); add both together in the P8 hardening pass~~
 
 **How it drained, and the one thing it under-specified.** Landed with `fuzz.yml`, which is what its deferral note asked for.
 
 The row describes the surface as "parsed through chained `toml_edit` migrations", and a target that drove only `ConfigDocument::parse` would have covered none of that - `parse` is TOML syntax and nothing else, and the migration chain lives behind `load`, which takes a path. So the target drives three stages by hand: `parse`, then `config()` for the serde deserialize, then `migrate` **from every version a file could claim** rather than from the version the document declares. Reading the declared version would have let the fuzzer trivially avoid multi-step chains by always claiming to be current, which is exactly the path a corrupted file does not take.
 
-Its seed is a v0-shaped config rather than a current one, for the same reason: a file already at `CURRENT_VERSION` walks no migration at all
+Its seed is a v0-shaped config rather than a current one, for the same reason: a file already at `CURRENT_VERSION` walks no migration at all.
+
+**And what the first version of that target's documentation over-claimed**, caught in review before merge. It said `migrate` was driven "from every version a file could claim". `CURRENT_VERSION` is **1**, so `0..=CURRENT_VERSION` was two iterations of which one is a no-op, and `migrate`'s own `from > CURRENT_VERSION -> UnsupportedVersion` arm was unreachable. Nor is there a "chain" yet: `migrate.rs` says in its own header that the single registered step is a *fake* `v0 -> v1` that exists to exercise the framework. The range now runs past `CURRENT_VERSION` so the rejection arm is covered, and the doc describes the one real step rather than a sequence
