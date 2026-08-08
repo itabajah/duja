@@ -95,6 +95,12 @@
 
 pub mod plan;
 
+// The detach-or-timeout decision for a worker asked to stop. OS-free like
+// `plan`, so it compiles and is tested on every target - but private like
+// `mac_geom`, because unlike `plan` and `linux_caps` it has no consumer outside
+// this crate (`docs/debt-archive.md` D-045).
+mod teardown;
+
 // Pure geometry for the macOS overlay backend. OS-free, so it compiles and is
 // tested on every target (like `plan`); only the `mac` backend calls it.
 mod mac_geom;
