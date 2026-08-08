@@ -86,9 +86,10 @@ pub(super) struct AppState {
     /// throttle on this path was a real shipped defect (P4 gate Finding 1).
     ///
     /// Its tests in [`crate::bin_support::level_forward`] cover only the
-    /// forwarder itself; the callers above it in this file are unpinned. See
-    /// [`set_user_level`](Self::set_user_level) for exactly what is and is not
-    /// covered.
+    /// forwarder itself, which is *downstream* of both callers and so can never
+    /// see a throttle placed above it. Those callers are pinned separately - see
+    /// [`set_user_level`](Self::set_user_level), which names the two tests and
+    /// why there are two.
     pub(super) levels: LevelForwarder<EngineLevelSink>,
     /// The opt-in gamma sub-floor channel (RAII crash-marker owner + engage/
     /// restore executor). Drives [`DimCommand`]s carrying a gamma factor to the
@@ -418,9 +419,12 @@ impl AppState {
             // re-rendering here would clear that flag before the frame paints. See
             // `set_user_level`.
             //
-            // NB: this arm is on the untested side of the seam — no test executes
-            // `on_ui_command`. Never guard this call with a throttle/debounce; see
-            // the test-coverage note on `set_user_level`.
+            // NB: never guard this call with a throttle/debounce. This arm used
+            // to be on the untested side of the seam; it is now pinned by
+            // `level_path_tests::the_ui_command_arm_forwards_every_sample_too`,
+            // which exists *separately* from the one on `set_user_level` because
+            // a throttle here would not touch that method. See the test-coverage
+            // note on `set_user_level`.
             UiCommand::SetLevel { id, pct } => self.set_user_level(&id, pct),
             UiCommand::Refresh => {
                 let _ = self.engine_tx.send(EngineCommand::RefreshNow);
@@ -731,26 +735,19 @@ impl AppState {
     ///
     /// **Not covered by any test**, and deliberately said out loud: deleting the
     /// call from `show_flyout` leaves the whole suite green and clippy silent.
-    /// That is the same structural gap as the throttle and loop-assembly rows in
-    /// `docs/debt.md` — `AppState` owns a [`super::surface::PlatformTray`] and two
-    /// live Slint shells, so it cannot be built off the Slint main thread — not an
-    /// oversight to be fixed by adding one.
     ///
-    /// The tray is behind a seam now and that changes **nothing** here: the seam
-    /// exists so a second backend can exist, not so the field can be faked. Every
-    /// `PlatformTray` a build can construct still needs a live desktop **session**
-    /// — which D-102's experiment sharpened rather than removed. It does *not*
-    /// need a non-test process: `build_tray` succeeds inside a test binary and
-    /// all three verbs work. That makes the obstacle "a test would depend on the
-    /// session it ran in", which is worse for CI than an outright refusal would
-    /// have been, and it is why the way out is a fake rather than a constructor.
-    /// The two Slint shells are untouched — but do not read that as a second
-    /// obstacle, because `duja-ui` builds both of them headless in its own tests
-    /// under `i_slint_backend_testing::init_no_event_loop`. The `docs/debt.md`
-    /// row `D-102` carries what is and is not verified about closing this class
-    /// of gap; the short version is that one field blocks it, not three. Said
-    /// sees a seam appear naturally expects the rows that named the concrete type
-    /// to have drained, and they have not.
+    /// This paragraph used to go on to say why that could not change - that
+    /// `AppState` "cannot be built off the Slint main thread" because it owns a
+    /// [`super::surface::PlatformTray`] and two live Slint shells. **That is no
+    /// longer the reason.** The `fixture` module below (`cfg(test)`, so rustdoc
+    /// does not render it) builds an `AppState` on every lane, with a recording
+    /// fake behind the tray seam and the headless Slint backend behind both
+    /// shells, and the one throttle row that shared this excuse has drained on
+    /// it. What is left here is an ordinary uncovered call: nothing
+    /// stops a test from building a fixture, calling `show_flyout`, and asserting
+    /// the palette was re-resolved. It has not been written, which is a different
+    /// statement from the one that used to be here and a much cheaper one to act
+    /// on.
     fn refresh_system_theme(&mut self) {
         let theme = settings::ui_theme(
             self.config.general.theme,
@@ -817,24 +814,30 @@ impl AppState {
     ///
     /// # Test coverage of that contract — read this before adding rate limiting
     ///
-    /// **This method and [`on_ui_command`](Self::on_ui_command) are NOT covered
-    /// by any test.** [`AppState`] cannot be constructed off a live Slint/tray
-    /// thread (see the note on the module's `tests`), so nothing executes either
-    /// of them; a leading-edge throttle added *here*, or in `on_ui_command`'s
-    /// `SetLevel` arm, compiles and passes the entire suite. This was verified,
-    /// not assumed. What **is** pinned:
+    /// **This method and [`on_ui_command`](Self::on_ui_command) are covered, and
+    /// a throttle added to either one goes red.** That is the opposite of what
+    /// this section said for four releases, so it is worth being exact about
+    /// which test catches what:
     ///
-    /// - the `duja-ui` half — `FlyoutVm::slider_changed` and
-    ///   `FlyoutShell::on_command`'s `slider-changed` handler — by
-    ///   `duja_ui::shell`'s `slider_drag_burst_emits_the_released_value_last`,
-    ///   which drives the real Slint binding;
-    /// - the engine's own last-wins coalescer, by `duja_app`'s worker tests;
-    /// - [`LevelForwarder`]'s own unconditional-forward behaviour, by
-    ///   [`crate::bin_support::level_forward`] — which is downstream of this
-    ///   method and therefore cannot see a throttle placed above it.
+    /// - `level_path_tests::a_slider_drag_forwards_every_sample_and_the_released_value_last`
+    ///   drives six samples through **this** method and asserts both that all six
+    ///   reach the engine and that the released one is last;
+    /// - `level_path_tests::the_ui_command_arm_forwards_every_sample_too` does the
+    ///   same through `on_ui_command`, because a throttle added there would leave
+    ///   this method untouched and the first test green. Two sites, two tests.
     ///
-    /// The gap between the `duja-ui` pin and the engine pin is exactly this
-    /// method plus `on_ui_command`. It is tracked in `docs/debt.md`.
+    /// Both were proven red by re-inserting a leading-edge guard on the
+    /// `self.levels.forward(&writes)` call below: one of the six samples survives.
+    /// The ends were already pinned and still are — `duja_ui::shell`'s
+    /// `slider_drag_burst_emits_the_released_value_last` drives the real Slint
+    /// binding, the engine's worker tests pin last-wins coalescing, and
+    /// [`crate::bin_support::level_forward`] pins [`LevelForwarder`] itself, which
+    /// is *downstream* of this method and so can never see a throttle placed
+    /// above it.
+    ///
+    /// What made the difference is the `fixture` module, not a new test-writing idea: the
+    /// old note here was right that nothing could execute either method, and
+    /// wrong only about why that was permanent.
     pub(super) fn set_user_level(&mut self, id: &StableDisplayId, pct: u8) {
         // Route to the group anchor: the flyout row, hotkey nudge, IPC and reflection
         // all address a member id, but a mirrored set is ONE control keyed under its
@@ -1397,6 +1400,360 @@ impl AppState {
 /// drag into software dimming disabled for the rest of the session.
 const fn retires_dimmer(error: &duja_core::dimmer::DimmerError) -> bool {
     matches!(error, duja_core::dimmer::DimmerError::Unsupported)
+}
+
+/// Building an [`AppState`] in a test, which four debt rows deferred on.
+///
+/// # Why a fixture rather than one constructor
+///
+/// `docs/debt.md` D-016, D-040, D-059 and D-065 all defer on the same sentence:
+/// *"`AppState` cannot be constructed in a test: it owns two live Slint shells
+/// and a concrete `tray_icon::TrayIcon` whose only constructor does
+/// `CreateWindowExW` + `Shell_NotifyIconW`."* Both halves were false by the time
+/// this landed, and they became false in different ways - the second one is the
+/// trap:
+///
+/// - **The Slint half was never true.** `duja-ui` has been instantiating both
+///   shells headless in its own suite since before three of those rows existed,
+///   through `i_slint_backend_testing::init_no_event_loop` - under its `smoke`
+///   feature, which CI's `--all-features` turns on and a bare `cargo test` does
+///   not. The fixture here is deliberately not gated that way: a seam four debt
+///   rows waited on should not need a flag to exercise.
+/// - **The tray half stopped being true, and then the opposite problem
+///   appeared.** `#134` replaced the three `tray-icon` handles with one
+///   `PlatformTray`, and D-102's experiment then showed `build_tray`
+///   **succeeds** in a test process. That is worse than a refusal, not better: a
+///   test that built a real tray would put a real Duja icon in the real
+///   notification area and answer differently per session. So the way in is
+///   [`PlatformTray::fake`], not a real one.
+///
+/// # What is real here and what is not
+///
+/// Three things here reach an OS and all are bounded. `tempfile::tempdir()`
+/// creates a real directory, which the `Harness` drops last so the files under
+/// it outlive everything that writes them. The Slint shells go through the
+/// headless backend. `OsHotkeyRegistrar::new` builds a real
+/// `GlobalHotKeyManager` on an interactive session - it does *not* merely
+/// degrade to `None`, which an earlier draft of this paragraph implied - but it
+/// registers nothing, because `register()` is never called, and it drops with
+/// the fixture.
+///
+/// **A third thing did reach one, and had to be given a seam.** Windows' update
+/// toast is a real `ToastNotification` under the `AppUserModelID` the installer
+/// stamps on the Start-Menu shortcut. Before `toast`'s `cfg!(test)` diversion
+/// existed, these tests put four fabricated "Duja update available"
+/// notifications into the operator's Action Center on every `cargo test`. A
+/// review found it, not anything that could fail - and the useful part is that
+/// the tray had just been given a fake for this exact hazard while the call
+/// beside it was walked straight past.
+///
+/// In particular the **gamma sink is real**, and is made
+/// inert the only way that is honest: its `resolve` closure answers `None` for
+/// every id, which is the sink's own documented "no device for this display"
+/// path. It returns `false` before any OS call, writes no crash marker and
+/// touches no ramp. So a test drives the same `GammaBackend` the app does, and
+/// the reason nothing lands on a screen is a rule the sink already had rather
+/// than a branch added for tests.
+#[cfg(test)]
+pub(super) mod fixture {
+    use std::cell::{Cell, RefCell};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+
+    use crossbeam_channel::Receiver;
+
+    use duja_app::EngineCommand;
+    use duja_core::config::Config;
+    use duja_ui::{FlyoutShell, FlyoutVm, SettingsShell, SettingsVm};
+
+    use crate::bin_support::bounds::BoundsMap;
+    use crate::bin_support::clone_group::CloneGrouping;
+    use crate::bin_support::gamma;
+    use crate::bin_support::level_forward::{EngineLevelSink, LevelForwarder};
+    use crate::bin_support::state_store::StateStore;
+
+    use super::super::hotkey_os::OsHotkeyRegistrar;
+    use super::super::surface::PlatformTray;
+    use super::AppState;
+
+    /// A built fixture: the state, plus the ends of every channel a test watches.
+    pub(in crate::bin_support::tray) struct Harness {
+        /// The state under test.
+        pub(in crate::bin_support::tray) app: AppState,
+        /// Everything `AppState` sent the engine, in order.
+        ///
+        /// Held rather than dropped: a dropped receiver turns every `send` into
+        /// an `Err` the app ignores, and the test would then be asserting against
+        /// a channel nobody could have delivered on.
+        pub(in crate::bin_support::tray) engine_rx: Receiver<EngineCommand>,
+        /// Keeps the config/state/marker directory alive for the fixture's life.
+        /// Never read; dropping it deletes the files underneath.
+        _dir: tempfile::TempDir,
+    }
+
+    /// Install the headless Slint backend once **per thread**.
+    ///
+    /// Per thread, not per process, and that distinction is the whole reason
+    /// this is a function rather than a bare call at the top of each test.
+    /// `init_no_event_loop` binds the platform to its *calling* thread, and a
+    /// shell built on any other one fails with "The Slint platform was
+    /// initialized in another thread". That string is what a `Once` here
+    /// actually produces, reproduced by swapping the latch back and running the
+    /// suite. A review round replaced it with a different message and labelled
+    /// the replacement "measured"; it was not, and the correction was the
+    /// defect. That is worth leaving written down, because this file argues at
+    /// length that a claim reading as verified and not being so is the expensive
+    /// kind.
+    ///
+    /// `cargo test` runs a binary's tests on
+    /// several threads of one process, so a `std::sync::Once` here - which is
+    /// what the first version of this used - initialises for whichever test ran
+    /// first and breaks every subsequent one. `cargo nextest`, which CI runs,
+    /// gives each test its own process and would have hidden that entirely: the
+    /// suite would have been green on CI and red on a developer's machine, which
+    /// is the worse direction for a fixture four debt rows are waiting on.
+    ///
+    /// A thread-local latch is correct under both runners. Each thread
+    /// initialises exactly once, so a test that builds two fixtures does not
+    /// double-init and a test on a fresh thread is not locked out of a platform
+    /// it never received.
+    fn slint_backend() {
+        thread_local! {
+            static READY: Cell<bool> = const { Cell::new(false) };
+        }
+        READY.with(|ready| {
+            if !ready.replace(true) {
+                i_slint_backend_testing::init_no_event_loop();
+            }
+        });
+    }
+
+    /// An [`AppState`] with a recording tray, an inert gamma sink, no overlay
+    /// dimmer, and a temporary directory for its config, state and crash marker.
+    ///
+    /// # Panics
+    /// If a Slint shell cannot be built headless or the temporary directory
+    /// cannot be made. Both mean the fixture is broken rather than the code under
+    /// test, and a silent skip would read as a pass.
+    pub(in crate::bin_support::tray) fn harness(config: Config) -> Harness {
+        slint_backend();
+        let dir = tempfile::tempdir().expect("a temp dir for the fixture");
+
+        let vm = Rc::new(RefCell::new(FlyoutVm::new()));
+        let shell = FlyoutShell::new(Rc::clone(&vm)).expect("a headless flyout shell");
+        let settings_vm = Rc::new(RefCell::new(SettingsVm::new()));
+        let settings_shell =
+            SettingsShell::new(Rc::clone(&settings_vm)).expect("a headless settings shell");
+
+        let (engine_tx, engine_rx) = crossbeam_channel::unbounded::<EngineCommand>();
+
+        let app = AppState {
+            shell,
+            vm,
+            settings_shell,
+            settings_vm,
+            autostart: None,
+            config_path: dir.path().join("config.toml"),
+            snapshots: Vec::new(),
+            // No overlay backend. `apply_overlays` then passes `None` through to
+            // `apply_dimming_batch`, which is the same shape as a machine whose
+            // dimmer was retired - a supported state, not a crippled fixture.
+            dimmer: None,
+            config,
+            gamma_allowed: true,
+            last_gamma_probe: None,
+            bounds: Arc::new(Mutex::new(BoundsMap::default())),
+            state: StateStore::load(dir.path().join("state.toml")),
+            crash_marker: dir.path().join("crash.marker"),
+            engine_tx: engine_tx.clone(),
+            levels: LevelForwarder::new(EngineLevelSink::new(engine_tx)),
+            // Real coordinator, real sink, and a resolver that answers `None` for
+            // every id - see this module's header for why that is the honest way
+            // to make it inert.
+            gamma: gamma::GammaBackend::new(dir.path().join("gamma.marker"), |_| None),
+            displays: Vec::new(),
+            groups: CloneGrouping::default(),
+            unresponsive: BTreeSet::new(),
+            user_controlled: BTreeSet::new(),
+            flyout_visible: false,
+            last_hidden: None,
+            hotkeys: OsHotkeyRegistrar::new(),
+            hotkey_outcomes: BTreeMap::new(),
+            tray: PlatformTray::fake(),
+            update_available: None,
+            update_check_in_flight: false,
+        };
+        Harness {
+            app,
+            engine_rx,
+            _dir: dir,
+        }
+    }
+
+    /// Every `SetUserLevel` sent so far, in order, as `(id, pct)`.
+    ///
+    /// Drains without blocking, so a test reads "what has been sent by now"
+    /// rather than waiting on a channel nothing is going to close.
+    pub(in crate::bin_support::tray) fn levels_sent(
+        rx: &Receiver<EngineCommand>,
+    ) -> Vec<(String, u8)> {
+        let mut seen = Vec::new();
+        while let Ok(command) = rx.try_recv() {
+            if let EngineCommand::SetUserLevel { id, pct } = command {
+                seen.push((id.as_str().to_owned(), pct));
+            }
+        }
+        seen
+    }
+}
+
+/// The app layer between the two ends everything else already pins.
+///
+/// `docs/debt.md` D-040 is precise about the gap, and the value of these tests
+/// is exactly its shape. The throttle-final-value contract - P4 gate Finding 1,
+/// where a leading-edge UI throttle dropped the *final* sample of a slider drag
+/// and stranded the hardware mid-drag - is pinned at the `duja-ui` end by
+/// `slider_drag_burst_emits_the_released_value_last`, and at the engine end by
+/// `write_min_gap`'s last-wins coalescing. Between them sat
+/// [`AppState::on_ui_command`]'s `SetLevel` arm and
+/// [`AppState::set_user_level`], and **a throttle re-added at either one passed
+/// the entire suite**. `LevelForwarder`'s own tests cannot see it: the forwarder
+/// is downstream of both.
+#[cfg(test)]
+mod level_path_tests {
+    use duja_core::config::Config;
+    use duja_core::id::StableDisplayId;
+    use duja_core::model::DisplayKind;
+    use duja_ui::UiCommand;
+
+    use super::fixture::{harness, levels_sent};
+
+    /// A stable id, built the way the rest of this file's tests build one.
+    fn id(serial: &str) -> StableDisplayId {
+        StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).expect("a valid id")
+    }
+
+    /// A display the app knows about, so `meta_of` can answer and a level has
+    /// somewhere to go.
+    fn known_display(app: &mut super::AppState, serial: &str) {
+        app.displays
+            .push((id(serial), DisplayKind::ExternalDdc, false));
+    }
+
+    /// The samples a slider drag produces: several in flight, then the one the
+    /// user released on. The released value is deliberately **not** the extreme,
+    /// so a throttle that happened to keep the minimum would still red.
+    const DRAG: [u8; 6] = [90, 74, 61, 48, 39, 55];
+
+    /// Every sample of a drag reaches the engine, and the released one is last.
+    ///
+    /// **Proven red at the historical site.** Re-inserting a leading-edge
+    /// throttle into [`AppState::set_user_level`] - guarding the
+    /// `self.levels.forward(&writes)` call on an elapsed-since-last-write test,
+    /// which is the shape P4 shipped - leaves one of the six samples standing:
+    ///
+    /// ```text
+    /// every sample must be forwarded [...]: [("GSM-0001-A", 87)]
+    ///   left: 1
+    ///  right: 6
+    /// ```
+    ///
+    /// The **count** is the assertion that catches every shape of throttle,
+    /// including the historical one: a dropped trailing edge is five samples
+    /// where six were sent. The last-value check is defence in depth rather than
+    /// an independent guard - an earlier draft of this comment sold it as
+    /// catching a case the count could not, and it does not. What it is for is a
+    /// future throttle that coalesces *without* changing the count, and it costs
+    /// two lines. The released sample is deliberately not the drag's extreme for
+    /// the same reason: a throttle that happened to keep the minimum would look
+    /// right on value alone.
+    #[test]
+    fn a_slider_drag_forwards_every_sample_and_the_released_value_last() {
+        let mut h = harness(Config::default());
+        known_display(&mut h.app, "A");
+
+        for pct in DRAG {
+            h.app.set_user_level(&id("A"), pct);
+        }
+
+        let sent = levels_sent(&h.engine_rx);
+        assert_eq!(
+            sent.len(),
+            DRAG.len(),
+            "every sample must be forwarded - there is no UI-side throttle, and \
+             the engine's own `write_min_gap` is what bounds the write rate: {sent:?}"
+        );
+        // The hardware target is the continuum-mapped value rather than the user
+        // percentage, so compare against what the app computes for the released
+        // sample rather than against 55. Pinning the raw number here would red
+        // whenever the continuum is retuned, which is a different decision with
+        // tests of its own.
+        let released = h.app.group_hardware_writes(&id("A"), 55);
+        let expected: Vec<(String, u8)> = released
+            .into_iter()
+            .map(|(display, pct)| (display.as_str().to_owned(), pct))
+            .collect();
+        assert_eq!(
+            sent.last().map(|(display, pct)| (display.clone(), *pct)),
+            expected.first().cloned(),
+            "the value the user released on must be the last one the engine sees"
+        );
+    }
+
+    /// The same contract through the arm the flyout actually calls.
+    ///
+    /// [`AppState::on_ui_command`] is the *other* half of D-040's gap and is a
+    /// separate site: a throttle added to its `SetLevel` arm would leave
+    /// `set_user_level` untouched and the test above green. `#82`'s rule is that
+    /// a defect must be re-inserted where it historically occurred, and this
+    /// contract has two such places, so it gets two tests rather than one that
+    /// reaches the deeper site through the shallower one.
+    #[test]
+    fn the_ui_command_arm_forwards_every_sample_too() {
+        let mut h = harness(Config::default());
+        known_display(&mut h.app, "A");
+
+        for pct in DRAG {
+            h.app
+                .on_ui_command(UiCommand::SetLevel { id: id("A"), pct });
+        }
+
+        assert_eq!(
+            levels_sent(&h.engine_rx).len(),
+            DRAG.len(),
+            "`on_ui_command`'s SetLevel arm must not coalesce either"
+        );
+    }
+
+    /// A level for a display nothing knows about sends nothing, rather than a
+    /// write the engine would have to discard.
+    ///
+    /// Pinned because it is what makes the tests above mean anything: if
+    /// `group_hardware_writes` answered for every id, a fixture with no displays
+    /// would still look busy and those assertions would be counting noise.
+    #[test]
+    fn an_unknown_display_forwards_nothing() {
+        let mut h = harness(Config::default());
+        h.app.set_user_level(&id("ghost"), 40);
+        assert!(levels_sent(&h.engine_rx).is_empty());
+    }
+
+    /// Driving a level marks the display user-controlled, which is what lets its
+    /// overlay engage and stops the next enumeration re-adopting the hardware
+    /// value over the top (item 5).
+    #[test]
+    fn setting_a_level_takes_control_of_the_display() {
+        let mut h = harness(Config::default());
+        known_display(&mut h.app, "A");
+        assert!(h.app.user_controlled.is_empty());
+
+        h.app.set_user_level(&id("A"), 60);
+
+        let key = id("A");
+        assert!(h.app.user_controlled.contains(key.as_str()));
+        assert_eq!(h.app.state.level(key.as_str()), Some(60));
+    }
 }
 
 #[cfg(test)]

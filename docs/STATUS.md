@@ -159,13 +159,16 @@ Measured on this box, 2026-08-08:
   30 that row records - and when it happens its measured handle drift should
   replace the harness's tolerance constant, which is a reasoned guess and says
   so.
-- **[D-102](debt.md#d-102)'s experiment has been run**, and it settles the
-  sentence four rows defer on. `build_tray` succeeds in a test process on an
-  interactive Windows session and all three tray-seam verbs work, so "`AppState`
-  cannot be constructed in a test" is false in both halves. Read the scope
-  literally: it is **not** the headless answer, and a CI runner on a different
-  window station is still unmeasured. What the rows now need is a fakeable tray
-  rather than proof it is possible.
+- **[D-102](debt.md#d-102)'s fixture has landed.** `AppState` is constructible
+  in a test on every lane, behind a recording fake tray and the headless Slint
+  backend, and `tray/state.rs` went **11.27 % to 32.28 %** of regions.
+  [D-040](debt-archive.md#d-040) drained on it, proven red at both of the two
+  sites it named. Three of the four did not: D-016 and D-065 need the same
+  treatment for the **gamma** channel, and D-059 needs neither. What the
+  experiment behind it settled is still a limit rather than an answer:
+  `build_tray` succeeding in a test process was measured on an interactive
+  Windows session only, and a CI runner's window station remains unmeasured -
+  much less pressing now that no test builds a real tray.
 - `duja.exe` is **15,729,664 bytes** (15.00 MiB) release, **within**
   its 16 MiB budget with 1,047,552 bytes to spare; `dujactl.exe` is 644,608
   (2 MiB budget, down from 851,968). Re-measured on the `v0.1.6` tree rather

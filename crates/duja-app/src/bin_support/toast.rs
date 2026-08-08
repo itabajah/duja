@@ -72,8 +72,67 @@ const AUMID: &str = "io.github.itabajah.duja";
 /// Called unconditionally by `update_flow`, on every platform. That is the point
 /// of the no-op arm: the caller states *what should happen*, and which platforms
 /// can do it is this module's business rather than a `cfg` at the call site.
+///
+/// # Under `cfg(test)` this records instead of showing, and that is not optional
+///
+/// Windows' arm is a **real** `ToastNotification` under the same `AppUserModelID`
+/// the installer stamps on the Start-Menu shortcut. It is not inert in a test
+/// process: `update_flow`'s `AppState` tests reach it through
+/// `surface_update_available`, and before this seam existed they put four
+/// fabricated "Duja update available" notifications into the operator's real
+/// Action Center on every `cargo test` - one of which claimed a version that
+/// does not exist and opened the releases page if clicked.
+///
+/// That is the hazard `wiring.rs`'s D-102 experiment is `#[ignore]`d for, in its
+/// own words: fine to do deliberately, wrong to do on every `cargo test`. The
+/// tray got a fake for exactly this reason and this call was walked straight
+/// past - found by review, not by anything that could fail, which is why the
+/// seam is here rather than in a rule about which tests may call what.
+///
+/// The diversion is a `cfg!` **expression** rather than a `#[cfg]` attribute on
+/// purpose. An attribute would make `platform::notify` - and behind it `show`
+/// and `set_app_id`, the whole `WinRT` arm - unreferenced in a test build, so
+/// `cargo clippy --all-targets` would stop linting the very code this seam
+/// exists to keep away from the operator. With a `cfg!` both arms are compiled
+/// and checked, and the dead one is eliminated.
 pub(crate) fn notify_update_available(version: &str) {
+    if cfg!(test) {
+        #[cfg(test)]
+        recorder::record(version);
+        return;
+    }
     platform::notify(version);
+}
+
+/// What [`notify_update_available`] was asked to announce, for the tests that
+/// would otherwise have shown it.
+///
+/// A thread-local rather than a `static`, so tests on different threads cannot
+/// see each other's toasts - `cargo test` runs a binary's tests across several
+/// threads of one process, and a shared `Vec` would make every assertion here
+/// depend on what else happened to be running.
+#[cfg(test)]
+pub(crate) mod recorder {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static SHOWN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Record one announcement instead of showing it.
+    pub(super) fn record(version: &str) {
+        SHOWN.with(|shown| shown.borrow_mut().push(version.to_owned()));
+    }
+
+    /// Every version announced on this thread so far, oldest first.
+    pub(crate) fn shown() -> Vec<String> {
+        SHOWN.with(|shown| shown.borrow().clone())
+    }
+
+    /// Forget everything recorded on this thread.
+    pub(crate) fn clear() {
+        SHOWN.with(|shown| shown.borrow_mut().clear());
+    }
 }
 
 #[cfg(windows)]

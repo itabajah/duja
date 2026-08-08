@@ -91,6 +91,11 @@ embed-manifest.workspace = true
 embed-resource.workspace = true
 
 [dev-dependencies]
+# The headless Slint backend, so `bin_support::tray`'s fixture can build both
+# shells without a display (`duja-ui` proves the pattern in its own suite). A
+# dev-dependency rather than an optional feature: these tests should run under a
+# bare `cargo test`, not only under CI's `--all-features`.
+i-slint-backend-testing.workspace = true
 duja-core = { workspace = true, features = ["test-support"] }
 duja-dimmer = { workspace = true }
 duja-platform = { workspace = true, features = ["test-support"] }

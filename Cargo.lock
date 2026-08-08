@@ -1102,6 +1102,7 @@ dependencies = [
  "embed-manifest",
  "embed-resource",
  "global-hotkey",
+ "i-slint-backend-testing",
  "ico",
  "ksni",
  "objc2 0.6.4",

@@ -119,15 +119,151 @@ fn update_status_from(outcome: UpdateOutcome) -> UpdateStatus {
 
 #[cfg(test)]
 mod tests {
-    //! The one item in this file that is not an [`AppState`] method, and so the
-    //! one a test can reach until [`D-102`]'s refactor lands. The rest of the
-    //! module measured 0 % of regions on 2026-08-08, for that reason.
+    //! Two kinds of test live here now, and the second kind is new.
     //!
-    //! [`D-102`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-102
+    //! [`update_status_from`] is a free function and was always reachable. The
+    //! rest of this module is [`AppState`] methods, which measured **0 %** of
+    //! regions on 2026-08-08 because nothing could build an `AppState` - the
+    //! sentence `docs/debt.md` D-102 re-triaged. The fixture that answers it is
+    //! [`crate::bin_support::tray::state::fixture`], and what it is pointed at
+    //! first is the de-duplication policy, because a comment in this file claims
+    //! that policy lives *here* rather than in the tray and nothing checked that
+    //! it did.
 
+    use duja_core::config::Config;
+
+    use super::super::state::fixture::harness;
     use super::update_status_from;
+    use crate::bin_support::toast::recorder as toasts;
     use crate::bin_support::updates::UpdateOutcome;
     use duja_ui::UpdateStatus;
+
+    /// Every toast this thread has been asked to show, and a clean slate first.
+    ///
+    /// The clear is not hygiene. Windows' toast arm is a **real**
+    /// `ToastNotification` under the `AppUserModelID` the installer stamps on the
+    /// Start-Menu shortcut, so before `toast`'s seam existed these tests put four
+    /// fabricated "Duja update available" notifications into the operator's
+    /// Action Center on every `cargo test`. The recorder is what stands in for
+    /// that now, and asserting on it is what keeps the seam from quietly
+    /// regressing to the thing it replaced.
+    fn toasts_after(exercise: impl FnOnce()) -> Vec<String> {
+        toasts::clear();
+        exercise();
+        toasts::shown()
+    }
+
+    /// The same version surfaces once, however many times it is announced.
+    ///
+    /// `surface_update_available`'s comment says de-duplication *by version*
+    /// "stays here" while "show the item exactly once" moved into the tray,
+    /// because the second is a backend obligation and the first is not. That is
+    /// a real split and it was unchecked in both directions: the tray's
+    /// `update_shown` flag would mask a missing guard here on Windows and macOS,
+    /// and on Linux there is no flag at all, so a lost guard would re-announce
+    /// on every check for as long as the release stayed newest.
+    ///
+    /// Goes red if the early return is removed: two calls, two announcements.
+    #[test]
+    fn the_same_version_is_announced_to_the_tray_only_once() {
+        let mut h = harness(Config::default());
+
+        let toasted = toasts_after(|| {
+            h.app.surface_update_available("v9.9.9");
+            h.app.surface_update_available("v9.9.9");
+        });
+
+        assert_eq!(
+            toasted,
+            ["v9.9.9"],
+            "the toast is behind the same guard, and a duplicate one is what a user would actually notice"
+        );
+        let (_, tooltips, updates) = h.app.tray.recorded();
+        assert_eq!(updates, ["v9.9.9"], "one announcement, not two");
+        assert_eq!(
+            tooltips,
+            [Some("Duja — update available".to_owned())],
+            "and one tooltip write, for the same reason"
+        );
+    }
+
+    /// De-duplication is **by version**, so a newer release announces again.
+    ///
+    /// The direction that matters more, and the one a `bool` "already
+    /// announced" flag would have got wrong: a user who leaves Duja running
+    /// across two releases must be told about the second.
+    #[test]
+    fn a_newer_version_announces_again() {
+        let mut h = harness(Config::default());
+
+        let toasted = toasts_after(|| {
+            h.app.surface_update_available("v9.9.9");
+            h.app.surface_update_available("v9.9.10");
+        });
+
+        let (_, _, updates) = h.app.tray.recorded();
+        assert_eq!(updates, ["v9.9.9", "v9.9.10"]);
+        assert_eq!(toasted, ["v9.9.9", "v9.9.10"], "and the desktop hears both");
+        assert_eq!(h.app.update_available.as_deref(), Some("v9.9.10"));
+    }
+
+    /// A *foreground* check reflects into the settings window and does **not**
+    /// touch the tray; only a background one surfaces the menu item and toast.
+    ///
+    /// The distinction is the whole reason `on_update_outcome` takes a
+    /// `background` flag, and dropping it would put a tray item and a toast in
+    /// front of a user who had just clicked "Check now" and was already looking
+    /// at the answer.
+    #[test]
+    fn a_foreground_check_reflects_but_does_not_surface() {
+        let mut h = harness(Config::default());
+        toasts::clear();
+
+        h.app.on_update_outcome(
+            UpdateOutcome::UpdateAvailable {
+                version: "v9.9.9".to_owned(),
+            },
+            false,
+        );
+
+        let (_, tooltips, updates) = h.app.tray.recorded();
+        assert!(updates.is_empty(), "the tray must stay quiet: {updates:?}");
+        assert!(tooltips.is_empty(), "{tooltips:?}");
+        assert!(
+            toasts::shown().is_empty(),
+            "and so must the desktop: a user who just clicked Check now is already looking at the answer"
+        );
+        assert_eq!(
+            h.app.settings_vm.borrow().update_status(),
+            &UpdateStatus::Available {
+                version: "v9.9.9".to_owned()
+            },
+            "but the settings window is told either way - it may be open"
+        );
+    }
+
+    /// And the background one does both - the tray **and** the toast.
+    ///
+    /// Asserting both is the point. An earlier version of this checked only the
+    /// tray while its doc said "does both", and a review proved the gap: deleting
+    /// the `toast::notify_update_available` call left this test green.
+    #[test]
+    fn a_background_check_surfaces_to_the_tray_and_the_desktop() {
+        let mut h = harness(Config::default());
+
+        let toasted = toasts_after(|| {
+            h.app.on_update_outcome(
+                UpdateOutcome::UpdateAvailable {
+                    version: "v9.9.9".to_owned(),
+                },
+                true,
+            );
+        });
+
+        let (_, _, updates) = h.app.tray.recorded();
+        assert_eq!(updates, ["v9.9.9"]);
+        assert_eq!(toasted, ["v9.9.9"]);
+    }
 
     #[test]
     fn every_outcome_maps_to_its_own_status() {
