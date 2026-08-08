@@ -51,8 +51,23 @@ a maintainer reads *while cutting the release*.)
       cargo-deny/clippy/tests, but the full 3-OS matrix only runs on the PR —
       never tag a branch tip or an un-merged commit.
 - [ ] **Bump the version and changelog.** Update the workspace `version` in
-      `Cargo.toml` (refresh `Cargo.lock`), and move the `CHANGELOG.md` unreleased
-      entries under a new `vX.Y.Z` heading. Merge that through CI first.
+      `Cargo.toml` (refresh `Cargo.lock`), and add a new `vX.Y.Z` section to
+      `CHANGELOG.md`. Merge that through CI first.
+
+      **Prepend one section; never regenerate the file.** `git cliff -o
+      CHANGELOG.md` rewrites every section from commit subjects and silently
+      deletes the hand-written intro paragraph and prose bullets each past
+      release carries - measured at `v0.1.6`, where it removed 174 lines before
+      being caught. `cliff.toml`'s header used to invite exactly that. The
+      working command is:
+
+      ```sh
+      git cliff --tag vX.Y.Z --unreleased --strip header -o section.md
+      ```
+
+      then insert `section.md` above the previous release's heading and write
+      the intro paragraph by hand. It is the part a human reads first and the
+      part no tool can generate.
 - [ ] **Refresh `fuzz/Cargo.lock` too**, with
       `cargo update --manifest-path fuzz/Cargo.toml -w`. It is a *separate*
       workspace and pins the path dependencies by version, so a workspace bump

@@ -1,4 +1,21 @@
-# git-cliff configuration — CHANGELOG.md is regenerated at every tag.
+# git-cliff configuration.
+#
+# DO NOT regenerate CHANGELOG.md wholesale. This comment used to say the file
+# "is regenerated at every tag", and following that at v0.1.6 deleted 174 lines:
+# every release section here carries a hand-written intro paragraph and prose
+# bullets that git-cliff cannot reproduce, because they are not in any commit
+# subject. Nothing in CI regenerates this file, so the instruction was also
+# describing automation that does not exist.
+#
+# The release step is to PREPEND one section and leave the rest alone:
+#
+#   git cliff --tag vX.Y.Z --unreleased --strip header -o /tmp/section.md
+#   # then insert that above the previous release's heading, and write the
+#   # intro paragraph by hand - see docs/release-checklist.md.
+#
+# The `body` template below is therefore used for one section at a time, and
+# `header` is CHANGELOG.md's own header, which is why it is not the release-notes
+# preamble (ADR-0024 explains that split).
 
 [changelog]
 header = """
