@@ -1,9 +1,9 @@
 # Duja - Project Status
 
 _Last updated: 2026-08-08. **P0 through P8 are closed**, `v0.1.6` shipped the
-two ports that had been held, and **P9 is planned** - the one phase whose scope
-was chosen by what the absent hardware still permits ([plan.md](plan.md) has its
-four waves). The ports ship as
+two ports that had been held, and **P9 is planned** - the first phase whose
+scope was chosen by what the absent hardware still permits, rather than merely
+limited by it ([plan.md](plan.md) has its waves). The ports ship as
 **unverified previews** rather than as confirmed platforms
 ([ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md)): the hold was
 self-defeating, because the community confirmations macOS needs to leave
