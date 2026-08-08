@@ -30,6 +30,19 @@ benchmark is [D-109](debt.md#d-109).
 - [ ] Kill the process while dimmed → relaunch: screen state restored (no stuck gamma/overlay).
 - [ ] Keyboard-only walkthrough: Tab between sliders, arrows adjust, Esc closes.
 
+### The soak, once per release train (P8 wave 3)
+
+- [ ] **`duja --soak 86400 --every 60`**, on an idle desktop, from a real tray
+      build's box. It exits non-zero on a budget miss and prints every budget it
+      broke rather than the first. Two things to record even on a pass: the
+      **peak RSS**, which is the headless figure and not the tray one the idle
+      budget asks for, and the **handle drift**, which is what should replace
+      `HANDLE_GROWTH_TOLERANCE` - that constant is a guess today and its own
+      docs ask for this run.
+- [ ] **The tray build's idle RSS, by hand.** Task Manager, flyout closed, after
+      a few minutes. This is the number `perf-budgets.md`'s idle row actually
+      names, and `--soak` cannot produce it: it builds no window.
+
 ## Windows
 - [ ] Mixed DPI (100/150/200%): overlays cover each monitor exactly; flyout anchors correctly for all taskbar positions.
 - [ ] HDR toggle mid-session: gamma path disabled, overlay still works, tooltip explains.

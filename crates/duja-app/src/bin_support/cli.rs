@@ -88,7 +88,9 @@ MODES:
     --help                print this help
 
 With no monitors visible (e.g. a disconnected session) the console modes
-degrade cleanly: they print \"no displays\" and exit 0.";
+degrade cleanly: they print \"no displays\" and exit 0. `--soak` is the one
+exception, and deliberately: it exits non-zero when a budget is missed or when
+it could not measure at all.";
 
 /// Parse the argument list (excluding `argv[0]`) into a [`Command`].
 ///
@@ -169,11 +171,18 @@ fn parse_soak<'a>(mut iter: impl Iterator<Item = &'a String>) -> Result<Command,
 {USAGE}"
         ))
     })?;
-    let secs = secs_raw.parse::<u64>().map_err(|_| {
-        CliError(format!(
-            "invalid <secs> `{secs_raw}` (want a non-negative integer)"
-        ))
-    })?;
+    // `>= 1`, unlike `--stress`: a zero-second soak takes exactly one sample,
+    // and a run that reports a verdict from one sample has measured nothing.
+    // `--every 0` is refused for a related reason two blocks down.
+    let secs = secs_raw
+        .parse::<u64>()
+        .ok()
+        .filter(|n| *n >= 1)
+        .ok_or_else(|| {
+            CliError(format!(
+                "invalid <secs> `{secs_raw}` (want an integer >= 1)"
+            ))
+        })?;
 
     let mut interval_secs = DEFAULT_SOAK_INTERVAL_SECS;
     while let Some(flag) = iter.next() {

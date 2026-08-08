@@ -130,6 +130,7 @@ argument.
 | [D-108](#d-108) | P7 gate | `duja-app` `tray/state.rs` `begin_quit` | Every clean quit writes identity gamma to every display, including ones Duja never touched |
 | [D-109](#d-109) | P8 wave 1 | `crates/duja-ui` + `docs/perf-budgets.md` | Two perf budgets name no instrument: there is no automated render benchmark, and both were last measured by hand at P4 |
 | [D-110](#d-110) | P8 wave 1 | `.github/workflows/` + `xtask` `size.rs` | The binary-size budget is gated at release time only, so a dependency bump that adds a megabyte is caught by the next release rather than by the PR |
+| [D-111](#d-111) | P8 wave 3 | `duja-app` `--soak` + `.github/workflows/` | The soak has never been run for longer than 30 seconds, and nothing runs a short one in CI |
 
 ## Rows
 
@@ -951,6 +952,16 @@ The exposure is the one that produced [D-011](debt-archive.md#d-011) in the firs
 **Why deferred.** Cost, and it is a real one rather than an excuse. The measurement is only meaningful on the profile that ships - fat LTO, `codegen-units = 1` - and that build is roughly twenty minutes on a hosted Windows runner, against a PR matrix that currently completes in a fraction of that. Paying it on every pull request to catch a regression that arrives perhaps once a year is the wrong trade, and paying it on a *cheaper* profile is worse than not paying it, because a budget measured against a build nobody ships is a number that will drift away from the one that matters and then be trusted anyway.
 
 The shapes worth pricing before choosing one: a scheduled weekly run on `main` (catches drift within seven days, costs one build a week, and reports after the merge rather than before it); a run gated on `Cargo.lock` changing (catches the dependency-bump case specifically, which is the one that actually happened, and misses a regression from our own code); or accepting the release-time gate as sufficient and saying so in ADR-0012 rather than leaving this row open. The middle one is the best fit for the observed failure mode and is not obviously worth a twelfth required check
+
+### D-111
+
+**Where:** `duja-app` `--soak` + `.github/workflows/` &nbsp;·&nbsp; **Added:** P8 wave 3
+
+**The soak exists and has never been soaked.** The longest run to date is 30 seconds. The budget it serves says *24 hours*, and the two numbers that run would produce are both load-bearing: whether RSS growth stays under 5 MB over a real day, and what the idle GDI/USER drift actually is - which is the measurement `HANDLE_GROWTH_TOLERANCE` is standing in for with a reasoned guess. [qa-checklist.md](qa-checklist.md) carries the run.
+
+**And nothing runs a short one in CI**, which [plan.md](plan.md)'s wave-3 scope asked for ("it runs on the dev box for the long burn, and a short one belongs in CI"). Not done, and not done for a reason worth writing down rather than leaving as an oversight: a CI soak has to start the platform event pump on a runner with no display server and no session, and whether `start_platform` succeeds there has never been tested. Shipping a workflow that might simply go red on its first scheduled run - or worse, pass by failing to assemble anything - would be a check that teaches nothing.
+
+**Why deferred.** The cheap experiment comes first and it is one job: run `duja --soak 120 --every 10` on each CI lane once, by hand, via `workflow_dispatch`, and read what happens. If the pump starts, the workflow is ten lines. If it does not, the finding is more valuable than the workflow would have been - it means `--headless` does not work on a headless runner either, which is a claim `docs/` currently makes in several places
 
 ### D-102
 

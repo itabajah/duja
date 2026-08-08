@@ -150,7 +150,11 @@ directories = "6"
 # it through `libc` instead would have meant a hand-rolled `sockaddr_nl` and four
 # unsafe blocks in a crate that currently has none outside its Windows and macOS
 # `sys` modules.
-rustix = { version = "1", features = ["fs", "process", "net", "event", "pipe"] }
+# `param` is P8 wave 3 and Linux-only: `--soak` reads `/proc/self/statm` in
+# pages and needs `page_size()` to turn them into bytes. It is a standalone
+# rustix feature that nothing else in this graph enables, and leaving it out
+# broke only the Linux lane - which is what the three-OS matrix is for.
+rustix = { version = "1", features = ["fs", "process", "net", "event", "pipe", "param"] }
 # Linux display-server clients (duja-dimmer, P7 wave 4). Both are ALREADY normal
 # Linux dependencies of the shipping binary through winit — `x11rb` via
 # softbuffer, `wayland-client` via smithay-client-toolkit — so declaring them

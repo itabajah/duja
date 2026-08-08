@@ -6,18 +6,25 @@
 //! no such flag and no way to read either number. This module is the half that
 //! reads them.
 //!
-//! # What is measured, and why "RSS" is three different things
+//! # What is measured, and how it differs from the budget's wording
 //!
-//! The budget says "35 MB private", which is the number a user sees in Task
-//! Manager and the reason Electron was rejected. Each platform spells it
-//! differently and the differences matter at the margins:
+//! `docs/perf-budgets.md` says "35 MB **private**". What this module reports is
+//! the **whole resident set** - private pages plus resident *shareable* ones
+//! (DLL and shared-object code, mapped section views). That is not the same
+//! number, and the difference is not small: measured on one live process here,
+//! `WorkingSetSize` was 73,158,656 against a private working set of 41,459,712.
 //!
-//! - **Windows**: `WorkingSetSize` from `GetProcessMemoryInfo`. This is what
-//!   Task Manager's "Memory (active private working set)" column is derived
-//!   from, so it is the number a user could reproduce by looking.
-//! - **Linux**: field 2 of `/proc/self/statm`, resident pages, multiplied by the
-//!   page size. Equivalent to `ps` RSS. No `unsafe` and no crate: it is a text
-//!   file.
+//! It over-counts, which is the safe direction to be wrong in against a ceiling,
+//! and it is stated here rather than papered over because an earlier version of
+//! this comment claimed the opposite - that `WorkingSetSize` "is what Task
+//! Manager's active private working set column is derived from". It is not, and
+//! no PSAPI field yields that column: `PrivateUsage` is private *commit* rather
+//! than resident.
+//!
+//! - **Windows**: `WorkingSetSize` from `GetProcessMemoryInfo`.
+//! - **Linux**: field 2 of `/proc/self/statm`, resident pages times the page
+//!   size - the same figure `ps` prints as RSS, and shared pages are in it for
+//!   the same reason. No `unsafe`; one crate, `rustix`, for the page size.
 //! - **macOS**: **not implemented.** `task_info(MACH_TASK_BASIC_INFO)` is the
 //!   right call and it is Mach FFI, which is more `unsafe` than a soak harness
 //!   should introduce into a crate whose macOS surface nobody has ever run.

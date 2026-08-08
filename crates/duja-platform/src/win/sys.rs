@@ -322,17 +322,23 @@ fn unregister_all(hwnd: HWND) {
 
 /// This process's working-set size in bytes, or `None` if the query failed.
 ///
-/// `WorkingSetSize` rather than `PrivateUsage`: `docs/perf-budgets.md`'s row is
-/// the number a user can reproduce in Task Manager, and this is the field that
-/// column is derived from. A failure is `None` rather than 0, so a soak report
-/// says "unavailable" instead of claiming a process with no memory.
+/// The **whole** working set: private pages plus resident shareable ones. Not
+/// Task Manager's "active private working set", which no PSAPI field yields -
+/// `PrivateUsage` is private *commit* rather than resident. It therefore
+/// over-counts against a budget written as "private", which is the safe
+/// direction against a ceiling; [`crate::process`] carries the measured gap. A
+/// failure is `None` rather than 0, so a soak says "could not read" instead of
+/// claiming a process with no memory.
 pub(crate) fn working_set_bytes() -> Option<u64> {
     let mut counters = PROCESS_MEMORY_COUNTERS::default();
     let size = u32::try_from(size_of::<PROCESS_MEMORY_COUNTERS>()).ok()?;
-    // SAFETY: `GetCurrentProcess` returns a pseudo-handle that is always valid
-    // for the calling process and needs no close. `counters` is a fully
-    // initialized, correctly aligned local that outlives the call, and `size` is
-    // its own size in bytes as the API requires.
+    // SAFETY: the only pointer crossing the boundary is `&raw mut counters`,
+    // which points at a fully initialized, correctly aligned local that outlives
+    // the call and is not aliased; `cb` is that same type's size, so the callee
+    // cannot write past it. `GetCurrentProcess` is a pseudo-handle constant that
+    // is always valid for the calling process, carries the
+    // PROCESS_QUERY_LIMITED_INFORMATION access this needs, and must not be
+    // closed - so there is no handle lifetime to get wrong.
     let result = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &raw mut counters, size) };
     result.ok().map(|()| counters.WorkingSetSize as u64)
 }
@@ -347,16 +353,24 @@ pub(crate) fn working_set_bytes() -> Option<u64> {
 /// 10,000 of either.
 ///
 /// `GetGuiResources` reports failure as `0`, which is also a legitimate count
-/// for a process that has created no GUI objects. The two are separated by
-/// clearing the thread's last-error first and reading it after, which is the
-/// documented way and the reason this is not a one-liner.
+/// for a process that has created no GUI objects - and this process reports
+/// exactly 0 GDI objects when headless, so the ambiguous value is the common
+/// one rather than a corner. Microsoft documents the ambiguity ("If the function
+/// fails, the return value is zero. To get extended error information, call
+/// `GetLastError`") without prescribing a recipe; clearing the last-error first
+/// is the standard way to make that advice usable, and is why this is not a
+/// one-liner.
 pub(crate) fn gui_objects(gdi: bool) -> Option<u32> {
     let flags = if gdi { GR_GDIOBJECTS } else { GR_USEROBJECTS };
-    // SAFETY: clears this thread's last-error code so the zero-versus-failure
-    // test below reads only what `GetGuiResources` set.
+    // SAFETY: no pointers and no handles - `SetLastError` writes one word of
+    // this thread's own TEB, which is sound to call at any time from any thread.
+    // It is here so the zero-versus-failure test below reads only what
+    // `GetGuiResources` set.
     unsafe { SetLastError(WIN32_ERROR(0)) };
-    // SAFETY: the pseudo-handle is always valid for the calling process, and
-    // `flags` is one of the two documented `GET_GUI_RESOURCES_FLAGS` constants.
+    // SAFETY: no pointers cross the boundary. The pseudo-handle is a constant
+    // that is always valid for the calling process and must not be closed, and
+    // `flags` is one of the two `GET_GUI_RESOURCES_FLAGS` constants the API
+    // defines, so the callee cannot be handed a value it does not enumerate.
     let count = unsafe { GetGuiResources(GetCurrentProcess(), flags) };
     if count != 0 {
         return Some(count);
