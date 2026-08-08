@@ -302,6 +302,14 @@ pub struct SettingsVm {
     update_status: UpdateStatus,
     monitors: Vec<MonitorSection>,
     hotkeys: Vec<HotkeyRow>,
+    /// The last settings write that failed, already rendered to a sentence by
+    /// the app, or `None` if the last one succeeded.
+    ///
+    /// A `String` rather than a `ConfigError` because `duja-ui` does not depend
+    /// on the config layer's error type and should not start: what a settings
+    /// window owes a user is a sentence naming the file and what went wrong,
+    /// and deciding that sentence is the app's job. `docs/debt-archive.md` D-113.
+    config_error: Option<String>,
 }
 
 impl Default for SettingsVm {
@@ -325,6 +333,7 @@ impl SettingsVm {
             update_status: UpdateStatus::Disabled,
             monitors: Vec::new(),
             hotkeys: Vec::new(),
+            config_error: None,
         }
     }
 
@@ -411,6 +420,17 @@ impl SettingsVm {
         self.update_status = status;
     }
 
+    /// Record that a settings write failed, or clear the banner with `None`.
+    ///
+    /// Every write path must call this on **both** outcomes. Setting it on the
+    /// failure alone would leave a stale banner up after the next write
+    /// succeeded, telling the user their settings are not being saved while they
+    /// are - which is the same class of wrong as the silence it replaces, in the
+    /// other direction.
+    pub fn set_config_error(&mut self, message: Option<String>) {
+        self.config_error = message;
+    }
+
     // --- accessors (rendered by the shell) ---
 
     /// Whether launch-at-login is currently on.
@@ -475,6 +495,12 @@ impl SettingsVm {
     #[must_use]
     pub fn update_status(&self) -> &UpdateStatus {
         &self.update_status
+    }
+
+    /// The last settings-write failure, if the last write failed.
+    #[must_use]
+    pub fn config_error(&self) -> Option<&str> {
+        self.config_error.as_deref()
     }
 
     /// Whether an update is available (drives the "Open releases page" action).

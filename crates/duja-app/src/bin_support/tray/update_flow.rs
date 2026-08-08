@@ -56,6 +56,17 @@ impl AppState {
         self.update_check_in_flight = true;
         self.state.record_update_check(unix_now());
         let _ = self.state.maybe_flush(Instant::now());
+        // No network from a test process. The thread below runs a real `ureq`
+        // GET against GitHub's API, and it is **detached** - nothing clears
+        // `update_check_in_flight` except `on_update_outcome` on a Slint loop a
+        // test never runs - so it outlives the test that started it and is a
+        // flake source as well as a nuisance. Same seam and same reasoning as
+        // `toast` and `open_url`; the bookkeeping above still happens, because
+        // that is the part a test may want to observe.
+        if cfg!(test) {
+            self.update_check_in_flight = false;
+            return;
+        }
         let spawned = std::thread::Builder::new()
             .name("duja-update-check".to_owned())
             .spawn(move || {
