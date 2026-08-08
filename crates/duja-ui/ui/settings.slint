@@ -173,6 +173,12 @@ export component SettingsWindow inherits Window {
     in property <int> accent-index;
     in-out property <bool> update-check-on;
     in property <string> update-status;
+    // A config-write failure, already rendered to a sentence by the app
+    // (empty = nothing wrong). Shown as a banner above every section
+    // rather than beside a control, because the failure is about the file
+    // and not about whichever toggle happened to trigger the write - the
+    // next one will fail the same way. docs/debt-archive.md D-113.
+    in property <string> config-error;
     in property <bool> update-available;
     in property <[SettingsMonitorData]> monitors;
     in property <[SettingsHotkeyData]> hotkeys;
@@ -293,6 +299,29 @@ export component SettingsWindow inherits Window {
                 VerticalLayout {
                     padding: 14px;
                     spacing: 12px;
+                    // A failed settings write, if the last one failed. Above the
+                    // sections so it is the first thing read, and `if` rather than
+                    // an always-present empty Text so it takes no vertical space
+                    // in the ordinary case.
+                    if root.config-error != "": Rectangle {
+                        background: Palette.danger.with-alpha(0.12);
+                        border-width: 1px;
+                        border-color: Palette.danger.with-alpha(0.45);
+                        border-radius: 6px;
+                        vertical-stretch: 0;
+                        HorizontalLayout {
+                            padding: 10px;
+                            Text {
+                                text: root.config-error;
+                                color: Palette.danger;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
+                                accessible-role: AccessibleRole.text;
+                                accessible-label: root.config-error;
+                            }
+                        }
+                    }
                     // Pack sections to the top: now that the window is resizable it
                     // can be taller than the content, and without this the surplus
                     // would spread the sections/rows apart instead of sitting at the
