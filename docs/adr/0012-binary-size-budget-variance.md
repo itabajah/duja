@@ -44,7 +44,7 @@ levers, in expected-payoff order, are recorded for P8:
 | P4 (tray + flyout + dimmer) | 14.9 MB | within the raised 16 MB budget |
 | P5 (+ settings, autostart, ureq/rustls update check) | **17.21 MB** | **over by 1.2 MB** |
 | P7 (+ the Linux tray and gamma sink) | 19,446,784 bytes | over by 2,669,568 |
-| **P8 (hardening)** | **15,546,368 bytes** | **within, by 1,230,848** |
+| **P8 (hardening)** | **15,709,696 bytes** | **within, by 1,067,520** |
 
 P5's overage is entirely the opt-in update check's TLS stack
 (`ureq` + `rustls` + `ring` + `webpki-roots`). It is **not** accepted as a new
@@ -63,12 +63,12 @@ raise-with-rationale rather than silent drift. `dujactl` remains 0.6 MB.
 > the four levers does not exist, the unit was never pinned, and the largest
 > single component of the binary is in a section neither list mentions. P8 did
 > get under the budget, so no raise was needed - `dujactl` measures
-> 832,000 bytes and now has a budget of its own.
+> 643,584 bytes and now has a budget of its own.
 
 ## P8 outcome (2026-08-08)
 
-**Recovered, to 15,546,368 bytes (14.83 MiB).** Under the budget
-for the first time since P4, with 24 % taken off the P7 binary. This section
+**Recovered, to 15,709,696 bytes (14.98 MiB).** Under the budget
+for the first time since P4, with 19.2 % taken off the P7 binary. This section
 records what worked, what the levers above got wrong, and the one trade that was
 made rather than avoided.
 
@@ -84,9 +84,13 @@ measured binary lands under both, so taking the loose one costs nothing today,
 and quietly tightening a budget under cover of disambiguating it would be a
 different change wearing this one's clothes.
 
-**Lever 2 does not exist.** "Slint image-format features: the flyout uses no
-SVG/EXR/animated images - investigate disabling the decoder stack Slint pulls by
-default." Investigated, and there is nothing to disable: `slint/std` implies
+**The Slint image-format lever does not exist.** Named rather than numbered,
+because this ADR lists levers twice and the two lists disagree: it is item 2 of
+the *Decision* list above and item 4 of the *Ledger* list, and "strike lever 2"
+read against the wrong one strikes fat LTO. The claim is "Slint image-format
+features: the flyout uses no SVG/EXR/animated images - investigate disabling the
+decoder stack Slint pulls by default." Investigated, and there is nothing to
+disable: `slint/std` implies
 `i-slint-core/std`, which implies `image-decoders` **and** `svg`, with no seam
 between them. The formats that *were* optional are already off - which is why
 `exr`, `tiff`, `qoi` and AVIF are absent from the binary while JPEG, WebP, PNG
@@ -148,10 +152,10 @@ which lever to reach for at 1.1.
 | both | 17,557,504 | -1,889,280 |
 | both, `opt-level = 2` | 17,161,216 | -2,285,568 |
 | both, `opt-level = "s"` everywhere | 14,280,192 | -5,166,592 |
-| **both, `opt-level = "s"` with the render path at 3** | **15,546,368** | **-3,900,416** |
+| **both, `opt-level = "s"` with the render path at 3** | **15,709,696** | **-3,737,088** |
 
 Two of those numbers are worth more than their row. **Fat LTO and `Targets`
-together beat the sum of their parts** by 127,168 bytes: LTO has less code to
+together beat the sum of their parts** by 126,976 bytes: LTO has less code to
 work with once the regex engine leaves, and inlines across what is left.
 And **`Targets` gave back nearly twice its `.text`** - `cargo bloat` attributes
 345 KiB to `regex-syntax` and `regex-automata`, and removing them took 664,064
@@ -166,15 +170,23 @@ that costs real time, and Duja's per-frame path is a *software* renderer
 (ADR-0009).
 
 So it is not applied to the per-frame path. `i-slint-core`,
-`i-slint-renderer-software`, `zeno` and `duja-ui` keep `opt-level = 3` through
-per-package profile overrides, and the 1,266,176 bytes that costs
+`i-slint-renderer-software`, `swash`, `zeno` and `duja-ui` keep `opt-level = 3`
+through per-package profile overrides, and the 1,429,504 bytes that costs
 against `"s"` everywhere is the price of not guessing about the renderer.
+
+`swash` is on that list because a review caught the first version of it
+crediting `zeno` with "glyph rasterization" and stopping there.
+`i-slint-renderer-software`'s `fonts/vectorfont.rs` calls
+`swash::scale::Render` to load, scale and hint the outline and hands `zeno` the
+mask to fill, so exempting only `zeno` would have left half the glyph pipeline
+at `-Os` while claiming to have exempted the frame path. It costs 163,328 bytes
+and it is the difference between a list and a correct one.
 
 **What is honestly not proven:** that a per-package `opt-level` override under
 `lto = "fat"` produces codegen identical to a whole-program `-O3` build. The
 mechanism is that rustc writes per-function `optsize` attributes into the
 bitcode and the LTO pipeline honours them, so functions from the O3 crates carry
-no size constraint - and the 1,266,176-byte difference proves the
+no size constraint - and the 1,429,504-byte difference proves the
 overrides do reach the linker. "Reaches the linker" is not "identical to O3",
 and this ADR does not claim it.
 

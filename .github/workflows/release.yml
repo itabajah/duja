@@ -432,15 +432,18 @@ jobs:
       # nothing in the path to notice, and it was a human reading a ledger months
       # later that caught it.
       #
-      # This runs BEFORE packaging on purpose: an over-budget binary should fail
-      # here, not after it has been zipped, installed into an Inno Setup tree,
-      # checksummed and signed. It is also deliberately not a PR check - the
-      # measurement needs a fat-LTO release build, which is roughly twenty
-      # minutes on a hosted Windows runner. `docs/debt.md` carries the gap that
-      # leaves: a dependency bump that adds a megabyte is caught here, at the
-      # next release, rather than at the pull request that lands it.
+      # This runs before the WINDOWS packaging steps, so an over-budget binary
+      # fails before it is zipped, installed into an Inno Setup tree, checksummed
+      # and signed. Be precise about the scope, because it is narrower than "a
+      # release cannot ship over budget": this job `needs: [macos, linux]`, so
+      # by the time it runs the disk image and the tarball are already built -
+      # and neither of those jobs measures anything. macOS cannot use this number
+      # at all (its artifact is a universal binary carrying two architectures)
+      # and no budget has ever been measured for either platform. Gating them on
+      # a guess would be worse than not gating them; `docs/debt.md` D-110 carries
+      # both that gap and the per-PR one.
       - name: Gate (binary size budget)
-        run: cargo run --release -p xtask -- size
+        run: cargo run --release --locked -p xtask -- size
 
       # Portable zip (staging + Compress-Archive), via the dependency-free xtask.
       - name: Stage portable archive

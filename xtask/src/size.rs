@@ -1,24 +1,30 @@
 //! `cargo xtask size` — the stripped-binary budget, enforced rather than
 //! remembered.
 //!
-//! [`ADR-0012`] raised the budget to 16 MB at the P4 gate and recorded that P5
+//! [ADR-0012] raised the budget to 16 MB at the P4 gate and recorded that P5
 //! had already blown through it. Between those two gates nothing measured the
 //! binary on the way past: it went from 14.9 MB to 19.4 MB across two releases,
 //! and what noticed was a human reading a ledger months later. A budget that is
 //! only checked when somebody remembers to check it is a budget that drifts, so
 //! P8 wave 1 recovered the bytes **and** put this in the path of a release.
 //!
-//! # Where it runs, and the gap that leaves
+//! # Where it runs, and the two gaps that leaves
 //!
-//! The release workflow calls it after building the release binaries, so a
-//! release cannot ship over budget. It deliberately does **not** run on every
-//! PR: the check needs a `--release` build with fat LTO, which is roughly twenty
-//! minutes on a hosted Windows runner, and paying that on every pull request to
-//! catch a regression that arrives once a year is the wrong trade.
+//! The release workflow's **Windows** job calls it after building, so a Windows
+//! release cannot ship over budget. Two things it does not cover, both real:
 //!
-//! The gap that leaves is real and worth naming rather than implying it away: a
-//! dependency bump that adds a megabyte is caught at the *next release*, not at
-//! the PR that lands it. `docs/debt.md` carries it.
+//! - **The other two platforms.** The `macos` and `linux` jobs build their own
+//!   binaries and neither calls this. macOS especially cannot use the same
+//!   number - its artifact is a `lipo` universal binary carrying two
+//!   architectures, so a single-arch ceiling is the wrong shape, and no budget
+//!   has ever been measured for either. Gating them on a number nobody has
+//!   measured would be a worse failure than not gating them.
+//! - **Pull requests.** The check needs a `--release` build with fat LTO,
+//!   roughly twenty minutes on a hosted Windows runner. A dependency bump that
+//!   adds a megabyte is caught at the *next release*, not at the PR that lands
+//!   it.
+//!
+//! Both are `docs/debt.md` D-110 rather than unstated.
 //!
 //! # Why bytes rather than megabytes
 //!
@@ -28,7 +34,7 @@
 //! being weighed against them. The budget here is an integer number of bytes and
 //! the human-readable figure is derived from it, never the other way round.
 //!
-//! [`ADR-0012`]: ../../../docs/adr/0012-binary-size-budget-variance.md
+//! [ADR-0012]: https://github.com/itabajah/duja/blob/main/docs/adr/0012-binary-size-budget-variance.md
 
 use std::path::{Path, PathBuf};
 
@@ -37,7 +43,7 @@ use crate::repo_root;
 
 /// The stripped-release budget for `duja`, in bytes.
 ///
-/// 16 MiB exactly. [`ADR-0012`](self) set "16 MB" without a unit; P8 wave 1 had
+/// 16 MiB exactly. ADR-0012 set "16 MB" without a unit; P8 wave 1 had
 /// to pick one, and picked the larger of the two readings **on purpose**: the
 /// measured binary lands under both, so choosing the loose reading costs nothing
 /// today and the alternative would be quietly tightening a budget under cover of
@@ -46,11 +52,12 @@ pub(crate) const MAIN_BUDGET_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The stripped-release budget for `dujactl`, in bytes.
 ///
-/// 2 MiB. `docs/perf-budgets.md` never set one for the helper — it recorded 0.6
-/// MB as an observation — and an unbudgeted binary is one nobody would notice
-/// growing. This is deliberately loose: `dujactl` measures 0.79 MiB, so the
-/// ceiling is not a target to grow into but a tripwire for the change that
-/// accidentally links the GUI stack into the CLI.
+/// 2 MiB. Nothing set one for the helper before P8: `docs/perf-budgets.md` did
+/// not mention `dujactl` at all, and the 0.6 MB figure people quote is an
+/// *observation* in ADR-0012 rather than a budget. An unbudgeted binary is one
+/// nobody would notice growing. This is deliberately loose - `dujactl` measures
+/// 643,584 bytes - so the ceiling is not a target to grow into but a tripwire
+/// for the change that accidentally links the GUI stack into the CLI.
 pub(crate) const HELPER_BUDGET_BYTES: u64 = 2 * 1024 * 1024;
 
 /// One binary measured against its budget.
@@ -231,9 +238,13 @@ mod tests {
     fn the_p5_regression_would_have_failed_this_check() {
         let p5 = Measured {
             name: "duja".to_owned(),
-            // 17.21 MB as ADR-0012's ledger recorded it, read as MiB - the
-            // reading that is *kindest* to the binary, and it fails anyway.
-            bytes: 18_046_546,
+            // ADR-0012's ledger recorded "17.21 MB" without a unit, which is the
+            // ambiguity this module exists to end. Read here as decimal MB -
+            // 17,210,000 rather than the 18,045,993 that 17.21 MiB would be -
+            // because that is the *smaller* number and therefore the reading
+            // most favourable to the binary. It fails the budget anyway, which
+            // is the point: the P5 overage was not a rounding argument.
+            bytes: 17_210_000,
             budget: MAIN_BUDGET_BYTES,
         };
         assert!(!p5.within(), "{}", p5.line());

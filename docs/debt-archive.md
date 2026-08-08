@@ -40,6 +40,7 @@ refusing to renumber.
 | [D-091](#d-091) | ~~P7 wave 4b-5 (`#132`)~~ | `duja-platform` `geometry.rs` `cursor_anchor` + `linux/geometry.rs` | ~~`cursor_anchor()` can block indefinitely on X11, and it will run on the Slint main thread once the tray lands~~ - **drained in `#139`**, with a deadline around the whole probe rather than the `Stream` wrapper this row proposed |
 | [D-098](#d-098) | ~~P7 wave 4 (`#124`), narrowed to X11 `#131`~~ | `duja-dimmer` `linux/gamma.rs` + `duja-app` `bin_support/gamma.rs` | ~~An X11 gamma ramp outlives the process and Linux has no crash guard for it~~ — **drained in `#136`**, in the same PR as the sink, exactly as its deferral note demanded |
 | [D-101](#d-101) | ~~P7 wave 4 (`#124` review)~~ | `duja-ui` `ui/settings.slint` + `duja-app` `bin_support/settings.rs` | ~~The gamma hazard caption names macOS, and `gamma_is_advisory()` is now true on Linux too~~ - **drained in `#138`**: the `bool` that made the two platforms indistinguishable is now a kind |
+| [D-011](#d-011) | ~~P5 / v0.1.0~~ | `duja-app` binary size | ~~`duja.exe` is **~19 MB** vs the ≤16 MB ADR-0012 budget~~ - **drained in P8 wave 1**: 15,709,696 bytes, within, and the budget is now enforced by `cargo xtask size`. Two of the three levers this row named were wrong |
 
 ## Rows
 
@@ -266,3 +267,21 @@ as exposed. Cheapness was never the problem.
 **What it does not close is now [D-106](debt.md#d-106)**: every other X path in
 the tree is still unbounded, and a timed-out probe parks a thread that nothing
 can cancel
+
+### D-011
+
+**Where:** `duja-app` binary size &nbsp;·&nbsp; **Added:** P5 / v0.1.0 &nbsp;·&nbsp; **Drained:** P8 wave 1
+
+~~`duja.exe` is **~19 MB** vs the ≤16 MB ADR-0012 budget: the ureq/rustls/ring/webpki-roots update stack (+1.2 MB) **plus** the WinRT toast bindings the v0.1.0 smart update loop added (`UI_Notifications`/`Data_Xml_Dom`/`Foundation*`). Levers: fat LTO (−1.0 MB measured), feature-gate the update stack (network + toast) behind a default-on feature so a "lite" build drops both, drop `tracing-subscriber`'s `env-filter` regex~~
+
+~~**Why deferred.** P8 hardening owns binary trimming; RAM and wakeup budgets still pass with headroom~~
+
+**How it drained, and what it got wrong.** `duja.exe` is **15,709,696 bytes**, within the 16 MiB budget with 1,067,520 to spare, and the budget is now checked by `cargo xtask size` in the release workflow instead of being remembered. The full measured ledger is [ADR-0012](adr/0012-binary-size-budget-variance.md)'s P8 section.
+
+Two of the three levers this row named were wrong, which is the part worth keeping:
+
+- **"Feature-gate the update stack (network + toast) behind a default-on feature so a 'lite' build drops both."** Gating something that is on by default saves the default build *nothing*. It creates the possibility of a smaller artifact nobody currently publishes, so as a lever against this budget it was worth zero bytes. Not taken.
+- **"Drop `tracing-subscriber`'s `env-filter` regex."** Correct, and worth more than it looked: 345 KiB of `.text` by `cargo bloat`, but 664,064 bytes off the file, because a crate leaves with its read-only data. It also was not free the way the row implies - `filter::Targets` differs from `EnvFilter` in three ways, two of which had to be repaired in `bin_support::logging` and one of which (an empty `RUST_LOG=` silencing the log) would have been a silent regression.
+- **"Fat LTO (-1.0 MB measured)."** Correct, and -1,098,240 on re-measurement.
+
+What actually reached the budget was none of them: `opt-level = "s"` with the frame path exempted, -3,277,312 against `opt-level = 3`. This row never mentioned the profile's optimization level, and its framing - a list of dependencies to remove - is why: the binary is **data-bound**, not code-bound. 36 % of it is `.rdata`, dominated by ICU and font tables welded to a Slint feature a desktop GUI cannot turn off, and no amount of removing crates from the list above could have reached it

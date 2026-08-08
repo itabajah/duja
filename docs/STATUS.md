@@ -137,10 +137,12 @@ Measured on this box, 2026-08-08:
   adversarially verified) with every confirmed finding fixed test-first.
 - Measured at the P4/P5 gates, headless: idle RSS **23.3 MB** (budget 35), idle
   CPU **0 ms over 20 s** - zero wakeups, by construction.
-- `duja.exe` is **15,546,368 bytes** (14.83 MiB) release, **within** its
-  16 MiB budget with 1,230,848 bytes to spare; `dujactl.exe` is 832,000 (2 MiB
-  budget). P8 wave 1 took 3,900,416 bytes off it, 20 %, and the budget is now
-  enforced by `cargo xtask size` in the release workflow rather than remembered.
+- `duja.exe` is **15,709,696 bytes** (14.98 MiB) release, **within**
+  its 16 MiB budget with 1,067,520 bytes to spare; `dujactl.exe` is 643,584
+  (2 MiB budget, down from 851,968). P8 wave 1 took 3,737,088 bytes off
+  the tray binary, 19.2 %, and the budget is now enforced by
+  `cargo xtask size` in the release workflow rather than remembered - **on the
+  Windows job only**, which is what that workflow builds and measures.
   The measured ledger, and the one lever that is a trade rather than a free win,
   are in [ADR-0012](adr/0012-binary-size-budget-variance.md).
 - **Two perf budgets are not measured by anything.** "Overlay alpha update
@@ -160,7 +162,6 @@ cargo doc --workspace --no-deps --all-features --document-private-items
 
 ## Known gaps carried forward
 
-- **Binary ~19 MB against a 16 MB budget** - P8 recovers it.
 - **The WMI panel set-path has never executed on real hardware** (this box is a
   desktop): borrow a laptop for a 30-minute run before the beta.
 - **Laptop QA of the `v0.1.4` mirror/software-only behaviour** is outstanding,

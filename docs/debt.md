@@ -36,7 +36,6 @@ argument.
 | [D-008](#d-008) | P3 | `duja-app` `run.rs` | `PlatformEvent::Suspending` is dropped; no pre-suspend write quiescing |
 | [D-009](#d-009) | P3 | `duja-panel` `wmi.rs` | `WmiMonitorID` array decoding, `WmiSetBrightness` invocation, and ProductCodeID assumptions never executed on real… |
 | [D-010](#d-010) | P4 | `duja-app` `engine.rs`/`run.rs` | Suspend/resume DDC re-push: on resume the display set is usually unchanged, so the manager emits no… |
-| [D-011](#d-011) | P5 / v0.1.0 | `duja-app` binary size | `duja.exe` is **~19 MB** vs the ≤16 MB ADR-0012 budget: the ureq/rustls/ring/webpki-roots update stack (+1.2 MB)… |
 | [D-012](#d-012) | P5 | `duja-core` `quirks` | User-directory quirk override (`quirks.override.toml`) is documented in the module + plan §7 but not wired — embedded… |
 | [D-013](#d-013) | P5 | `duja-ui` settings | Sync-group management (create/assign/offset) has no UI, so `MonitorConfig.sync_offset` (persisted since P2) still has… |
 | [D-014](#d-014) | P6 | `duja-ddc` `mac/` | macOS DDC/CI (enumeration + both I2C transports) has **never run on real hardware** — Duja has no Mac and CI mac… |
@@ -216,13 +215,6 @@ Suspend/resume DDC re-push: on resume the display set is usually unchanged, so t
 
 **Why deferred.** Needs hardware evidence (which monitors drop DDC state across S3/modern-standby) before choosing a policy: re-push all levels on `PlatformEvent::Resume`, or only after a resume-triggered enumeration diff
 
-### D-011
-
-**Where:** `duja-app` binary size &nbsp;·&nbsp; **Added:** P5 / v0.1.0
-
-`duja.exe` is **~19 MB** vs the ≤16 MB ADR-0012 budget: the ureq/rustls/ring/webpki-roots update stack (+1.2 MB) **plus** the WinRT toast bindings the v0.1.0 smart update loop added (`UI_Notifications`/`Data_Xml_Dom`/`Foundation*`). Levers: fat LTO (−1.0 MB measured), feature-gate the update stack (network + toast) behind a default-on feature so a "lite" build drops both, drop `tracing-subscriber`'s `env-filter` regex
-
-**Why deferred.** P8 hardening owns binary trimming; RAM and wakeup budgets still pass with headroom
 
 ### D-012
 
@@ -967,9 +959,13 @@ That was tolerable while the release profile was `opt-level = 3` and nobody was 
 
 **Where:** `.github/workflows/` + `xtask` `size.rs` &nbsp;·&nbsp; **Added:** P8 wave 1
 
-**The size budget is gated at release time only.** `cargo xtask size` runs in the `release` job, on the bytes it just built, so a release cannot ship over budget. Nothing checks a pull request.
+**The size budget is gated at release time, on one platform.** `cargo xtask size` runs in the `release` job, on the bytes it just built, so a *Windows* release cannot ship over budget. Two things it does not cover.
 
-The exposure is the one that produced [D-011](#d-011) in the first place: `duja.exe` went from 14.9 MB at P4 to 19,446,784 bytes by P7 with nothing in the path to notice, one dependency at a time. A per-PR gate is what turns "we recovered 4.7 MB" into "we keep it", and a dependabot bump is precisely the change that would give it back.
+**Neither of the other two platforms.** The `macos` and `linux` jobs build their own release binaries and neither measures anything, and because `release` declares `needs: [macos, linux]`, both artifacts are already built - the disk image signed, possibly notarized - before the gate runs at all. macOS cannot use this number in any case: its artifact is a `lipo` universal binary carrying two architectures, so a single-arch ceiling is the wrong shape rather than merely the wrong value. And no budget has ever been *measured* for either platform, which is the real blocker: gating on a number nobody has measured is how a check becomes a thing people disable.
+
+**And no pull request.**
+
+The exposure is the one that produced [D-011](debt-archive.md#d-011) in the first place: `duja.exe` went from 14.9 MB at P4 to 19,446,784 bytes by P7 with nothing in the path to notice, one dependency at a time. A per-PR gate is what turns "we recovered 3,737,088 bytes" into "we keep it", and a dependabot bump is precisely the change that would give it back.
 
 **Why deferred.** Cost, and it is a real one rather than an excuse. The measurement is only meaningful on the profile that ships - fat LTO, `codegen-units = 1` - and that build is roughly twenty minutes on a hosted Windows runner, against a PR matrix that currently completes in a fraction of that. Paying it on every pull request to catch a regression that arrives perhaps once a year is the wrong trade, and paying it on a *cheaper* profile is worse than not paying it, because a budget measured against a build nobody ships is a number that will drift away from the one that matters and then be trusted anyway.
 
