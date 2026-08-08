@@ -90,24 +90,24 @@ fn the_real_flyout_renders_frames_through_the_software_renderer() {
 /// three-monitor flyout is 397 logical pixels tall, so the third card rendered
 /// past the bottom edge and the published timing was a two-card frame wearing a
 /// three-monitor label.
+/// The expected sizes are **literals**. A first version compared
+/// `probe_size(rows)` against `flyout_logical_height(rows)` - the function
+/// `probe_size` is *defined* in terms of - so the assertion could not fail for
+/// any implementation. It stayed green with the sizing defect in the tree while
+/// the other two tests went red, which is how a review caught it; a second
+/// version claimed to have fixed this and did not, because the edit silently
+/// failed to apply and the vacuous test kept passing.
 #[test]
 fn the_probe_window_is_the_size_the_app_presents() {
-    for rows in [0_usize, 1, 2, 3, 5] {
-        let (_, height) = probe_size(rows);
-        assert!(
-            (f32::from(u16::try_from(height).expect("a flyout is under 65535 px tall"))
-                - flyout_logical_height(rows))
-            .abs()
-                < 1.0,
-            "the probe's {rows}-row window is {height} px, but the app presents \
-             {} px",
-            flyout_logical_height(rows)
-        );
-        assert_ne!(
-            height, 260,
-            "260 is the markup default, not a size the app ever presents"
-        );
-    }
+    assert_eq!(probe_size(0), (360, 178));
+    assert_eq!(probe_size(1), (360, 179));
+    assert_eq!(probe_size(2), (360, 288));
+    assert_eq!(probe_size(3), (360, 397));
+    assert_eq!(probe_size(5), (360, 615));
+
+    // And `duja-app` presents what the probe renders, which is the whole reason
+    // the arithmetic is in one crate instead of two.
+    assert!((flyout_logical_height(3) - 397.0).abs() < f32::EPSILON);
 }
 
 /// **A third monitor must put a whole card's worth of new pixels on the
@@ -126,10 +126,10 @@ fn the_probe_window_is_the_size_the_app_presents() {
 /// **Deliberately 1, 2 and 3 rather than a monotonicity claim.** The count is
 /// pixels unequal to the buffer's modal colour, and the mode is not a fixed
 /// thing: it is the window background at 0 and 1 rows and the card fill from 2
-/// on, and it saturates once the window hits its 620 px clamp. So the sequence
-/// is **not** monotone - the first monitor lowers the count by about 2,650 and
-/// the sixth by about 15,600 - and a test named for "every extra monitor" would
-/// have been asserting something false. What is stable, and what the sizing
+/// on. So the sequence is **not** monotone - the first monitor lowers the count
+/// by about 2,650, and the sixth lowers it by about 15,600 because the window
+/// has hit its 620 px clamp and the rows compress instead - and a test named
+/// for "every extra monitor" would have been asserting something false. What is stable, and what the sizing
 /// defect breaks, is that a card which fits adds a card's worth.
 #[test]
 fn a_third_monitor_adds_a_whole_card_of_pixels() {

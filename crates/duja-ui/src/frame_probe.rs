@@ -366,8 +366,11 @@ fn install() -> Result<Rc<MinimalSoftwareWindow>, PlatformError> {
 /// buffer's most common colour**. That is a proxy for "content reached the
 /// layout", not a measure of it, and it is deliberately a coarse one. It is
 /// **not monotone** in the row count: the first monitor lowers it (the card
-/// fill displaces background that was already being counted) and it saturates
-/// once the window reaches its 620 px clamp. What it does reliably is separate
+/// fill displaces background that was already being counted), and once the
+/// window reaches its 620 px clamp an extra monitor lowers it again, by about
+/// 15,600 - the rows compress rather than the window growing, so the card fill
+/// that defines the mode takes over more of a buffer that is no longer getting
+/// any bigger. What it does reliably is separate
 /// a card that rendered from a card that fell off the bottom edge, which is the
 /// one question it exists to answer.
 fn content_pixels(buffer: &[PremultipliedRgbaColor]) -> u64 {
