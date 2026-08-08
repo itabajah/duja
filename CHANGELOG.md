@@ -20,18 +20,18 @@ releasing. [ADR-0024](docs/adr/0024-preview-artifacts-on-the-patch-train.md)
 breaks that loop and re-maps `v0.2.0` and `v0.3.0` to mean **hardware-confirmed**
 rather than first-shipped.
 
-For Windows this is a smaller release than that makes it sound, and a real one:
-`duja.exe` is **15.0 MiB, back under its 16 MiB budget for the first time since
-P4** and 3.7 MB smaller than before the hardening pass, quitting Duja no longer
-flattens the gamma of displays it never touched, and `config.toml` is size-capped
-before it is read rather than after.
+For Windows this is a smaller release than that makes it sound, and a real one.
+`duja.exe` is **19 % smaller than the binary `v0.1.5` shipped** - 19,333,120
+bytes down to 15,729,664, both built on one machine with the pinned toolchain -
+which puts it back under its 16 MiB budget for the first time since P4. Quitting
+Duja no longer flattens the gamma of displays it never touched, and
+`config.toml` is size-capped before it is read rather than after.
 
-(That figure is stated against the pre-hardening binary, which is what
-[ADR-0012](docs/adr/0012-binary-size-budget-variance.md)'s ledger measured. It is
-deliberately **not** stated as a percentage against `v0.1.5`: no `v0.1.5` binary
-was ever measured, that release predates both ports, and the tempting "19 %" is
-the hardening pass's own reduction from the P7 baseline rather than anything a
-`v0.1.5` user would see.)
+(The Performance entry below reads "3.9 MB". That was `#144`'s figure before
+`swash` joined the per-package optimization exemptions and the saving was
+re-measured at 3,737,088 bytes against the P7 baseline. The 19 % above is a
+different measurement again - end to end from `v0.1.5`, which is the one an
+upgrading user actually experiences.)
 
 ### Added
 

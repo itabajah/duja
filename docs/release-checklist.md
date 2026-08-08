@@ -89,12 +89,14 @@ a maintainer reads *while cutting the release*.)
       Install section, the support matrix, and `SECURITY.md` describe what a user
       can actually download. Do not add a platform's instructions before the tag
       that first publishes its artifact — until then they point at a file that is
-      not on the Releases page. **Due with `v0.1.6`**, which under
-      [ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md) is the tag
-      that first publishes a macOS and a Linux artifact: the README needs a
-      macOS install section (there is none), its Linux section still opens "No
-      release yet", its "There is no macOS or Linux download yet" note goes, and
-      `SECURITY.md`'s "Two of the four have never been published" goes with it.
+      not on the Releases page. **Done for macOS and Linux at `v0.1.6`**, the
+      tag that first publishes their artifacts under
+      [ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md): the README
+      has install sections for both and `SECURITY.md` no longer says two of the
+      four are unpublished. Nothing is owed here for the next release unless a
+      *further* platform appears - and note that this bullet listed four
+      outstanding edits for one PR after they had all landed, because the PR
+      that wrote the list and the PR that did the work were different ones.
 - [ ] **Update [`release-notes-preamble.md`](release-notes-preamble.md) in the
       same PR.** It is prepended verbatim to the published notes, and it is the
       *only* place a reader is told which artifacts are unverified previews.

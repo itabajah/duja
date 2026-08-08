@@ -1,15 +1,18 @@
 # git-cliff configuration.
 #
 # DO NOT regenerate CHANGELOG.md wholesale. This comment used to say the file
-# "is regenerated at every tag", and following that at v0.1.6 deleted 174 lines:
-# every release section here carries a hand-written intro paragraph and prose
-# bullets that git-cliff cannot reproduce, because they are not in any commit
-# subject. Nothing in CI regenerates this file, so the instruction was also
-# describing automation that does not exist.
+# "is regenerated at every tag", and following that at v0.1.6 deleted 174 lines.
+# Every section from [0.1.1] onward carries a hand-written intro paragraph and
+# prose bullets that git-cliff cannot reproduce, because they are in no commit
+# subject: [0.1.5] went 43 lines -> 11, [0.1.1] 69 -> 15. ([0.1.0] is the one
+# exception - it has no hand-written prose, and regeneration slightly EXPANDS
+# it, which is why "every section" was too strong a claim.) Nothing in CI
+# regenerates this file either, so the instruction also described automation
+# that does not exist.
 #
 # The release step is to PREPEND one section and leave the rest alone:
 #
-#   git cliff --tag vX.Y.Z --unreleased --strip header -o /tmp/section.md
+#   git cliff --tag vX.Y.Z --unreleased --strip header -o section.md
 #   # then insert that above the previous release's heading, and write the
 #   # intro paragraph by hand - see docs/release-checklist.md.
 #
