@@ -332,8 +332,16 @@ impl AppState {
             warn!(error = %e, "failed to clear overlays");
         }
         // Restore the displays this session engaged (clearing the crash marker),
-        // then a belt-and-suspenders global identity pass for anything left over
-        // from a prior dirty run.
+        // then the global identity pass — unconditionally, unlike `begin_quit`.
+        //
+        // NOT for the reason this comment used to give ("anything left over from
+        // a prior dirty run"): D-108 established that a leftover is the crash
+        // marker's job at launch, and `gamma::tear_down_gamma` is where that
+        // argument lives. The reason it stays here is different and stronger.
+        // **The user asked by name.** Someone pressing "Restore screen" is asking
+        // for exactly the trade `begin_quit` declines to make on their behalf —
+        // if a colour-temperature tool's curve is what is wrong with their
+        // screen, flattening it is the point.
         self.gamma.restore_all();
         let report = duja_dimmer::restore_all();
         info!(

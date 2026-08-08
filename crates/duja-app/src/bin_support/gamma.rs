@@ -112,7 +112,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use duja_core::dimmer::{DimCommand, Dimmer, DimmerError};
 use duja_core::id::StableDisplayId;
-use tracing::warn;
+use tracing::info;
 
 /// A per-display gamma engage/restore executor.
 ///
@@ -413,11 +413,24 @@ pub(crate) struct GammaTeardown {
 /// `duja --restore` and the tray's "Restore screen". Someone pressing those is
 /// asking for exactly the trade this function declines to make on their behalf.
 ///
-/// Both effects are parameters so the sequencing is testable. `AppState` cannot
-/// be constructed in a test (D-102), and a pure `bool -> bool` helper beside an
-/// untouched `begin_quit` would be the `#82` shape: an impeccable red-first proof
-/// protecting the one function the test called directly. What is left uncovered
-/// is three lines of wiring.
+/// # What the tests below do and do not prove
+///
+/// Both effects are parameters, so the *sequencing* is observable and the
+/// regression test goes red when the unconditional call is re-inserted **here**.
+///
+/// That is **not** the acceptance criterion `plan.md` sets, and a review proved
+/// it: re-insert the defect at the site it historically occupied — inline in
+/// `begin_quit`, bypassing this function — and the whole suite stays green,
+/// because no test reaches `begin_quit` at all. Closures made the sequencing
+/// visible; they did not move a test one line closer to the caller. An earlier
+/// version of this comment claimed they did, which was the `#82` shape wearing a
+/// denial of it.
+///
+/// What would close it is [D-102](https://github.com/itabajah/duja/blob/main/docs/debt.md#d-102)'s
+/// experiment — one `#[ignore]`d test constructing `PlatformTray` headless — and
+/// that experiment is *why* this gap is still open rather than a reason it has to
+/// be: D-102 already records that the "`AppState` cannot be constructed" excuse
+/// went stale when `#134` removed the `tray_icon::TrayIcon` field.
 pub(crate) fn tear_down_gamma(
     own_restore: impl FnOnce() -> bool,
     wide_rescue: impl FnOnce() -> duja_dimmer::RestoreReport,
@@ -430,7 +443,10 @@ pub(crate) fn tear_down_gamma(
         };
     }
     let report = wide_rescue();
-    warn!(
+    // `info!`, not `warn!`: the sink that actually failed has already warned
+    // (per display on Linux, once on Windows), and a third line at WARN for the
+    // *rescue* would read as a third fault. This records that the rescue ran.
+    info!(
         restored = report.restored.len(),
         failed = report.failed.len(),
         "this session could not restore a ramp it engaged; ran the global identity pass"
@@ -1091,9 +1107,15 @@ mod platform {
         /// Note the blast radius, which is wider than the Windows twin's: this
         /// resets **every** display, including ones Duja never engaged and whatever
         /// another app (f.lux, a calibration loader) had set. Windows' `restore_now`
-        /// touches only what it recorded. Pre-existing — `tray/state.rs` already
-        /// calls the same global `duja_dimmer::restore_all()` on quit and on
-        /// "Restore screen" — but it is a real difference, not a simplification.
+        /// touches only what it recorded. A real difference, not a simplification.
+        ///
+        /// **This is also why macOS lost nothing when D-108 stopped the quit path
+        /// calling the global pass unconditionally.** On the other two platforms
+        /// that removed a second, wider action; here it removed a *duplicate* —
+        /// this method **is** `duja_dimmer::restore_all()`, so the old code called
+        /// it twice and the profile reload still happens on every quit. A reader
+        /// of `tear_down_gamma`'s docs would otherwise conclude macOS now skips
+        /// it, which would be wrong.
         fn restore_all(&mut self) -> bool {
             // The report is inspected nowhere on purpose: its `failed` list is
             // hardcoded empty upstream, so there is nothing to branch on.

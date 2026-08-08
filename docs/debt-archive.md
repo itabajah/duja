@@ -44,7 +44,6 @@ refusing to renumber.
 | [D-002](#d-002) | ~~P2~~ | `.github/workflows/` | ~~Add `coverage.yml` (llvm-cov ≥90% gate) and `fuzz.yml` (weekly nightly burn) CI jobs~~ - **drained in P8 wave 2**, plus a third lane the row did not ask for |
 | [D-023](#d-023) | ~~P6 (audit 2026-07-13)~~ | `fuzz/` | ~~Add the `fuzz_config_toml` target~~ - **drained in P8 wave 2**, landed with the workflow that runs it, exactly as the row asked |
 | [D-108](#d-108) | ~~P7 gate~~ | `duja-app` `tray/state.rs` `begin_quit` | ~~Every clean quit writes identity gamma to every display, including ones Duja never touched~~ - **drained in P8 wave 4** |
-| [D-093](#d-093) | ~~P7 wave 4b-5 (`#132`)~~ | `duja-dimmer` `linux_caps.rs` `transport` | ~~`WAYLAND_SOCKET` is not consulted, so a client launched with a handed-over compositor socket is classified X11~~ - **drained in P8 wave 4** |
 
 ## Rows
 
@@ -326,14 +325,12 @@ Its seed is a v0-shaped config rather than a current one, for the same reason: a
 
 **Where:** `duja-app` `tray/state.rs` `begin_quit` &nbsp;·&nbsp; **Added:** P7 gate &nbsp;·&nbsp; **Drained:** P8 wave 4
 
-~~**Where:** `duja-app` `tray/state.rs` `begin_quit` &nbsp;·&nbsp; **Added:** P7 gate~~
-
 ~~**Every clean quit writes identity gamma to every display, including ones Duja never touched.** `begin_quit` calls `self.gamma.restore_all()` - which restores exactly what this session engaged, correctly - and then calls `duja_dimmer::restore_all()` **unconditionally**, as a "global identity pass [to clear] any ramp left over from a prior dirty run". What that second call does is not the same on all three platforms, and the comment beside it does not say so:~~
 
-~~- **Windows**: enumerates every gamma display and writes the identity ramp to each. A running f.lux loses its tint on every Duja quit.
-- **macOS**: `CGDisplayRestoreColorSyncSettings`, which reloads the user's **profile**. This is a restore rather than a flatten, and is the only benign arm.
-- **Linux/X11**: walks every CRTC on the screen - including ones driving nothing - and writes identity. `redshift`, `gammastep`, GNOME Night Light and a `colord` calibration curve are all clobbered.
-- **Linux/Wayland**: releases only this process's gamma controls. Benign, because there is nothing else to find.~~
+- ~~**Windows**: enumerates every gamma display and writes the identity ramp to each. A running f.lux loses its tint on every Duja quit.~~
+- ~~**macOS**: `CGDisplayRestoreColorSyncSettings`, which reloads the user's **profile**. This is a restore rather than a flatten, and is the only benign arm.~~
+- ~~**Linux/X11**: walks every CRTC on the screen - including ones driving nothing - and writes identity. `redshift`, `gammastep`, GNOME Night Light and a `colord` calibration curve are all clobbered.~~
+- ~~**Linux/Wayland**: releases only this process's gamma controls. Benign, because there is nothing else to find.~~
 
 ~~**Why deferred.** Two reasons, and the second is the reason it is a row rather than a fix in the gate that found it. First, it is **not P7's defect**: the call has been there since the Windows train, so a fix changes shipped Windows quit behaviour and belongs in a PR whose subject that is, with its own review - `#82` is this project's standing example of what happens otherwise. Second, the analysis is worth landing before the change, because the *right* fix is not obvious from the symptom. The pass is nearly redundant everywhere: a leftover from a dirty run is what `startup::recover_from_crash_marker` handles, at launch, from the marker - and P7 is what gave **Linux** that marker, so the belt-and-braces argument is now weakest on the platform where the cost is highest. [D-099](debt.md#d-099) already carries the victim classification (`redshift` and friends repair themselves on their next timer; a `colord`/`xcalib` curve is loaded once at login and stays flattened), which is what makes this worth doing rather than filing as cosmetic. The likely shape is to drop the unconditional pass entirely and let the marker path own leftovers, keeping the wide walk for the two places a user asks for it: `duja --restore` and the tray's "Restore screen"~~
 
@@ -341,20 +338,9 @@ Its seed is a v0-shaped config rather than a current one, for the same reason: a
 
 **What this row got right and what it under-specified.** Right: that the pass is nearly redundant, and that the marker path owns leftovers. Under-specified: it proposed to "drop the unconditional pass entirely and let the marker path own leftovers", which would have removed the rescue from the one case that still needs it - a restore that failed. The failure mode the row was closest to missing is the one the second test pins.
 
-**And the honest limit of the proof.** The two effects are parameters so the *sequencing* is testable, and the regression test was proven red by re-inserting the unconditional call. But `AppState` still cannot be constructed in a test ([D-102](debt.md#d-102)), so what remains uncovered is the three lines of wiring in `begin_quit` that call it. Naming that is the point: `#82` is this project's standing example of a red-first proof that protected only the function the test called directly, and a pure `bool -> bool` helper beside an untouched `begin_quit` would have been exactly that shape
+**And the honest limit of the proof, which a review had to establish because the first version of this section got it wrong.** The two effects are parameters, so the *sequencing* is observable and the test goes red when the unconditional call is re-inserted **into `tear_down_gamma`**. That is not the criterion [plan.md](plan.md) sets. Re-insert the defect where it *historically occupied* - inline in `begin_quit`, bypassing the new function - and the whole suite stays green, because nothing reaches `begin_quit` at all. The first draft of this row claimed closures avoided the `#82` shape; they made the sequencing visible and moved no test one line closer to the caller.
 
-### D-093
+What would close it is [D-102](debt.md#d-102)'s experiment, and that is the sharp part: D-102 already records that the "`AppState` cannot be constructed" reason **went stale** when `#134` removed the `tray_icon::TrayIcon` field. The excuse was re-asserted in new code without re-checking it.
 
-**Where:** `duja-dimmer` `linux_caps.rs` `transport` &nbsp;·&nbsp; **Added:** P7 wave 4b-5 (`#132`) &nbsp;·&nbsp; **Drained:** P8 wave 4
+**One case the fix's own argument does not cover.** "The marker path owns leftovers" is true for a leftover whose *address* is unchanged. It is not true for one whose address changed while the process ran: a monitor that renumbers (`\\.\DISPLAY2` to `DISPLAY3`) after engage and before the next apply batch leaves the guard restoring a stale device name, which can succeed - so `own_clean` is `true`, the wide pass is skipped, and the marker is removed, with a live ramp on a panel nothing now tracks. The old unconditional pass enumerated *current* displays and covered it. Whether the ramp survives a topology change at all is uncertain (`GammaBackend::invalidate` hedges that "the OS **may** have reset every ramp"), so this is an unexamined hole rather than a proven brick - which is why it is written here rather than left for someone to find
 
-~~**Where:** `duja-dimmer` `linux_caps.rs` `transport` &nbsp;·&nbsp; **Added:** P7 wave 4b-5 (`#132`)~~
-
-~~**`WAYLAND_SOCKET` is not consulted, so a client launched with a handed-over compositor socket is classified X11 whenever a stale `DISPLAY` is also set.** A compositor that spawns a client itself may pass a connected file descriptor and set only `WAYLAND_SOCKET`; `wayland-client`'s `connect_to_env` honours it, and so does winit's backend selection - `#132`'s own `window_system` had to include it for that reason. The dimmer's rule would pick X11 and drive `XRandR` gamma and an X11 overlay through Xwayland on a session whose compositor is right there~~
-
-~~**Why deferred.** Nothing is known to be broken by it: every desktop session manager sets `WAYLAND_DISPLAY`, and the configuration that does not is a client the compositor launched directly. It is a row rather than a fix because the two rules answer different questions and should be corrected on their own terms - `transport` decides which server to *drive*, `window_system` predicts which backend winit will *create a window on* - and because changing the dimmer's rule moves the whole capability report, which wants its own red-first test rather than a rider on a geometry wave~~
-
-**How it drained, and the second bug the first one was hiding.** `transport` now treats a non-empty `WAYLAND_SOCKET` as Wayland, alongside `WAYLAND_DISPLAY`, with the same empty-is-unset rule - which matters more here than elsewhere, since an empty value would claim a Wayland session with no way to reach it.
-
-The fix that took longer than the one line was **why five call sites had to change**. `SessionEnv` borrows, so every caller read the variables into locals and built the struct itself: five copies of "read these and construct". Adding a third variable meant finding all five, and *that* is the shape this row is an instance of rather than an exception to. So the environment read moved behind one `SessionEnvVars::from_env`, and the call sites became two lines each. The next variable is added once.
-
-Verified with the isolated-crate cross-check rather than a CI round: `duja-app`'s Linux gamma arm is one of the five sites and the dev box cannot link that crate for Linux, so a throwaway crate pulling the seam in through `#[path]` compiled and clippy'd it for `x86_64-unknown-linux-gnu` first

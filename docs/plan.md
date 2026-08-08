@@ -79,7 +79,7 @@ feature area.
 | 1 | binary size: measure first, then trim, then gate it ([D-011](debt-archive.md#d-011), [ADR-0012](adr/0012-binary-size-budget-variance.md)) | done - `#144`, D-011 drained |
 | 2 | the fuzz and coverage lanes ([D-002](debt-archive.md#d-002), [D-023](debt-archive.md#d-023)) | done - `#145` |
 | 3 | `--soak`, the harness two perf budgets already cite | done - `#146` |
-| 4 | the debt drain (`refactor:` PR, the rubric's ~15% time-box) | done - `#147` |
+| 4 | the debt drain (`refactor:` PR, the rubric's ~15% time-box) | **partial** - `#147`, see below |
 | 5 | the security pass and the docs-truth sweep | pending |
 | 6 | the phase gate - **the multi-reviewer one** - and `m8-hardening` | pending |
 
@@ -255,9 +255,21 @@ The rubric time-boxes this at ~15% of the phase. Rows are picked for being
   inputs. Its own deferral says to revisit "when the P8 soak numbers set a real
   threshold", and wave 3 is where those numbers come from, so this row is
   sequenced after it rather than beside it.
-- **[D-093](debt-archive.md#d-093)** - `WAYLAND_SOCKET` is not consulted, so a client
+- **[D-093](debt.md#d-093)** - `WAYLAND_SOCKET` is not consulted, so a client
   handed a compositor socket is classified X11. Pure, testable, no session
   needed.
+
+**What wave 4 actually landed, and what it did not.** `#147` drained
+[D-108](debt-archive.md#d-108) and re-opened [D-093](debt.md#d-093) with a cause
+rather than closing it. It did **not** do the other two items above, and marking
+the wave "done" while two of its four rows were untouched is the kind of drift
+this file exists to prevent - so the table says **partial**.
+
+The omission that matters is [D-102](debt.md#d-102)'s experiment, because it is
+not independent of D-108: that fix is tested at its seam and **not** at
+`begin_quit`, and the reason given for that is the very sentence D-102 records as
+out of date. The experiment is an afternoon and it decides whether the gap is
+real. It should be the next thing anybody does here.
 
 **[D-021](debt.md#d-021) is explicitly not in this wave.** Unifying `windows`
 0.58 to 0.62 in `duja-panel` means rewriting VARIANT-era COM against an API that

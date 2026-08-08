@@ -883,8 +883,17 @@ pub(crate) struct DisplayEnv<'a> {
 /// winit's `EventLoop` will pick, because the anchor describes the window winit
 /// is about to place, so it consults `WAYLAND_SOCKET` as well. A session with a
 /// handed-over socket and a stale `DISPLAY` is the case where the two disagree,
-/// and each is right about its own question. `docs/debt.md` carries the half of
-/// that which is arguably a gap on the dimmer's side.
+/// and each is right about its own question. `docs/debt.md` D-093 carries the
+/// half of that which is arguably a gap on the dimmer's side.
+///
+/// **The disagreement is now known to be load-bearing rather than untidy.** P8
+/// wave 4 tried closing it by having the dimmer consult `WAYLAND_SOCKET` too,
+/// and a review found the variable is *single-use*: `connect_to_env` takes the
+/// fd and `remove_var`s it, so a second reader sees nothing. That is survivable
+/// here — this module predicts what winit will do, and winit is the one consumer
+/// — and it is not survivable for the dimmer, which opens four connections and
+/// re-reads per decision. So the asymmetry stays, and `linux_caps::transport`'s
+/// docs carry the finding.
 ///
 /// Wayland wins when both are set, for the reason it wins everywhere: nearly
 /// every Wayland session also runs Xwayland and sets `DISPLAY`. An **empty**
