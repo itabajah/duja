@@ -1,7 +1,7 @@
 # Duja - Project Status
 
-_Last updated: 2026-08-08. **Every phase is closed** through P8, and the
-`v0.1.6` checkpoint releases the two ports that had been held. They ship as
+_Last updated: 2026-08-08. **Every phase is closed** through P8, and `v0.1.6`
+shipped the two ports that had been held. They ship as
 **unverified previews** rather than as confirmed platforms
 ([ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md)): the hold was
 self-defeating, because the community confirmations macOS needs to leave
@@ -52,7 +52,7 @@ verbatim and unpruned, which is where they belong.
 | `v0.1.3` | Windows | shipped - the built-in panel no longer vanishes on a GPU-driven backlight |
 | `v0.1.4` | Windows | shipped - dark rebrand plus the mirror/software-only pair |
 | `v0.1.5` | Windows | shipped - a live monitor no longer sticks as "software-only"; tray Restart |
-| `v0.1.6` | Windows + previews | **shipping** - the first release to carry a macOS `.dmg` and a Linux `.tar.gz`, both labelled unverified. Flips to `shipped` when the tag is pushed, per [release-checklist.md](release-checklist.md) |
+| `v0.1.6` | Windows + previews | shipped - the first release to carry a macOS `.dmg` and a Linux `.tar.gz`, both labelled unverified previews |
 | `v0.2.0` | macOS | **re-mapped** - now means hardware-confirmed, not first shipped |
 | `v0.3.0` | Linux | **re-mapped** - same |
 | `v1.0.0` | - | **held** - see below |

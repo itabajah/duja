@@ -48,6 +48,12 @@ to assert.
   - [Perceptual brightness continuum (v2, ADR-0014)](#s21)
   - [UI layout & ruby theme (2026-07-14)](#s22)
   - [v0.1.0 release (2026-07-16)](#s23)
+- [v0.1.6: the checkpoint that shipped the ports](#s59)
+  - [The decision, and the loop it broke](#s60)
+  - [What the reviews found](#s61)
+  - [The correction that was the defect](#s62)
+  - [What was verified rather than assumed](#s63)
+  - [What it cost, and what it did not do](#s64)
 - [P8 waves, as planned and as they went](#s52)
   - [Wave 1 - the binary](#s53)
   - [Wave 2 - the fuzz and coverage lanes](#s54)
@@ -1218,6 +1224,126 @@ install and stay current on:
 - **Not signed.** No Authenticode certificate yet, so SmartScreen warns on first
   run; authenticity is via the checksums + minisign key + provenance. Binary size
   regressed to ~19 MB (P8 trim).
+
+<a id="s59"></a>
+## v0.1.6: the checkpoint that shipped the ports
+
+Four PRs, `#150`-`#153`, and a release. What it was for: a clean checkpoint -
+the app verified, the docs made true, the code tidied where tidying was owed,
+and a release at the end.
+
+<a id="s60"></a>
+### The decision, and the loop it broke
+
+Three phases had closed with a tag and no release, all waiting on the same
+condition: nobody has run the macOS or Linux build on the hardware it targets.
+That was recorded as a decision rather than a blocker each time, and each time
+it was defensible.
+
+**It was also self-blocking, and nobody had said so.**
+[ADR-0013](adr/0013-macos-ddc-wrap-vs-vendor.md) keeps the macOS DDC path
+experimental until three independent community confirmations per architecture
+exist. Those come from other people's hardware. The artifact those people would
+run had never been on the Releases page. The condition for releasing was
+confirmation and the mechanism for confirmation was releasing, so holding
+forever was the default outcome, and three closed phases with nothing shipped is
+what that looks like from outside.
+
+**And the hold had no mechanism.** `release.yml` has no version-line gating at
+all - every `if:` in the file was read to confirm it - so the `macos` and `linux`
+jobs run on any `v*` tag and their artifacts land in the same `SHA256SUMS`,
+minisign pass, attestation and Release. The only thing implementing "held" was a
+human not pushing a tag, which is one command away from happening by accident.
+
+[ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md) is the decision that
+came out of that: previews ship on the patch train, `v0.2.0` and `v0.3.0` are
+re-mapped to mean *hardware-confirmed*, and every release carrying an
+unconfirmed platform says so from a committed file rather than from whoever cut
+it. A label is weaker than a hold, so it gets a mechanism: a Preflight step that
+fails the release before anything is built if the preamble is missing or empty.
+
+<a id="s61"></a>
+### What the reviews found
+
+**Four PRs, four adversarial reviews, and every one found something that would
+otherwise have shipped.** That is now nine consecutive phases and checkpoints
+where the same has been true. Worth recording per-PR rather than in aggregate,
+because the pattern in what they found is more useful than the count:
+
+| PR | the finding that mattered most |
+|---|---|
+| `#150` | the preamble told users `duja --restore` recovers a Wayland session. It deliberately does not connect at all; killing the process *is* the recovery there. Wrong for the majority of the Linux audience, in the file that replaced the hold |
+| `#151` | the test's **name** claimed the one thing the experiment did not measure - it ran on a live session, not headless, and headless is the CI question the four debt rows actually need |
+| `#152` | two false superlatives about coverage, in opposite directions and mutually inconsistent; plus a link the reorganisation broke, in a file that had zero before |
+| `#153` | a **correction** that turned a true claim into a false one, and had to be reverted |
+
+**Three of the four are the same species**: a claim that read as verified and
+was not. The fourth is worse and is the one worth keeping.
+
+<a id="s62"></a>
+### The correction that was the defect
+
+`#153`'s changelog said `duja.exe` is "19 % smaller than at `v0.1.5`". Reading
+[ADR-0012](adr/0012-binary-size-budget-variance.md)'s ledger suggested that was
+wrong - 19,446,784 is labelled the **P7** baseline, and v0.1.5 predates both
+ports - so the number was removed and replaced with a paragraph explaining that
+no v0.1.5 binary had ever been measured and the figure could not be known.
+
+Every part of that was wrong, and a reviewer settled it by **building v0.1.5**:
+
+```
+v0.1.5  duja.exe   19,333,120 bytes   (lto = "thin", opt-level = 3)
+v0.1.6  duja.exe   15,729,664 bytes   (lto = "fat",  opt-level = "s")
+                   -3,603,456         = 18.64 %, which rounds to 19 %
+```
+
+Independently reproduced before the revert. The `~19 MB` figure was also
+recorded in `docs/STATUS.md` **at the v0.1.5 tag** the whole time, so "never
+measured" was falsifiable by `git show`. And 19 % is both numbers at once, for a
+reason the ledger does not make obvious: P6 and P7 added almost nothing to the
+*Windows* binary, because their code is `cfg`-ed out of it.
+
+This is [`#132`'s lesson](#s33) happening rather than being quoted - a review
+round whose later findings are defects that earlier corrections introduced. The
+rule that came out of `#132` was to weight code over prose. The rule this adds
+is narrower and sharper: **when a correction turns on a number, measure the
+number.** Reasoning from a ledger about what a binary used to weigh is not
+measuring it, and the build takes ninety seconds.
+
+<a id="s63"></a>
+### What was verified rather than assumed
+
+Named because a checkpoint reporting only findings cannot distinguish "checked"
+from "not looked at":
+
+- **[D-102](debt.md#d-102)'s experiment, run at last.** `build_tray` succeeds in
+  a test process and all three tray-seam verbs work, so the sentence four rows
+  defer on is false in both halves. It is *not* the headless answer and the row
+  now says so. It also falsified its own prediction that three rows would then
+  close with no refactor: because the constructor succeeds, a naive test depends
+  on the session it ran in, so what the rows need is a fakeable tray.
+- **The release build and both budgets, on the tree being tagged.** `duja.exe`
+  15,729,664 against 16,777,216. A 90-second soak on the release binary: peak
+  RSS 16,936,960 against 35,000,000, zero growth, flat GDI and USER, `PASS` -
+  and a 20-second run returning `UNMEASURABLE` with exit 1, which is the first
+  observation of that guarantee on a release build.
+- **The full pipeline, by `workflow_dispatch` before tagging.** Both non-Windows
+  packaging jobs green, and the new Preflight step exercised for the first time
+  by exactly the dry run it was designed to be reachable from.
+- **Every relative link and anchor across ten documents**, mechanically.
+- **The changelog's entry accounting**: 70 commits since `v0.1.5`, 9 of them
+  `chore`/`ci`/`build` and skipped, 61 bullets.
+
+<a id="s64"></a>
+### What it cost, and what it did not do
+
+`plan.md` shed 244 of its 351 lines to `history.md`, which is this file. The
+[D-114](debt.md#d-114) row was added rather than paid: both `xtask` subcommands
+take `std::env::Args`, so their argument parsing is unreachable from a unit test
+by construction. The fix is an hour and it was deliberately not taken here,
+because `xtask` is the tool that *performs* the release, including the size
+gate, and cutting `v0.1.6` with an `xtask` no release had ever used is the wrong
+trade on the wrong day.
 
 <a id="s52"></a>
 ## P8 waves, as planned and as they went
