@@ -129,7 +129,7 @@ argument.
 | [D-107](#d-107) | P7 wave 6 (`#140`) | `packaging/linux/` + `xtask` `dist.rs` | Linux ships a tarball and no native package, because a package makes a dependency claim nobody here can check |
 | [D-109](#d-109) | P8 wave 1 | `crates/duja-ui` + `docs/perf-budgets.md` | Two perf budgets name no instrument: there is no automated render benchmark, and both were last measured by hand at P4 |
 | [D-110](#d-110) | P8 wave 1 | `.github/workflows/` + `xtask` `size.rs` | The binary-size budget is gated at release time only, so a dependency bump that adds a megabyte is caught by the next release rather than by the PR |
-| [D-111](#d-111) | P8 wave 3 | `duja-app` `--soak` + `.github/workflows/` | The soak has never been run for longer than 30 seconds, and nothing runs a short one in CI |
+| [D-111](#d-111) | P8 wave 3, **90s run** `v0.1.6` | `duja-app` `--soak` + `.github/workflows/` | The soak has never been run for longer than 90 seconds, and nothing runs a short one in CI |
 | [D-112](#d-112) | P8 gate | `duja-app` `--soak` + `duja-dimmer` `win/` | The soak's GDI/USER counters are structurally near-zero: everything that moves them lives in the dimmer and gamma sink, which it does not build |
 | [D-113](#d-113) | P8 gate | `duja-core` `config/persist.rs` | The 1 MiB cap is on reads only, so Duja can write a config it will then refuse to read - and the state path overwrites rather than propagates |
 | [D-114](#d-114) | `v0.1.6` checkpoint | `xtask` `size.rs`/`dist.rs` + `main.rs` | Both subcommands take `std::env::Args`, a type no test can construct, so neither one's argument parsing is reachable by a test |
@@ -961,6 +961,8 @@ The shapes worth pricing before choosing one: a scheduled weekly run on `main` (
 **And nothing runs a short one in CI**, which [plan.md](plan.md)'s wave-3 scope asked for ("it runs on the dev box for the long burn, and a short one belongs in CI"). Not done, and not done for a reason worth writing down rather than leaving as an oversight: a CI soak has to start the platform event pump on a runner with no display server and no session, and whether `start_platform` succeeds there has never been tested. Shipping a workflow that might simply go red on its first scheduled run - or worse, pass by failing to assemble anything - would be a check that teaches nothing.
 
 **Why deferred.** The cheap experiment comes first and it is one job: run `duja --soak 120 --every 10` on each CI lane once, by hand, via `workflow_dispatch`, and read what happens. If the pump starts, the workflow is ten lines. If it does not, the finding is more valuable than the workflow would have been - it means `--headless` does not work on a headless runner either, which is a claim `docs/` currently makes in several places
+
+**Advanced, not drained, at the `v0.1.6` checkpoint.** The longest run is now **90 seconds** rather than 30, on the **release** build, sampling every 10: 10 samples, none unreadable, peak RSS 16,936,960 bytes, 0 bytes growth, flat GDI and USER, `PASS`. Two properties were exercised for the first time by that run rather than argued: a 20-second run over the same binary returned `UNMEASURABLE` with **exit 1** (so a run that measures nothing cannot read as a pass), and the report named the IPC server as not started because another Duja held the endpoint, instead of silently measuring less. None of that is the 24 hours the budget row names, and nothing runs a short soak in CI, so the row stays open on both halves.
 
 ### D-112
 

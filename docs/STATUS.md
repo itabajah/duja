@@ -139,13 +139,21 @@ Measured on this box, 2026-08-08:
 - Measured at the P4/P5 gates, headless: idle RSS **23.3 MB** (budget 35), idle
   CPU **0 ms over 20 s** - zero wakeups, by construction.
 - **`duja --soak <secs>` is the instrument those RSS budgets have cited since
-  P4** and did not have until P8 wave 3. A 30-second run on this box: peak RSS
-  **18,169,856 bytes** against a 35,000,000 budget, zero growth, flat GDI and
-  USER. Read it for what it is - the **headless** process, not the tray one, and
-  the *whole* resident set rather than the "private" the row asks for. The
-  24-hour run the budget names has not been done ([D-111](debt.md#d-111)), and
-  when it is, its measured handle drift should replace the harness's tolerance
-  constant, which is a reasoned guess and says so.
+  P4** and did not have until P8 wave 3. Re-run on the **release** build at the
+  `v0.1.6` checkpoint, 90 seconds sampling every 10: peak RSS **16,936,960
+  bytes** against a 35,000,000 budget, **0 bytes growth**, flat GDI and USER,
+  10 samples and none unreadable. Verdict `PASS`, exit 0.
+  Read it for what it is - the **headless** process, not the tray one, and the
+  *whole* resident set rather than the "private" the row asks for. Two further
+  limits this run made visible rather than assumed: the IPC server did **not**
+  start, because another Duja held the endpoint, and the report says so instead
+  of quietly measuring less; and a 20-second run over the same build returned
+  `UNMEASURABLE` with **exit 1**, which is the guarantee that a run measuring
+  nothing cannot be read as a pass. The 24-hour run the budget names is still
+  undone ([D-111](debt.md#d-111)) - 90 seconds is the longest yet, against the
+  30 that row records - and when it happens its measured handle drift should
+  replace the harness's tolerance constant, which is a reasoned guess and says
+  so.
 - **[D-102](debt.md#d-102)'s experiment has been run**, and it settles the
   sentence four rows defer on. `build_tray` succeeds in a test process on an
   interactive Windows session and all three tray-seam verbs work, so "`AppState`
@@ -153,9 +161,12 @@ Measured on this box, 2026-08-08:
   literally: it is **not** the headless answer, and a CI runner on a different
   window station is still unmeasured. What the rows now need is a fakeable tray
   rather than proof it is possible.
-- `duja.exe` is **15,709,696 bytes** (14.98 MiB) release, **within**
-  its 16 MiB budget with 1,067,520 bytes to spare; `dujactl.exe` is 643,584
-  (2 MiB budget, down from 851,968). P8 wave 1 took 3,737,088 bytes off
+- `duja.exe` is **15,729,664 bytes** (15.00 MiB) release, **within**
+  its 16 MiB budget with 1,047,552 bytes to spare; `dujactl.exe` is 644,608
+  (2 MiB budget, down from 851,968). Re-measured on the `v0.1.6` tree rather
+  than carried over from P8 wave 1, which is why it is 19,968 bytes above the
+  figure that ledger records - the checkpoint added code, and the budget
+  absorbed it. P8 wave 1 took 3,737,088 bytes off
   the tray binary, 19.2 %, and the budget is now enforced by
   `cargo xtask size` in the release workflow rather than remembered - **on the
   Windows job only**, which is what that workflow builds and measures.
