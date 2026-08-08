@@ -329,6 +329,72 @@ mod tests {
         assert_eq!(rows_across, 2, "both rows of the second table, and no more");
     }
 
+    /// The fuzz targets named in `fuzz/Cargo.toml` and the ones `fuzz.yml`
+    /// actually burns must be the same set.
+    ///
+    /// Three files have to agree about this list and none of them can see the
+    /// others: the manifest declares the `[[bin]]`s, the workflow enumerates a
+    /// matrix, and `fuzz/README.md` tells a human how many there are. The
+    /// interesting direction is **manifest-only**: a target added to the
+    /// manifest and forgotten in the matrix compiles, passes the `cargo check`
+    /// step in CI, appears in `cargo fuzz list`, and is never run by anything.
+    /// It looks exactly like coverage and is none.
+    ///
+    /// The other direction fails loudly on its own (`cargo fuzz run` errors on
+    /// an unknown target) but only once a week, so it is checked here too.
+    ///
+    /// `fuzz/` is a separate workspace, so no `cargo` command in the main build
+    /// graph can be made to notice any of this.
+    #[test]
+    fn every_declared_fuzz_target_is_in_the_weekly_burn() {
+        let manifest = crate::read_repo_file(&["fuzz", "Cargo.toml"]);
+        let workflow = crate::read_repo_file(&[".github", "workflows", "fuzz.yml"]);
+
+        // `name = "fuzz_x"` under a `[[bin]]`. Matching on the prefix rather
+        // than on section state keeps this to one pass; the package's own
+        // `name = "duja-fuzz"` does not start with `fuzz_`, and neither does any
+        // dependency key.
+        let mut declared: Vec<String> = manifest
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("name = \""))
+            .filter_map(|rest| rest.strip_suffix('"'))
+            .filter(|name| name.starts_with("fuzz_"))
+            .map(str::to_owned)
+            .collect();
+
+        // A YAML sequence item under the `target:` key. `fuzz_targets` (the
+        // directory) never appears in this shape, and `${{ matrix.target }}` is
+        // not a literal, so neither can be mistaken for an entry.
+        let mut burned: Vec<String> = workflow
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("- "))
+            .filter(|name| name.starts_with("fuzz_"))
+            .map(str::to_owned)
+            .collect();
+
+        declared.sort();
+        burned.sort();
+        assert_eq!(
+            declared, burned,
+            "fuzz/Cargo.toml declares {declared:?} and .github/workflows/fuzz.yml \
+             burns {burned:?}. A target in the manifest and not in the matrix is \
+             a fuzzer that exists, compiles, lists, and is never run."
+        );
+
+        // The tripwire. Both sides are parsed by prefix matching, so a change to
+        // either file's shape could leave both lists empty and the comparison
+        // above vacuously true. Six is the count as of P8 wave 2; the floor is
+        // deliberately below it rather than equal to it, because a *removed*
+        // target is a decision somebody makes on purpose and should not have to
+        // edit an assertion to express.
+        assert!(
+            declared.len() >= 5,
+            "only {} fuzz targets parsed out of fuzz/Cargo.toml - the parse is \
+             broken, not the list",
+            declared.len()
+        );
+    }
+
     /// Every Markdown file under `docs/`, recursively.
     fn markdown_files(dir: &PathBuf) -> Vec<PathBuf> {
         let mut found = Vec::new();

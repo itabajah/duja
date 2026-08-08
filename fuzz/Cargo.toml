@@ -66,3 +66,10 @@ path = "fuzz_targets/fuzz_ddc_packet.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_config_toml"
+path = "fuzz_targets/fuzz_config_toml.rs"
+test = false
+doc = false
+bench = false

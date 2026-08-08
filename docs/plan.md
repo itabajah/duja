@@ -77,7 +77,7 @@ feature area.
 | wave | scope | state |
 |---|---|---|
 | 1 | binary size: measure first, then trim, then gate it ([D-011](debt-archive.md#d-011), [ADR-0012](adr/0012-binary-size-budget-variance.md)) | done - `#144`, D-011 drained |
-| 2 | the fuzz and coverage lanes ([D-002](debt.md#d-002), [D-023](debt.md#d-023)) | pending |
+| 2 | the fuzz and coverage lanes ([D-002](debt-archive.md#d-002), [D-023](debt-archive.md#d-023)) | done - `#145` |
 | 3 | `--soak`, the harness two perf budgets already cite | pending |
 | 4 | the debt drain (`refactor:` PR, the rubric's ~15% time-box) | pending |
 | 5 | the security pass and the docs-truth sweep | pending |
@@ -197,8 +197,8 @@ What the wave owes when it is done:
 
 ### Wave 2 - the fuzz and coverage lanes
 
-[D-002](debt.md#d-002) has been open since P2 and names two workflows;
-[D-023](debt.md#d-023) names the sixth fuzz target and says to land it with
+[D-002](debt-archive.md#d-002) has been open since P2 and names two workflows;
+[D-023](debt-archive.md#d-023) names the sixth fuzz target and says to land it with
 them, which is right - a target nothing runs is a file, not coverage.
 
 - **`fuzz_config_toml`.** `config.toml` is user-editable and parsed through
