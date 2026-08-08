@@ -1,10 +1,12 @@
 # Duja - Project Status
 
-_Last updated: 2026-08-08. **P0 through P8 are closed**, `v0.1.6` shipped the
-two ports that had been held, and **P9 is planned** - the first phase whose
+_Last updated: 2026-08-09. **P0 through P8 are closed**, `v0.1.6` shipped the
+two ports that had been held, and **P9 is in progress** - the first phase whose
 scope was chosen by what the absent hardware still permits, rather than merely
-limited by it ([plan.md](plan.md) has its waves). The ports ship as
-**unverified previews** rather than as confirmed platforms
+limited by it. Six of its rows have drained - five of them in its four waves and
+one that predates them - and the instruments have not started; see
+[plan.md](plan.md). The ports ship as **unverified previews** rather than as
+confirmed platforms
 ([ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md)): the hold was
 self-defeating, because the community confirmations macOS needs to leave
 "experimental" cannot arrive for a build nobody can install. `v0.2.0` and
@@ -45,7 +47,7 @@ verbatim and unpruned, which is where they belong.
 | P6 macOS port | `m6-macos` | done, gate passed |
 | P7 Linux port | `m7-linux` | done, gate run |
 | P8 Hardening | `m8-hardening` | done, gate run, `v1.0.0` held |
-| P9 App-layer seam + instruments | `m9-seam` | in progress - 6 rows drained, instruments left |
+| P9 App-layer seam + instruments | `m9-seam` | in progress - 6 rows drained |
 
 | release | train | state |
 |---|---|---|
@@ -114,12 +116,14 @@ own `display` helper inside its macros.
 
 Measured on this box, 2026-08-08:
 
-- **1,413 tests** pass in a local `cargo test --workspace --all-features`,
+- **1,459 tests** pass in a local `cargo test --workspace --all-features`,
   with a further **8 `#[ignore]`d** on top of that rather than among them - an
   ignored test does not pass, and writing it as "8 of them" was wrong for one
-  edit's lifetime. Re-measured at the `v0.1.6` checkpoint; the P8 gate
-  had found the figure before it 36 low, so it is now re-counted with every
-  release rather than carried forward.
+  edit's lifetime. Re-measured at the P9 checkpoint. The P8 gate found the
+  figure before it 36 low and this bullet then said it would be "re-counted with
+  every release rather than carried forward" - which did not survive contact:
+  `v0.1.6`'s 1,413 was carried through six merged PRs and was 46 low by the time
+  a review caught it. Re-count it at every checkpoint, not every release.
   The per-OS count differs, and deliberately is not enumerated here: the
   `#![cfg(windows)]` and `#![cfg(unix)]` integration suites compile out on the
   other lanes, as do per-OS unit tests spread across roughly two dozen modules.
@@ -159,12 +163,20 @@ Measured on this box, 2026-08-08:
   30 that row records - and when it happens its measured handle drift should
   replace the harness's tolerance constant, which is a reasoned guess and says
   so.
-- **[D-102](debt.md#d-102)'s fixture has landed**, and P9's first four PRs with
-  it. `AppState` is constructible in a test on every lane, behind a recording
-  fake tray, a recording gamma channel and the headless Slint backend, and
-  `tray/state.rs` is at **48.91 %** of regions with 823 uncovered - measured on
-  this tree, up from 11.27 % and 1,031. `tray/update_flow.rs` is at 79.72 %,
-  from 26.89 %. [D-040](debt-archive.md#d-040) drained on the fixture,
+- **[D-102](debt.md#d-102)'s fixture has landed**, and P9's first six PRs with
+  it. Two of those six built it (`#157`, `#159`); `#158` borrows it; `#155` is
+  the plan, and `#156` and `#160` are unrelated to it.
+
+  `AppState` is constructible in a test on every lane, behind a recording
+  fake tray, a recording gamma channel and the headless Slint backend.
+  `tray/state.rs`'s **uncovered regions went 1,031 to 823** across three of
+  those PRs, and [plan.md](plan.md) gives each one's delta - a total credited to
+  any single PR is wrong. The percentage moved 11.27 % to 48.91 % and is the
+  flattered number: the file grew 1,162 regions to 1,611, since a fixture's own
+  body counts as covered. `tray/update_flow.rs` moved 26.89 % to 73.08 % on the
+  fixture and 73.08 % to 79.72 % on the config-cap PR after it - none of it on
+  the gamma seam, which is worth saying inside a bullet a reader would otherwise
+  credit for all of it. [D-040](debt-archive.md#d-040) drained on the fixture,
   and [D-016](debt-archive.md#d-016) plus [D-065](debt-archive.md#d-065) on the
   gamma seam that followed it, each proven red at its historical site.
   [D-059](debt.md#d-059) is the one still open, and it needs neither - it wants
