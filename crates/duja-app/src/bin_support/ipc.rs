@@ -121,14 +121,17 @@ impl IpcBridge for TrayBridge {
     fn set_level(&self, id: &str, pct: u8) -> bool {
         // Resolve the stable id off the engine snapshot (also the existence
         // check), then apply on the main thread through the flyout's own path.
-        let Some(target) = self
-            .snapshot()
-            .into_iter()
-            .find(|snap| snap.id.as_str() == id)
-        else {
+        //
+        // The lookup itself is `duja_app::ipc::find_by_id` rather than a local
+        // `find`, because this used to be a verbatim copy of the one in
+        // `HeadlessBridge::set_level` and this copy was the untested one. Two
+        // spellings of "which display does this id name" is one more than the
+        // protocol has.
+        let snapshot = self.snapshot();
+        let Some(target) = duja_app::ipc::find_by_id(&snapshot, id) else {
             return false;
         };
-        crate::bin_support::tray::ipc_apply_set_level(target.id, pct);
+        crate::bin_support::tray::ipc_apply_set_level(target.id.clone(), pct);
         true
     }
 

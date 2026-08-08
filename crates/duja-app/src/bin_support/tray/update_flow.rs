@@ -116,3 +116,68 @@ fn update_status_from(outcome: UpdateOutcome) -> UpdateStatus {
         UpdateOutcome::Failed(_) => UpdateStatus::Failed,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The one item in this file that is not an [`AppState`] method, and so the
+    //! one a test can reach until [`D-102`]'s refactor lands. The rest of the
+    //! module measured 0 % at the `v0.1.6` checkpoint for that reason.
+    //!
+    //! [`D-102`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-102
+
+    use super::update_status_from;
+    use crate::bin_support::updates::UpdateOutcome;
+    use duja_ui::UpdateStatus;
+
+    #[test]
+    fn every_outcome_maps_to_its_own_status() {
+        assert_eq!(
+            update_status_from(UpdateOutcome::UpToDate),
+            UpdateStatus::UpToDate
+        );
+        assert_eq!(
+            update_status_from(UpdateOutcome::UpdateAvailable {
+                version: "v9.9.9".to_owned()
+            }),
+            UpdateStatus::Available {
+                version: "v9.9.9".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_failure_reports_failed_rather_than_up_to_date() {
+        // The arm worth pinning. `UpToDate` and `Failed` both render as "no
+        // update", so transposing them is invisible in the settings window and
+        // silently tells a user on a broken network that they are current.
+        assert_eq!(
+            update_status_from(UpdateOutcome::Failed("connection refused".to_owned())),
+            UpdateStatus::Failed
+        );
+        // The reason string is deliberately dropped rather than surfaced: the
+        // settings window shows a neutral line, per `UpdateOutcome::Failed`'s own
+        // doc. Pinned so a future "helpful" change to show it has to change this
+        // test and read that doc on the way past.
+        assert_eq!(
+            update_status_from(UpdateOutcome::Failed(String::new())),
+            UpdateStatus::Failed
+        );
+    }
+
+    #[test]
+    fn the_version_string_is_carried_through_unaltered() {
+        // Not cosmetic: the same string is what `PlatformTray::announce_update`
+        // renders into the tray menu, so a mapping that trimmed or re-formatted
+        // it here would desynchronise the menu from the settings window.
+        for v in ["v1.0.0", "0.1.6", "v2.0.0-rc.1"] {
+            assert_eq!(
+                update_status_from(UpdateOutcome::UpdateAvailable {
+                    version: v.to_owned()
+                }),
+                UpdateStatus::Available {
+                    version: v.to_owned()
+                }
+            );
+        }
+    }
+}

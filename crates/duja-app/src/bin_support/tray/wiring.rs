@@ -345,3 +345,86 @@ fn spawn_notification_bridge(notifications: crossbeam_channel::Receiver<EngineNo
         })
         .ok();
 }
+
+#[cfg(test)]
+mod tests {
+    //! [`D-102`]'s experiment, and nothing else.
+    //!
+    //! Four debt rows ([`D-016`], [`D-040`], [`D-059`], [`D-065`]) defer on one
+    //! sentence: that `AppState` "cannot be constructed in a test". D-102
+    //! re-triaged that sentence and found half of it already false — `#134`
+    //! removed the `tray_icon::TrayIcon` field, and `duja-ui` had been building
+    //! both Slint shells headless in its own suite all along. What D-102 listed
+    //! as **not verified** was the remaining half: whether `build_tray` actually
+    //! refuses in a test process, or whether that had only ever been assumed.
+    //!
+    //! This module answers exactly that and stops. It is deliberately not a step
+    //! toward constructing `AppState`: that is a refactor, it wants its own PR,
+    //! and D-102's whole point is that the refactor should not be planned before
+    //! the measurement exists.
+    //!
+    //! [`D-102`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-102
+    //! [`D-016`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-016
+    //! [`D-040`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-040
+    //! [`D-059`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-059
+    //! [`D-065`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-065
+
+    /// Does `build_tray` succeed in a test process?
+    ///
+    /// **`#[ignore]`d on purpose, and it must stay that way.** On Windows this
+    /// reaches `CreateWindowExW` + `Shell_NotifyIconW`, so on a developer's
+    /// interactive desktop a passing run puts a real Duja icon in the real
+    /// notification area for as long as the value lives. That is fine to do
+    /// deliberately and wrong to do on every `cargo test`; on a CI runner it is a
+    /// session-dependent answer, which is the kind that turns green into noise.
+    ///
+    /// Run it by hand:
+    ///
+    /// ```text
+    /// cargo test -p duja-app --bin duja -- --ignored --nocapture d102
+    /// ```
+    ///
+    /// It asserts nothing about which way the answer goes. The outcome IS the
+    /// result — a row in `docs/debt.md` is what changes, not a red bar — and an
+    /// assertion here would only pin whichever session the author happened to
+    /// run it in.
+    #[test]
+    #[ignore = "D-102 experiment: touches the real desktop session; run by hand"]
+    fn d102_can_build_tray_be_constructed_headless() {
+        let outcome = super::build_tray(duja_ui::AccentChoice::default());
+        let Ok(mut tray) = outcome else {
+            let e = outcome.err().map(|e| format!("{e:#}")).unwrap_or_default();
+            println!("D-102: build_tray REFUSED in a test process: {e}");
+            return;
+        };
+        println!("D-102: build_tray SUCCEEDED in a test process.");
+
+        // "Constructs" and "is usable" are different claims, and only the second
+        // one is what the four rows need — a field `AppState` can hold but not
+        // drive is no better than one it cannot build. So exercise all three of
+        // the seam's verbs, which is the entire surface `AppState` touches.
+        for (verb, result) in [
+            (
+                "set_accent",
+                tray.set_accent(duja_ui::AccentChoice::default()),
+            ),
+            ("set_tooltip", tray.set_tooltip(Some("D-102 probe"))),
+            ("announce_update", tray.announce_update("v0.0.0-probe")),
+            // Twice: `announce_update` is idempotent by a flag on this backend,
+            // and the second call is the one that would trip a double-prepend.
+            (
+                "announce_update (again)",
+                tray.announce_update("v0.0.1-probe"),
+            ),
+        ] {
+            match result {
+                Ok(()) => println!("D-102:   {verb} -> ok"),
+                Err(e) => println!("D-102:   {verb} -> REFUSED: {e:#}"),
+            }
+        }
+
+        // Explicit, so the icon does not outlive the test on a pass and the drop
+        // is inside the measured window rather than after it.
+        drop(tray);
+    }
+}
