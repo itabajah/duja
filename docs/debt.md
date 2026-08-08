@@ -130,7 +130,6 @@ argument.
 | [D-110](#d-110) | P8 wave 1 | `.github/workflows/` + `xtask` `size.rs` | The binary-size budget is gated at release time only, so a dependency bump that adds a megabyte is caught by the next release rather than by the PR |
 | [D-111](#d-111) | P8 wave 3, **90s run** `v0.1.6` | `duja-app` `--soak` + `.github/workflows/` | The soak has never been run for longer than 90 seconds, and nothing runs a short one in CI |
 | [D-112](#d-112) | P8 gate | `duja-app` `--soak` + `duja-dimmer` `win/` | The soak's GDI/USER counters are structurally near-zero: everything that moves them lives in the dimmer and gamma sink, which it does not build |
-| [D-113](#d-113) | P8 gate | `duja-core` `config/persist.rs` | The 1 MiB cap is on reads only, so Duja can write a config it will then refuse to read - and the state path overwrites rather than propagates |
 
 ## Rows
 
@@ -965,18 +964,6 @@ What does move those counters is entirely outside the harness: `CreateSolidBrush
 The first version of the module header made this worse by justifying the IPC server's inclusion as "the single most plausible source of the handle leak the GDI/USER counters exist to catch" - conflating kernel handles with GUI objects, and thereby arguing that the harness covered the thing it structurally cannot. The header now says the opposite in as many words.
 
 **Why deferred.** Closing it means the soak assembling a `PlatformDimmer` and a gamma sink, which is a materially different harness: those need a real desktop session, they engage overlays and ramps on the operator's actual screen for the duration of the run, and a 24-hour soak that dims someone's monitors for 24 hours is not a thing to build casually. The cheap half - counting *kernel* handles with `GetProcessHandleCount`, which would cover the IPC server the header was reaching for - is a smaller job and probably the right first step
-
-### D-113
-
-**Where:** `duja-core` `config/persist.rs` &nbsp;·&nbsp; **Added:** P8 gate
-
-**The config size cap is asymmetric, in two ways that compound.** `read_to_string_opt` refuses anything over `MAX_CONFIG_LEN`; `write_atomic` has no cap at all. `[monitors]` and `[hotkeys]` are both unbounded by the schema and the document layer is format-preserving, so **Duja can write a file it will subsequently refuse to read.**
-
-What happens then differs by file, and the difference is not one anybody chose. `settings_apply::persist_config_change` propagates, so every settings write from the tray fails while the app stays up - recoverable only by editing the file by hand, with no UI telling the user which file. `state_store::load` does the opposite: it logs, substitutes `StateFile::default()`, and the next `record()` marks it dirty, so the flush **atomically overwrites the user's state file with defaults**. An over-cap-but-valid `state.toml` loaded fine before P8 wave 5 and is now read as garbage and then destroyed.
-
-Both are remote: `state.toml` is tens of bytes per display, so roughly thirteen thousand entries. The cap is still the right call - the alternative was a policy claiming a control that did not exist. But the asymmetry is a decision that was never made, only arrived at.
-
-**Why deferred.** The fix is not just a write-side cap. It is a decision about what the app *tells the user*, and that is UI work: `ConfigError::TooLarge` needs to reach the settings window with the path, and the state path needs to refuse to overwrite what it could not read rather than silently replacing it. A write-side cap alone would turn "settings writes fail" into "settings writes fail slightly earlier"
 
 ### D-102
 

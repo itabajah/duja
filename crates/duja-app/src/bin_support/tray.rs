@@ -801,9 +801,55 @@ fn bounds_updating_enumerator(bounds: Arc<Mutex<BoundsMap>>) -> duja_app::Enumer
 ///
 /// The platform call itself lives in `duja_platform::desktop`; this wrapper is
 /// only the logging policy, which is the app's to decide.
+/// # Under `cfg(test)` this records instead of opening, and that is not optional
+///
+/// `duja_platform::open_url` is a real `ShellExecuteW`. It is not inert in a
+/// test process: an `AppState` test that reaches `Action::OpenReleases` or
+/// `SettingsCommand::OpenReleasesPage` **launches the operator's browser**, and
+/// one did - on every `cargo test`, measured through browser process start
+/// times.
+///
+/// That is the hazard `toast::notify_update_available` was given a seam for one
+/// commit earlier, in a message that even names this call ("opened the releases
+/// page if clicked"). The rule was written down and then walked past into the
+/// un-seamed sibling on the same code path. So the sibling has the seam too, and
+/// the same `cfg!` **expression** rather than a `#[cfg]` attribute, so
+/// `duja_platform::open_url` stays referenced and linted in the test profile.
 fn open_url(url: &str) {
+    if cfg!(test) {
+        #[cfg(test)]
+        opened::record(url);
+        return;
+    }
     if let Err(failure) = duja_platform::open_url(url) {
         warn!(url, code = ?failure.code, "failed to open the releases page");
+    }
+}
+
+/// What [`open_url`] was asked to open, for the tests that would otherwise have
+/// opened it. Thread-local, so tests on different threads cannot see each
+/// other's.
+#[cfg(test)]
+pub(crate) mod opened {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static URLS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Record one URL instead of opening it.
+    pub(super) fn record(url: &str) {
+        URLS.with(|urls| urls.borrow_mut().push(url.to_owned()));
+    }
+
+    /// Every URL opened on this thread so far, oldest first.
+    pub(crate) fn urls() -> Vec<String> {
+        URLS.with(|urls| urls.borrow().clone())
+    }
+
+    /// Forget everything recorded on this thread.
+    pub(crate) fn clear() {
+        URLS.with(|urls| urls.borrow_mut().clear());
     }
 }
 

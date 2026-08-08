@@ -130,10 +130,39 @@ pub(crate) fn read_capped(reader: impl std::io::Read) -> Result<String, ConfigEr
 /// The write is durable and crash-safe: it lands in a same-directory temporary
 /// file that is flushed and fsynced before an atomic rename replaces `path`.
 ///
+/// # The cap is on this side too, and it was not
+///
+/// [`read_to_string_opt`] refuses anything over [`MAX_CONFIG_LEN`] and this
+/// function used to refuse nothing, so **Duja could write a file it would
+/// subsequently refuse to read**. `[monitors]` and `[hotkeys]` are both
+/// unbounded by the schema and the document layer is format-preserving, so
+/// unknown keys and comments accumulate across a load-save round trip as well.
+///
+/// Refusing here rather than at the next read is not merely earlier, which is
+/// what a first draft of `docs/debt-archive.md` D-113 assumed. It is the
+/// difference between a failure the *acting* user sees and one that surfaces at
+/// some later launch to whoever is sitting there - and, for `state.toml`,
+/// between a write that is refused and one that lands and is then refused *on
+/// the way back in*, leaving the user's levels to be replaced by defaults.
+/// ("Read as garbage" is what D-113 says and it is not what happens: an
+/// over-cap file is not read at all.) `duja-app`'s `state_store` carries that
+/// other half.
+///
 /// # Errors
-/// [`ConfigError::Io`] if the directory cannot be created, the temporary file
-/// cannot be written or fsynced, or the rename fails.
+/// - [`ConfigError::TooLarge`] if `contents` exceeds [`MAX_CONFIG_LEN`], before
+///   anything is created or written.
+/// - [`ConfigError::Io`] if the directory cannot be created, the temporary file
+///   cannot be written or fsynced, or the rename fails.
 pub fn write_atomic(path: &Path, contents: &str) -> Result<(), ConfigError> {
+    // Before `create_dir_all`, deliberately: a refused write must leave the
+    // filesystem exactly as it found it, including not creating a config
+    // directory for a document that is never going to land in it.
+    if contents.len() > MAX_CONFIG_LEN {
+        return Err(ConfigError::TooLarge {
+            at_least: contents.len() as u64,
+            max: MAX_CONFIG_LEN,
+        });
+    }
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
     if let Some(dir) = parent {
         fs::create_dir_all(dir).map_err(ConfigError::Io)?;
@@ -169,6 +198,69 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A document over the cap is refused **before** anything reaches the disk.
+    ///
+    /// D-113's headline: the read side capped and the write side did not, so
+    /// Duja could write a file it would subsequently refuse to read. Goes red
+    /// against the pre-fix `write_atomic`, which wrote the file and returned
+    /// `Ok(())` - and then `read_to_string_opt` on the same path returned
+    /// `TooLarge`, which is the round trip this asserts cannot happen.
+    #[test]
+    fn a_document_over_the_cap_is_refused_rather_than_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let oversized = "x".repeat(MAX_CONFIG_LEN + 1);
+
+        match write_atomic(&path, &oversized) {
+            Err(ConfigError::TooLarge { at_least, max }) => {
+                assert_eq!(at_least, oversized.len() as u64);
+                assert_eq!(max, MAX_CONFIG_LEN);
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+        assert!(
+            !path.exists(),
+            "a refused write must leave nothing behind, not a partial file"
+        );
+    }
+
+    /// The write cap and the read cap agree at the boundary.
+    ///
+    /// Two caps written as two comparisons is two places for an off-by-one, and
+    /// the failure it would produce is exactly the one this row is about: a
+    /// document that writes and then will not read. Exactly the cap is legal on
+    /// both sides.
+    #[test]
+    fn a_document_of_exactly_the_cap_survives_the_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let at_the_line = "x".repeat(MAX_CONFIG_LEN);
+
+        write_atomic(&path, &at_the_line).expect("exactly the cap is within it");
+        let read_back = read_to_string_opt(&path).expect("and reads back");
+        assert_eq!(read_back.as_deref(), Some(at_the_line.as_str()));
+    }
+
+    /// A refused write does not create the config directory either.
+    ///
+    /// `write_atomic` does `create_dir_all` before it writes, so a cap check
+    /// placed after it would leave an empty `%APPDATA%\Duja\` behind on a first
+    /// run that failed - which reads to the next launch, and to a user looking
+    /// at their filesystem, as though Duja had got further than it did.
+    #[test]
+    fn a_refused_write_does_not_create_the_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nested = dir.path().join("Duja").join("config.toml");
+
+        let refused = write_atomic(&nested, &"x".repeat(MAX_CONFIG_LEN + 1));
+
+        assert!(matches!(refused, Err(ConfigError::TooLarge { .. })));
+        assert!(
+            !dir.path().join("Duja").exists(),
+            "the parent directory must not have been created"
+        );
+    }
 
     /// `SECURITY.md` claims "typed parsing only, **size caps**" for these files,
     /// and until P8 wave 5 there was no cap: `read_to_string` allocated whatever
