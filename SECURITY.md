@@ -96,8 +96,8 @@ Linux `.tar.gz`) with `gh attestation verify <file> --repo itabajah/duja`.
 (`SHA256SUMS` and the `.minisig` files are not attested; they are covered by
 minisign above.)
 
-All four are published as of `v0.1.6`, and **two of them are previews**. The
-macOS `.dmg` and the Linux `.tar.gz` carry the same checksums, minisign
+From `v0.1.6` onward all four are published, and **two of them are previews**.
+The macOS `.dmg` and the Linux `.tar.gz` carry the same checksums, minisign
 signatures and provenance attestation as the Windows artifacts, and **nobody has
 run either one on the hardware it targets**. They were held until `v0.1.6` for
 exactly that reason; [ADR-0024](docs/adr/0024-preview-artifacts-on-the-patch-train.md)
