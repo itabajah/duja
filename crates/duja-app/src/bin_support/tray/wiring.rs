@@ -369,7 +369,15 @@ mod tests {
     //! [`D-059`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-059
     //! [`D-065`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-065
 
-    /// Does `build_tray` succeed in a test process?
+    /// Does `build_tray` succeed inside a **test process**, on a live desktop
+    /// session?
+    ///
+    /// **Read the name literally, because an earlier one did not.** This was
+    /// called `..._headless` until review, and that word named the one thing the
+    /// run does not measure: it executes on an interactive session, so what it
+    /// answers is "does the constructor refuse merely because its process is a
+    /// test binary?" — not "does it work with no session at all", which is the
+    /// CI question the four rows actually need and which nobody has measured.
     ///
     /// **`#[ignore]`d on purpose, and it must stay that way.** On Windows this
     /// reaches `CreateWindowExW` + `Shell_NotifyIconW`, so on a developer's
@@ -390,7 +398,7 @@ mod tests {
     /// run it in.
     #[test]
     #[ignore = "D-102 experiment: touches the real desktop session; run by hand"]
-    fn d102_can_build_tray_be_constructed_headless() {
+    fn d102_build_tray_in_a_test_process_on_a_live_session() {
         let outcome = super::build_tray(duja_ui::AccentChoice::default());
         let Ok(mut tray) = outcome else {
             let e = outcome.err().map(|e| format!("{e:#}")).unwrap_or_default();
@@ -410,8 +418,14 @@ mod tests {
             ),
             ("set_tooltip", tray.set_tooltip(Some("D-102 probe"))),
             ("announce_update", tray.announce_update("v0.0.0-probe")),
-            // Twice: `announce_update` is idempotent by a flag on this backend,
-            // and the second call is the one that would trip a double-prepend.
+            // Twice, and the honest reason is narrower than the first comment
+            // here claimed. It said the second call "is the one that would trip
+            // a double-prepend"; it cannot be. The Windows arm returns early on
+            // `update_shown` and never reaches `prepend_items` again, and the
+            // Linux arm has no flag at all. What the repeat actually shows is
+            // that the *relabel* path — `set_text` on an item already in a live
+            // menu — is reachable from a test process, which is a different call
+            // into the OS from the prepend and worth knowing separately.
             (
                 "announce_update (again)",
                 tray.announce_update("v0.0.1-probe"),
@@ -423,8 +437,11 @@ mod tests {
             }
         }
 
-        // Explicit, so the icon does not outlive the test on a pass and the drop
-        // is inside the measured window rather than after it.
+        // Explicit rather than at end of scope. It buys one thing only, and not
+        // the two an earlier comment here claimed: it puts the drop *before* the
+        // `println!`-free tail so the icon leaves the notification area at a
+        // known point rather than an incidental one. Nothing is "measured", and
+        // scope-end would free it either way.
         drop(tray);
     }
 }

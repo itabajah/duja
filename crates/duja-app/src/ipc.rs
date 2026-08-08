@@ -95,13 +95,25 @@ pub fn handle_request(bridge: &dyn IpcBridge, request: Request) -> Response {
 /// `find(|snap| snap.id.as_str() == id)` that used to sit in [`handle_request`]'s
 /// `GetBrightness` arm, in [`HeadlessBridge::set_level`], and in the binary's
 /// `TrayBridge::set_level`. The three were identical and only two of them were
-/// ever reached by a test - the binary's copy measured **0 %** at the `v0.1.6`
-/// checkpoint - so a change to the matching rule in one place would have left the
-/// tray path silently disagreeing with the headless one about which display a
-/// `dujactl set` names.
+/// ever reached by a test — the binary's copy measured **0 %** of regions on
+/// 2026-08-08 — so a change to the matching rule in one place would have left
+/// the tray path silently disagreeing with the headless one about which display
+/// a `dujactl set` names.
 ///
 /// Public because the third caller lives in the binary crate, which is the whole
 /// reason the duplication existed.
+///
+/// **This is not the only id-matching rule in the codebase, and it should not
+/// become one.** [`duja_core::id::select_slot_match`] resolves a `-slot<n>`
+/// twin against the hardware and is what `backend.rs` and `dujactl` use. The
+/// two are deliberately different: a snapshot id already carries its slot
+/// suffix, so the IPC surface wants exact equality and nothing cleverer.
+/// Matching becomes wrong here the moment it starts guessing.
+///
+/// Ties are resolved first-wins. The manager gives twins distinct ids, so a
+/// duplicate is a defect upstream rather than a case to define policy for —
+/// but the behaviour is pinned by a test so a later `.rev()` or `.filter().last()`
+/// is a decision rather than an accident.
 #[must_use]
 pub fn find_by_id<'a>(snapshot: &'a [DisplaySnapshot], id: &str) -> Option<&'a DisplaySnapshot> {
     snapshot.iter().find(|snap| snap.id.as_str() == id)
@@ -229,6 +241,23 @@ mod tests {
         assert!(find_by_id(&table, &truncated).is_none());
         assert!(find_by_id(&table, &format!("{full}X")).is_none());
         assert!(find_by_id(&table, &full).is_some());
+    }
+
+    #[test]
+    fn a_duplicate_id_resolves_to_the_first_row() {
+        // The one behavioural property the hoist froze into a *public* function
+        // and that nothing else pinned: which row wins a tie. The manager gives
+        // twins distinct `-slot<n>` ids, so a duplicate here is an upstream
+        // defect rather than a supported case - but "first wins" is now the
+        // documented answer, and `.rev()` or `.filter(..).last()` would stay
+        // green without this.
+        let (first, shadow) = (snap("AAA", 11), snap("AAA", 99));
+        let id = first.id.as_str().to_owned();
+        assert_eq!(id, shadow.id.as_str(), "the fixture must actually collide");
+        let table = vec![first, shadow];
+
+        let hit = find_by_id(&table, &id).expect("the id is in the table");
+        assert_eq!(hit.user_level_pct, 11, "first match wins, not last");
     }
 
     /// A fake bridge over a fixed table; records `set_level` calls.

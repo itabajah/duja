@@ -121,7 +121,7 @@ fn update_status_from(outcome: UpdateOutcome) -> UpdateStatus {
 mod tests {
     //! The one item in this file that is not an [`AppState`] method, and so the
     //! one a test can reach until [`D-102`]'s refactor lands. The rest of the
-    //! module measured 0 % at the `v0.1.6` checkpoint for that reason.
+    //! module measured 0 % of regions on 2026-08-08, for that reason.
     //!
     //! [`D-102`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-102
 
@@ -147,9 +147,15 @@ mod tests {
 
     #[test]
     fn a_failure_reports_failed_rather_than_up_to_date() {
-        // The arm worth pinning. `UpToDate` and `Failed` both render as "no
-        // update", so transposing them is invisible in the settings window and
-        // silently tells a user on a broken network that they are current.
+        // The arm worth pinning, though not for the reason first written here.
+        // That comment said the two "both render as 'no update', so transposing
+        // them is invisible in the settings window" - and review disproved it:
+        // `settings_shell.rs` renders "Up to date" and "Couldn't check for
+        // updates", which are plainly different lines. What is true is the
+        // consequence: a user whose check failed is told they are current, which
+        // is the one wrong answer this mapping can give that a user will act on.
+        // What genuinely collapses the two is `SettingsVm::has_update()`, a
+        // different surface with its own tests.
         assert_eq!(
             update_status_from(UpdateOutcome::Failed("connection refused".to_owned())),
             UpdateStatus::Failed
@@ -166,9 +172,15 @@ mod tests {
 
     #[test]
     fn the_version_string_is_carried_through_unaltered() {
-        // Not cosmetic: the same string is what `PlatformTray::announce_update`
-        // renders into the tray menu, so a mapping that trimmed or re-formatted
-        // it here would desynchronise the menu from the settings window.
+        // The settings window prints this string, so trimming or re-formatting
+        // it here changes what a user reads.
+        //
+        // It does NOT desynchronise the tray menu, which is what this comment
+        // claimed until review: `on_update_outcome` passes the tray its version
+        // from `outcome` directly, never from this function's output, so the two
+        // paths are independent. Worth keeping the correction rather than the
+        // tidier wrong reason, because "these two surfaces share a string" is
+        // exactly the kind of belief that makes a later refactor merge them.
         for v in ["v1.0.0", "0.1.6", "v2.0.0-rc.1"] {
             assert_eq!(
                 update_status_from(UpdateOutcome::UpdateAvailable {
