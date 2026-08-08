@@ -11,7 +11,6 @@
 //! per-function `optsize` attributes, which is not the same guarantee as a
 //! whole-program `-O3` build.
 //!
-
 //! This module is the measurement the argument never had.
 //!
 //! # What it does not measure, said before what it does
@@ -40,7 +39,8 @@
 //! `set_content_height` on every present, and
 //! [`crate::layout::flyout_logical_height`] gives **397** for three monitors.
 //! So a third card fell off the bottom edge and the published timing was a
-//! two-card flyout labelled as three, about a quarter low.
+//! two-card flyout labelled as three: the mean ran about 18 per cent low, and a
+//! third of the pixels the app pushes were outside the measurement.
 //!
 //! Both of this module's "did it draw" checks passed the whole time, which is
 //! the part worth keeping. The drawn-area check re-asserted the size the probe
@@ -62,7 +62,7 @@
 //! [D-109]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-109
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -129,8 +129,14 @@ pub struct Frame {
     pub elapsed: Duration,
     /// The area of the region the renderer reported drawing.
     pub drawn_pixels: u64,
-    /// How many pixels in the buffer differ from its top-left (background)
-    /// pixel.
+    /// How many pixels in the buffer differ from the buffer's **most common**
+    /// value.
+    ///
+    /// Deliberately literal: it is *not* "pixels that are not background". The
+    /// modal colour is the window background at 0 and 1 rows and the card fill
+    /// from 2 rows on, and at 3 rows about three quarters of what this counts
+    /// is window background. It is a coarse proxy for "content reached the
+    /// layout", and it is not monotone in the row count.
     pub content_pixels: u64,
 }
 
@@ -347,28 +353,47 @@ fn install() -> Result<Rc<MinimalSoftwareWindow>, PlatformError> {
 /// at all - the same shape of false signal as the drawn-area check it was
 /// written to compensate for, found the same way, one round later.
 ///
-/// The mode is the panel fill, so this counts pixels that are not background:
-/// cards, text, sliders and pills.
+/// # What the mode actually is, measured rather than assumed
+///
+/// A first version of this doc said "the mode is the panel fill, so this counts
+/// pixels that are not background". Both halves are wrong. Measured on the dark
+/// theme, the modal colour is `Palette.bg` (the window background) at 0 and 1
+/// rows and `Palette.surface` (the **card** fill) from 2 rows on - it flips
+/// identity between the first two points any test compares - and at 3 rows
+/// roughly three quarters of the pixels this counts *are* window background.
+///
+/// So the honest description is the literal one: **pixels unequal to the
+/// buffer's most common colour**. That is a proxy for "content reached the
+/// layout", not a measure of it, and it is deliberately a coarse one. It is
+/// **not monotone** in the row count: the first monitor lowers it (the card
+/// fill displaces background that was already being counted) and it saturates
+/// once the window reaches its 620 px clamp. What it does reliably is separate
+/// a card that rendered from a card that fell off the bottom edge, which is the
+/// one question it exists to answer.
 fn content_pixels(buffer: &[PremultipliedRgbaColor]) -> u64 {
     fn key(px: PremultipliedRgbaColor) -> u32 {
         u32::from_be_bytes([px.alpha, px.red, px.green, px.blue])
     }
 
-    let mut histogram: HashMap<u32, u64> = HashMap::new();
+    let mut histogram: BTreeMap<u32, u64> = BTreeMap::new();
     for px in buffer {
         let slot = histogram.entry(key(*px)).or_insert(0);
         *slot = slot.saturating_add(1);
     }
-    let Some(background) = histogram
+    // Tie-broken on the colour key, not left to iteration order: a `HashMap`
+    // with a random state and a bare `max_by_key` would pick a different mode
+    // between runs whenever two colours tie, and the closest margin measured
+    // here is 728 pixels out of 64,080. Deterministic is cheap.
+    let Some(modal) = histogram
         .iter()
-        .max_by_key(|entry| *entry.1)
-        .map(|entry| *entry.0)
+        .max_by_key(|(colour, count)| (**count, **colour))
+        .map(|(colour, _)| *colour)
     else {
         return 0;
     };
     buffer
         .iter()
-        .filter(|px| key(**px) != background)
+        .filter(|px| key(**px) != modal)
         .fold(0_u64, |acc, _| acc.saturating_add(1))
 }
 

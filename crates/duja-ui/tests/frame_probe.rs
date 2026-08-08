@@ -110,8 +110,8 @@ fn the_probe_window_is_the_size_the_app_presents() {
     }
 }
 
-/// **Content has to reach the buffer, and more monitors have to mean more of
-/// it.**
+/// **A third monitor must put a whole card's worth of new pixels on the
+/// screen.**
 ///
 /// This is the assertion that would have caught the sizing defect, and the
 /// drawn-area check provably would not have: under `NewBuffer` the region the
@@ -122,8 +122,17 @@ fn the_probe_window_is_the_size_the_app_presents() {
 /// sizing its window from the markup default and skipping `set_content_height`),
 /// a third monitor adds **168** content pixels. With the window sized the way
 /// the app presents it, the same monitor adds **14,161**.
+///
+/// **Deliberately 1, 2 and 3 rather than a monotonicity claim.** The count is
+/// pixels unequal to the buffer's modal colour, and the mode is not a fixed
+/// thing: it is the window background at 0 and 1 rows and the card fill from 2
+/// on, and it saturates once the window hits its 620 px clamp. So the sequence
+/// is **not** monotone - the first monitor lowers the count by about 2,650 and
+/// the sixth by about 15,600 - and a test named for "every extra monitor" would
+/// have been asserting something false. What is stable, and what the sizing
+/// defect breaks, is that a card which fits adds a card's worth.
 #[test]
-fn each_extra_monitor_puts_more_content_on_the_screen() {
+fn a_third_monitor_adds_a_whole_card_of_pixels() {
     let content = |n: usize| {
         frame_probe::probe(4, monitors(n))
             .expect("the flyout renders headless")
@@ -131,11 +140,7 @@ fn each_extra_monitor_puts_more_content_on_the_screen() {
             .expect("a run with frames in it has a content count")
     };
 
-    let (one, two, three) = (content(1), content(2), content(3));
-    assert!(
-        two > one,
-        "a second monitor drew no more content than one: {one} then {two}"
-    );
+    let (two, three) = (content(2), content(3));
     assert!(
         three > two,
         "a third monitor drew no more content than two: {two} then {three}"
@@ -187,6 +192,18 @@ fn the_flyout_renders_inside_the_frame_budget() {
         stats.verdict(),
     );
 
+    // **Restored after a review demonstrated its absence.** This assertion was
+    // in the first version, was dropped when the test was rewritten to fix the
+    // sizing defect, and its absence let this exact run go green on that very
+    // defect: it printed `size=360x397 ... drawn=Some(93600)/142920` and passed,
+    // because `--ignored` filters out the always-on test that checks it. This is
+    // the run whose numbers get written into `docs/perf-budgets.md`, so it is
+    // the last place the check should be missing.
+    assert_eq!(
+        stats.least_drawn_pixels(),
+        Some(u64::from(width).saturating_mul(u64::from(height))),
+        "every frame must redraw the full {width}x{height} window"
+    );
     assert_eq!(
         stats.verdict(),
         Verdict::Pass,
