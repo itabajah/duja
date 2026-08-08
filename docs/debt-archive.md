@@ -45,6 +45,7 @@ refusing to renumber.
 | [D-023](#d-023) | ~~P6 (audit 2026-07-13)~~ | `fuzz/` | ~~Add the `fuzz_config_toml` target~~ - **drained in P8 wave 2**, landed with the workflow that runs it, exactly as the row asked |
 | [D-108](#d-108) | ~~P7 gate~~ | `duja-app` `tray/state.rs` `begin_quit` | ~~Every clean quit writes identity gamma to every display, including ones Duja never touched~~ - **drained in P8 wave 4** |
 | [D-114](#d-114) | ~~`v0.1.6` checkpoint~~ | `xtask` `size.rs`/`dist.rs` + `main.rs` | ~~Both subcommands take `std::env::Args`, a type no test can construct, so neither one's argument parsing is reachable by a test~~ - **drained in `#156`**, and the measurement disproved half of the row: `dist`'s parsing was already reachable, though not fully covered |
+| [D-040](#d-040) | ~~v0.1.1 (deep review) -> narrowed in `#82`~~ | `duja-app` `tray/state.rs` | ~~The throttle-final-value contract is pinned at the `duja-ui` end and the engine end, and the app layer between them is unpinned~~ - **drained in `#157`**, by the `AppState` fixture the row said it needed, and proven red at both of its two sites |
 
 ## Rows
 
@@ -365,3 +366,20 @@ The consequence is the part worth keeping. The row explained `dist.rs`'s **41.78
 **And making the parsing reachable immediately found a defect in it**, which is the argument for the row rather than against it. `size`'s loop took the token after `--target` unconditionally, so `cargo xtask size --target --release` set the triple to `--release`, looked under `target/--release/release`, and reported a *missing binary* at a path the user never typed - a message about the wrong problem entirely, on the tool a maintainer runs while cutting a release. `dist` had already decided that was wrong and guarded it with a flag-shaped-value check; the two subcommands had simply drifted. The check is now `xtask::args::value`, one rule in one place, and the red-first proof is at the site: `a_flag_shaped_target_value_is_refused_rather_than_used_as_a_directory` fails against `size`'s own loop with `Invocation { triple: Some("--release") }` and passes once the shared rule is routed in.
 
 **What did not change, and deliberately.** A repeated `--target` still takes the last value rather than erroring, which is the GNU convention and what `dist` does with its own flags; it is now pinned by a test, because it is the one argument rule here that is a *choice* rather than a rejection and nothing else recorded it. The integration-test route the row mentioned in passing - spawning the built binary - was not taken and is not owed: it costs a release-profile build per case to reach rules a pure function now answers in microseconds
+### D-040
+
+**Where:** `duja-app` `tray/state.rs` &nbsp;·&nbsp; **Added:** ~~v0.1.1 (deep review) -> narrowed in `#82`~~
+
+~~**The app layer between the `duja-ui` pin and the engine pin is unpinned.**~~ - **drained in `#157`**, with exactly the refactor this row named: `AppState` is now constructible in a test, so `set_user_level` and `on_ui_command`'s `SetLevel` arm are executed rather than reasoned about. `a_slider_drag_forwards_every_sample_and_the_released_value_last` drives six samples through `set_user_level` and asserts both that all six reach the engine and that the released one is last; `the_ui_command_arm_forwards_every_sample_too` does the same through the other entry point.
+
+**Two tests rather than one, because the row named two sites.** `#82`'s rule is that a defect is re-inserted where it *historically occurred* rather than where a test can reach it, and this contract has two such places. A throttle added to `on_ui_command`'s arm leaves `set_user_level` untouched, so a single test that reached the deeper site through the shallower one would have proved nothing about the shallower one. Both were re-inserted and both went red - a leading-edge guard on `self.levels.forward(&writes)` leaves **one of six** samples standing:
+
+```text
+every sample must be forwarded [...]: [("GSM-0001-A", 87)]
+  left: 1
+ right: 6
+```
+
+**Both assertions are load-bearing, and for different failures.** A throttle that merely coalesced would fail the count; one that dropped the trailing edge would fail the last value. P4 gate Finding 1 did the *second* while looking like the first, which is why the released sample in the fixture is deliberately not the extreme of the drag: a throttle that happened to keep the minimum would still red.
+
+**What the row got right, and the one thing it did not.** Right, and unusually so: it stated the gap, named both sites, said a refactor rather than a test was what closed it, and recorded that the defect had been re-inserted *empirically* rather than assumed. Its deferral reason was the false part - "`AppState` cannot be constructed in a test: it owns two live Slint shells and a concrete `tray_icon::TrayIcon`" - and it was false in one half from the day it was written (`duja-ui` was already building both shells headless) and in the other from `#134`. See [D-102](debt.md#d-102) for the re-triage, and for the part that is *still* open: the fixture answers this row and does not answer the two that need the gamma channel observable.

@@ -33,15 +33,23 @@
 //! | --- | --- |
 //! | `FlyoutVm::slider_changed` (`duja-ui`) | `duja_ui::shell`'s `slider_drag_burst_emits_the_released_value_last` (drives the real Slint binding) |
 //! | `FlyoutShell::on_command` slider handler (`duja-ui`) | the same test |
-//! | `AppState::on_ui_command` (`tray::state`) | **nothing** |
-//! | `AppState::set_user_level` (`tray::state`) — the historical defect site | **nothing** |
+//! | `AppState::on_ui_command` (`tray::state`) | `tray::state`'s `the_ui_command_arm_forwards_every_sample_too` |
+//! | `AppState::set_user_level` (`tray::state`) — the historical defect site | `tray::state`'s `a_slider_drag_forwards_every_sample_and_the_released_value_last` |
 //! | `LevelForwarder::forward` (here) | the tests below |
 //! | engine `write_min_gap` last-wins coalescing | `duja_app`'s worker tests |
 //!
-//! The two unpinned rows are the app layer: `AppState` owns two live Slint
-//! shells and a real tray icon and cannot be constructed off the tray thread,
-//! so no test executes either method. That gap is tracked in `docs/debt.md` —
-//! do not read the tests below as coverage of it.
+//! **Those two rows read "nothing" until the `AppState` fixture landed**, and
+//! the reason this section gave for it — that `AppState` "owns two live Slint
+//! shells and a real tray icon and cannot be constructed off the tray thread" —
+//! was wrong in both halves by the time it was last edited: `duja-ui` builds
+//! both shells headless in its own suite, and `#134` had already replaced the
+//! tray handles with a seam. `docs/debt-archive.md` D-040 carries the re-triage.
+//!
+//! What has **not** changed is the sentence this section exists for: the tests
+//! below are still not coverage of the path. They call
+//! [`LevelForwarder::forward`] directly, so they can see nothing about a caller
+//! that stops calling it. That is now the only thing they fail to see, rather
+//! than the reason two segments of the table were bare.
 
 use crossbeam_channel::Sender;
 

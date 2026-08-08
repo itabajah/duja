@@ -23,10 +23,32 @@
 //! De-duplication *by version* stays in `AppState`, where it belongs — that is
 //! policy about when to toast, not a property of any tray.
 //!
-//! `PlatformTray` is a concrete type per target rather than a `dyn` trait, which
+//! # One implementation per build, and the one exception
+//!
+//! The OS backend is a concrete type per target rather than a `dyn` trait, which
 //! mirrors `PlatformDimmer` in `duja-dimmer` for the same reason: exactly one
-//! implementation is reachable in a given build, so a vtable would buy nothing
-//! and cost a name that means "any of them" in a codebase where it never is.
+//! implementation is reachable in a **shipping** build, so a vtable would buy
+//! nothing and cost a name that means "any of them" in a codebase where it never
+//! is.
+//!
+//! That sentence used to say "a given build" and it stopped being true here, so
+//! it is amended rather than quietly outgrown. A **test** build reaches two:
+//! [`OsTray`] and `FakeTray`, behind [`Backend`]. (`FakeTray` is unlinked on
+//! purpose: it is `cfg(test)`, so rustdoc does not compile it and an intra-doc
+//! link to it fails the `-D warnings` doc build.) `docs/debt.md` D-102
+//! established why a fake is needed rather than optional - `build_tray`
+//! *succeeds* in a test process on a live session, so an `AppState` test that
+//! built a real tray would put a real Duja icon in the real notification area
+//! and would answer differently per session, which on CI is the difference
+//! between a gate and noise. Success created the need for a fake rather than
+//! removing it.
+//!
+//! It is still not a `dyn` trait, and the reason survives the amendment intact:
+//! the second implementation exists only where `cfg(test)` is on, so nothing
+//! shipped ever dispatches, and the enum keeps every backend's methods
+//! *inherent* - a trait would have to name the union of three signatures, two of
+//! which are infallible for backend-specific reasons this module documents at
+//! length.
 
 use anyhow::Result;
 use duja_ui::accent::AccentChoice;
@@ -58,7 +80,7 @@ pub(super) fn update_label(version: &str) -> String {
 /// a "have I prepended yet" flag, `ksni` holds one service handle and keeps the
 /// rest in the value it moved onto its own thread.
 #[cfg(not(target_os = "linux"))]
-pub(crate) struct PlatformTray {
+pub(crate) struct OsTray {
     /// The tray icon itself, held so an accent change can swap its glyph live.
     icon: tray_icon::TrayIcon,
     /// A live handle to the menu — the same `Rc` inner the tray owns — so the
@@ -68,14 +90,14 @@ pub(crate) struct PlatformTray {
     /// finds a newer release. Built up front so its id is stable and known to the
     /// event handler before it is ever shown.
     update_item: tray_icon::menu::MenuItem,
-    /// Whether [`PlatformTray::announce_update`] has already put the item in the
-    /// menu. The backend owns this rather than the caller, because "prepend
-    /// exactly once" is a `tray-icon` obligation and not a fact about updates.
+    /// Whether [`Self::announce_update`] has already put the item in the menu.
+    /// The backend owns this rather than the caller, because "prepend exactly
+    /// once" is a `tray-icon` obligation and not a fact about updates.
     update_shown: bool,
 }
 
 #[cfg(not(target_os = "linux"))]
-impl PlatformTray {
+impl OsTray {
     /// Wrap the pieces `build_tray` produced.
     pub(super) const fn new(
         icon: tray_icon::TrayIcon,
@@ -146,13 +168,13 @@ impl PlatformTray {
 /// `Result` stays in the signature so `AppState` needs no `cfg`; what would be
 /// wrong is inventing an error for it to carry.
 #[cfg(target_os = "linux")]
-pub(crate) struct PlatformTray {
+pub(crate) struct OsTray {
     /// The running service.
     inner: super::ksni_tray::LinuxTray,
 }
 
 #[cfg(target_os = "linux")]
-impl PlatformTray {
+impl OsTray {
     /// Wrap a started service.
     pub(super) const fn new(inner: super::ksni_tray::LinuxTray) -> Self {
         Self { inner }
@@ -198,6 +220,130 @@ impl PlatformTray {
     pub(crate) fn announce_update(&mut self, version: &str) -> Result<()> {
         self.inner.announce_update(version);
         Ok(())
+    }
+}
+
+/// Which tray is behind the seam.
+///
+/// One variant in a shipping build; two under `cfg(test)`. See the module header
+/// for why the second one exists and why this is an enum rather than a trait.
+enum Backend {
+    /// The real tray for this target.
+    Os(OsTray),
+    /// A stand-in that records what it was asked to do and touches no OS.
+    #[cfg(test)]
+    Fake(FakeTray),
+}
+
+/// The tray, as the rest of the app is allowed to see it.
+///
+/// The three verbs are the whole surface `AppState` touches. Everything about
+/// *how* a tray achieves them - three live `tray-icon` handles and a
+/// prepend-once flag on Windows and macOS, one `ksni` service handle on Linux,
+/// three `Vec`s in a test - stays behind this type.
+pub(crate) struct PlatformTray {
+    /// The tray this seam is standing in front of.
+    backend: Backend,
+}
+
+impl PlatformTray {
+    /// Repaint the tray glyph in `accent`'s colour.
+    ///
+    /// # Errors
+    /// Whatever the backend returns. On every backend a failure here is
+    /// cosmetic: the tray keeps the glyph it already has.
+    pub(crate) fn set_accent(&mut self, accent: AccentChoice) -> Result<()> {
+        match &mut self.backend {
+            Backend::Os(os) => os.set_accent(accent),
+            #[cfg(test)]
+            Backend::Fake(fake) => {
+                fake.accents.push(accent);
+                Ok(())
+            }
+        }
+    }
+
+    /// Set (or clear) the tray tooltip.
+    ///
+    /// # Errors
+    /// Whatever the backend returns; the Linux arm never fails and documents
+    /// why at [`OsTray::set_tooltip`].
+    pub(crate) fn set_tooltip(&mut self, text: Option<&str>) -> Result<()> {
+        match &mut self.backend {
+            Backend::Os(os) => os.set_tooltip(text),
+            #[cfg(test)]
+            Backend::Fake(fake) => {
+                fake.tooltips.push(text.map(str::to_owned));
+                Ok(())
+            }
+        }
+    }
+
+    /// Say that `version` is available, idempotently.
+    ///
+    /// # Errors
+    /// Whatever the backend returns.
+    pub(crate) fn announce_update(&mut self, version: &str) -> Result<()> {
+        match &mut self.backend {
+            Backend::Os(os) => os.announce_update(version),
+            #[cfg(test)]
+            Backend::Fake(fake) => {
+                fake.updates.push(version.to_owned());
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Wrap the real tray this target built.
+impl From<OsTray> for PlatformTray {
+    fn from(os: OsTray) -> Self {
+        PlatformTray {
+            backend: Backend::Os(os),
+        }
+    }
+}
+
+/// A tray that records rather than renders.
+///
+/// It exists so [`super::state::AppState`] can be built in a test at all, which
+/// is the sentence four debt rows deferred on. It records rather than merely
+/// accepting, because a tray that silently swallowed every verb would let a
+/// caller stop calling one and leave every test green - which is the failure
+/// mode those rows are about in the first place.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct FakeTray {
+    /// Every accent this tray was asked to paint, oldest first.
+    accents: Vec<AccentChoice>,
+    /// Every tooltip it was asked to show, oldest first; `None` is a clear.
+    tooltips: Vec<Option<String>>,
+    /// Every version it was asked to announce, oldest first. Not de-duplicated:
+    /// `announce_update` is idempotent as an *outcome*, and a test that wants to
+    /// prove the caller de-duplicates needs to see the calls it actually made.
+    updates: Vec<String>,
+}
+
+#[cfg(test)]
+impl PlatformTray {
+    /// A tray that records and touches no OS.
+    pub(super) fn fake() -> Self {
+        PlatformTray {
+            backend: Backend::Fake(FakeTray::default()),
+        }
+    }
+
+    /// What the fake was asked to do, in order: accents, tooltips, versions.
+    ///
+    /// # Panics
+    /// If this is not a fake. A test that reaches for the recording of a real
+    /// tray has confused its fixture for the thing it stands in for, and a
+    /// silent empty answer would read as "nothing was called".
+    pub(super) fn recorded(&self) -> (&[AccentChoice], &[Option<String>], &[String]) {
+        match &self.backend {
+            Backend::Fake(fake) => (&fake.accents, &fake.tooltips, &fake.updates),
+            Backend::Os(_) => panic!("recorded() on a real tray"),
+        }
     }
 }
 
