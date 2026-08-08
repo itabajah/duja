@@ -5,19 +5,12 @@
 //! their binary would be racing them for a slot only one can hold. Cargo gives
 //! each `tests/*.rs` its own binary, which is the isolation this needs.
 //!
-//! Two tests, and the split is deliberate:
-//!
-//! - [`the_real_flyout_renders_frames_through_the_software_renderer`] runs on
-//!   every lane, every push. It asserts the harness *works* - that the real
-//!   `FlyoutShell` instantiates headless, that frames come back timed, and that
-//!   the buffer is not uniform - and asserts nothing about how long they took.
-//!   This is the part that must not be allowed to rot.
-//! - [`the_flyout_renders_inside_the_frame_budget`] is `#[ignore]`d and prints
-//!   the number. It is a *timing* assertion, and a shared CI runner under an
-//!   unknown load is not where this project wants one of those: [D-110] is the
-//!   standing note that gating on a number nobody has measured is how a check
-//!   becomes a thing people disable. Run it by hand, on a build profile you
-//!   name, per `docs/qa-checklist.md`.
+//! The split between what runs always and what is `#[ignore]`d is deliberate.
+//! Everything that asserts the harness *works* runs on every lane, every push.
+//! The one test that asserts a *duration* is ignored: a shared CI runner under
+//! an unknown load is not where this project wants a timing gate, and [D-110]
+//! is the standing note that gating on a number nobody has measured is how a
+//! check becomes a thing people disable.
 //!
 //! [D-110]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-110
 
@@ -26,29 +19,27 @@
 use duja_core::id::StableDisplayId;
 use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
 use duja_ui::flyout_vm::FlyoutVm;
-use duja_ui::frame_probe::{self, FRAME_BUDGET, PROBE_SIZE, Verdict};
+use duja_ui::frame_probe::{self, FRAME_BUDGET, Verdict, probe_size};
+use duja_ui::layout::flyout_logical_height;
 
 /// How many frames the timed run measures.
 ///
-/// Enough that [`frame_probe::warmup_frames`] discards a real warm-up (a tenth,
-/// so twelve here) and enough that one unlucky scheduler slice does not decide
-/// the verdict on its own.
+/// Enough that `frame_probe::warmup_frames` discards a real warm-up and enough
+/// that one unlucky scheduler slice does not decide the verdict on its own.
 const TIMED_FRAMES: u32 = 120;
 
-/// A three-monitor flyout: the shape the budget is written about, and more work
-/// per frame than the one-monitor case most developers would be looking at.
-fn three_monitors() -> FlyoutVm {
+/// A flyout with `n` monitors in it.
+fn monitors(n: usize) -> FlyoutVm {
     let mut vm = FlyoutVm::new();
     vm.set_displays(
-        [("A", "Left", 40), ("B", "Middle", 65), ("C", "Right", 80)]
-            .into_iter()
-            .map(|(serial, name, level)| DisplaySnapshot {
-                id: StableDisplayId::from_parts("GSM", 0x0001, Some(serial))
+        (0..n)
+            .map(|i| DisplaySnapshot {
+                id: StableDisplayId::from_parts("GSM", 0x0001, Some(&format!("S{i}")))
                     .expect("a three-part id with a serial is well formed"),
-                name: name.to_owned(),
+                name: format!("Monitor {i}"),
                 kind: DisplayKind::ExternalDdc,
                 software_only: false,
-                user_level_pct: level,
+                user_level_pct: 40,
                 capabilities: Capabilities::default(),
             })
             .collect(),
@@ -64,8 +55,8 @@ fn three_monitors() -> FlyoutVm {
 /// than repeated, and about the probe returning frames it actually drew.
 #[test]
 fn the_real_flyout_renders_frames_through_the_software_renderer() {
-    let stats = frame_probe::probe(8, three_monitors())
-        .expect("the software renderer needs no display server");
+    let stats =
+        frame_probe::probe(8, monitors(3)).expect("the software renderer needs no display server");
 
     // Eight frames, one discarded as warm-up.
     assert_eq!(
@@ -83,12 +74,8 @@ fn the_real_flyout_renders_frames_through_the_software_renderer() {
         Verdict::Unmeasurable,
         "the renderer drew nothing, so the timings above are measuring an empty loop"
     );
-    // The assertion that makes the number believable. Every frame must have
-    // redrawn the whole window: the probe asks for `NewBuffer`, which is a
-    // full redraw by definition, so anything less means the component laid out
-    // smaller than the window it was measured in and the timings describe a
-    // flyout nobody will ever see.
-    let (width, height) = PROBE_SIZE;
+
+    let (width, height) = probe_size(3);
     assert_eq!(
         stats.least_drawn_pixels(),
         Some(u64::from(width).saturating_mul(u64::from(height))),
@@ -96,10 +83,78 @@ fn the_real_flyout_renders_frames_through_the_software_renderer() {
     );
 }
 
-/// The empty flyout still paints - it draws its own no-displays state - so the
+/// **The probe renders the window the app actually presents.**
+///
+/// The regression this exists for: the first version sized its window from the
+/// markup's default `content-height` of 260, which no row count produces. A
+/// three-monitor flyout is 397 logical pixels tall, so the third card rendered
+/// past the bottom edge and the published timing was a two-card frame wearing a
+/// three-monitor label.
+#[test]
+fn the_probe_window_is_the_size_the_app_presents() {
+    for rows in [0_usize, 1, 2, 3, 5] {
+        let (_, height) = probe_size(rows);
+        assert!(
+            (f32::from(u16::try_from(height).expect("a flyout is under 65535 px tall"))
+                - flyout_logical_height(rows))
+            .abs()
+                < 1.0,
+            "the probe's {rows}-row window is {height} px, but the app presents \
+             {} px",
+            flyout_logical_height(rows)
+        );
+        assert_ne!(
+            height, 260,
+            "260 is the markup default, not a size the app ever presents"
+        );
+    }
+}
+
+/// **Content has to reach the buffer, and more monitors have to mean more of
+/// it.**
+///
+/// This is the assertion that would have caught the sizing defect, and the
+/// drawn-area check provably would not have: under `NewBuffer` the region the
+/// renderer reports is the window item's rect, taken from the size the probe
+/// itself passed to `set_size`, so it re-asserts its own input.
+///
+/// Measured against the defect re-inserted at the site it occupied (the probe
+/// sizing its window from the markup default and skipping `set_content_height`),
+/// a third monitor adds **168** content pixels. With the window sized the way
+/// the app presents it, the same monitor adds **14,161**.
+#[test]
+fn each_extra_monitor_puts_more_content_on_the_screen() {
+    let content = |n: usize| {
+        frame_probe::probe(4, monitors(n))
+            .expect("the flyout renders headless")
+            .least_content_pixels()
+            .expect("a run with frames in it has a content count")
+    };
+
+    let (one, two, three) = (content(1), content(2), content(3));
+    assert!(
+        two > one,
+        "a second monitor drew no more content than one: {one} then {two}"
+    );
+    assert!(
+        three > two,
+        "a third monitor drew no more content than two: {two} then {three}"
+    );
+    // Measured on this box, a card is worth about 14,160 content pixels. The
+    // floor is a third of that: comfortably above noise, comfortably below a
+    // rendered card, and nowhere near the low hundreds a clipped card produces.
+    assert!(
+        three.saturating_sub(two) > 5_000,
+        "a third monitor added only {} pixels of content, which is the \
+         off-the-bottom-edge signature rather than a rendered card",
+        three.saturating_sub(two)
+    );
+}
+
+/// The empty flyout still draws - it has its own no-displays panel - so the
 /// measurability check must not be reading "has rows" by accident.
 #[test]
-fn the_empty_state_paints_too() {
+fn the_empty_state_draws_too() {
     let stats = frame_probe::probe(4, FlyoutVm::new()).expect("the empty flyout renders headless");
     assert_ne!(stats.verdict(), Verdict::Unmeasurable);
 }
@@ -114,31 +169,24 @@ fn the_empty_state_paints_too() {
 #[test]
 #[ignore = "a timing assertion; run it by hand on a named profile, not on a shared runner"]
 fn the_flyout_renders_inside_the_frame_budget() {
-    let stats = frame_probe::probe(TIMED_FRAMES, three_monitors())
+    let stats = frame_probe::probe(TIMED_FRAMES, monitors(3))
         .expect("the software renderer needs no display server");
 
-    let (width, height) = PROBE_SIZE;
+    let (width, height) = probe_size(3);
     println!(
-        "frames={} min={:?} mean={:?} max={:?} drawn={:?}/{} budget={:?} verdict={:?}",
+        "frames={} size={width}x{height} min={:?} mean={:?} max={:?} drawn={:?}/{} content={:?} \
+         budget={:?} verdict={:?}",
         stats.frames(),
         stats.min(),
         stats.mean(),
         stats.max(),
         stats.least_drawn_pixels(),
         u64::from(width).saturating_mul(u64::from(height)),
+        stats.least_content_pixels(),
         FRAME_BUDGET,
         stats.verdict(),
     );
 
-    // The same believability check the always-on test makes. It is repeated
-    // rather than assumed because this is the run whose number gets written
-    // into `docs/perf-budgets.md`, and a figure quoted from a partial redraw
-    // would be wrong in the direction nobody checks.
-    assert_eq!(
-        stats.least_drawn_pixels(),
-        Some(u64::from(width).saturating_mul(u64::from(height))),
-        "every frame must redraw the full {width}x{height} window"
-    );
     assert_eq!(
         stats.verdict(),
         Verdict::Pass,

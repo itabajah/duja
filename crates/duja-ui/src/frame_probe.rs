@@ -11,13 +11,7 @@
 //! per-function `optsize` attributes, which is not the same guarantee as a
 //! whole-program `-O3` build.
 //!
-//! *(D-109 says "the four crates" and lists four. There are five: `swash` was
-//! added after the row was written, by the same P8 wave that noticed the first
-//! version of the list credited `zeno` with a job half of which is `swash`'s.
-//! The row was never updated. Counted here rather than restated, because a
-//! count in prose is the thing this project has spent a phase learning not to
-//! write.)*
-//!
+
 //! This module is the measurement the argument never had.
 //!
 //! # What it does not measure, said before what it does
@@ -38,6 +32,25 @@
 //! exemption protects, which is the actual exposure and is otherwise unmeasured
 //! on every lane.
 //!
+//! # The size is derived, and the first version of this module got that wrong
+//!
+//! It rendered at 360 by 260 - the pair `FlyoutShell::new` seeds its DPI hook
+//! with - and called that "the app's own design size". 260 is the markup's
+//! *default* `content-height`; `AppState::show_flyout` calls
+//! `set_content_height` on every present, and
+//! [`crate::layout::flyout_logical_height`] gives **397** for three monitors.
+//! So a third card fell off the bottom edge and the published timing was a
+//! two-card flyout labelled as three, about a quarter low.
+//!
+//! Both of this module's "did it draw" checks passed the whole time, which is
+//! the part worth keeping. The drawn-area check re-asserted the size the probe
+//! itself had passed to `set_size`; the content check compared every pixel
+//! against the buffer's top-left, which is a rounded corner, so 98 per cent of
+//! any buffer counted as content at any row count. Two checks, both written to
+//! make the number believable, neither able to fail on the defect they were
+//! for. The arithmetic now lives in [`crate::layout`], next to the markup it
+//! mirrors, so there is one copy rather than a re-derivation.
+//!
 //! # Why the software renderer rather than a timer around the real window
 //!
 //! A span around the winit path needs a human watching a screen, which is what
@@ -49,6 +62,7 @@
 //! [D-109]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-109
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -90,17 +104,24 @@ pub enum Verdict {
     Unmeasurable,
 }
 
-/// One timed frame, with the two independent answers to "did it draw".
+/// One timed frame, with two independent answers to "did it draw".
 ///
-/// **Two, because neither alone is enough**, and the first draft of this module
-/// shipped only the second. `drawn_pixels` is the renderer's own account of the
-/// area it touched, which is authoritative about intent and says nothing about
-/// what came out; `painted` is a scan of the buffer, which proves pixels differ
-/// and cannot tell a full redraw from a one-pixel one. A probe that reports
-/// 180 microseconds for a window it laid out at zero size satisfies the second
-/// and fails the first, and 180 microseconds is what this harness measured on
-/// its first run - fast enough to need the check before the number could be
-/// believed.
+/// **Two, because neither alone is enough - and a review proved the first is
+/// weaker than this module originally claimed.** `drawn_pixels` is the area the
+/// renderer reported touching, but under
+/// [`RepaintBufferType::NewBuffer`] that region is the *window item's* rect,
+/// which Slint takes from the size the caller passed to `set_size`. So it
+/// re-asserts the probe's own input and proves nothing about content reaching
+/// the layout. `content_pixels` is a scan of the buffer: how many pixels differ
+/// from the background, which does move with content and is what catches a row
+/// that laid out past the bottom edge.
+///
+/// The first draft carried the area check alone and presented it as the guard
+/// against exactly the defect it cannot see: the probe was sizing its window
+/// from the markup's *default* rather than from
+/// [`crate::layout::flyout_logical_height`], so a third monitor's card fell off
+/// the bottom and changed 202 pixels out of 93,600. The area check read a
+/// perfect full-window redraw throughout.
 #[derive(Debug, Clone, Copy)]
 pub struct Frame {
     /// How long [`SoftwareRenderer::render`](slint::platform::software_renderer::SoftwareRenderer::render)
@@ -108,8 +129,9 @@ pub struct Frame {
     pub elapsed: Duration,
     /// The area of the region the renderer reported drawing.
     pub drawn_pixels: u64,
-    /// Whether the buffer came back with more than one distinct pixel value.
-    pub painted: bool,
+    /// How many pixels in the buffer differ from its top-left (background)
+    /// pixel.
+    pub content_pixels: u64,
 }
 
 /// How many leading frames a run of `total` discards before it starts timing.
@@ -144,11 +166,11 @@ const MAX_WARMUP_FRAMES: u32 = 16;
 #[derive(Debug, Default, Clone)]
 pub struct FrameStats {
     frames: u32,
-    painted: u32,
     min: Option<Duration>,
     max: Option<Duration>,
     total: Duration,
     least_drawn: Option<u64>,
+    least_content: Option<u64>,
 }
 
 impl FrameStats {
@@ -157,12 +179,9 @@ impl FrameStats {
         let Frame {
             elapsed,
             drawn_pixels,
-            painted,
+            content_pixels,
         } = frame;
         self.frames = self.frames.saturating_add(1);
-        if painted {
-            self.painted = self.painted.saturating_add(1);
-        }
         self.min = Some(self.min.map_or(elapsed, |m| m.min(elapsed)));
         self.max = Some(self.max.map_or(elapsed, |m| m.max(elapsed)));
         self.total = self.total.saturating_add(elapsed);
@@ -170,6 +189,22 @@ impl FrameStats {
             self.least_drawn
                 .map_or(drawn_pixels, |d| d.min(drawn_pixels)),
         );
+        self.least_content = Some(
+            self.least_content
+                .map_or(content_pixels, |c| c.min(content_pixels)),
+        );
+    }
+
+    /// How much content the *emptiest* timed frame drew.
+    ///
+    /// A minimum, on the same reasoning as [`Self::least_drawn_pixels`] and
+    /// deliberately the same rule: the first version of this module aggregated
+    /// its two signals by opposite rules - a minimum for area, "at least one
+    /// frame" for content - and a review pointed out that the doc arguing for
+    /// the minimum sat four lines from the code doing the opposite.
+    #[must_use]
+    pub const fn least_content_pixels(&self) -> Option<u64> {
+        self.least_content
     }
 
     /// The area the *stingiest* timed frame reported drawing.
@@ -216,7 +251,7 @@ impl FrameStats {
     /// gap.
     #[must_use]
     pub fn verdict(&self) -> Verdict {
-        if self.frames == 0 || self.painted == 0 || self.least_drawn == Some(0) {
+        if self.frames == 0 || self.least_drawn == Some(0) || self.least_content == Some(0) {
             return Verdict::Unmeasurable;
         }
         match self.max {
@@ -226,16 +261,28 @@ impl FrameStats {
     }
 }
 
-/// The flyout's design size in logical pixels, which at scale 1.0 is also the
-/// buffer's physical size.
+/// The window size, in physical pixels at scale 1.0, that a `rows`-monitor
+/// flyout is presented at.
 ///
-/// The same pair `FlyoutShell::new` seeds its buffer keeper with. A probe at
-/// some other size would be measuring a window the app never shows.
-///
-/// Public because the drawn-area assertion is only meaningful against it: a
-/// test that hard-coded 360 by 260 would go green on a probe that had quietly
-/// started measuring some other window.
-pub const PROBE_SIZE: (u32, u32) = (360, 260);
+/// **Derived, not a constant, and the first version of this module got that
+/// wrong.** It used the pair `FlyoutShell::new` seeds its DPI hook with -
+/// 360 by 260 - and called it "the app's own design size". 260 is the markup's
+/// *default* `content-height`; the app calls `set_content_height` on every
+/// present, and [`crate::layout::flyout_logical_height`] gives 397 for three
+/// monitors. So the probe rendered a window with two of the three cards in it
+/// and published the timing as a three-monitor frame.
+#[must_use]
+pub fn probe_size(rows: usize) -> (u32, u32) {
+    // RATIONALE (cast_possible_truncation, cast_sign_loss): both values are
+    // small positive layout constants clamped to at most 620.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        (
+            crate::layout::FLYOUT_LOGICAL_WIDTH as u32,
+            crate::layout::flyout_logical_height(rows) as u32,
+        )
+    }
+}
 
 thread_local! {
     /// The window every probe on this thread renders into.
@@ -286,20 +333,43 @@ fn install() -> Result<Rc<MinimalSoftwareWindow>, PlatformError> {
     })
 }
 
-/// Whether `buffer` holds more than one distinct pixel value.
+/// How many pixels in `buffer` differ from the buffer's **most common** pixel
+/// value.
 ///
-/// The cheapest possible answer to "did the renderer actually draw", and the
-/// reason [`FrameStats::verdict`] has an [`Unmeasurable`](Verdict::Unmeasurable)
-/// arm at all.
-fn painted(buffer: &[PremultipliedRgbaColor]) -> bool {
-    // `PremultipliedRgbaColor` is not `PartialEq`, so the comparison is written
-    // out. Four `u8`s rather than a derive is not worth a newtype.
-    fn same(a: PremultipliedRgbaColor, b: PremultipliedRgbaColor) -> bool {
-        a.alpha == b.alpha && a.red == b.red && a.green == b.green && a.blue == b.blue
+/// # Why the mode and not the corner pixel
+///
+/// The first version compared against `buffer[0]`, which is a rounded corner
+/// and so is nearly unique: **98.3 % to 99.1 %** of every buffer differed from
+/// it, at every row count. That number is the window's area with the corners
+/// shaved off. It rose when a monitor was added only because the window grew,
+/// so a test asserting "more monitors means more content" passed on the
+/// *window size* and would have gone green with nothing drawn in the new space
+/// at all - the same shape of false signal as the drawn-area check it was
+/// written to compensate for, found the same way, one round later.
+///
+/// The mode is the panel fill, so this counts pixels that are not background:
+/// cards, text, sliders and pills.
+fn content_pixels(buffer: &[PremultipliedRgbaColor]) -> u64 {
+    fn key(px: PremultipliedRgbaColor) -> u32 {
+        u32::from_be_bytes([px.alpha, px.red, px.green, px.blue])
     }
+
+    let mut histogram: HashMap<u32, u64> = HashMap::new();
+    for px in buffer {
+        let slot = histogram.entry(key(*px)).or_insert(0);
+        *slot = slot.saturating_add(1);
+    }
+    let Some(background) = histogram
+        .iter()
+        .max_by_key(|entry| *entry.1)
+        .map(|entry| *entry.0)
+    else {
+        return 0;
+    };
     buffer
-        .split_first()
-        .is_some_and(|(first, rest)| rest.iter().any(|px| !same(*px, *first)))
+        .iter()
+        .filter(|px| key(**px) != background)
+        .fold(0_u64, |acc, _| acc.saturating_add(1))
 }
 
 /// Render `frames` frames of the real flyout and time each one.
@@ -316,12 +386,18 @@ fn painted(buffer: &[PremultipliedRgbaColor]) -> bool {
 /// Bubbles [`PlatformError`] if this thread already has another Slint platform,
 /// or if the flyout component fails to instantiate.
 pub fn probe(frames: u32, vm: FlyoutVm) -> Result<FrameStats, PlatformError> {
-    let (width, height) = PROBE_SIZE;
+    let rows = vm.rows().len();
+    let (width, height) = probe_size(rows);
     let window = install()?;
     window.set_size(PhysicalSize::new(width, height));
 
     let vm = Rc::new(RefCell::new(vm));
     let shell = FlyoutShell::new(Rc::clone(&vm))?;
+    // What `AppState::show_flyout` does on every present, and what the first
+    // version of this probe omitted: without it the component keeps the
+    // markup's default `content-height` and lays its cards out for a window
+    // that is not the one being rendered.
+    shell.set_content_height(crate::layout::flyout_logical_height(rows));
 
     let pixels = usize::try_from(width)
         .ok()
@@ -365,7 +441,7 @@ pub fn probe(frames: u32, vm: FlyoutVm) -> Result<FrameStats, PlatformError> {
             stats.record(Frame {
                 elapsed,
                 drawn_pixels: drawn.get(),
-                painted: painted(&buffer),
+                content_pixels: content_pixels(&buffer),
             });
         }
     }
@@ -377,14 +453,14 @@ pub fn probe(frames: u32, vm: FlyoutVm) -> Result<FrameStats, PlatformError> {
 mod tests {
     use super::*;
 
-    /// A frame that drew the whole probe window, so the tests below can vary
-    /// the one thing each is about.
-    fn frame(elapsed: Duration, painted: bool) -> Frame {
-        let (w, h) = PROBE_SIZE;
+    /// A frame that drew the whole window and some content, so the tests below
+    /// can vary the one thing each is about.
+    fn frame(elapsed: Duration, content: bool) -> Frame {
+        let (w, h) = probe_size(3);
         Frame {
             elapsed,
             drawn_pixels: u64::from(w).saturating_mul(u64::from(h)),
-            painted,
+            content_pixels: if content { 1_000 } else { 0 },
         }
     }
 
@@ -432,7 +508,7 @@ mod tests {
     /// broken harness reporting a healthy number, the failure shape this
     /// project rates worse than an admitted gap.
     #[test]
-    fn frames_that_painted_nothing_are_unmeasurable_however_fast_they_were() {
+    fn frames_that_drew_no_content_are_unmeasurable_however_fast_they_were() {
         let mut stats = FrameStats::default();
         for _ in 0..10 {
             stats.record(frame(Duration::from_micros(5), false));
@@ -482,28 +558,32 @@ mod tests {
         assert_eq!(inside.verdict(), Verdict::Pass);
     }
 
-    /// A mixed run is measurable: one painted frame is enough to prove the
-    /// renderer drew, and the timings of the rest still count.
+    /// **One blank frame poisons the run**, and this test asserted the
+    /// opposite until a review pointed out that the two signals were being
+    /// aggregated by opposite rules - a minimum for drawn area, "at least one"
+    /// for content - with the doc arguing for the minimum four lines above the
+    /// code doing the other thing. A run that stopped drawing part-way through
+    /// has timings that describe nothing anybody wants to know, whichever
+    /// signal noticed.
     #[test]
-    fn one_painted_frame_makes_the_run_measurable() {
+    fn a_single_contentless_frame_makes_the_whole_run_unmeasurable() {
         let mut stats = FrameStats::default();
         stats.record(frame(Duration::from_millis(1), false));
         stats.record(frame(Duration::from_millis(2), true));
-        assert_eq!(stats.verdict(), Verdict::Pass);
+        assert_eq!(stats.verdict(), Verdict::Unmeasurable);
+        assert_eq!(stats.least_content_pixels(), Some(0));
     }
 
     /// The check the buffer scan cannot make. A frame that laid the window out
     /// at zero size draws nothing, so every pixel in the buffer is whatever the
-    /// frame *before* it left there - which a uniformity scan happily calls
-    /// painted, and which is the exact shape that made the harness's first
-    /// 180-microsecond reading unbelievable.
+    /// frame *before* it left there - which a content scan happily counts.
     #[test]
-    fn a_frame_that_drew_no_pixels_is_unmeasurable_even_when_the_buffer_is_not_uniform() {
+    fn a_frame_that_drew_no_pixels_is_unmeasurable_even_when_content_was_seen() {
         let mut stats = FrameStats::default();
         stats.record(Frame {
             elapsed: Duration::from_millis(1),
             drawn_pixels: 0,
-            painted: true,
+            content_pixels: 1_000,
         });
         assert_eq!(stats.verdict(), Verdict::Unmeasurable);
         assert_eq!(stats.least_drawn_pixels(), Some(0));
@@ -519,7 +599,7 @@ mod tests {
         stats.record(Frame {
             elapsed: Duration::from_millis(1),
             drawn_pixels: 0,
-            painted: true,
+            content_pixels: 1_000,
         });
         stats.record(frame(Duration::from_millis(1), true));
         assert_eq!(stats.frames(), 3);

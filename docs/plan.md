@@ -124,10 +124,20 @@ harness closes neither. The overlay is a Win32 layered window rather than a
 Slint surface, and a cold start to a tray icon needs a session. What the harness
 does measure is the frame path P8 wave 1 exempted from `opt-level = "s"` by
 name, which is the exposure the row was arguing about even though it is not the
-budget the row cited. The exemption had never been measured, is worth about 1.4x
-to 1.5x, and the budget clears by two orders of magnitude either way - so the
-argument was right and nothing depended on it. `perf-budgets.md` gains a row
-that has an instrument; the three that do not, still do not.
+budget the row cited. The exemption had never been measured, is worth roughly
+1.4x, and the budget clears by a wide margin either way - about 70x on a typical
+frame - so the argument was right and nothing depended on it. `perf-budgets.md`
+gains a row that has an instrument; the three that do not, still do not.
+
+**The first version of that measurement was wrong, and a review caught it.** The
+probe sized its window from the markup's default rather than from the height the
+app presents, so a third monitor's card fell off the bottom edge and a two-card
+flyout was timed and published as three. Both of the harness's own "did it draw"
+checks passed throughout - one re-asserted the size the probe itself passed in,
+the other compared every pixel against a rounded corner and so counted 98 per
+cent of any buffer as content. A check that cannot fail is the same defect as no
+check, wearing better clothes, and this phase has now produced one in code as
+well as in prose.
 
 **Two things are worth carrying out of it, and neither is a row.** Every PR was
 reviewed adversarially and every review found something real - which by now is

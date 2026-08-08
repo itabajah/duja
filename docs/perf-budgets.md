@@ -85,35 +85,46 @@ the row added here is a fourth thing that now does. D-109 is narrowed rather
 than drained.
 
 `cargo test -p duja-ui --release --test frame_probe -- --ignored --nocapture`
-renders the real `FlyoutShell` - three monitors, 360 x 260, the app's own design
-size - through Slint's software renderer into a plain buffer, with no display
-server, on any lane. It discards a warm-up tenth and times the rest.
+renders the real `FlyoutShell` - three monitors, at the **360 x 397** the app
+presents for three monitors - through Slint's software renderer into a plain
+buffer, with no display server, on any lane. It discards a warm-up tenth and
+times the rest. The size is computed by `duja_ui::layout::flyout_logical_height`,
+the same function `AppState::show_flyout` sizes the real window with, rather
+than restated here.
 
-**Measured on this box (Windows, release profile):** min **177 us**, mean
-**186-193 us** across runs, worst frame **222-306 us**. Two orders of magnitude
-inside the budget.
+**Measured on this box (Windows, release profile), six runs:** min **215-218
+us**, mean **229-234 us**, worst frame **320-445 us**. About **70x** inside the
+budget on a typical frame and about **36x** on the worst frame seen.
 
-**And the exemption it exists to check is worth about 1.4x to 1.5x.** With the
-five per-package `opt-level = 3` overrides removed - `-Os` everywhere - the same
-probe reports min **253 us**, mean **285 us**, worst **390 us**. So the
-exemption does what P8 wave 1 argued it would, at the 1,429,504 bytes that
-section already prices; and *also*, both builds clear this budget with room to
-spare, so nothing here depends on it. Both halves are the measurement, and only
-the first was ever predicted.
+**And the exemption it exists to check is worth roughly 1.4x.** With the five
+per-package `opt-level = 3` overrides removed - `-Os` everywhere - six runs give
+min **294-307 us**, mean **315-325 us**, worst **380-469 us**. The minimum and
+the mean do not overlap between the two configurations, so the effect is real;
+the worst frame is noisy and does overlap, which matters because the worst frame
+is what the verdict gates on. So the exemption does what P8 wave 1 argued it
+would, at the 1,429,504 bytes [ADR-0012](adr/0012-binary-size-budget-variance.md)
+prices; and *also*, both builds clear this budget with room to spare, so nothing
+here depends on it. Both halves are the measurement, and only the first was ever
+predicted.
 
 Two limits on that number, because a budget row that overstates its instrument
 is worse than one with no instrument at all:
 
 - **It is a full redraw, which the shipped app does not always do.** The probe
-  asks for `NewBuffer`, so every frame repaints all 93,600 pixels; the windowed
+  asks for `NewBuffer`, so every frame repaints all 142,920 pixels; the windowed
   path can repaint a dirty region instead. It over-states against this row,
-  which is the safe direction, and the probe asserts the full area was drawn on
-  every frame - a partial redraw quoted as a frame time is the one way this
-  number could be wrong in the direction nobody checks.
+  which is the safe direction. **The area the renderer reports is not a check on
+  that** - under `NewBuffer` it is the window item's rect, taken from the size
+  the probe passed in, so it re-asserts its own input. What the probe checks
+  instead is that content reached the buffer: a third monitor must add real
+  pixels rather than 168 of them, which is what a card rendering past the bottom
+  edge produces.
 - **It is a reflection, not a drag.** A headless harness has no input to
   inject, so the probe dirties the tree through `update_from_vm`, the same path
   the app's external-change reflection takes. The Slint callback a real thumb
-  drives is not exercised here; `shell.rs`'s own tests are what cover that.
+  drives is not exercised here; `shell.rs`'s own tests are what cover that. The
+  mutation is load-bearing rather than decorative: without it the same loop
+  measures about half the time, because it re-renders an unchanged tree.
 
 Design rules that protect the budgets:
 

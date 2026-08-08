@@ -196,15 +196,16 @@ Measured on this box, 2026-08-08:
   Windows job only**, which is what that workflow builds and measures.
   The measured ledger, and the one lever that is a trade rather than a free win,
   are in [ADR-0012](adr/0012-binary-size-budget-variance.md).
-- **Two perf budgets are still not measured by anything.** "Overlay alpha
-  update < 16 ms" and "Cold start < 300 ms" were last measured by hand at P4,
-  and P8 wave 1 changed the optimization level, which plausibly moves both. The
-  interim instrument is two rows at the top of
-  [qa-checklist.md](qa-checklist.md). [D-109](debt.md#d-109) built a render
-  benchmark in P9 wave 3 and it covers **neither of these**: it renders the
-  flyout, the overlay is a Win32 layered window, and a cold start needs a
-  session. What it did settle is the `opt-level = "s"` exemption, which is worth
-  about 1.4x to 1.5x on a frame and which nothing had measured before.
+- **Three perf budgets are still not measured by anything.** "Overlay alpha
+  update < 16 ms", "Cold start < 300 ms" and "Slider to DDC write dispatched"
+  were last measured by hand at P4, and P8 wave 1 changed the optimization
+  level, which plausibly moves at least two of them. The interim instrument is
+  two rows at the top of [qa-checklist.md](qa-checklist.md).
+  [D-109](debt.md#d-109) built a render benchmark in P9 wave 3 and it covers
+  **none of these**: it renders the flyout, the overlay is a Win32 layered
+  window, and a cold start needs a session. What it did settle is the
+  `opt-level = "s"` exemption, which is worth roughly 1.4x on a frame and which
+  nothing had measured before.
 
 The CI commands, which a local check must match exactly:
 

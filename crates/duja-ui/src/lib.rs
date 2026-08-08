@@ -52,6 +52,7 @@ pub mod frame_probe;
 // Public so `duja-app` can render the tray icon from the same art as the window
 // icon — the raw RGBA buffer is the only thing the two crates can share.
 pub mod icon;
+pub mod layout;
 pub mod settings_shell;
 pub mod settings_vm;
 pub mod shell;

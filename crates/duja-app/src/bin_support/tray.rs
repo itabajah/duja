@@ -118,15 +118,12 @@ mod surface;
 mod update_flow;
 mod wiring;
 
-/// The flyout's fixed logical width (matches `flyout.slint`).
-const FLYOUT_LOGICAL_WIDTH: f32 = 360.0;
-/// The flyout's hard maximum logical height. Beyond this the rows scroll rather
-/// than the window growing (matches the `clamp(..., 620px)` in `flyout.slint`).
-const FLYOUT_MAX_LOGICAL_HEIGHT: f32 = 620.0;
-/// The flyout's minimum logical height (the empty-state / single-row floor,
-/// matching the `clamp(160px, …)` in `flyout.slint`). The work-area cap is never
-/// allowed to shrink the window below this.
-const FLYOUT_MIN_LOGICAL_HEIGHT: f32 = 160.0;
+// The flyout's geometry lives in `duja-ui`, next to the `.slint` markup it is
+// arithmetic over. It used to be three constants and a method here, in the crate
+// that cannot see the file they each claim to match - which is how the frame
+// probe came to measure a window size the app never presents. Re-exported rather
+// than re-declared so every call site below is unchanged.
+use duja_ui::layout::{FLYOUT_LOGICAL_WIDTH, FLYOUT_MAX_LOGICAL_HEIGHT, FLYOUT_MIN_LOGICAL_HEIGHT};
 /// The settings window's initial logical size (matches `settings.slint`'s
 /// `preferred-width`/`preferred-height`). The window is user-resizable from here.
 const SETTINGS_LOGICAL_WIDTH: f32 = 560.0;
