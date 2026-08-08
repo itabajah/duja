@@ -69,17 +69,44 @@ pub(crate) fn apply_to_document(doc: &mut ConfigDocument, command: &SettingsComm
     }
 }
 
+/// Whether `command` can change a config key at all.
+///
+/// Decided from the command alone, so a caller can answer it **without opening
+/// the file**. That is the whole point: [`persist_config_change`] used to
+/// `ConfigDocument::load(path)?` first and check the footprint afterwards, so an
+/// unreadable `config.toml` made *every* command return `Err` - including
+/// `OpenReleasesPage`, which then reported a failed settings save because the
+/// user had clicked a link.
+///
+/// The list is duplicated from [`apply_to_document`]'s last arm, which is a place
+/// for drift. Two `cfg(test)` items stop it, so neither is linked here:
+/// `the_footprint_predicate_agrees_with_what_the_document_does` checks the two
+/// against each other for every variant, and `exhaustive_check` makes a new
+/// variant fail the test build until somebody says which side it falls on.
+pub(crate) const fn touches_config(command: &SettingsCommand) -> bool {
+    !matches!(
+        command,
+        SettingsCommand::CheckUpdates
+            | SettingsCommand::OpenReleasesPage
+            | SettingsCommand::SetInput { .. }
+    )
+}
+
 /// Load the config document from `path`, apply `command`, and save it back.
 ///
-/// A no-op (returns `Ok(false)`) for commands with no config footprint. On a
-/// config-affecting command, returns `Ok(true)` after a successful atomic write.
+/// A no-op (returns `Ok(false)`) for commands with no config footprint, and it
+/// answers that **before** touching the file - see [`touches_config`].
 ///
 /// # Errors
-/// Propagates any load/parse/write error from the config layer.
+/// Propagates any load/parse/write error from the config layer, for a command
+/// that has something to write.
 pub(crate) fn persist_config_change(
     path: &Path,
     command: &SettingsCommand,
 ) -> Result<bool, duja_core::config::ConfigError> {
+    if !touches_config(command) {
+        return Ok(false);
+    }
     let mut doc = ConfigDocument::load(path)?;
     if !apply_to_document(&mut doc, command) {
         return Ok(false);
@@ -141,6 +168,125 @@ mod tests {
 
     fn id(serial: &str) -> StableDisplayId {
         StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).unwrap()
+    }
+
+    /// Every `SettingsCommand`, so the two footprint lists cannot drift apart.
+    ///
+    /// Restated rather than derived: a test that asked `apply_to_document` what
+    /// `touches_config` should say would be comparing a thing with itself.
+    ///
+    /// **This list is a promise, not a constraint**, and two versions of this
+    /// doc claimed otherwise. The first said a missing variant would fail to
+    /// compile - a `vec![]` literal cannot do that. The second pointed at
+    /// [`exhaustive_check`] as "the constraint this needs", which it is not: it
+    /// is driven from this list, so a variant absent here never reaches it.
+    /// Deleting an entry still leaves the workspace green. What
+    /// `exhaustive_check` buys is that a *listed* variant must be classified;
+    /// keeping the list complete is a human obligation and is stated as one.
+    fn every_command() -> Vec<SettingsCommand> {
+        vec![
+            SettingsCommand::SetAutostart(true),
+            SettingsCommand::SetTheme(ThemeChoice::Dark),
+            SettingsCommand::SetAccent(AccentChoice::default()),
+            SettingsCommand::SetUpdateCheck(true),
+            SettingsCommand::SetMonitorFloor {
+                id: id("A"),
+                pct: 10,
+            },
+            SettingsCommand::SetMonitorDimMode {
+                id: id("A"),
+                mode: DimMode::Overlay,
+            },
+            SettingsCommand::SetMonitorMinPerceived {
+                id: id("A"),
+                pct: 10,
+            },
+            SettingsCommand::SetHotkey {
+                action_key: "brightness_up".to_owned(),
+                binding: "ctrl+alt+up".to_owned(),
+            },
+            SettingsCommand::ClearHotkey {
+                action_key: "brightness_up".to_owned(),
+            },
+            SettingsCommand::CheckUpdates,
+            SettingsCommand::OpenReleasesPage,
+            SettingsCommand::SetInput {
+                id: id("A"),
+                value: 0x11,
+            },
+        ]
+    }
+
+    /// A `match` with no wildcard, so a new `SettingsCommand` variant has to be
+    /// classified here before the test build compiles. The arms do nothing; the
+    /// exhaustiveness is the whole point.
+    ///
+    /// It is the *third* place that stops, not the first - `apply_to_document`
+    /// and the settings dispatcher are both real matches and fail the shipping
+    /// build ahead of it. What this adds is a forcing point next to
+    /// [`touches_config`], which is a negative `!matches!` and so is checked by
+    /// nothing at all.
+    ///
+    /// **What it does not do**, because a correction claimed otherwise and a
+    /// review measured it: it cannot force the new variant into
+    /// [`every_command`]. This is driven *from* that list, so a variant missing
+    /// from it is simply never passed here - deleting an entry leaves the whole
+    /// workspace green. It constrains the *classification* of a variant that is
+    /// listed, not the completeness of the list. Nothing in Rust can force that
+    /// second thing for a `Vec` literal, which is why the list is still a promise
+    /// and this doc says so instead of declaring the gap closed.
+    #[expect(
+        clippy::match_same_arms,
+        reason = "the arms are deliberately identical; the exhaustiveness is what is being asserted"
+    )]
+    fn exhaustive_check(command: &SettingsCommand) {
+        match command {
+            SettingsCommand::SetAutostart(_)
+            | SettingsCommand::SetTheme(_)
+            | SettingsCommand::SetAccent(_)
+            | SettingsCommand::SetUpdateCheck(_)
+            | SettingsCommand::SetMonitorFloor { .. }
+            | SettingsCommand::SetMonitorDimMode { .. }
+            | SettingsCommand::SetMonitorMinPerceived { .. }
+            | SettingsCommand::SetHotkey { .. }
+            | SettingsCommand::ClearHotkey { .. } => {}
+            SettingsCommand::CheckUpdates
+            | SettingsCommand::OpenReleasesPage
+            | SettingsCommand::SetInput { .. } => {}
+        }
+    }
+
+    /// [`touches_config`] and [`apply_to_document`] must agree about every
+    /// command, because the first is now what decides whether the file is opened
+    /// at all.
+    ///
+    /// They disagreeing is how a no-footprint command would start reporting a
+    /// failed save again, which is the defect this predicate was extracted to
+    /// fix: `persist_config_change` loaded the document *first*, so an unreadable
+    /// `config.toml` made `OpenReleasesPage` return `Err` and the settings window
+    /// told the user their click had failed to save something.
+    ///
+    /// `ClearHotkey` is the interesting row and the reason this is not an
+    /// equality: it *can* touch config and, against a document with nothing
+    /// bound, does not. So the predicate is the weaker claim - "might" - and the
+    /// assertion is one-directional.
+    #[test]
+    fn the_footprint_predicate_agrees_with_what_the_document_does() {
+        for command in every_command() {
+            exhaustive_check(&command);
+            let mut doc = ConfigDocument::parse("").expect("an empty document parses");
+            let wrote = apply_to_document(&mut doc, &command);
+            assert!(
+                !wrote || touches_config(&command),
+                "{command:?} changed a key that `touches_config` says it cannot, so the file would never be opened for it"
+            );
+            if !touches_config(&command) {
+                assert!(
+                    !wrote,
+                    "{command:?} is declared footprint-free and wrote anyway"
+                );
+            }
+        }
     }
 
     #[test]

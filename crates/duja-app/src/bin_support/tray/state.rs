@@ -439,6 +439,64 @@ impl AppState {
         }
     }
 
+    /// Persist one settings command, and put the outcome where the user can see
+    /// it.
+    ///
+    /// Both settings-write sites used to end `Err(e) => warn!(...)`, which meant
+    /// a failed write **looked exactly like a successful one**: the view-model
+    /// had already reflected the toggle, so the switch stayed where the user put
+    /// it and nothing on screen said the file had not been touched. On the next
+    /// launch the setting was simply back where it started.
+    /// `docs/debt-archive.md` D-113 is about the cap that makes this reachable;
+    /// this is the half that decides what the app *tells* the user, which the
+    /// row names as the reason a write-side cap alone would not have closed it.
+    ///
+    /// # The three outcomes are three different answers
+    ///
+    /// `persist_config_change` returns `Ok(true)` for a write that landed,
+    /// `Ok(false)` for a command with **no config footprint** at all
+    /// (`SetInput`, `CheckUpdates`, `OpenReleasesPage`, and a `ClearHotkey` with
+    /// nothing bound), and
+    /// `Err` for a write that failed. Only the first proves the file is
+    /// writable, so only the first clears the banner.
+    ///
+    /// The first version of this collapsed `Ok(_)` into "clear", and a review
+    /// found the hole: a settings write fails, the banner appears, the user
+    /// picks a different **input source** one row below in the same window - a
+    /// command that touches no config - and the banner disappears while their
+    /// setting is still unsaved. That is the same lie this function exists to
+    /// stop, pointing a third way, and it would have been the easiest of the
+    /// three to ship.
+    fn persist_or_report(&mut self, command: &SettingsCommand, what: &str) {
+        let outcome = settings_apply::persist_config_change(&self.config_path, command);
+        // `None` means "say nothing new", which is not the same as "clear".
+        let banner: Option<Option<String>> = match &outcome {
+            Ok(true) => Some(None),
+            Ok(false) => None,
+            Err(e) => {
+                warn!(error = %e, what, "failed to persist a settings change");
+                // The path is the actionable half - "could not save" without it
+                // leaves a user with nothing to look at. `{e}` rather than
+                // `{e:#}`: `ConfigError`'s Display already carries the cause,
+                // and the alternate form repeats it.
+                Some(Some(format!(
+                    "Could not save the {} to {}: {e}",
+                    what,
+                    self.config_path.display()
+                )))
+            }
+        };
+        let changed = matches!(outcome, Ok(true));
+        if let Some(message) = banner {
+            self.settings_vm.borrow_mut().set_config_error(message);
+        }
+        if changed {
+            self.reload_config();
+        }
+        self.settings_shell
+            .update_from_vm(&self.settings_vm.borrow());
+    }
+
     /// Apply a flyout dimming toggle: persist the display's dim mode (overlay when
     /// on, off when off), re-plan its dimmer batch, and refresh both windows.
     ///
@@ -454,11 +512,7 @@ impl AppState {
             id: id.clone(),
             mode,
         };
-        match settings_apply::persist_config_change(&self.config_path, &command) {
-            Ok(true) => self.reload_config(),
-            Ok(false) => {}
-            Err(e) => warn!(error = %e, "failed to persist dimming toggle"),
-        }
+        self.persist_or_report(&command, "dimming toggle");
         self.reapply_display(id);
         self.refresh_flyout_dimming();
         self.render();
@@ -617,11 +671,7 @@ impl AppState {
 
         // 1. Persist the config-affecting part (format-preserving), then reload
         //    the typed config so in-memory state matches disk.
-        match settings_apply::persist_config_change(&self.config_path, &command) {
-            Ok(true) => self.reload_config(),
-            Ok(false) => {}
-            Err(e) => warn!(error = %e, "failed to persist settings change"),
-        }
+        self.persist_or_report(&command, "settings change");
 
         // 2. Apply the live side effect.
         match command {
@@ -1753,6 +1803,182 @@ mod level_path_tests {
         let key = id("A");
         assert!(h.app.user_controlled.contains(key.as_str()));
         assert_eq!(h.app.state.level(key.as_str()), Some(60));
+    }
+}
+
+/// What the settings window is told when a config write fails.
+///
+/// `docs/debt-archive.md` D-113's third half. A review found two holes in the
+/// first version of it, and neither had a test until the `AppState` fixture
+/// landed - which it had, in this branch's own base, so shipping them unpinned
+/// would have been a choice rather than a constraint.
+#[cfg(test)]
+mod config_banner_tests {
+    use duja_core::config::Config;
+    use duja_core::id::StableDisplayId;
+    use duja_ui::SettingsCommand;
+
+    use super::fixture::harness;
+
+    fn id(serial: &str) -> StableDisplayId {
+        StableDisplayId::from_parts("GSM", 0x0001, Some(serial)).expect("a valid id")
+    }
+
+    /// A `config.toml` that cannot be persisted through.
+    ///
+    /// Over `MAX_CONFIG_LEN`, which fails on the **read** - `ConfigDocument::load`
+    /// hits `read_to_string_opt`'s metadata pre-check and returns `TooLarge`
+    /// before `write_atomic` is reached. An earlier version of this comment said
+    /// "the write path will refuse", which is not what happens; a review measured
+    /// it by deleting the write cap and finding these tests unmoved.
+    ///
+    /// That is a real limit on what they prove: they pin the **banner**, not the
+    /// write cap, and the write cap has its own tests in `duja-core`. Nothing here
+    /// joins the two, which is stated rather than implied by "all three halves".
+    fn unwritable_config(app: &mut super::AppState) {
+        std::fs::write(
+            &app.config_path,
+            "x".repeat(duja_core::config::persist::MAX_CONFIG_LEN + 1),
+        )
+        .expect("write an over-cap config");
+    }
+
+    /// A failed settings write reaches the window, naming the file.
+    #[test]
+    fn a_failed_write_names_the_file() {
+        let mut h = harness(Config::default());
+        unwritable_config(&mut h.app);
+
+        h.app
+            .on_settings_command(SettingsCommand::SetUpdateCheck(true));
+
+        let vm = h.app.settings_vm.borrow();
+        let banner = vm.config_error().expect("the user must be told");
+        assert!(banner.contains("config.toml"), "{banner}");
+    }
+
+    /// **A command with no config footprint leaves the banner alone.**
+    ///
+    /// Both directions of the same hole, and the first version had both. It
+    /// cleared on `Ok(_)`, so a user whose write had just failed could pick a
+    /// different input source one row below and watch the warning vanish while
+    /// their setting stayed unsaved. And `persist_config_change` loaded the
+    /// document *before* checking the footprint, so against an unreadable config
+    /// those same commands returned `Err` and **raised** a banner about a save
+    /// nobody had asked for - clicking "Open releases page" reported a failed
+    /// settings save.
+    ///
+    /// So a no-footprint command must neither set nor clear it, whatever state
+    /// the file is in. Asserted against a broken config, which is the case that
+    /// exercises both.
+    #[test]
+    fn a_command_with_no_config_footprint_neither_sets_nor_clears_the_banner() {
+        let mut h = harness(Config::default());
+        unwritable_config(&mut h.app);
+
+        // Nothing has failed yet, so no no-footprint command may invent one.
+        // All three, in the first phase, because the second phase cannot tell a
+        // command that left the banner alone from one that *replaced* it.
+        for command in no_footprint_commands() {
+            h.app.on_settings_command(command);
+        }
+        assert_eq!(
+            h.app.settings_vm.borrow().config_error(),
+            None,
+            "a click that saves nothing cannot report a failed save"
+        );
+
+        // Now make one fail, and check the same commands neither wipe it nor
+        // quietly swap it for one of their own.
+        h.app
+            .on_settings_command(SettingsCommand::SetUpdateCheck(true));
+        let raised = h
+            .app
+            .settings_vm
+            .borrow()
+            .config_error()
+            .map(str::to_owned)
+            .expect("the failure is shown");
+
+        for command in no_footprint_commands() {
+            h.app.on_settings_command(command);
+        }
+        assert_eq!(
+            h.app.settings_vm.borrow().config_error(),
+            Some(raised.as_str()),
+            "the warning must survive unchanged; a replacement is the same lie"
+        );
+    }
+
+    /// Every command `touches_config` declares footprint-free.
+    ///
+    /// Named here rather than inlined because both phases must drive the same
+    /// set: an earlier version exercised `SetInput` only in the second phase,
+    /// where the banner is already up, and asserted only `is_some()` - so
+    /// dropping `SetInput` from the predicate left both tests green while it
+    /// raised a fresh banner of its own. That is the command the whole fix is
+    /// named for.
+    fn no_footprint_commands() -> Vec<SettingsCommand> {
+        vec![
+            SettingsCommand::CheckUpdates,
+            SettingsCommand::OpenReleasesPage,
+            SettingsCommand::SetInput {
+                id: id("A"),
+                value: 0x11,
+            },
+        ]
+    }
+
+    /// The two side effects those commands *do* have stay behind their seams.
+    ///
+    /// `OpenReleasesPage` reaches `ShellExecuteW` and `CheckUpdates` spawns a
+    /// real HTTPS GET, and before their `cfg!(test)` diversions existed the test
+    /// above launched the operator's browser on every `cargo test` - measured
+    /// through browser process start times. This asserts the diversions rather
+    /// than trusting them, because the seam is one edit away from being walked
+    /// past again, which is exactly how it got walked past the first time.
+    #[test]
+    fn the_no_footprint_commands_reach_no_browser_and_no_network() {
+        let mut h = harness(Config::default());
+        super::super::opened::clear();
+
+        for command in no_footprint_commands() {
+            h.app.on_settings_command(command);
+        }
+
+        // Not "nothing happened" - `OpenReleasesPage` is *supposed* to open the
+        // page. What must not happen is a real `ShellExecuteW`, and the proof
+        // that it did not is the URL being in the recorder instead.
+        assert_eq!(
+            super::super::opened::urls(),
+            [crate::bin_support::updates::RELEASES_PAGE_URL],
+            "the open went through the seam rather than to the operator's browser"
+        );
+        assert!(
+            !h.app.update_check_in_flight,
+            "and no detached network thread was left running past the test"
+        );
+    }
+
+    /// A write that succeeds clears it, which is the other half of not lying.
+    ///
+    /// A banner that only ever appeared would sit there after the next write
+    /// worked, telling a user their settings are not being saved while they are.
+    #[test]
+    fn a_later_successful_write_clears_the_banner() {
+        let mut h = harness(Config::default());
+        unwritable_config(&mut h.app);
+
+        h.app
+            .on_settings_command(SettingsCommand::SetUpdateCheck(true));
+        assert!(h.app.settings_vm.borrow().config_error().is_some());
+
+        // Remove the obstacle and write again.
+        std::fs::remove_file(&h.app.config_path).expect("clear the way");
+        h.app
+            .on_settings_command(SettingsCommand::SetUpdateCheck(false));
+
+        assert_eq!(h.app.settings_vm.borrow().config_error(), None);
     }
 }
 

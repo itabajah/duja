@@ -493,6 +493,10 @@ fn render_into(
     ui.set_accent_on(crate::shell::to_slint(accent.on));
     ui.set_update_check_on(vm.update_check_on());
     ui.set_update_status(SharedString::from(status_line(vm.update_status())));
+    // Empty string means "no banner"; the `.slint` gates the whole Rectangle on
+    // it, so a cleared error takes its vertical space back rather than leaving a
+    // blank box behind.
+    ui.set_config_error(SharedString::from(vm.config_error().unwrap_or_default()));
     ui.set_update_available(vm.update_available());
 
     // Reuse each monitor's input-label model across renders so its `inputs`
@@ -938,6 +942,54 @@ mod binding_tests {
     use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
     use i_slint_backend_testing::{ElementHandle, ElementRoot};
 
+    /// A settings-write failure reaches the window, and clears when the next
+    /// write succeeds.
+    ///
+    /// `docs/debt-archive.md` D-113's UI half. Both settings-write sites used to end
+    /// `Err(e) => warn!(...)`, so a failed write looked exactly like a
+    /// successful one: the view-model had already reflected the toggle, the
+    /// switch stayed where the user put it, and the setting was simply back
+    /// where it started at the next launch. The row is explicit that a
+    /// write-side cap alone would not have closed it, because the missing part
+    /// is what the app *tells* the user.
+    ///
+    /// Both directions are asserted in one test on purpose. A banner that only
+    /// ever appears is the same defect in the other direction - it would sit
+    /// there after the next write worked, telling a user their settings are not
+    /// being saved while they are - and a test that only checked the appearing
+    /// half would pass against that.
+    #[test]
+    fn a_failed_settings_write_is_shown_and_a_later_success_clears_it() {
+        i_slint_backend_testing::init_no_event_loop();
+
+        let vm = Rc::new(RefCell::new(SettingsVm::new()));
+        let shell = SettingsShell::new(vm.clone()).expect("settings shell instantiates");
+
+        shell.update_from_vm(&vm.borrow());
+        assert!(
+            config_error_banners(&shell).is_empty(),
+            "nothing has failed yet"
+        );
+
+        vm.borrow_mut().set_config_error(Some(
+            "Could not save settings change to C:/x/config.toml: too large".to_owned(),
+        ));
+        shell.update_from_vm(&vm.borrow());
+        let shown = config_error_banners(&shell);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(
+            shown.first().is_some_and(|b| b.contains("config.toml")),
+            "the path is the actionable half of the message: {shown:?}"
+        );
+
+        vm.borrow_mut().set_config_error(None);
+        shell.update_from_vm(&vm.borrow());
+        assert!(
+            config_error_banners(&shell).is_empty(),
+            "a cleared error must take its banner away"
+        );
+    }
+
     /// A gamma cap that is deliberately **not** Windows' 50 — see the twin in the
     /// `tests` module above.
     const NOT_THE_WINDOWS_CAP: u8 = 62;
@@ -1001,6 +1053,10 @@ mod binding_tests {
 
     fn gamma_cap_captions(shell: &SettingsShell) -> Vec<String> {
         captions_starting_with(shell, "Gamma can only darken")
+    }
+
+    fn config_error_banners(shell: &SettingsShell) -> Vec<String> {
+        captions_starting_with(shell, "Could not save")
     }
 
     fn gamma_advisory_captions(shell: &SettingsShell) -> Vec<String> {
