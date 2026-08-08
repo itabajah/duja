@@ -74,9 +74,12 @@ a maintainer reads *while cutting the release*.)
       Install section, the support matrix, and `SECURITY.md` describe what a user
       can actually download. Do not add a platform's instructions before the tag
       that first publishes its artifact — until then they point at a file that is
-      not on the Releases page. (macOS and Linux install steps landed with
-      `v0.1.6`, the tag that first published their artifacts under
-      [ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md).)
+      not on the Releases page. **Due with `v0.1.6`**, which under
+      [ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md) is the tag
+      that first publishes a macOS and a Linux artifact: the README needs a
+      macOS install section (there is none), its Linux section still opens "No
+      release yet", its "There is no macOS or Linux download yet" note goes, and
+      `SECURITY.md`'s "Two of the four have never been published" goes with it.
 - [ ] **Update [`release-notes-preamble.md`](release-notes-preamble.md) in the
       same PR.** It is prepended verbatim to the published notes, and it is the
       *only* place a reader is told which artifacts are unverified previews.
@@ -84,6 +87,16 @@ a maintainer reads *while cutting the release*.)
       stale preamble is a false assurance on the page a user downloads from.
       Check it names exactly the platforms that are still unconfirmed — no more
       (which understates a platform that has since been confirmed) and no fewer.
+
+      Two rules for editing it, both learned the expensive way in the review of
+      the PR that added it. **Keep it free of HTML comments**: the file is
+      published byte-for-byte into the release body, so a maintainer note meant
+      for the repo ends up in the API response and the edit view. And **check
+      every capability claim against the code**, not against the README: that
+      review found the first draft telling users `duja --restore` recovers a
+      Wayland session (it deliberately does not connect at all) and that
+      `dujactl doctor` reports a missing tray host (nothing in `dujactl`
+      mentions `StatusNotifierItem`).
 - [ ] **Dry run.** Trigger the `release` workflow via **Run workflow**
       (`workflow_dispatch`) on the merged commit. Download the
       `duja-<ver>-release` artifact and confirm the installer, portable zip,

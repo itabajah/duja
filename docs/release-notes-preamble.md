@@ -1,21 +1,3 @@
-<!--
-  Prepended verbatim to every published release's notes by the "Generate release
-  notes" step in .github/workflows/release.yml, ahead of the git-cliff changelog.
-
-  ADR-0024 requires it: a release that carries an artifact for a platform nobody
-  has confirmed on real hardware must say so in its own notes, and that claim
-  lives in a reviewed file rather than in whoever is cutting the release. It
-  cannot live in cliff.toml, because the release step runs `git cliff --strip
-  all`, which drops the configured header and footer.
-
-  EDIT THIS IN THE SAME PR THAT BUMPS THE VERSION. When a platform leaves
-  preview - macOS at ADR-0013's three independent community confirmations per
-  architecture, Linux at a human running the tray on a real session - move it out
-  of the preview list here and out of the README's support-matrix note in the
-  same change. A stale preamble understates or overstates what a download is,
-  and both directions are the false-assurance shape docs/plan.md forbids.
--->
-
 > ### Windows is the released platform. macOS and Linux ship as previews.
 >
 > **Windows**: `duja-setup-<version>.exe` and `duja-<version>-windows-x64.zip`
@@ -28,12 +10,26 @@
 > types, pure tests, CI and cross-referenced primary sources only. Expect
 > defects that no amount of that catches.
 >
-> Two things make a bad first run recoverable, and they are worth knowing before
-> you start. Run **`dujactl doctor`** first: it reports what your session can
-> actually do (transport, overlay, gamma, and the displays it found), so a
-> missing kernel module or tray host says so instead of looking like a hang. And
-> if a screen is left dim or discoloured, **`duja --restore`** puts the gamma
-> back, as does simply killing the process on Wayland.
+> **On Linux, run `dujactl doctor` first.** It prints the display server it
+> found, whether overlay dimming and gamma dimming are available this session,
+> and the displays it can see, so a missing `i2c-dev` module or an unusable
+> compositor says so instead of looking like a hang. Two things it does *not*
+> tell you: whether your desktop has a `StatusNotifierItem` host (without one
+> the tray icon simply never appears, and nothing reports that), and anything
+> about macOS, where the report is display information only.
+>
+> **If a screen is left dim or discoloured**, how you recover depends on the
+> transport, and it is worth reading before you need it:
+>
+> - **X11**: `duja --restore` resets the gamma on every CRTC of your X screen.
+> - **Wayland**: `duja --restore` has nothing to do and says so. It is not
+>   broken - a `wlr-gamma-control` ramp lives only as long as the process that
+>   set it, so **killing Duja is the recovery**, and the compositor puts the
+>   output back by itself even after a hard kill.
+> - **macOS**: `duja --restore` is the only route, and there is no automatic
+>   crash recovery behind it - the crash marker the other platforms write is
+>   not written there. Both binaries live inside
+>   `Duja.app/Contents/MacOS/`, so neither is on your `PATH` without a symlink.
 >
 > Reports are the point of shipping these. A
 > [quirk report](https://github.com/itabajah/duja/issues/new?template=monitor-quirk-report.yml)

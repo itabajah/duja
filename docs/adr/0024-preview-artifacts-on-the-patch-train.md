@@ -2,8 +2,12 @@
 
 - Status: accepted
 - Date: 2026-08-08
-- Supersedes: the platform rows and the "no new platform" rule of
-  [0019](0019-version-ladder-and-release-trains.md)
+- Supersedes: [0019](0019-version-ladder-and-release-trains.md)'s platform
+  rows, its "no new platform" rule for patch releases, and its two statements
+  that a minor release *adds* a platform (its Decision rule on minor releases,
+  and its "macOS lands as `v0.2.0`, Linux as `v0.3.0`" consequence). Under this
+  ADR a minor **confirms** a platform rather than adding one. 0019's `v1.0.0`
+  row stands unchanged.
 
 ## Context
 
@@ -71,40 +75,76 @@ beginning with `v0.1.6`, labelled as unverified previews.**
 4. **A release carrying an unconfirmed platform must say so in its own release
    notes**, and that is a committed file rather than a memory:
    [`docs/release-notes-preamble.md`](../release-notes-preamble.md) is prepended
-   to the git-cliff output by `release.yml`. `git cliff --strip all` removes the
-   configured header and footer, so `cliff.toml` cannot carry this; and a label
-   applied by whoever happens to be cutting the release is the
+   to the git-cliff output by `release.yml`. A label applied by whoever happens
+   to be cutting the release is the
    [false-assurance](../plan.md#how-work-lands) shape this project has a rule
    against. When a platform leaves preview, the preamble is edited in the same
    PR that bumps the version.
+
+   **Why not `cliff.toml`'s header**, stated precisely because the first version
+   of this ADR got it wrong and a reviewer disproved it by running the command.
+   The claim was that `--strip all` removes the header and footer so the config
+   cannot carry this. That is not a constraint - `--strip` is chosen on the same
+   command line, `--strip footer` demonstrably keeps the header, and `cliff.toml`
+   has no footer configured at all. The real reason is narrower and is about
+   ownership: `cliff.toml`'s `[changelog] header` is **`CHANGELOG.md`'s** header
+   ("# Changelog / All notable changes to Duja are documented here..."), which is
+   the wrong text for a release body and the right text for the file it belongs
+   to. One key cannot be both. A separate file is the cheaper answer than a
+   second changelog config.
 
 ## Consequences
 
 - **A macOS or Linux user can now install code that has never executed on their
   hardware.** That is the cost, stated without softening. The mitigations are
-  real but partial: gamma and overlay state is crash-guarded
-  (`duja --restore`, crash-marker recovery), `dujactl doctor` reports what a
-  session can actually do before the tray is launched, and the Linux gamma path
-  refuses rather than silently doing nothing on a transport it cannot drive.
-  None of that is a substitute for the run, which is exactly why the artifacts
-  are labelled rather than announced.
+  real, partial, and **uneven across the two platforms** - the first draft of
+  this list said "gamma and overlay state is crash-guarded (`duja --restore`,
+  crash-marker recovery)" as though that held everywhere, and a reviewer caught
+  that it does not:
 
-- **The update checker's reach is unchanged.** It prompts on a newer stable
-  release via GitHub's `/releases/latest`, and today every installed copy of
-  Duja is a Windows one. The ports have no installed base to notify, so this
-  decision adds no prompt that did not already exist.
+  | | X11 | Wayland | macOS |
+  |---|---|---|---|
+  | `duja --restore` | resets every CRTC | nothing to do, and says so | the only route |
+  | automatic crash recovery | crash marker | not needed - the ramp dies with the process | **none: no marker is written** |
+  | `dujactl doctor` session report | yes | yes | display info only |
+
+  So the platform with the weakest recovery story is the one whose report says
+  least, and neither `doctor` nor anything else detects a missing
+  `StatusNotifierItem` host. The preamble states this per-platform rather than
+  in one reassuring sentence. None of it substitutes for the run, which is why
+  the artifacts are labelled rather than announced.
+
+- **The update checker's reach is unchanged *today*, and will not stay that
+  way.** It prompts on a newer stable release via `/releases/latest`, and every
+  installed copy of Duja is currently a Windows one, so this decision adds no
+  prompt that did not already exist. But `updates.rs` carries no platform `cfg`:
+  once a Mac or Linux user installs a preview, the *next* release prompts them,
+  and it prompts them toward another preview. That is a new consequence of this
+  decision rather than a pre-existing one, and it is the strongest argument for
+  keeping the preamble accurate - it is what a returning preview user sees.
 
 - **`v1.0.0` stays held, and its condition is unchanged.** ADR-0019 defines it
   as including "cross-platform hardware sign-off", and a preview is the opposite
   of a sign-off. What this decision changes is that the sign-off is now
   *obtainable*: previews are the instrument that produces it.
 
-- **Three documents stop being true the moment this ships** and are corrected in
-  the same release: `README.md`'s "There is no macOS or Linux download yet" and
-  its support-matrix note, `SECURITY.md`'s "Two of the four have never been
-  published", and `docs/STATUS.md`'s two `held` release rows. The support
-  matrix's 🧪 cells stay 🧪 — "written and CI-tested, never run on real
-  hardware" is still precisely what they are, and a download link does not
+- **Four documents stop being true the moment this ships** and are corrected in
+  the same release, in the `v0.1.6` docs PR rather than this one:
+
+  | file | what goes stale |
+  |---|---|
+  | `README.md` | "There is no macOS or Linux download yet" (`:131`), "**Linux (x64).** No release yet" (`:78`), and the absence of any macOS install section |
+  | `SECURITY.md` | "Two of the four have never been published" (`:99`) |
+  | `docs/STATUS.md` | the two `held` release rows |
+  | `docs/plan.md` | the ladder section, the phase table's `v0.2.0 held` / `v0.3.0 held`, and the "held rather than pending" list |
+
+  The list said *three* until a reviewer pointed out that `plan.md` - the
+  entry-point doc - asserts the old ladder in four places. `docs/adr/0019`'s own
+  file is deliberately untouched: `docs/adr/README.md` says a superseded
+  decision's text stays and the *index row* carries the annotation.
+
+  The support matrix's 🧪 cells stay 🧪 — "written and CI-tested, never run on
+  real hardware" is still precisely what they are, and a download link does not
   change it.
 
 - **What replaces the hold is the label**, and a label is weaker than a gate.
