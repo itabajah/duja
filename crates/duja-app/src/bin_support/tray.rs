@@ -364,8 +364,8 @@ pub(crate) fn run(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
         run::controller_factory(),
         tick_rx,
     );
-    let dimmer = match PlatformDimmer::spawn() {
-        Ok(d) => Some(d),
+    let dimmer: Option<Box<dyn duja_core::dimmer::Dimmer>> = match PlatformDimmer::spawn() {
+        Ok(d) => Some(Box::new(d)),
         Err(e) => {
             error!(error = %e, "overlay dimmer unavailable; software dimming disabled");
             None
@@ -564,8 +564,9 @@ struct LoopStartResources {
     autostart: Option<Box<dyn Autostart>>,
     /// The shared display-bounds map the enumerator refreshes.
     bounds: Arc<Mutex<BoundsMap>>,
-    /// The overlay dimmer, if it spawned.
-    dimmer: Option<PlatformDimmer>,
+    /// The overlay dimmer, if it spawned. Boxed behind its trait so `AppState`'s
+    /// field can be substituted in a test - see that field's doc.
+    dimmer: Option<Box<dyn duja_core::dimmer::Dimmer>>,
     /// The engine command channel (cloned for the level forwarder and the IPC
     /// bridge).
     engine_tx: Sender<EngineCommand>,
