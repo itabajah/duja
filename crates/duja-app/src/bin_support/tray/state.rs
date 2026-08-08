@@ -1501,9 +1501,11 @@ pub(super) mod fixture {
     /// initialized in another thread". That string is what a `Once` here
     /// actually produces, reproduced by swapping the latch back and running the
     /// suite. A review round replaced it with a different message and labelled
-    /// the replacement "measured"; it was not, and the correction was the defect
-    /// - which is worth leaving written down, because this file argues at length
-    /// that a claim reading as verified and not being so is the expensive kind.
+    /// the replacement "measured"; it was not, and the correction was the
+    /// defect. That is worth leaving written down, because this file argues at
+    /// length that a claim reading as verified and not being so is the expensive
+    /// kind.
+    ///
     /// `cargo test` runs a binary's tests on
     /// several threads of one process, so a `std::sync::Once` here - which is
     /// what the first version of this used - initialises for whichever test ran
