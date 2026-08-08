@@ -11,27 +11,38 @@ the identical build as an **artifacts-only dry run** (no publish).
 The gate (cargo-deny + clippy + tests) re-validates the tagged commit, so a red
 or advisory-drifted commit fails the run before anything is **published**. Be
 precise about *when*, because it is not "before anything is built": the gate
-steps live in the `release` job, and the `macos` job runs **first** with no gate
-of its own. So both Apple slices are compiled, fused, bundled and `codesign`ed —
-and, on the `MACOS_SIGN` path, submitted to Apple's notary and stapled — before
+steps live in the `release` job, and the `macos` and `linux` jobs both run
+**first** with no gate of their own. So both Apple slices are compiled, fused,
+bundled and `codesign`ed — and, on the `MACOS_SIGN` path, submitted to Apple's
+notary and stapled — and the Linux tarball is built, staged and verified, before
 `cargo deny` has run. Nothing unverified can reach the Releases page. What a tag
-on a bad commit does cost is a full macOS build, and — **once `MACOS_SIGN` is
-enabled**, which it is not today, so the notarize and staple steps do not run —
-a notarization submission, which is a permanent request to Apple for a build you
-then throw away.
+on a bad commit does cost is a full macOS build plus a full Linux one, and —
+**once `MACOS_SIGN` is enabled**, which it is not today, so the notarize and
+staple steps do not run — a notarization submission, which is a permanent
+request to Apple for a build you then throw away.
 
-Two further limits worth knowing before trusting a green run: the gate's clippy
-and tests execute on **`windows-latest` only**, so no `cfg(target_os = "macos")`
-item is compiled by them (`cargo deny` *does* cover the macOS dependency graph —
-`deny.toml` sets `all-features` with no target restriction). And the `macos` job
-runs on floating `runs-on: macos-latest` in a workflow that SHA-pins every action.
+Two further limits worth knowing before trusting a green run. The gate's clippy
+and tests execute on **`windows-latest` only**, so neither a
+`cfg(target_os = "macos")` nor a `cfg(target_os = "linux")` item is compiled by
+them — the 3-OS matrix in `ci.yml` is what covers those, on the merge PR rather
+than on the tag. (`cargo deny` *does* cover both dependency graphs here:
+`deny.toml` sets `all-features` with no target restriction.) And the `macos` and
+`linux` jobs run on floating `runs-on: macos-latest` / `ubuntu-latest` in a
+workflow that SHA-pins every action.
 
-Two jobs: `macos` builds both Apple slices, fuses them, and produces the signed
-`Duja.app` inside a disk image; `release` then does everything else on Windows
-and folds that image into the one `SHA256SUMS`, the one minisign pass, the one
-provenance attestation, and the one Release. The macOS job runs first and the
-Windows one `needs:` it, so **a macOS packaging failure blocks the whole
-release** rather than quietly publishing a Windows-only one.
+**Three** jobs. `macos` builds both Apple slices, fuses them, and produces the
+signed `Duja.app` inside a disk image; `linux` builds and tars the Linux
+artifact; `release` then does everything else on Windows and folds both into the
+one `SHA256SUMS`, the one minisign pass, the one provenance attestation, and the
+one Release. The first two run in parallel and the Windows one `needs:` both, so
+**a macOS *or* Linux packaging failure blocks the whole release** rather than
+quietly publishing a Windows-only one.
+
+(This paragraph said "Two jobs" and named only macOS until the `v0.1.6` prep.
+The `linux` job landed in P7 wave 6, and P8 wave 5's docs-truth sweep corrected
+the same stale count in `SECURITY.md` and in `release.yml`'s own comment while
+missing this file - which is the drift that sweep exists to catch, in the runbook
+a maintainer reads *while cutting the release*.)
 
 ## Before tagging
 
@@ -63,17 +74,42 @@ release** rather than quietly publishing a Windows-only one.
       Install section, the support matrix, and `SECURITY.md` describe what a user
       can actually download. Do not add a platform's instructions before the tag
       that first publishes its artifact — until then they point at a file that is
-      not on the Releases page. (Outstanding: the macOS `.dmg` install steps, due
-      with `v0.2.0`.)
+      not on the Releases page. **Due with `v0.1.6`**, which under
+      [ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md) is the tag
+      that first publishes a macOS and a Linux artifact: the README needs a
+      macOS install section (there is none), its Linux section still opens "No
+      release yet", its "There is no macOS or Linux download yet" note goes, and
+      `SECURITY.md`'s "Two of the four have never been published" goes with it.
+- [ ] **Update [`release-notes-preamble.md`](release-notes-preamble.md) in the
+      same PR.** It is prepended verbatim to the published notes, and it is the
+      *only* place a reader is told which artifacts are unverified previews.
+      ADR-0024 made that label the thing that replaced holding the release, so a
+      stale preamble is a false assurance on the page a user downloads from.
+      Check it names exactly the platforms that are still unconfirmed — no more
+      (which understates a platform that has since been confirmed) and no fewer.
+
+      Two rules for editing it, both learned the expensive way in the review of
+      the PR that added it. **Keep it free of HTML comments**: the file is
+      published byte-for-byte into the release body, so a maintainer note meant
+      for the repo ends up in the API response and the edit view. And **check
+      every capability claim against the code**, not against the README: that
+      review found the first draft telling users `duja --restore` recovers a
+      Wayland session (it deliberately does not connect at all) and that
+      `dujactl doctor` reports a missing tray host (nothing in `dujactl`
+      mentions `StatusNotifierItem`).
 - [ ] **Dry run.** Trigger the `release` workflow via **Run workflow**
       (`workflow_dispatch`) on the merged commit. Download the
       `duja-<ver>-release` artifact and confirm the installer, portable zip,
-      disk image, and `SHA256SUMS` are present and sane. This publishes nothing.
-      The dry run is also the **only** automated exercise of the macOS packaging
-      path — `lipo`, `codesign` and `hdiutil` cannot run on the other lanes — so
-      check the `macos` job's *Verify the bundle* step went green: it lints the
-      `Info.plist`, asserts `LSUIElement`, and proves both binaries carry an
-      arm64 **and** an x86_64 slice built against the advertised floor.
+      disk image, tarball and `SHA256SUMS` are present and sane. This publishes
+      nothing. The dry run is also the **only** automated exercise of the two
+      non-Windows packaging paths, so check both verification steps went green:
+      the `macos` job's *Verify the bundle* (it lints the `Info.plist`, asserts
+      `LSUIElement`, and proves both binaries carry an arm64 **and** an x86_64
+      slice built against the advertised floor — `lipo`, `codesign` and
+      `hdiutil` cannot run on the other lanes) and the `linux` job's *Verify the
+      tarball* (it extracts the archive the way a user will, checks the
+      executable bit survived `tar`, validates the `.desktop` entry, and runs
+      `dujactl version` to prove the binary inside matches the artifact's name).
 
 ## Tagging
 
@@ -82,14 +118,16 @@ guard fails the run when `vX.Y.Z` does not match the workspace version, so a
 mislabeled installer never ships.
 
 ```sh
-git tag v0.1.0            # == the version in Cargo.toml
-git push origin v0.1.0
+git tag v0.1.6            # == the version in Cargo.toml
+git push origin v0.1.6
 ```
 
-The tag push packages macOS, runs the gate, builds the Windows binaries,
-Authenticode-signs the installer (only if enabled — see below), computes
-`SHA256SUMS`, minisigns every asset, attests the three binaries, renders release
-notes with git-cliff, and creates the GitHub Release.
+The tag push packages macOS and Linux, runs the gate, builds the Windows
+binaries, checks them against the size budget, Authenticode-signs the installer
+(only if enabled — see below), computes `SHA256SUMS`, minisigns every asset,
+attests the **four** shippable artifacts, renders release notes with git-cliff
+behind [`release-notes-preamble.md`](release-notes-preamble.md), and creates the
+GitHub Release.
 
 ## After publish — verify every asset
 
@@ -107,10 +145,10 @@ shasum -a 256 -c SHA256SUMS      # macOS (byte-identical digests)
 minisign -Vm SHA256SUMS -P RWSeL0en/zyHopbYOTmC4nwO4pLW0WN6awWsuhwoUZnSM+D0zukOl0UK
 
 # 3. Build-provenance attestation on each artifact (installer, zip, image, tarball).
-gh attestation verify duja-setup-0.1.0.exe            --repo itabajah/duja
-gh attestation verify duja-0.1.0-windows-x64.zip      --repo itabajah/duja
-gh attestation verify duja-0.1.0-macos-universal.dmg  --repo itabajah/duja
-gh attestation verify duja-0.1.0-linux-x64.tar.gz     --repo itabajah/duja
+gh attestation verify duja-setup-0.1.6.exe            --repo itabajah/duja
+gh attestation verify duja-0.1.6-windows-x64.zip      --repo itabajah/duja
+gh attestation verify duja-0.1.6-macos-universal.dmg  --repo itabajah/duja
+gh attestation verify duja-0.1.6-linux-x64.tar.gz     --repo itabajah/duja
 ```
 
 All four must pass. Provenance covers the four shippable artifacts only;
@@ -120,10 +158,10 @@ On a Mac, also confirm the image mounts and the bundle is intact — this is the
 part CI checked on a virtualized runner and a user checks on real hardware:
 
 ```sh
-hdiutil attach duja-0.1.0-macos-universal.dmg
-codesign --verify --strict --verbose=2 /Volumes/Duja\ 0.1.0/Duja.app
-lipo -archs /Volumes/Duja\ 0.1.0/Duja.app/Contents/MacOS/duja   # x86_64 arm64
-hdiutil detach /Volumes/Duja\ 0.1.0
+hdiutil attach duja-0.1.6-macos-universal.dmg
+codesign --verify --strict --verbose=2 /Volumes/Duja\ 0.1.6/Duja.app
+lipo -archs /Volumes/Duja\ 0.1.6/Duja.app/Contents/MacOS/duja   # x86_64 arm64
+hdiutil detach /Volumes/Duja\ 0.1.6
 ```
 
 On Linux, confirm the tarball extracts to one directory and the binaries kept
@@ -131,8 +169,8 @@ their permission bit — the failure a tarball has and a zip does not, and the o
 that only shows up on the user's machine:
 
 ```sh
-tar xzf duja-0.1.0-linux-x64.tar.gz
-cd duja-0.1.0-linux-x64
+tar xzf duja-0.1.6-linux-x64.tar.gz
+cd duja-0.1.6-linux-x64
 test -x duja && test -x dujactl && echo "executable bit intact"
 ./dujactl doctor          # says what this session can and cannot do
 ```
@@ -168,11 +206,12 @@ to the workflow:
 
 The step runs **before** `SHA256SUMS` is computed, so the checksums and the
 provenance attestation automatically cover the signed installer — no reordering
-needed. Only the installer `.exe` is Authenticode-signable; the portable `.zip`
-stays covered by minisign + provenance, and `SHA256SUMS` by **minisign only** —
-`subject-path` lists the three binaries and deliberately excludes it, as the
-"All three must pass" note above says. Once signing is confirmed
-on a real release, drop the SmartScreen note from `SECURITY.md` / README.
+needed. Only the installer `.exe` is Authenticode-signable; the portable `.zip`,
+the `.dmg` and the `.tar.gz` stay covered by minisign + provenance, and
+`SHA256SUMS` by **minisign only** — `subject-path` lists the four shippable
+artifacts and deliberately excludes it, as the "All four must pass" note above
+says. Once signing is confirmed on a real release, drop the SmartScreen note
+from `SECURITY.md` / README.
 
 > **Note.** The Azure step is also `PUBLISH`-gated, so a `workflow_dispatch` dry
 > run never exercises it — the signing path first runs on a real `v*` tag. When
