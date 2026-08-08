@@ -35,6 +35,9 @@ use windows::Win32::Foundation::HWND;
 use duja_core::dimmer::{DimCommand, Dimmer, DimmerError};
 
 use crate::plan::{OverlayEntry, OverlayOp, plan_transition};
+use tracing::warn;
+
+use crate::teardown::{Teardown, teardown_decision};
 
 // The three marker functions are deliberately absent: they moved to
 // `crate::marker` when Linux needed them, and the crate root exports them from
@@ -57,6 +60,17 @@ pub use hdr::{display_supports_gamma, is_hdr_active};
 /// the caller fall back to software failure and keep the UI (and `begin_quit`)
 /// responsive. Mirrors the engine's ADR-0017 bounded-wait philosophy.
 const DIMMER_REPLY_BUDGET: Duration = Duration::from_secs(2);
+
+/// How long [`WindowsDimmer::shutdown`] waits for the overlay worker to return
+/// before detaching it.
+///
+/// Two seconds, matching [`DIMMER_REPLY_BUDGET`] rather than being tuned
+/// separately: a worker that cannot answer an apply inside that window is the
+/// same wedge this is about, and two numbers for one condition is two numbers to
+/// keep in step. It is a **teardown** budget, so the cost of it being generous
+/// is a quit that takes an extra moment, and the cost of it being mean is
+/// detaching a thread that was about to finish.
+const SHUTDOWN_BUDGET: Duration = DIMMER_REPLY_BUDGET;
 
 /// A command sent to the overlay worker thread, each carrying a one-shot reply.
 enum Command {
@@ -87,6 +101,14 @@ pub struct WindowsDimmer {
     tx: Sender<Command>,
     /// The worker's join handle, taken on the first shutdown.
     join: Option<JoinHandle<()>>,
+    /// Disconnects when the worker thread returns, however it returns.
+    ///
+    /// Nothing is ever sent on it. The worker holds the sending half and drops
+    /// it on the way out - including on an unwind - so a `recv_timeout` here
+    /// distinguishes "finished" from "still going" without the worker having to
+    /// cooperate, which is the whole point: a worker that could cooperate would
+    /// not be wedged.
+    finished: MpscReceiver<()>,
 }
 
 impl fmt::Debug for WindowsDimmer {
@@ -107,10 +129,16 @@ impl WindowsDimmer {
     pub fn spawn() -> Result<Self, DimmerError> {
         let (tx, rx) = crossbeam_channel::unbounded::<Command>();
         let (init_tx, init_rx) = sync_channel::<Result<isize, DimmerError>>(1);
+        let (finished_tx, finished) = sync_channel::<()>(0);
 
         let join = std::thread::Builder::new()
             .name("duja-dimmer-overlays".to_owned())
-            .spawn(move || worker_main(&rx, &init_tx))
+            .spawn(move || {
+                // Held for the thread's whole life and never sent on. Dropping
+                // it is the signal, so it fires on a panic unwind too.
+                let _finished = finished_tx;
+                worker_main(&rx, &init_tx);
+            })
             .map_err(|e| DimmerError::Os(format!("failed to spawn overlay thread: {e}")))?;
 
         match init_rx.recv() {
@@ -118,6 +146,7 @@ impl WindowsDimmer {
                 control,
                 tx,
                 join: Some(join),
+                finished,
             }),
             Ok(Err(e)) => {
                 let _ = join.join();
@@ -136,18 +165,39 @@ impl WindowsDimmer {
     /// handle is taken on the first call, so later calls (and [`Drop`]) are
     /// no-ops.
     ///
-    /// # Limitation
-    /// The [`apply`](Self::apply)/[`clear`](Self::clear) reply wait is bounded
-    /// (see `DIMMER_REPLY_BUDGET`), but this `join` is **not**: a worker wedged
+    /// # The wait is bounded, and what that costs
+    ///
+    /// This used to be a plain `join()`, which is unbounded: a worker wedged
     /// inside a hung Win32 call never processes the shutdown post, so the join
-    /// blocks until it does. Stable `std` has no timed join; a bounded teardown
-    /// would need a detach-or-timeout mechanism and is left as follow-up. In
-    /// practice the same wedge that would hang the join already degrades
-    /// apply/clear to a backend failure, so the UI stays responsive until quit.
+    /// blocked until it did - and on a quit path that is a process that does not
+    /// exit. `docs/debt-archive.md` D-045, and the shape it asked for was
+    /// detach-or-timeout, because stable `std` still has no timed join.
+    ///
+    /// So the wait is on the `finished` channel, which disconnects when
+    /// the thread returns, and `teardown::teardown_decision` turns the outcome into
+    /// join-or-detach. **Detaching is a real cost and is not hidden**: the
+    /// thread keeps running, its overlays stay on screen until the process
+    /// image goes, and any OS resources it holds are released by process exit
+    /// rather than by us. That is worse than a clean join and much better than
+    /// not returning, which is what the alternative was.
+    ///
+    /// Idempotent: the join handle is taken on the first call, so later calls
+    /// and [`Drop`] are no-ops.
     pub fn shutdown(&mut self) {
         if let Some(join) = self.join.take() {
             sys::post_shutdown(self.control);
-            let _ = join.join();
+            match teardown_decision(self.finished.recv_timeout(SHUTDOWN_BUDGET)) {
+                Teardown::Join => {
+                    let _ = join.join();
+                }
+                Teardown::Detach => {
+                    warn!(
+                        budget_ms = SHUTDOWN_BUDGET.as_millis(),
+                        "overlay worker did not stop within its budget; detaching it so                          teardown completes. Its overlays go with the process."
+                    );
+                    drop(join);
+                }
+            }
         }
     }
 

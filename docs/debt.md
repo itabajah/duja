@@ -66,7 +66,6 @@ argument.
 | [D-042](#d-042) | v0.1.1 (`#55`) | `packaging/windows/duja.iss` + `duja-app` | Installer now **detects** a running instance (`AppMutex`), but seamless **auto-close** via the Restart Manager… |
 | [D-043](#d-043) | v0.1.1 (`#52`) | `duja-ui` `settings_vm.rs` / `flyout.slint` | The Input dropdown's recorded selection resets to `None` on the next `set_displays` (hot-plug / dimming toggle /… |
 | [D-044](#d-044) | v0.1.1 (`#48`) | `duja-app` `worker.rs` / `protocol.rs` | A `controller.set()` that returns `Ok(Err(ControlError))` (a handled backend rejection, not a panic) is acked as a… |
-| [D-045](#d-045) | v0.1.1 (`#49`) | `duja-dimmer` `win/mod.rs` | `WindowsDimmer::shutdown()`'s `join()` is still **unbounded** if the overlay worker is wedged in a hung Win32 call —… |
 | [D-046](#d-046) | v0.1.2 (`#59`) | `duja-app` `tray.rs`/`engine.rs` | A display *wrongly* downgraded to `SoftwareOnly` by the first-write verify is transiently double-dimmed (the residual… |
 | [D-047](#d-047) | v0.1.2 (`#59`) | `duja-app` `engine.rs` | The self-heal's `moved` guard could be tricked by a read-*jittering* dead panel that sits within ±1 of the user's… |
 | [D-048](#d-048) | v0.1.2 (`#61`) | `duja-ddc` `win/mod.rs` | Mirror mode: if a genuine external fails all 3 *paced* probe reads (now rare) the external falls back to positional… |
@@ -453,14 +452,6 @@ The Input dropdown's recorded selection resets to `None` on the next `set_displa
 A `controller.set()` that returns `Ok(Err(ControlError))` (a handled backend rejection, not a panic) is acked as a **successful** Set, so a monitor that persistently rejects writes is never surfaced/greyed
 
 **Why deferred.** Intentional per the protocol doc (a gone display is caught by the next enumeration's `Removed`); surfacing persistent write-rejection needs a new transient-vs-persistent policy + `AckOutcome` variant. Revisit if a real monitor exhibits it
-
-### D-045
-
-**Where:** `duja-dimmer` `win/mod.rs` &nbsp;·&nbsp; **Added:** v0.1.1 (`#49`)
-
-`WindowsDimmer::shutdown()`'s `join()` is still **unbounded** if the overlay worker is wedged in a hung Win32 call — the dispatch `recv_timeout` unblocks apply/clear (and quit reaches `quit_event_loop`), but a Drop-time join could stall final teardown after the UI is gone
-
-**Why deferred.** Stable `std` has no timed join; a real fix needs detach-or-timeout semantics like the engine's. The primary UI-freeze is fixed; this is teardown-only
 
 ### D-046
 
