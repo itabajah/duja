@@ -76,6 +76,7 @@ pub(crate) mod rng;
 pub(crate) mod run;
 pub(crate) mod settings;
 pub(crate) mod settings_apply;
+pub(crate) mod soak;
 pub(crate) mod startup;
 pub(crate) mod state_store;
 pub(crate) mod stress;

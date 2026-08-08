@@ -80,6 +80,10 @@ fn run(args: &[String]) -> anyhow::Result<ExitCode> {
         Command::Restore => Ok(bin_support::run::restore()),
         Command::CheckUpdates => Ok(check_updates()),
         Command::Stress { secs, hz } => bin_support::stress::run(secs, hz),
+        Command::Soak {
+            secs,
+            interval_secs,
+        } => bin_support::soak::run(secs, interval_secs),
     }
 }
 

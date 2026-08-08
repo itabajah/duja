@@ -2,6 +2,12 @@
 
 use std::fmt;
 
+/// The default sampling interval for `--soak`, in seconds.
+///
+/// A minute. Fine enough that an hour's run has sixty points to see a slope in,
+/// coarse enough that a 24-hour run prints 1,440 lines rather than 86,400.
+pub(crate) const DEFAULT_SOAK_INTERVAL_SECS: u64 = 60;
+
 /// The default flood rate for `--stress`, in ticks per second per display.
 pub(crate) const DEFAULT_STRESS_HZ: u32 = 20;
 
@@ -30,6 +36,13 @@ pub(crate) enum Command {
         secs: u64,
         /// Flood rate in ticks per second per display.
         hz: u32,
+    },
+    /// Run the idle soak harness for `secs`, sampling every `interval_secs`.
+    Soak {
+        /// How long to hold the pipeline idle, in seconds.
+        secs: u64,
+        /// Seconds between samples.
+        interval_secs: u64,
     },
     /// Restore the screen: clear overlays + identity gamma, then report.
     Restore,
@@ -67,6 +80,9 @@ MODES:
     --once                enumerate once, print a display table, exit
     --stress <secs>       flood SetUserLevel for <secs> seconds, print a report
         [--hz <n>]        flood rate per display (default 20)
+    --soak <secs>         hold the pipeline idle for <secs>, sampling RSS and
+                          GDI/USER handle counts, then print a growth report
+        [--every <n>]     seconds between samples (default 60)
     --restore             clear overlays + reset identity gamma, then report
     --check-updates       check GitHub for a newer release, print the result
     --help                print this help
@@ -94,6 +110,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Command, CliError> {
         "--check-updates" => expect_end(iter, Command::CheckUpdates),
         "--help" | "-h" => Ok(Command::Help),
         "--stress" => parse_stress(iter),
+        "--soak" => parse_soak(iter),
         other => Err(CliError(format!("unknown mode `{other}`\n\n{USAGE}"))),
     }
 }
@@ -143,9 +160,50 @@ fn parse_stress<'a>(mut iter: impl Iterator<Item = &'a String>) -> Result<Comman
     Ok(Command::Stress { secs, hz })
 }
 
+/// Parse `<secs> [--every <n>]` after `--soak`.
+fn parse_soak<'a>(mut iter: impl Iterator<Item = &'a String>) -> Result<Command, CliError> {
+    let secs_raw = iter.next().ok_or_else(|| {
+        CliError(format!(
+            "--soak needs <secs>
+
+{USAGE}"
+        ))
+    })?;
+    let secs = secs_raw.parse::<u64>().map_err(|_| {
+        CliError(format!(
+            "invalid <secs> `{secs_raw}` (want a non-negative integer)"
+        ))
+    })?;
+
+    let mut interval_secs = DEFAULT_SOAK_INTERVAL_SECS;
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--every" => {
+                let raw = iter
+                    .next()
+                    .ok_or_else(|| CliError("--every needs <n>".to_owned()))?;
+                interval_secs = raw.parse::<u64>().ok().filter(|n| *n >= 1).ok_or_else(|| {
+                    CliError(format!("invalid --every `{raw}` (want an integer >= 1)"))
+                })?;
+            }
+            other => {
+                return Err(CliError(format!(
+                    "unexpected argument `{other}`
+
+{USAGE}"
+                )));
+            }
+        }
+    }
+    Ok(Command::Soak {
+        secs,
+        interval_secs,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Command, DEFAULT_STRESS_HZ, parse};
+    use super::{Command, DEFAULT_SOAK_INTERVAL_SECS, DEFAULT_STRESS_HZ, parse};
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_owned()).collect()
@@ -194,6 +252,42 @@ mod tests {
                 hz: DEFAULT_STRESS_HZ
             })
         );
+    }
+
+    #[test]
+    fn soak_defaults_its_sampling_interval() {
+        assert_eq!(
+            parse(&args(&["--soak", "3600"])),
+            Ok(Command::Soak {
+                secs: 3600,
+                interval_secs: DEFAULT_SOAK_INTERVAL_SECS
+            })
+        );
+    }
+
+    #[test]
+    fn soak_reads_an_explicit_interval() {
+        assert_eq!(
+            parse(&args(&["--soak", "60", "--every", "5"])),
+            Ok(Command::Soak {
+                secs: 60,
+                interval_secs: 5
+            })
+        );
+    }
+
+    /// A zero interval would spin the sampling loop as fast as the OS will
+    /// answer, which measures the harness rather than Duja - and would fill a
+    /// 24-hour log with millions of lines.
+    #[test]
+    fn soak_refuses_a_zero_interval() {
+        assert!(parse(&args(&["--soak", "60", "--every", "0"])).is_err());
+    }
+
+    #[test]
+    fn soak_needs_a_duration() {
+        assert!(parse(&args(&["--soak"])).is_err());
+        assert!(parse(&args(&["--soak", "forever"])).is_err());
     }
 
     #[test]

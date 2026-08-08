@@ -89,6 +89,10 @@ pub mod desktop;
 pub mod geometry;
 mod installer_guard;
 pub mod ipc;
+/// This process's own resource usage, for the `--soak` harness. Unconditional:
+/// the module carries its own per-platform arms and answers `None` where it
+/// cannot measure, so callers need no `cfg` of their own.
+pub mod process;
 mod single_instance;
 
 // The trusted-directory rule shared by the two unix subsystems that keep

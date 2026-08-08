@@ -85,7 +85,7 @@ confirmations per architecture, which no amount of code closes.
 |---|---|---|
 | 1 | binary size: measure, trim, then gate it in CI | next |
 | 2 | the fuzz and coverage lanes | done - `#145` |
-| 3 | `--soak`, the harness two perf budgets already cite | pending |
+| 3 | `--soak`, the harness two perf budgets already cite | done - `#146` |
 | 4 | the debt drain (`refactor:` PR) | pending |
 | 5 | the security pass and the docs-truth sweep | pending |
 | 6 | the multi-reviewer phase gate, and `m8-hardening` | pending |
@@ -138,6 +138,12 @@ Measured on this box, 2026-08-08:
   adversarially verified) with every confirmed finding fixed test-first.
 - Measured at the P4/P5 gates, headless: idle RSS **23.3 MB** (budget 35), idle
   CPU **0 ms over 20 s** - zero wakeups, by construction.
+- **`duja --soak <secs>` is the instrument those RSS budgets have cited since
+  P4** and did not have until P8 wave 3. A 6-second smoke on this box: peak RSS
+  **17,711,104 bytes** against a 36,700,160 budget, zero growth, flat GDI and
+  USER counts. The 24-hour run the budget actually names has not been done - and
+  when it is, its measured handle drift should replace the tolerance constant,
+  which is currently a reasoned guess and says so.
 - `duja.exe` is **15,709,696 bytes** (14.98 MiB) release, **within**
   its 16 MiB budget with 1,067,520 bytes to spare; `dujactl.exe` is 643,584
   (2 MiB budget, down from 851,968). P8 wave 1 took 3,737,088 bytes off

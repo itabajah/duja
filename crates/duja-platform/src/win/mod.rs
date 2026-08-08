@@ -9,7 +9,10 @@
 //! See [`sys`] for the FFI and the pattern used to reach the channel from the
 //! window procedure.
 
-mod sys;
+// `pub(crate)` rather than private since P8 wave 3: `crate::process` reads two
+// counters from here. It stays crate-visible - the `unsafe` stays behind this
+// module's safe wrappers, which is what its own header promises.
+pub(crate) mod sys;
 
 use std::sync::mpsc::SyncSender;
 use std::thread::JoinHandle;
