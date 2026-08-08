@@ -112,6 +112,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use duja_core::dimmer::{DimCommand, Dimmer, DimmerError};
 use duja_core::id::StableDisplayId;
+use tracing::info;
 
 /// A per-display gamma engage/restore executor.
 ///
@@ -367,6 +368,93 @@ pub(crate) fn apply_dimming_batch(
     };
     coord.restore_phase(commands, sink);
     outcome
+}
+
+/// What a teardown did, so the caller can decide about the crash marker without
+/// re-deriving the rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GammaTeardown {
+    /// Whether this session restored everything it had engaged.
+    pub(crate) own_clean: bool,
+    /// Whether the wide rescue ran.
+    pub(crate) wide_rescue_ran: bool,
+}
+
+/// Tear down this session's gamma, and reach for the **global** identity pass
+/// only when this session's own restore did not come back clean.
+///
+/// # The defect this exists to fix (D-108)
+///
+/// `begin_quit` used to call `self.gamma.restore_all()` and then
+/// `duja_dimmer::restore_all()` **unconditionally**, described in a comment as a
+/// "global identity pass [to clear] any ramp left over from a prior dirty run".
+/// That call is not the same thing on every platform. macOS reloads the user's
+/// colour profile, which is a restore. Windows and X11 walk **every** display or
+/// CRTC they can enumerate and write identity, which is a *flatten*: quitting
+/// Duja wiped f.lux, redshift, GNOME Night Light or a `colord` calibration curve
+/// that Duja had never touched.
+///
+/// It was also redundant on the clean path, which is what makes this a fix
+/// rather than a trade. A leftover from a prior dirty run is
+/// `startup::recover_from_crash_marker`'s job, at launch, from the marker — and
+/// P7 is what gave Linux that marker, so the belt-and-braces argument had become
+/// weakest exactly where the cost was highest.
+///
+/// # The rule
+///
+/// **A rescue runs when there is something to rescue.** If this session restored
+/// every ramp it engaged, nothing of ours is left and the wide pass has no work
+/// to do; skipping it is what stops a bystander's curve being flattened. If the
+/// restore did *not* come back clean, a ramp may be stuck — a possibly unusable
+/// screen, which outranks another tool's tint (and per D-099, `redshift` and
+/// friends repair themselves on their next timer anyway).
+///
+/// The wide walk is **kept unconditionally** where the user asks for it by name:
+/// `duja --restore` and the tray's "Restore screen". Someone pressing those is
+/// asking for exactly the trade this function declines to make on their behalf.
+///
+/// # What the tests below do and do not prove
+///
+/// Both effects are parameters, so the *sequencing* is observable and the
+/// regression test goes red when the unconditional call is re-inserted **here**.
+///
+/// That is **not** the acceptance criterion `plan.md` sets, and a review proved
+/// it: re-insert the defect at the site it historically occupied — inline in
+/// `begin_quit`, bypassing this function — and the whole suite stays green,
+/// because no test reaches `begin_quit` at all. Closures made the sequencing
+/// visible; they did not move a test one line closer to the caller. An earlier
+/// version of this comment claimed they did, which was the `#82` shape wearing a
+/// denial of it.
+///
+/// What would close it is [D-102](https://github.com/itabajah/duja/blob/main/docs/debt.md#d-102)'s
+/// experiment — one `#[ignore]`d test constructing `PlatformTray` headless — and
+/// that experiment is *why* this gap is still open rather than a reason it has to
+/// be: D-102 already records that the "`AppState` cannot be constructed" excuse
+/// went stale when `#134` removed the `tray_icon::TrayIcon` field.
+pub(crate) fn tear_down_gamma(
+    own_restore: impl FnOnce() -> bool,
+    wide_rescue: impl FnOnce() -> duja_dimmer::RestoreReport,
+) -> GammaTeardown {
+    let own_clean = own_restore();
+    if own_clean {
+        return GammaTeardown {
+            own_clean,
+            wide_rescue_ran: false,
+        };
+    }
+    let report = wide_rescue();
+    // `info!`, not `warn!`: the sink that actually failed has already warned
+    // (per display on Linux, once on Windows), and a third line at WARN for the
+    // *rescue* would read as a third fault. This records that the rescue ran.
+    info!(
+        restored = report.restored.len(),
+        failed = report.failed.len(),
+        "this session could not restore a ramp it engaged; ran the global identity pass"
+    );
+    GammaTeardown {
+        own_clean,
+        wide_rescue_ran: true,
+    }
 }
 
 /// The pure decision core: tracks which displays currently have gamma engaged
@@ -1019,9 +1107,15 @@ mod platform {
         /// Note the blast radius, which is wider than the Windows twin's: this
         /// resets **every** display, including ones Duja never engaged and whatever
         /// another app (f.lux, a calibration loader) had set. Windows' `restore_now`
-        /// touches only what it recorded. Pre-existing — `tray/state.rs` already
-        /// calls the same global `duja_dimmer::restore_all()` on quit and on
-        /// "Restore screen" — but it is a real difference, not a simplification.
+        /// touches only what it recorded. A real difference, not a simplification.
+        ///
+        /// **This is also why macOS lost nothing when D-108 stopped the quit path
+        /// calling the global pass unconditionally.** On the other two platforms
+        /// that removed a second, wider action; here it removed a *duplicate* —
+        /// this method **is** `duja_dimmer::restore_all()`, so the old code called
+        /// it twice and the profile reload still happens on every quit. A reader
+        /// of `tear_down_gamma`'s docs would otherwise conclude macOS now skips
+        /// it, which would be wrong.
         fn restore_all(&mut self) -> bool {
             // The report is inspected nowhere on purpose: its `failed` list is
             // hardcoded empty upstream, so there is nothing to branch on.
@@ -1333,7 +1427,7 @@ mod platform {
     use duja_core::dimmer::{DimCommand, Dimmer, DimmerError, GAMMA_FLOOR};
     use duja_core::id::StableDisplayId;
     use duja_dimmer::GammaDisplay;
-    use duja_dimmer::linux_caps::{SessionEnv, Transport};
+    use duja_dimmer::linux_caps::{SessionEnvVars, Transport};
     use tracing::{debug, warn};
 
     use super::{
@@ -1420,12 +1514,8 @@ mod platform {
     /// The decision itself is `linux_caps::transport`, which is pure and already
     /// tested — this is only the environment read it takes as input.
     fn session_transport() -> Transport {
-        let wayland_display = std::env::var("WAYLAND_DISPLAY").ok();
-        let display = std::env::var("DISPLAY").ok();
-        duja_dimmer::linux_caps::transport(SessionEnv {
-            wayland_display: wayland_display.as_deref(),
-            display: display.as_deref(),
-        })
+        let vars = SessionEnvVars::from_env();
+        duja_dimmer::linux_caps::transport(vars.as_session_env())
     }
 
     impl LinuxSink {
@@ -1880,6 +1970,67 @@ mod tests {
         if let Ok(mut log) = trace.lock() {
             log.push(step);
         }
+    }
+
+    /// The wide identity pass must not run when this session cleaned up after
+    /// itself.
+    ///
+    /// This is D-108 as a fixture. The defect was an unconditional
+    /// `duja_dimmer::restore_all()` in `begin_quit`, and on Windows and X11 that
+    /// walks every display or CRTC it can enumerate and writes identity — so
+    /// every clean quit flattened f.lux, redshift or a `colord` curve Duja had
+    /// never touched. Re-insert it by making [`tear_down_gamma`] call
+    /// `wide_rescue` unconditionally, and this goes red.
+    #[test]
+    fn a_clean_quit_does_not_touch_displays_this_session_never_engaged() {
+        let mut wide_ran = false;
+        let teardown = tear_down_gamma(
+            || true,
+            || {
+                wide_ran = true;
+                duja_dimmer::RestoreReport::default()
+            },
+        );
+        assert!(!wide_ran, "the global identity pass ran on a clean quit");
+        assert!(teardown.own_clean);
+        assert!(!teardown.wide_rescue_ran);
+    }
+
+    /// And it must still run when there IS something to rescue. A stuck ramp is
+    /// a possibly-unusable screen, which outranks another tool's tint — so the
+    /// fix must not quietly become "never do the wide pass".
+    #[test]
+    fn a_quit_that_could_not_restore_its_own_ramp_rescues_wider() {
+        let mut wide_ran = false;
+        let teardown = tear_down_gamma(
+            || false,
+            || {
+                wide_ran = true;
+                duja_dimmer::RestoreReport::default()
+            },
+        );
+        assert!(wide_ran, "a failed restore left no wider rescue");
+        assert!(!teardown.own_clean);
+        assert!(teardown.wide_rescue_ran);
+    }
+
+    /// The marker rule the caller reads off `own_clean` is the **session's own**
+    /// restore, not the wide pass's outcome: a wide pass that appeared to succeed
+    /// must not license removing a marker the backend deliberately kept.
+    #[test]
+    fn a_successful_wide_rescue_does_not_make_a_dirty_quit_clean() {
+        let teardown = tear_down_gamma(
+            || false,
+            || duja_dimmer::RestoreReport {
+                restored: vec!["display-1".to_owned()],
+                failed: Vec::new(),
+            },
+        );
+        assert!(
+            !teardown.own_clean,
+            "the wide pass's success leaked into the session's verdict, which would \
+             remove a crash marker the backend kept on purpose"
+        );
     }
 
     /// A fake sink that records every engage/restore call for assertions.

@@ -332,8 +332,16 @@ impl AppState {
             warn!(error = %e, "failed to clear overlays");
         }
         // Restore the displays this session engaged (clearing the crash marker),
-        // then a belt-and-suspenders global identity pass for anything left over
-        // from a prior dirty run.
+        // then the global identity pass — unconditionally, unlike `begin_quit`.
+        //
+        // NOT for the reason this comment used to give ("anything left over from
+        // a prior dirty run"): D-108 established that a leftover is the crash
+        // marker's job at launch, and `gamma::tear_down_gamma` is where that
+        // argument lives. The reason it stays here is different and stronger.
+        // **The user asked by name.** Someone pressing "Restore screen" is asking
+        // for exactly the trade `begin_quit` declines to make on their behalf —
+        // if a colour-temperature tool's curve is what is wrong with their
+        // screen, flattening it is the point.
         self.gamma.restore_all();
         let report = duja_dimmer::restore_all();
         info!(
@@ -376,17 +384,20 @@ impl AppState {
         // "Backend", not "guard": Windows gets the retention from
         // `ScreenStateGuard`, Linux writes it out in `LinuxSink::restore_all`, and
         // macOS has no marker at all — but all three keep the same contract here.
-        // A global identity pass then clears any ramp left over from a prior dirty
-        // run, mirroring `restore_screen`'s belt-and-suspenders.
-        let gamma_clean = self.gamma.restore_all();
-        let report = duja_dimmer::restore_all();
-        if gamma_clean {
+        //
+        // The *global* identity pass is deliberately NOT unconditional here, and
+        // `gamma::tear_down_gamma` carries the whole argument: a clean quit that
+        // walks every display writing identity flattens f.lux, redshift or a
+        // calibration curve Duja never touched (D-108). `restore_screen` still
+        // does it unconditionally, because there the user asked by name.
+        let teardown =
+            gamma::tear_down_gamma(|| self.gamma.restore_all(), duja_dimmer::restore_all);
+        if teardown.own_clean {
             let _ = std::fs::remove_file(&self.crash_marker);
         }
         info!(
-            gamma_clean,
-            restored = report.restored.len(),
-            failed = report.failed.len(),
+            gamma_clean = teardown.own_clean,
+            wide_rescue_ran = teardown.wide_rescue_ran,
             "restored screen on quit"
         );
         if let Some(dimmer) = self.dimmer.as_mut() {

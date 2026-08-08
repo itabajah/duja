@@ -86,7 +86,7 @@ confirmations per architecture, which no amount of code closes.
 | 1 | binary size: measure, trim, then gate it in CI | next |
 | 2 | the fuzz and coverage lanes | done - `#145` |
 | 3 | `--soak`, the harness two perf budgets already cite | done - `#146` |
-| 4 | the debt drain (`refactor:` PR) | pending |
+| 4 | the debt drain (`refactor:` PR) | **partial** - `#147` |
 | 5 | the security pass and the docs-truth sweep | pending |
 | 6 | the multi-reviewer phase gate, and `m8-hardening` | pending |
 

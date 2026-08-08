@@ -114,7 +114,7 @@ argument.
 | [D-089](#d-089) | P7 wave 3, **X11 half closed** `#132` | `duja-platform` `geometry.rs` | `cursor_anchor()` returns the fallback rectangle on a Wayland session, so the flyout does not open under the tray icon |
 | [D-090](#d-090) | P7 wave 4b-5 (`#132`) | `committed.toml` | `line_length = 0` was justified by a false claim about what squash-merge keeps, and the honest justification is a… |
 | [D-092](#d-092) | P7 wave 4b-5 (`#132`) | `duja-platform` `linux_geometry.rs` `scale_factor` + `linux_xsettings.rs` | The X11 scale factor mirrors winit 0.30's chain, and is evaluated on a different monitor than winit evaluates it on |
-| [D-093](#d-093) | P7 wave 4b-5 (`#132`) | `duja-dimmer` `linux_caps.rs` `transport` | `WAYLAND_SOCKET` is not consulted, so a client launched with a handed-over compositor socket is classified X11 whenever… |
+| [D-093](#d-093) | P7 wave 4b-5 (`#132`), **cause found** P8 wave 4 | `duja-dimmer` `linux_caps.rs` `transport` + `linux/` | A handed-over `WAYLAND_SOCKET` session is classified X11, and the obvious fix makes it worse: the variable is single-use |
 | [D-094](#d-094) | P7 wave 4b (`#131`) | `duja-dimmer` `linux_caps.rs` `SurfaceCaps::refuse_gamma` + `dujactl` `linux_report.rs` | ADR-0011's step 5 has no production caller, so a `dujactl doctor` line saying "gamma dimming: available" is never… |
 | [D-095](#d-095) | P7 wave 4b (`#131`) | `duja-dimmer` `linux/wlr_gamma.rs` `with_session` | A Wayland gamma session that is open and idle never reads its socket, and a Wayland client that never reads can be… |
 | [D-096](#d-096) | P7 wave 4b (`#131`) | `duja-dimmer` `linux/gamma.rs` `restore_all` + `linux/mod.rs` | A process that engaged `XRandR` ramps and then acquired a `WAYLAND_DISPLAY` reports a clean rescue over CRTCs it left… |
@@ -127,7 +127,6 @@ argument.
 | [D-105](#d-105) | P7 wave 5 (`#136`) | `duja-app` `bin_support/tray/` + `bin_support/gamma.rs` | Nothing on any lane has ever seen the Linux tray appear or a Linux ramp land, and the dev box cannot build the crate that would |
 | [D-106](#d-106) | P7 wave 5 follow-up (`#139`) | `duja-platform` `linux/geometry.rs` + `duja-dimmer` `linux/`, `dujactl` | Only the tray's X11 path is bounded; every other X call in the tree can still hang forever, and a timed-out probe parks a thread |
 | [D-107](#d-107) | P7 wave 6 (`#140`) | `packaging/linux/` + `xtask` `dist.rs` | Linux ships a tarball and no native package, because a package makes a dependency claim nobody here can check |
-| [D-108](#d-108) | P7 gate | `duja-app` `tray/state.rs` `begin_quit` | Every clean quit writes identity gamma to every display, including ones Duja never touched |
 | [D-109](#d-109) | P8 wave 1 | `crates/duja-ui` + `docs/perf-budgets.md` | Two perf budgets name no instrument: there is no automated render benchmark, and both were last measured by hand at P4 |
 | [D-110](#d-110) | P8 wave 1 | `.github/workflows/` + `xtask` `size.rs` | The binary-size budget is gated at release time only, so a dependency bump that adds a megabyte is caught by the next release rather than by the PR |
 | [D-111](#d-111) | P8 wave 3 | `duja-app` `--soak` + `.github/workflows/` | The soak has never been run for longer than 30 seconds, and nothing runs a short one in CI |
@@ -840,11 +839,21 @@ The macOS status icon is **not** a template image (`tray-icon`'s `icon_is_templa
 
 ### D-093
 
-**Where:** `duja-dimmer` `linux_caps.rs` `transport` &nbsp;·&nbsp; **Added:** P7 wave 4b-5 (`#132`)
+**Where:** `duja-dimmer` `linux_caps.rs` `transport` + `linux/` &nbsp;·&nbsp; **Added:** P7 wave 4b-5 (`#132`), **cause found** P8 wave 4
 
-**`WAYLAND_SOCKET` is not consulted, so a client launched with a handed-over compositor socket is classified X11 whenever a stale `DISPLAY` is also set.** A compositor that spawns a client itself may pass a connected file descriptor and set only `WAYLAND_SOCKET`; `wayland-client`'s `connect_to_env` honours it, and so does winit's backend selection - `#132`'s own `window_system` had to include it for that reason. The dimmer's rule would pick X11 and drive `XRandR` gamma and an X11 overlay through Xwayland on a session whose compositor is right there
+**A client handed a pre-connected compositor socket is classified X11.** `WAYLAND_SOCKET` carries a file descriptor rather than a socket *name* - Flatpak's `wayland` permission, xdg-desktop-portal, anything launching a client with the connection already open - and such a client may have no `WAYLAND_DISPLAY`. `transport` then answers `X11`, because Xwayland set `DISPLAY`, and Duja drives `XRandR` gamma and an X11 overlay through the compatibility layer.
 
-**Why deferred.** Nothing is known to be broken by it: every desktop session manager sets `WAYLAND_DISPLAY`, and the configuration that does not is a client the compositor launched directly. It is a row rather than a fix because the two rules answer different questions and should be corrected on their own terms - `transport` decides which server to *drive*, `window_system` predicts which backend winit will *create a window on* - and because changing the dimmer's rule moves the whole capability report, which wants its own red-first test rather than a rider on a geometry wave
+**P8 wave 4 tried the obvious fix and a review caught it making things worse.** Treating a non-empty `WAYLAND_SOCKET` as Wayland looks like a one-line change. It is not, because **the variable is single-use**: `wayland-client`'s `connect_to_env` parses the fd, takes it as an `OwnedFd`, and calls `env::remove_var("WAYLAND_SOCKET")` so children do not inherit it. Duja opens **four independent** connections (`probe`, `enumerate_outputs`, the layer surface, the gamma manager) and deliberately re-reads the environment on **every** transport decision, because a cached answer is wrong for exactly the session that changed under a running process. Those two designs cannot both hold for a one-shot variable, and the result was:
+
+1. First decision: `Wayland`. `enumerate_outputs` connects, stamps `wl_output` connector names as gamma tokens, drops the connection - closing the fd and removing the variable.
+2. Every later decision: `X11`, same process, no display change.
+3. `gamma_address(X11, "DP-1")` rejects the Wayland-format token, so **every engage is refused and gamma dimming dies silently** - and an all-decimal connector name would parse as a CRTC id and dim a different screen.
+
+Consistently-X11 at least works, suboptimally, through Xwayland. So the change was reverted and `transport`'s docs carry the whole finding, which is worth more than the row was.
+
+**What would actually close it.** Not a classifier change - a connection-lifetime one. Either Duja opens one Wayland connection it keeps and shares across the four users, or it captures the fd itself at startup before anything else can consume it (`dup` it, and hand the duplicate to each `Connection::from_socket`). The first is the larger and better change and touches `linux/wayland.rs`, `outputs.rs`, `layer.rs` and `wlr_gamma.rs`; the second is a smaller hack in the same shape as the problem.
+
+**Why deferred.** It is now understood to be a wave-sized job in a subsystem no lane can execute, not the one-line fix it was filed as. Note also that nothing here is reachable on a machine with no Wayland session, so the failure above was reasoned from the crate source rather than observed - which is the same evidence standard the rest of P7's Linux work rests on, and the reason [D-105](#d-105) is still open
 
 ### D-094
 
@@ -911,19 +920,6 @@ The macOS status icon is **not** a template image (`tray-icon`'s `icon_is_templa
 **Linux ships a tarball and no native package, because a package makes a dependency claim nobody here can check.** `xtask dist --target linux` stages `duja-<ver>-linux-x64.tar.gz`: two binaries, both licences, the README, a `.desktop` entry and an icon. That is the Windows portable zip's twin and it is the whole Linux packaging story - no AppImage, no `.deb`, no `.rpm`, no Flatpak, no AUR. A user on a distribution missing `libfontconfig1` or `libxkbcommon0` gets a linker error at launch, with nothing in the artifact to have warned them
 
 **Why deferred.** Not effort, and not a preference for tarballs. A package makes a **claim** an archive does not, and the claim is the part that cannot be checked from here. A `.deb` or `.rpm` declares its runtime dependencies, and a wrong `Depends:` is an install that succeeds followed by an application that will not start; an AppImage bundles its libraries instead, and one missing from the `AppDir` fails the same way, later and with more machinery in between. Both would be a guess presented as a supported package, which is the false-assurance shape this project rates worse than an admitted gap - and the reason it cannot be more than a guess is [D-105](#d-105): no CI runner has a display server or a `StatusNotifierWatcher`, and the Windows development box cannot build `duja-app` for Linux at all. **The tarball is also what unblocks the answer** rather than a placeholder for it: the phase gate needs something a human can extract and run, and what that run reveals about the real dependency set is the input a package needs. So the ordering is deliberate - archive, then hardware, then package - and `packaging/linux/README.md` carries the runtime library list in the meantime, which is the honest version of what a `Depends:` line would assert
-
-### D-108
-
-**Where:** `duja-app` `tray/state.rs` `begin_quit` &nbsp;·&nbsp; **Added:** P7 gate
-
-**Every clean quit writes identity gamma to every display, including ones Duja never touched.** `begin_quit` calls `self.gamma.restore_all()` - which restores exactly what this session engaged, correctly - and then calls `duja_dimmer::restore_all()` **unconditionally**, as a "global identity pass [to clear] any ramp left over from a prior dirty run". What that second call does is not the same on all three platforms, and the comment beside it does not say so:
-
-- **Windows**: enumerates every gamma display and writes the identity ramp to each. A running f.lux loses its tint on every Duja quit.
-- **macOS**: `CGDisplayRestoreColorSyncSettings`, which reloads the user's **profile**. This is a restore rather than a flatten, and is the only benign arm.
-- **Linux/X11**: walks every CRTC on the screen - including ones driving nothing - and writes identity. `redshift`, `gammastep`, GNOME Night Light and a `colord` calibration curve are all clobbered.
-- **Linux/Wayland**: releases only this process's gamma controls. Benign, because there is nothing else to find.
-
-**Why deferred.** Two reasons, and the second is the reason it is a row rather than a fix in the gate that found it. First, it is **not P7's defect**: the call has been there since the Windows train, so a fix changes shipped Windows quit behaviour and belongs in a PR whose subject that is, with its own review - `#82` is this project's standing example of what happens otherwise. Second, the analysis is worth landing before the change, because the *right* fix is not obvious from the symptom. The pass is nearly redundant everywhere: a leftover from a dirty run is what `startup::recover_from_crash_marker` handles, at launch, from the marker - and P7 is what gave **Linux** that marker, so the belt-and-braces argument is now weakest on the platform where the cost is highest. [D-099](#d-099) already carries the victim classification (`redshift` and friends repair themselves on their next timer; a `colord`/`xcalib` curve is loaded once at login and stays flattened), which is what makes this worth doing rather than filing as cosmetic. The likely shape is to drop the unconditional pass entirely and let the marker path own leftovers, keeping the wide walk for the two places a user asks for it: `duja --restore` and the tray's "Restore screen"
 
 ### D-109
 
