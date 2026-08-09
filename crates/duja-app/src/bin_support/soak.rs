@@ -117,9 +117,12 @@ use crate::bin_support::{backend, run};
 /// choosing it means this wave loosened nothing it was not asked to loosen.
 ///
 /// Measured again in P9 wave 3: peaks cluster **around 16.1 MB**, and every run
-/// measured has fallen between 16.0 and 16.3 MB, so the headroom against 35 MB
-/// is still large. A `windows-latest` CI runner peaked at **16,228,352** on the
-/// same invocation, inside that range on a machine nobody tuned the instrument
+/// measured has fallen between 16.0 and 16.3 MB - **every run but one**, which
+/// is recorded below and is the reason that sentence carries a caveat rather
+/// than a range alone. The headroom against 35 MB is large either way.
+///
+/// A `windows-latest` CI runner peaked at **16,228,352** on the same
+/// invocation, inside that range on a machine nobody tuned the instrument
 /// against. `ubuntu-latest` peaked at **9,981,952** - the first Linux figure
 /// this tree has had, and about 38 % smaller.
 ///

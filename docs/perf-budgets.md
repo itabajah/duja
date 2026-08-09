@@ -34,8 +34,8 @@ are GUI objects, and a headless soak creates almost none - measured on this box,
 GDI 0 and USER 5, flat across every run here. On a `windows-latest` runner USER
 settles at **6** instead, moving from 5 within the first ten seconds and then
 staying put, so "flat" is a property of the steady state rather than of the
-number. What it does create is *kernel* handles: pipe
-instances for the IPC server, the log file, thread handles. Those are counted
+number. What a headless soak does create is *kernel* handles: pipe instances for
+the IPC server, the log file, thread handles. Those are counted
 now (`GetProcessHandleCount` on Windows, `/proc/self/fd` on Linux) and runs on
 this box report **around 250** of them. Before this, a headless soak could leak
 a pipe instance per connection for a day and report a clean pass, which is
@@ -45,10 +45,9 @@ The three lanes have now been measured against each other, by the
 dispatch-only `soak` workflow ([D-111](debt.md#d-111)): a headless Duja peaks at
 **16,228,352 bytes** on `windows-latest` and **9,981,952** on `ubuntu-latest`,
 with roughly 250 kernel handles against 15 descriptors and RSS growth of 0 on
-both. macOS assembles and
-reports `UNMEASURABLE`, which is what it is documented to do. The Windows CI
-figure lands inside the range measured on the dev box, which is the first
-cross-check this instrument has had.
+both. macOS assembles and reports `UNMEASURABLE`, which is what it is documented
+to do. The Windows CI figure lands inside the range measured on the dev box,
+which is the first cross-check this instrument has had.
 
 The kernel family is also the first one that is **not** perfectly flat: every
 drift measured here has been negative and no larger than five. A fall is not a
