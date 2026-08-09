@@ -99,14 +99,19 @@ use crate::bin_support::{backend, run};
 /// measures around 17.6 MB, so the strict reading also clears with room, and
 /// choosing it means this wave loosened nothing it was not asked to loosen.
 ///
-/// Measured again in P9 wave 3: **16.07 to 16.25 MB** peak across more than a
-/// dozen runs on this box, so the headroom is still large.
+/// Measured again in P9 wave 3: peaks cluster **around 16.1 MB**, and every run
+/// measured has fallen between 16.0 and 16.3 MB, so the headroom against 35 MB
+/// is still large. Round numbers with slack, because the tight version of this
+/// sentence has now been falsified twice: `16.1 to 16.3` missed a 16,068,608
+/// run at the bottom, and the correction that fixed the floor quietly moved the
+/// ceiling to `16.25` with no measurement behind it and was falsified at the top
+/// by a 16,257,024 run in the next batch.
 ///
 /// **One further run reported 31.3 MB and nobody can say why.** It was
 /// `duja --soak 90 --every 10`; its samples, verbatim: `t+0s 16084992`, then
 /// `t+10s 31322112` and flat at that figure to the end. It was the first
-/// execution of a freshly linked binary,
-/// and a first draft of this note wrote that condition down as the finding - but
+/// execution of a freshly linked binary, and a first draft of this note wrote
+/// that condition down as the finding - but
 /// a reviewer then ran exactly that condition twice more and got 16.24 MB and
 /// 16.11 MB, so the condition is **withdrawn** rather than repeated. What is
 /// left is one anomalous run, its numbers, and no mechanism: `WorkingSetSize`
@@ -253,8 +258,11 @@ pub(crate) struct SoakRun {
 /// able to report flat for something that moved". That promise was safe only
 /// because the two GUI families measure exactly flat on a headless run. The
 /// kernel family, added in P9 wave 3, is the first one that moves: a
-/// ninety-second run on this box went 256 to 247, and the report printed
-/// `kernel handles growth 0`. The first thing the new instrument did on a real
+/// ninety-second run on this box spanned 256 to 247 across its samples, and the
+/// report printed `kernel handles growth 0`. *(Nine is that run's **spread**;
+/// the budgeted drift is measured from the first post-warm-up sample and no
+/// drift larger than five has been measured here. Two different quantities,
+/// both quoted in this file.)* The first thing the new instrument did on a real
 /// box was print "flat" for something that moved by nine.
 ///
 /// So the drift is signed and the *budget* clamps rather than the measurement.
@@ -998,9 +1006,9 @@ mod tests {
     /// fell printed `0` - and this module and `docs/perf-budgets.md` both
     /// promise the report "names any non-zero drift even when it passes". The
     /// promise held only because the two GUI families measure exactly flat on a
-    /// headless run. The first real run of the kernel family went 256 to 247 and
-    /// the report said `0`, which is the false-assurance shape this project
-    /// rates below an admitted gap.
+    /// headless run. The first real run of the kernel family spanned 256 to 247
+    /// across its samples and the report said `0`, which is the false-assurance
+    /// shape this project rates below an admitted gap.
     #[test]
     fn a_handle_count_that_falls_is_named_rather_than_reported_as_flat() {
         let run = run_of(Duration::from_secs(100), 11, |i| {

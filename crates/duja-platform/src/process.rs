@@ -35,8 +35,8 @@
 //! and USER objects, which are a Win32 concept with no counterpart elsewhere.
 //! They are **not** kernel handles - an earlier version of this sentence called
 //! them "Win32 kernel objects", four lines above a section explaining that the
-//! two are different things. The budget row that mentions them says "flat GDI/USER handle
-//! counts" and was written for the Windows train.
+//! two are different things. The budget row that mentions them says "flat
+//! GDI/USER handle counts" and was written for the Windows train.
 //!
 //! # Kernel handles, which are a different thing from GUI objects
 //!
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(
             count_results(fails_in_the_middle),
             None,
-            "two entries were counted before the error; answering `Some(2)`              would be a truncated count wearing a real one's clothes"
+            "`Some(2)` here would be a truncated count wearing a real one's clothes"
         );
 
         let fails_last: [Result<(), ()>; 3] = [Ok(()), Ok(()), Err(())];
