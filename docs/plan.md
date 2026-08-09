@@ -33,6 +33,12 @@ a table produces claims that read as checked and are not, and the corrections
 were worse than the original. What a wave *turned out* to drain is a different
 thing - it is measured when the wave lands, and recorded below once it has.
 
+The **state** column is about what the wave builds, not about rows: wave 3 is
+"landed" with all four of its rows still open, and wave 4 is "partly landed"
+because one thing it was for is unbuilt. Reading it as a drain count is what let
+a first version of this close-out write "all four waves have landed" into
+`STATUS.md` next to a row saying "partly".
+
 | wave | what it builds | state |
 |---|---|---|
 | 1 | the `AppState` test seam: a fakeable `PlatformTray`, and a fixture that constructs the state | landed |
@@ -90,9 +96,14 @@ two different 37s, one percentage points and one regions.)
 
 **Wave 3's rows are budgets that cannot fail**, and some of that work may
 honestly end in "narrow the row" rather than "build the thing".
-[D-110](debt.md#d-110)'s cost is a ~20-minute fat-LTO build against a PR matrix
-that finishes in a fraction; [D-112](debt.md#d-112) as written needs the soak to
-drive real overlays on an operator's screen for 24 hours, and offers a cheap
+[D-110](debt.md#d-110)'s cost was written as a ~20-minute fat-LTO build against
+a PR matrix finishing in a fraction, and **wave 3 measured both halves and found
+neither**: the build is 6m22s on average and the matrix 4m12s, so it is about
+1.5x rather than a multiple, and "a fraction of that" is the clause that does
+not survive. That does not settle the row - see D-110 for what it does and does
+not change - but the version of the cost this sentence used to give is gone;
+[D-112](debt.md#d-112) as written needs the soak to drive real overlays on an
+operator's screen for 24 hours, and offers a cheap
 half instead. A budget nobody can fail is worse than no budget, and an
 instrument nobody will run is worse than both - so deleting a budget line is a
 legitimate outcome of this wave and is not a failure of it.
@@ -114,12 +125,14 @@ seven minutes before this plan did, and its review had already struck one
 attempt to file it under P9. It is counted here because it is P9-era work, not
 because the wave table accounts for it.
 
-**Wave 3 has landed, in three instruments and one experiment**, and none of the
-four drained the row it belongs to. [D-109](debt.md#d-109) narrowed;
+**Wave 3 has landed, in two instruments, a workflow and an experiment**, and it
+left every one of its four rows open. [D-109](debt.md#d-109) narrowed;
 [D-112](debt.md#d-112) closed the half its own row calls cheap;
 [D-111](debt.md#d-111) got the mechanism its remedy asks for and then the
-reading. That is the wave working as intended rather than falling short: an
-instrument row drains when the budget it serves can be checked, and three of
+reading; and [D-110](debt.md#d-110), which built nothing, had both numbers in
+its deferral argument measured for the first time. That is the wave working as
+intended rather than falling short: an instrument row drains when the budget it
+serves can be checked, and three of
 these budgets still need hardware or a day of wall clock that CI cannot give.
 
 What is left of the phase is [D-076](debt.md#d-076) from wave 4 and
@@ -133,16 +146,27 @@ Slint surface, and a cold start to a tray icon needs a session. What the harness
 does measure is the frame path P8 wave 1 exempted from `opt-level = "s"` by
 name, which is the exposure the row was arguing about even though it is not the
 budget the row cited. The exemption had never been measured, is worth roughly
-1.4x, and the budget clears by a wide margin either way - about 70x on a typical
-frame - so the argument was right and nothing depended on it. `perf-budgets.md`
+1.3x to 1.4x, and the budget clears by a wide margin either way - about 65x on a
+typical frame - so the argument was right and nothing depended on it. (Those two
+figures read 1.4x and 70x here until this close-out, against `debt.md`'s and
+`perf-budgets.md`'s 1.3x-to-1.4x and 65x. The tighter pair were the first ones
+published and the wider pair are what survived re-measurement.) `perf-budgets.md`
 gains a row that has an instrument; the three that do not, still do not.
 
+**And that instrument's *timing* assertion runs nowhere automatically.** It is
+`#[ignore]`d on purpose - a shared runner under unknown load is not where a
+duration gate belongs, which is [D-110](debt.md#d-110)'s lesson - so the budget
+is checked by hand. What does run on every push is the harness's correctness:
+that the real flyout renders, at the size the app presents, with content
+reaching the buffer. Worth stating in a paragraph arguing that rows drain when a
+budget can be checked, because this one can be checked and is not being.
+
 **[D-112](debt.md#d-112)'s cheap half is counted now**, and the row's argument
-became a measurement: a headless soak reports GDI 0 and USER 5 because it builds
-no GUI objects, and around 250 *kernel* handles because it builds a pipe server,
-a log file and threads. Before it, a leaked pipe instance per connection could
-have run for a day and reported a clean PASS. Linux gained a handle signal it
-never had, since `GetGuiResources` has no counterpart there.
+became a measurement: a headless soak on this box reports GDI 0 and USER 5
+because it builds no GUI objects, and around 250 *kernel* handles because it
+builds a pipe server, a log file and threads. Before it, a leaked pipe instance
+per connection could have run for a day and reported a clean PASS. Linux gained
+a handle signal it never had, since `GetGuiResources` has no counterpart there.
 
 **And [D-111](debt.md#d-111)'s experiment ran**, which is the one result of this
 wave nobody could have predicted from the code. `--soak 120 --every 10` on all
@@ -153,12 +177,29 @@ and the Windows CI number lands inside the range measured on the dev box - the
 first time this instrument has been checked against a machine nobody tuned it
 on. macOS assembles and measures nothing, which is what it is documented to do.
 
-**Three of the wave's own fixes were caught by its own instruments.** The frame
-probe's first reading was unbelievable until a drawn-area check existed; the
-soak's first real kernel reading printed `0` for a count that had moved by nine;
-and the CI run showed USER moving 5 to 6 on a runner while three places in the
-tree said it was flat at 5. Each is the same shape, and it is the shape this
+**Two of the wave's own fixes were caught by its own instruments, and a third -
+the worst - was not.** The soak's first real kernel reading printed `0` for a
+count that had moved by nine; and the CI run showed USER moving 5 to 6 on a
+runner while several places in the
+tree said it was flat at 5. Both are the same shape, and it is the shape this
 phase exists to remove: a number that looks measured and is not.
+
+The third is the frame probe's first reading, and **a review caught that one**.
+It matters which, because the probe had *two* "did it draw" checks at the time
+and both passed: one re-asserted the window size the probe itself had passed in,
+and the other compared every pixel against a rounded corner. A first version of
+this paragraph said the reading "was unbelievable until a drawn-area check
+existed", which is false twice - the check existed, and `tests/frame_probe.rs`
+now records that it "provably would not have" caught the defect. An instrument
+that cannot fail is not a weaker instrument; it is the thing this phase is
+about, wearing the costume of the remedy.
+
+*(A first version of that sentence said "three places". That number was written,
+found short, corrected to a different wrong number, and then deleted from
+`debt.md` for being an undercount inside the sentence written to fix an
+undercount - all inside wave 3. Reinstating it here, in the paragraph arguing
+against numbers that look measured, is the joke writing itself, and it is
+recorded rather than quietly fixed.)*
 
 **The first version of that measurement was wrong, and a review caught it.** The
 probe sized its window from the markup's default rather than from the height the

@@ -4,10 +4,12 @@ _Last updated: 2026-08-09. **P0 through P8 are closed**, `v0.1.6` shipped the
 two ports that had been held, and **P9 is in progress** - the first phase whose
 scope was chosen by what the absent hardware still permits, rather than merely
 limited by it. Six of its rows have drained - five of them in its four waves and
-one that predates them - and **all four waves have now landed**, wave 3's three
-instruments among them; see [plan.md](plan.md). What is left of the phase is two
-rows, [D-059](debt.md#d-059) and [D-076](debt.md#d-076). The ports ship as **unverified previews** rather than as
-confirmed platforms
+one that predates them - and **all four waves have now landed something**, wave
+3's instruments among them; see [plan.md](plan.md). Two rows are what is left of
+the *phase's plan* - [D-059](debt.md#d-059) and [D-076](debt.md#d-076) - which is
+not the same as two open rows: the four rows wave 3 worked are all still open,
+because an instrument row drains when the budget it serves can be checked. The
+ports ship as **unverified previews** rather than as confirmed platforms
 ([ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md)): the hold was
 self-defeating, because the community confirmations macOS needs to leave
 "experimental" cannot arrive for a build nobody can install. `v0.2.0` and
