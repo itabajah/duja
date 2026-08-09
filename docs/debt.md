@@ -902,12 +902,12 @@ That was tolerable while the release profile was `opt-level = 3` and nobody was 
 
 **The stale count in this row reached the manifest too.** The paragraph above said "the four crates" and listed four; the manifest has five. `Cargo.toml`'s own comment said "functions from these four" directly above five `[profile.release.package.*]` blocks - so the count was wrong in the file the whole measurement is about, as well as here. Both are corrected in place. *(A first version of this paragraph claimed three sites and that all three were "corrected". The third was the frame probe's module header, which listed all five correctly from the start and merely carried a note about this row; it was deleted, not corrected. Miscounting the sites of a stale count is its own joke and is left recorded rather than tidied.)*
 
-**What the measurement said, including the half nobody predicted.** Six runs each, on this box, release profile, a three-monitor flyout at the 360 x 397 the app presents:
+**What the measurement said, including the half nobody predicted.** About twenty runs on this box for the shipped profile and a dozen for the comparison, release build, a three-monitor flyout at the 360 x 397 the app presents. The figures are the medians of the per-run statistics, because the ranges are what keep being escaped by the next batch:
 
-| build | min | mean |
+| build | median run-min | median run-mean |
 |---|---|---|
-| shipped (`-Os` + the five overrides) | 213-223 us | 229-244 us |
-| `-Os` everywhere | 293-307 us | 315-325 us |
+| shipped (`-Os` + the five overrides) | 219 us | 236 us |
+| `-Os` everywhere | 301 us | 320 us |
 
 The minimum and the mean do not overlap between the two configurations, so the effect is real rather than noise, and it is worth roughly **1.3x to 1.4x**. **The worst frame is not tabulated**, because it does not reproduce: repeated runs of the same binary put it anywhere from about 280 us to about 690 us, which is scheduler noise rather than a property of the renderer. It is still what `verdict()` gates on, so anyone tightening this budget must measure the tail rather than trust a handful of runs. Both builds clear 16 ms with room - about **65x** on a typical frame, and more than **20x** even on the slowest frame seen across dozens of runs - so the exemption does what wave 1 argued it would **and** the budget never depended on it.
 

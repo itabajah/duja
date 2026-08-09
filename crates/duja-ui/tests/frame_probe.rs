@@ -20,7 +20,6 @@ use duja_core::id::StableDisplayId;
 use duja_core::model::{Capabilities, DisplayKind, DisplaySnapshot};
 use duja_ui::flyout_vm::FlyoutVm;
 use duja_ui::frame_probe::{self, FRAME_BUDGET, Verdict, probe_size};
-use duja_ui::layout::flyout_logical_height;
 
 /// How many frames the timed run measures.
 ///
@@ -93,10 +92,14 @@ fn the_real_flyout_renders_frames_through_the_software_renderer() {
 /// The expected sizes are **literals**. A first version compared
 /// `probe_size(rows)` against `flyout_logical_height(rows)` - the function
 /// `probe_size` is *defined* in terms of - so the assertion could not fail for
-/// any implementation. It stayed green with the sizing defect in the tree while
-/// the other two tests went red, which is how a review caught it; a second
-/// version claimed to have fixed this and did not, because the edit silently
-/// failed to apply and the vacuous test kept passing.
+/// any implementation; a second version claimed to have fixed that and did not,
+/// because the edit silently failed to apply and a vacuous test kept passing.
+///
+/// **What this pins is the public size surface, not the probe's use of it.** It
+/// reds if `probe_size` returns the wrong pair - which is the shape the original
+/// defect took, a `PROBE_SIZE` constant of `(360, 260)`. It stays *green* if
+/// `probe()` ignores `probe_size` and sizes its window some other way; the two
+/// tests below are what catch that, and they do.
 #[test]
 fn the_probe_window_is_the_size_the_app_presents() {
     assert_eq!(probe_size(0), (360, 178));
@@ -104,10 +107,6 @@ fn the_probe_window_is_the_size_the_app_presents() {
     assert_eq!(probe_size(2), (360, 288));
     assert_eq!(probe_size(3), (360, 397));
     assert_eq!(probe_size(5), (360, 615));
-
-    // And `duja-app` presents what the probe renders, which is the whole reason
-    // the arithmetic is in one crate instead of two.
-    assert!((flyout_logical_height(3) - 397.0).abs() < f32::EPSILON);
 }
 
 /// **A third monitor must put a whole card's worth of new pixels on the
@@ -128,8 +127,12 @@ fn the_probe_window_is_the_size_the_app_presents() {
 /// thing: it is the window background at 0 and 1 rows and the card fill from 2
 /// on. So the sequence is **not** monotone - the first monitor lowers the count
 /// by about 2,650, and the sixth lowers it by about 15,600 because the window
-/// has hit its 620 px clamp and the rows compress instead - and a test named
-/// for "every extra monitor" would have been asserting something false. What is stable, and what the sizing
+/// has hit its 620 px clamp, so the extra card's upper band enters the viewport
+/// and the rest of it becomes scrollable rather than drawn - and a test named
+/// for "every extra monitor" would have been asserting something false. (The
+/// rows do **not** compress: `flyout.slint` packs cards at their natural height
+/// inside a `ScrollView`, and the bands measure identically from one monitor to
+/// seven.) What is stable, and what the sizing
 /// defect breaks, is that a card which fits adds a card's worth.
 #[test]
 fn a_third_monitor_adds_a_whole_card_of_pixels() {

@@ -366,11 +366,17 @@ fn install() -> Result<Rc<MinimalSoftwareWindow>, PlatformError> {
 /// buffer's most common colour**. That is a proxy for "content reached the
 /// layout", not a measure of it, and it is deliberately a coarse one. It is
 /// **not monotone** in the row count: the first monitor lowers it (the card
-/// fill displaces background that was already being counted), and once the
-/// window reaches its 620 px clamp an extra monitor lowers it again, by about
-/// 15,600 - the rows compress rather than the window growing, so the card fill
-/// that defines the mode takes over more of a buffer that is no longer getting
-/// any bigger. What it does reliably is separate
+/// fill displaces background that was already being counted), and a sixth
+/// lowers it again by about 15,600. **The rows do not compress** - a first
+/// version of this sentence said they did, which the markup forbids
+/// (`flyout.slint`'s body is a `ScrollView` whose `VerticalLayout` carries
+/// `alignment: start` to pack cards "at their natural height") and measurement
+/// disproves (the card bands are pixel-identical, 58 px and 22 px at a 96 px
+/// pitch, from one monitor to seven). What happens is that the window grows
+/// only from 615 to 620 px, so the sixth card's upper band enters the viewport
+/// while the rest of it sits below the edge, scrollable rather than drawn - and
+/// the pixels it does add are card fill, which *is* the modal colour, so a
+/// count of pixels unequal to the mode falls. What it does reliably is separate
 /// a card that rendered from a card that fell off the bottom edge, which is the
 /// one question it exists to answer.
 fn content_pixels(buffer: &[PremultipliedRgbaColor]) -> u64 {

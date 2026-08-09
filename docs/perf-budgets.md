@@ -92,9 +92,11 @@ times the rest. The size is computed by `duja_ui::layout::flyout_logical_height`
 the same function `AppState::show_flyout` sizes the real window with, rather
 than restated here.
 
-**Measured on this box (Windows, release profile), over about twenty runs:** min
-**213-223 us**, mean **229-244 us**. About **65x** inside the budget on a
-typical frame.
+**Measured on this box (Windows, release profile), over about twenty runs:**
+the median run reports a fastest frame of **219 us** and a mean of **236 us**.
+Medians rather than ranges, because every range published for these has been
+escaped by the next batch of runs; individual runs span roughly 212-227 us on
+the minimum. About **65x** inside the budget on a typical frame.
 
 The **worst** frame is not quoted, because it does not reproduce: repeated runs
 of the same binary put it anywhere from about 280 us to about 690 us, which is
@@ -106,16 +108,17 @@ a handful of runs. A first version of this paragraph quoted 24x from six runs
 and a later 40 gave 23.3x, which is the same mistake this paragraph exists to
 warn about, made inside the warning.
 
-**And the exemption it exists to check is worth roughly 1.3x to 1.4x.** With the five
-per-package `opt-level = 3` overrides removed - `-Os` everywhere - the same
-probe gives min **293-307 us** and mean **315-325 us**. The minimum and the mean
-do not overlap between the two configurations, so the effect is real rather than
-noise; the worst frame overlaps freely and is not evidence of anything here. So
-the exemption does what P8 wave 1 argued it would, at the 1,429,504 bytes
-[ADR-0012](adr/0012-binary-size-budget-variance.md)
-prices; and *also*, both builds clear this budget with room to spare, so nothing
-here depends on it. Both halves are the measurement, and only the first was ever
-predicted.
+**And the exemption it exists to check is worth roughly 1.3x to 1.4x.** With
+the five per-package `opt-level = 3` overrides removed - `-Os` everywhere - the
+same probe reports a median run-min of **301 us** and a median run-mean of
+**320 us**. The two configurations do not overlap on either statistic (the
+slowest shipped mean seen is still faster than the fastest `-Os` mean seen), so
+the effect is real rather than noise; the worst frame overlaps freely and is not
+evidence of anything here. So the exemption does what P8 wave 1 argued it would,
+at the 1,429,504 bytes
+[ADR-0012](adr/0012-binary-size-budget-variance.md) prices; and *also*, both
+builds clear this budget with room to spare, so nothing here depends on it.
+Both halves are the measurement, and only the first was ever predicted.
 
 Two limits on that number, because a budget row that overstates its instrument
 is worse than one with no instrument at all:
