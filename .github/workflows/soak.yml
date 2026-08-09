@@ -38,6 +38,16 @@
 # green job with a line in the summary, i.e. a check that only fails when the
 # binary does not run at all.
 #
+# **The honest caveat on that**: the two propagating lanes gate on numbers this
+# tree itself calls guesses. `HANDLE_GROWTH_TOLERANCE`'s own doc says it "is a
+# guess rather than a measurement" and that "a rise of nine would FAIL a healthy
+# run"; the idle-RSS constant's doc records one unexplained run at 89 % of
+# budget; and no Linux or macOS RSS figure exists anywhere. So an early red here
+# is at least as likely to be the instrument as the code. That is tolerable only
+# because this workflow is dispatch-only with no pull-request status, runs with
+# `fail-fast: false`, and writes the full reading before it exits - a red lane
+# still hands back its numbers.
+#
 # # Why the report is read from disk rather than from stdout
 #
 # Because a run that outlives its shell has to leave its numbers somewhere, and
@@ -50,8 +60,10 @@
 # does not stop the process inheriting standard handles a parent supplies -
 # which the step below supplies, with `> soak-stdout.txt 2>&1`. Measured on a
 # binary carrying the same cfg gate: stdout arrives in the file. The premise is
-# true of the un-redirected invocation `qa-checklist.md` gives an operator, and
-# `soak.rs`'s module header is about that one.
+# true of the un-redirected invocation `qa-checklist.md` gives an operator
+# (`start /wait duja.exe --soak ...`), and `soak.rs`'s header now says which of
+# the two it is about - it did not, until this workflow became the first
+# redirected caller in the tree to contradict it.
 #
 # All third-party actions are pinned by commit SHA (supply-chain policy).
 
@@ -106,9 +118,9 @@ jobs:
     # about a third of the figure this workflow was first justified against.
     #
     # Forty-five minutes therefore leaves room for a soak of about half an hour
-    # on top of the build. A longer one needs this raised - and GitHub caps any
-    # job at six hours, which is why this mechanism can never deliver D-111's
-    # other half, the 24-hour run.
+    # on top of the build. A longer one needs this raised - and GitHub caps a
+    # hosted job at six hours, which is why this mechanism can never deliver
+    # D-111's other half, the 24-hour run.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -137,9 +149,18 @@ jobs:
         run: |
           set -u
 
-          # A typo here would otherwise reach the harness, produce no report and
-          # be reported by the branch below as a pump that would not start -
-          # a misdiagnosis of the one question this workflow exists to answer.
+          # A bad input would otherwise reach the harness, produce no report and
+          # be reported by the branch below as a pump that would not start - a
+          # misdiagnosis of the one question this workflow exists to answer.
+          #
+          # The bounds are the CLI's own, not invented here: `cli.rs` parses both
+          # as `u64` and requires `>= 1`, so `0` and anything that overflows a
+          # `u64` are rejected by it *after* this point and would surface as a
+          # missing report. The upper bound is this job's: `timeout-minutes` is
+          # 45 and the build takes about seven of them, so a soak beyond half an
+          # hour is a guaranteed kill - including the 86400 that
+          # `qa-checklist.md` quite correctly tells an operator to run on a real
+          # desktop.
           for value in "$SOAK_SECONDS" "$SOAK_EVERY"; do
             case "$value" in
               '' | *[!0-9]*)
@@ -147,6 +168,10 @@ jobs:
                 exit 1
                 ;;
             esac
+            if [ "$value" -lt 1 ] || [ "$value" -gt 1800 ]; then
+              echo "::error::soak inputs must be between 1 and 1800 seconds; got '$value'. A longer run needs timeout-minutes raised, and GitHub caps a hosted job at six hours regardless."
+              exit 1
+            fi
           done
 
           bin=target/release/duja
@@ -177,8 +202,10 @@ jobs:
           # The report is written beside the rotating log, under the per-user
           # data directory `directories::ProjectDirs` resolves. That is inside
           # $HOME on all three runners, so one search covers them. `|| true`
-          # because `find` exits non-zero on an unreadable directory and the
-          # designed error below is a better diagnosis than a bare exit.
+          # because the runner's shell has `pipefail` and this pipeline has two
+          # ways to fail that are not findings: `find` exits non-zero on an
+          # unreadable directory, and it takes SIGPIPE when `head -1` closes
+          # early. The designed error below is a better diagnosis than either.
           report=$(find "$HOME" -name soak-report.txt -type f -newer soak-started 2>/dev/null | head -1 || true)
           if [ -z "$report" ]; then
             echo "::error::no soak-report.txt under HOME; the harness never reached the point of reporting"

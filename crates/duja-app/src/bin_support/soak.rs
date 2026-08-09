@@ -10,9 +10,17 @@
 //! # Where the report goes, which on Windows is not the console
 //!
 //! **A release `duja.exe` is a GUI-subsystem binary** (`main.rs`'s
-//! `windows_subsystem = "windows"`), so it has no console: `eprintln!` lands on
-//! an invalid handle, std maps that to `Ok`, and every line this harness prints
-//! is silently discarded. The shell does not wait for it either, so the exit
+//! `windows_subsystem = "windows"`), so Windows allocates it no console: run it
+//! from a shell and `eprintln!` lands on an invalid handle, std maps that to
+//! `Ok`, and every line this harness prints is silently discarded.
+//!
+//! **That is about the un-redirected invocation, and only that.** Not
+//! allocating a console is not the same as having no standard handles: a parent
+//! that supplies them - `> out.txt 2>&1`, or a pipe - is inherited normally, and
+//! the output arrives. `.github/workflows/soak.yml` redirects for exactly that
+//! reason and gets the text. `docs/qa-checklist.md` gives an operator the
+//! un-redirected `start /wait duja.exe --soak ...`, which is the case this
+//! paragraph is about and the case the file below exists for. The shell does not wait for it either, so the exit
 //! code — the whole of the "UNMEASURABLE is not a pass" guarantee — is
 //! unobservable too. `main.rs` has said this since P4 and P8 wave 3 wrote past
 //! it, which made the instrument useless on the one build worth soaking: the
