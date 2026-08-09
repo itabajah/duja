@@ -50,6 +50,7 @@ refusing to renumber.
 | [D-040](#d-040) | ~~v0.1.1 (deep review) → narrowed in `#82`~~ | `duja-app` `tray/state.rs` | ~~The throttle-final-value contract is pinned at the `duja-ui` end and the engine end, and the app layer between them is unpinned~~ - **drained in `#157`**, by the `AppState` fixture the row said it needed, and proven red at both of its two sites |
 | [D-065](#d-065) | ~~post-v0.1.5 (gamma refusal fix)~~ | `duja-app` `tray/state.rs` `apply_overlays` | ~~Nothing pins that `apply_overlays` routes through `apply_dimming_batch`; re-inlining the overlay apply plus the two gamma phases restores the mid-drag flash~~ - **drained in `#159`**, on the recording gamma channel the `AppState` fixture lacked |
 | [D-016](#d-016) | ~~P6 (gate, `#109`)~~ | `duja-app` `tray/state.rs` `on_platform_wake` | ~~The wake → re-assert wiring is unpinned at the app layer: deleting either line from `on_platform_wake` leaves the whole suite green~~ - **drained in `#159`**, on the recording gamma channel the `AppState` fixture lacked |
+| [D-059](#d-059) | ~~post-v0.1.5 (event-loop-first)~~ | `duja-app` `tray.rs` | ~~Nothing ties duja's own loop-time assembly to the mechanism it rides on~~ - **drained in `#167`** by a witness type rather than the injected probe the row asked for: re-inlining the assembly is a compile error now, where it used to leave 377 tests green |
 
 ## Rows
 
@@ -395,7 +396,7 @@ every sample must be forwarded [...]: [("GSM-0001-A", 87)]
 
 **The second assertion is defence in depth rather than an independent guard, and an earlier draft of this paragraph oversold it.** It claimed a coalescing throttle would fail the count while a trailing-edge drop would fail the last value, as though each caught a case the other missed. A trailing-edge drop fails the count too - five samples are not six - so the count assertion catches both shapes on its own. What the last-value check buys is the case where a *future* throttle coalesces without changing the count, and it is cheap. The released sample in the fixture is still deliberately not the extreme of the drag, for the same reason: a throttle that happened to keep the minimum would look right on value alone.
 
-**What the row got right, and the one thing it did not.** Right, and unusually so: it stated the gap, named both sites, said a refactor rather than a test was what closed it, and recorded that the defect had been re-inserted *empirically* rather than assumed. Its deferral reason was the false part - "`AppState` cannot be constructed in a test: it owns two live Slint shells and a concrete `tray_icon::TrayIcon`" - and it was false in one half from the day it was written (`duja-ui` was already building both shells headless) and in the other from `#134`. See [D-102](debt.md#d-102) for the re-triage. *(That sentence used to end "and for the part that is still open: the fixture answers this row and does not answer the two that need the gamma channel observable". Both of those - D-016 and D-065 - drained in `#159` on the gamma seam, so what is left of the four is D-059 alone. `#159` wrote that correction into D-113's entry by mistake; the checkpoint PR then de-duplicated the two, deleted the corrected copy, and so had to write the correction again here - which is why it took two more rounds to end up in the row it belongs to.)*
+**What the row got right, and the one thing it did not.** Right, and unusually so: it stated the gap, named both sites, said a refactor rather than a test was what closed it, and recorded that the defect had been re-inserted *empirically* rather than assumed. Its deferral reason was the false part - "`AppState` cannot be constructed in a test: it owns two live Slint shells and a concrete `tray_icon::TrayIcon`" - and it was false in one half from the day it was written (`duja-ui` was already building both shells headless) and in the other from `#134`. See [D-102](debt.md#d-102) for the re-triage. *(That sentence used to end "and for the part that is still open: the fixture answers this row and does not answer the two that need the gamma channel observable". Both of those - D-016 and D-065 - drained in `#159` on the gamma seam, and D-059 then drained in `#167` on a witness type rather than on anything the fixture supplied, so the four are complete and this row's mechanism accounts for exactly one of them. `#159` wrote that correction into D-113's entry by mistake; the checkpoint PR then de-duplicated the two, deleted the corrected copy, and so had to write the correction again here - which is why it took two more rounds to end up in the row it belongs to.)*
 
 ### D-113
 
@@ -486,3 +487,81 @@ Closing it needs a `windows_live` test that holds the worker busy and watchdogs 
 **One arm is pinned that a later tidy-up would get wrong.** `recv_timeout` can in principle answer `Ok(())`, and nothing ever sends on that channel - so an `Ok` means the channel is not the one this reasoning assumes. It resolves to `Detach`, because under a broken assumption the answer that cannot hang is the right one. Folding it in with `Disconnected` for symmetry is how the unbounded wait comes back, and there is a test whose whole purpose is to red on that.
 
 **The budget is `DIMMER_REPLY_BUDGET` rather than a number of its own**, deliberately: a worker that cannot answer an apply inside two seconds is the same wedge this is about, and two constants for one condition is two constants to keep in step
+
+### D-059
+
+**Where:** `duja-app` `tray.rs` &nbsp;·&nbsp; **Added:** ~~post-v0.1.5 (event-loop-first)~~
+
+~~**Nothing ties duja's own loop-time assembly to the mechanism it rides on.** `tests/loop_time_assembly.rs` pins the *mechanism* against the real Slint/winit stack (a zero-duration `Timer::single_shot` queued before `run_event_loop_until_quit` fires once, from inside the loop, leaving no timer entry), and `LoopAssembly`'s three tests pin the hand-back **cell**. What no test pins is the wiring between them: re-inlining `build_tray`/`init_hotkeys` back into `run`'s pre-loop phase — the exact regression this PR exists to prevent — keeps the entire suite green, because Windows tolerates the old ordering and only macOS does not. Closing it needs `build_tray`/`init_hotkeys`/`assemble_with_loop_running` behind a seam a test can observe the loop state at (e.g. an injected "is the loop running" probe, or a `TrayBuilder` trait), which is an `AppState`-shaped refactor, not a test~~
+
+~~**Why deferred.** `AppState` cannot be constructed in a test — it owns two live Slint shells and a concrete `tray_icon::TrayIcon`, whose only constructor does `CreateWindowExW` + `Shell_NotifyIconW` (the v0.1.1 row above, same blocker). Deliberately narrowed rather than left as "untestable": the earlier version of this row claimed an ordering assertion needed a Slint harness `duja-app` does not have, which was **wrong** — `duja-app` depends on both `slint` and `duja-ui`, so it can and now does drive a real winit-backed loop in an integration test. Only the duja-specific half remains, and it is the half that needs the refactor. **That reason is gone, and this row's real obstacle was never the same one.** `#157` built the `AppState` fixture the shared sentence blocked on, and [D-040](debt-archive.md#d-040) drained on it. This row does not, because what it needs is not a constructible `AppState` but a way to observe **when** `build_tray` and `init_hotkeys` ran relative to the loop. The fixture is orthogonal rather than a step: it assembles the state directly instead of through `run`'s loop-time hand-back, so it cannot see the ordering at all. What this needs is the seam the row already names - an injected "is the loop running" probe, or a `TrayBuilder` a test substitutes. This row had already narrowed one false "needs a harness we do not have" claim; the shared sentence was the second, and it means this row spent three checkpoints deferring on something that was not blocking it.~~
+
+**Drained in `#167`, and not by the remedy this row named.** The row asked for
+"an injected 'is the loop running' probe, or a `TrayBuilder` trait", and both of
+those are tests. What closed it is a **type**: `build_tray` and `init_hotkeys`
+each take a `&LoopRunning`, a zero-sized witness whose field and constructor are
+private to `bin_support/tray/loop_running.rs`, and whose only mint sits inside
+the callback that module queues onto the loop. Re-inlining either call into
+`run`'s pre-loop phase is `error[E0061]` at both sites; forging a witness from
+`tray.rs` is `error[E0603]`, with rustc naming the one edit that would open the
+hole ("consider making the field publicly accessible").
+
+**The row's own claim was measured before it was fixed rather than repeated.**
+With `build_tray`/`init_hotkeys` restored to the site they occupied before the
+event-loop-first restructure, **377 `duja-app` tests pass** - `tests/loop_time_assembly.rs`
+among them, because that file pins the mechanism and never the wiring to it. The
+row had asserted this since it was written and nobody had run it.
+
+**Why a test was never going to close this, which the row did not see.** A test
+observes what a function does. This regression is not something a function does -
+it is code *moving*, and the only readers of a refactor are the compiler and a
+reviewer. Every probe or `TrayBuilder` this row proposed would have pinned the
+seam it was injected into and said nothing about a caller that stopped using it.
+That is the same shape as [D-045](#d-045)'s red-first proof pinning a pure
+function the fix itself introduced, and as the frame probe's two "did it draw"
+checks that both passed on a window sized wrong: an instrument aimed one step
+away from the defect.
+
+**What the witness does not prove, and what carries the rest.** Provenance only:
+a `&LoopRunning` came from inside `when_loop_running`'s callback. That the
+callback runs *in-loop* is a property of two pinned dependency versions - a Slint
+timer is drained only from `update_timers_and_animations`, which the winit
+backend calls from `new_events` - and dependabot merges minor bumps here
+unattended. So `tests/loop_running_token.rs` pins it against the real stack:
+the closure has **not** fired between queueing and starting the loop (a plain
+equality, which is the historical shape stated directly), and the loop was ended
+by the closure's own quit rather than by a watchdog. Both assertions were proven
+falsifiable by separate mutations, because an assertion that cannot fail is what
+this phase keeps finding. It carries no "nothing left scheduled" assertion - the
+watchdog is still armed when that loop exits - and `loop_time_assembly.rs` keeps
+that half.
+
+**A mutation reporting green is not evidence until you know it was applied.** The
+watchdog assertion first appeared to survive its mutation, which would have made
+it vacuous. It had not survived anything: the shell that wrote it was `git
+checkout <untracked file> && python ...`, the checkout failed, and `&&` never ran
+the edit. The test then passed because it was the unmutated test. A scratch
+experiment measured the real behaviour (the loop runs the full 500 ms and only
+the watchdog ends it), the mutation was applied properly, and it reds. Worth
+recording because the failure mode is silent and reads exactly like a passing
+falsification check.
+
+**The escape hatch is named rather than hidden.** `LoopRunning::assumed_for_test`
+is `cfg(test)`-only, asserts nothing, and says so in its own doc: the caller is
+stating that the loop question is not what their test is about. It exists for one
+caller, [D-102](debt.md#d-102)'s `#[ignore]`d experiment, whose recorded answer -
+"does `build_tray` refuse merely because its process is a test binary?" - would
+change meaning if a running loop were added underneath it. `run` is not
+`cfg(test)`, so no production path can reach it.
+
+**What is still not pinned, and it is the third bullet of `tray.rs`'s own list.**
+That `assemble_with_loop_running` is the closure being queued. The witness makes
+the two OS calls unreachable from phase 1; it does not say duja's assembly is
+what carries them, and nothing here changes that. The list in `tray.rs` says so
+rather than reading as covered.
+
+**Windows-only, for the mechanism half only.** A CI ubuntu runner has no X server
+and a macOS loop must own the process's main thread, so neither can host a
+loop-driving test - the same reason `loop_time_assembly.rs` is `cfg(windows)`.
+The **type** is enforced on all three lanes by every `cargo check`, which is the
+half that matters for a regression nobody would see until a Mac ran it.

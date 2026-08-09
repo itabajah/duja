@@ -35,6 +35,13 @@
 //! here. The ordering is **not** `cfg`-split: Windows, the shipped platform,
 //! exercises exactly the sequence macOS depends on.
 //!
+//! **Nor is the split left to this paragraph.** [`build_tray`] and
+//! [`init_hotkeys`] each take a [`loop_running::LoopRunning`], a witness the
+//! queued callback is the only thing that can mint, so moving either into phase 1
+//! is a compile error rather than a green test run — which is what it used to be,
+//! measured across 377 tests. See [`loop_running`] for what that does and does not
+//! prove.
+//!
 //! # Continuum ownership
 //!
 //! The app owns each display's *user* level (persisted in the state file). A
@@ -112,6 +119,11 @@ mod ksni_tray;
 // `bin_support::tray` and fail on the ubuntu lane alone. It did.
 #[cfg(any(test, target_os = "linux"))]
 mod linux_icon;
+// Owns the `Timer::single_shot` the loop-time assembly rides on, and the witness
+// type that makes re-inlining it into the pre-loop phase a compile error. Kept
+// free of every other `bin_support` import so `tests/loop_running_token.rs` can
+// pull it in through `#[path]` and drive it against the real Slint/winit stack.
+mod loop_running;
 mod policy;
 mod state;
 mod surface;
@@ -448,61 +460,19 @@ pub(crate) fn run(verbose: bool, relaunch: bool) -> anyhow::Result<ExitCode> {
 /// Queue [`assemble_with_loop_running`] to run as the first work the (not yet
 /// running) event loop does, reporting its outcome through `assembly`.
 ///
-/// # The mechanism, and why this one
-///
-/// A zero-duration single-shot Slint timer — deliberately **not**
-/// [`slint::invoke_from_event_loop`] and **not**
-/// `i_slint_backend_winit::Backend::builder().with_custom_application_handler`.
-/// Verified in the pinned dependency sources:
-///
-/// - **It can only fire from inside the running loop.** A Slint timer is drained
-///   only by `i_slint_core::platform::update_timers_and_animations`, and
-///   `i-slint-backend-winit` calls that from exactly two places:
-///   `ApplicationHandler::new_events` (`event_loop.rs`) and the Apple display-link
-///   callback (`frame_throttle/apple_display_link.rs`, which only exists once a
-///   window is rendering). Both are inside the loop, so the closure fires at
-///   `StartCause::Init` on the loop's first pass — exactly the point `tray-icon`
-///   documents as the earliest legal moment to create a macOS status item.
-///   (`i_slint_core::platform::set_platform` also calls it, but that already ran
-///   when the flyout window was created, before this timer exists.)
-/// - **It does not need `Send`.** `Timer::single_shot` takes `FnOnce() + 'static`;
-///   `invoke_from_event_loop` additionally requires `Send`, which `FlyoutShell`,
-///   `SettingsShell`, `Rc<RefCell<…Vm>>` and [`gamma::GammaBackend`] (it owns a
-///   bare `Box<dyn FnMut>`) are not. Using it would mean pushing those
-///   main-thread-only values across a `Send` bound via a second thread-local or an
-///   `unsafe impl Send`.
-/// - **The user-event ordering question does not arise.** Winit *does* deliver
-///   queued user events strictly after `StartCause::Init` on both platforms (on
-///   macOS they are drained only in the `BeforeWaiting` observer, gated on
-///   `is_running`, which `applicationDidFinishLaunching:` sets immediately before
-///   dispatching Init + Resumed), so `invoke_from_event_loop` would also have been
-///   late enough. The timer is preferred because it does not *depend* on that
-///   answer: it hangs off the backend's own `new_events` hook rather than on
-///   user-event delivery order.
-/// - **A custom application handler costs too much.** Its
-///   `new_events(_, StartCause::Init)` hook is the documented "loop is running
-///   now" callback, but taking over backend construction means calling
-///   `slint::platform::set_platform` by hand and re-asserting the software
-///   renderer, which ADR-0009 makes load-bearing for both the RAM and
-///   binary-size budgets.
-/// - **It schedules nothing further.** A `SingleShot` timer is removed from the
-///   timer list once its callback returns (`TimerList::maybe_activate_timers`), so
-///   `duration_until_next_timer_update` is `None` again and the loop is back to
-///   `ControlFlow::Wait` with zero periodic wakeups (ADR-0001).
-///
-/// The first and last points rest on two *pinned dependency versions*, and
-/// dependabot merges `cargo-minor-patch` bumps here unattended, so they are not
-/// left as prose: `tests/loop_time_assembly.rs` asserts them against the real
-/// Slint/winit stack. If a Slint bump relocates the timer drain, that test fails
-/// on Windows instead of the tray quietly moving back outside the loop and the
-/// consequence surfacing on macOS, where it is fatal.
+/// The queueing mechanism — a zero-duration single-shot Slint timer, and why that
+/// rather than [`slint::invoke_from_event_loop`] or a custom winit application
+/// handler — lives with the code that performs it, in [`loop_running`]. What
+/// belongs here is only the outcome routing: a closure queued onto the loop can
+/// neither `?` out of [`run()`] nor return a value, so both directions go through
+/// [`LoopAssembly`], and the fatal arm has to end the loop itself.
 fn queue_loop_time_assembly(
     resources: LoopStartResources,
     assembly: &Rc<LoopAssembly<PipeServer>>,
 ) {
     let assembly = Rc::clone(assembly);
-    slint::Timer::single_shot(Duration::ZERO, move || {
-        match assemble_with_loop_running(resources) {
+    loop_running::when_loop_running(move |running| {
+        match assemble_with_loop_running(resources, running) {
             Ok(server) => {
                 assembly.store_server(server);
                 // Logged here, not before the loop: everything this message claims
@@ -649,10 +619,19 @@ impl<S> LoopAssembly<S> {
 ///   `dujactl` request can never arrive before the state its handler reaches for
 ///   exists.
 ///
+/// `running` is what makes the first of those two structural rather than
+/// documented: it is the witness [`loop_running`] mints inside the queued
+/// callback, both calls below require one, and there is no way to obtain one in
+/// [`run()`]'s pre-loop phase. Moving them back there — which used to leave the
+/// whole suite green — no longer compiles.
+///
 /// # Errors
 /// Returns an error if the tray icon or its menu cannot be created. That is fatal
 /// (see [`LoopAssembly`]); everything else here degrades in place.
-fn assemble_with_loop_running(resources: LoopStartResources) -> anyhow::Result<Option<PipeServer>> {
+fn assemble_with_loop_running(
+    resources: LoopStartResources,
+    running: &loop_running::LoopRunning,
+) -> anyhow::Result<Option<PipeServer>> {
     let LoopStartResources {
         paths,
         config,
@@ -677,11 +656,11 @@ fn assemble_with_loop_running(resources: LoopStartResources) -> anyhow::Result<O
 
     // Tray icon + menu on the Slint main thread (glyph/colour shared with the
     // taskbar icons via `duja_ui::icon`), plus the update-surface handles.
-    let tray = build_tray(accent).context("creating the tray icon")?;
+    let tray = build_tray(running, accent).context("creating the tray icon")?;
 
     // Global hotkeys: same main-thread-with-a-running-loop requirement as the
     // tray. A failure only disables the affected binding.
-    let (hotkeys, hotkey_outcomes) = init_hotkeys(&config);
+    let (hotkeys, hotkey_outcomes) = init_hotkeys(running, &config);
 
     APP.with(|cell| {
         cell.set(Some(AppState {
@@ -1072,12 +1051,20 @@ fn unix_now() -> i64 {
 ///   The **mechanism** — that a zero-duration [`slint::Timer::single_shot`]
 ///   queued before the loop fires once, from inside it, leaving no timer behind —
 ///   *is* pinned, against the real Slint/winit stack, in
-///   `tests/loop_time_assembly.rs`. What is still open is the wiring between the
-///   two: re-inlining `build_tray`/`init_hotkeys` into the pre-loop phase keeps
-///   the whole suite green. That gap is the debt.md row.
+///   `tests/loop_time_assembly.rs`, and `tests/loop_running_token.rs` adds that
+///   [`loop_running::when_loop_running`] defers rather than calls. Neither says
+///   this closure is the one carrying duja's assembly.
 ///
-/// Both gaps are Windows-invisible by construction (Windows tolerates the old
-/// ordering), which is why this restructure landed on its own and why the
+/// **The wiring between the two is no longer in this list**, and the reason it
+/// left is worth reading: it was never testable from here. Re-inlining
+/// `build_tray`/`init_hotkeys` into the pre-loop phase used to keep the whole
+/// suite green — 377 `duja-app` tests, measured with the defect restored at its
+/// historical site — and it now fails to compile, because both take a
+/// [`loop_running::LoopRunning`] that only the queued callback can produce. A
+/// gap that a test could not reach was closed by a type instead.
+///
+/// The gaps that remain are Windows-invisible by construction (Windows tolerates
+/// the old ordering), which is why this restructure landed on its own and why the
 /// interactive smoke test is part of its evidence rather than an optional extra.
 #[cfg(test)]
 mod tests {

@@ -43,6 +43,14 @@
 //! sibling `#[test]` here — give it its own file (its own test binary) if one is
 //! ever needed.
 //!
+//! One was: `tests/loop_running_token.rs`, which is that rule being followed
+//! rather than a duplicate of this file. It drives the loop through
+//! `bin_support::tray::loop_running` — duja's own wrapper around the timer — and
+//! asserts the property this file cannot, that the closure is **queued** rather
+//! than called. What is pinned here is the timer itself, including the
+//! leaves-nothing-scheduled half that the other file's watchdog makes
+//! unassertable.
+//!
 //! Windows-only, like the tray itself: this asserts the mechanism `tray.rs`
 //! depends on, and `tray.rs` is `cfg(windows)`. The mechanism is
 //! platform-independent by design (that is the point of not `cfg`-splitting the

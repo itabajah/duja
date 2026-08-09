@@ -1475,7 +1475,8 @@ const fn retires_dimmer(error: &duja_core::dimmer::DimmerError) -> bool {
 ///
 /// # Why a fixture rather than one constructor
 ///
-/// `docs/debt.md` D-016, D-040, D-059 and D-065 all defer on the same sentence:
+/// D-016, D-040, D-059 and D-065 - all four now in `docs/debt-archive.md`, and
+/// only two of them drained here - all defer on the same sentence:
 /// *"`AppState` cannot be constructed in a test: it owns two live Slint shells
 /// and a concrete `tray_icon::TrayIcon` whose only constructor does
 /// `CreateWindowExW` + `Shell_NotifyIconW`."* Both halves were false by the time
