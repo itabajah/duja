@@ -38,11 +38,11 @@ this box report **around 250** of them. Before this, a headless soak could leak
 a pipe instance per connection for a day and report a clean pass, which is
 [D-112](debt.md#d-112). Linux had no handle signal at all.
 
-The kernel family is also the first one that is **not** perfectly flat: it falls
-by up to nine over ninety seconds here. A fall is not a leak and does not fail a
-run, but it is not "flat" either, and the report says so - the drift used to
-saturate at zero, so the very first real run of the new counter printed `0` for
-something that had moved by nine.
+The kernel family is also the first one that is **not** perfectly flat: every
+drift measured here has been negative and no larger than five. A fall is not a
+leak and does not fail a run, but it is not "flat" either, and the report says
+so - the drift used to saturate at zero, so the very first real run of the new
+counter printed `0` for a count that had moved.
 
 Three limits, because a budget row that overstates its instrument is worse than
 one with no instrument at all:
@@ -65,10 +65,10 @@ one with no instrument at all:
 The harness fails on drift above 8 in any handle family rather than above 0 -
 looser than this row, because [D-005](debt.md#d-005) is the standing example of
 a harness gating on absolute zero and reporting FAIL on a healthy run, and
-because nobody
-has run 24 hours to measure the real idle drift. Since its threshold is looser
-than the budget, its report **names any non-zero drift even when it passes**: it
-cannot print "flat" for something that moved.
+because nobody has run 24 hours to measure the real idle drift. Since its
+threshold is looser than the budget, its report **names any non-zero drift even
+when it passes, in either direction**: it cannot print "flat" for something that
+moved, and a fall is reported with its sign rather than saturated to zero.
 
 On a platform that cannot read its own usage the verdict is `UNMEASURABLE` with
 a non-zero exit - **not** a pass. macOS is that platform today (`task_info` is

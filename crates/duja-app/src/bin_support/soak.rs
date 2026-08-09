@@ -139,12 +139,24 @@ pub(crate) const RSS_GROWTH_BUDGET_BYTES: u64 = 5_000_000;
 /// **The reasoning above is the GUI families', and the kernel family inherited
 /// it without earning it.** The 10,000-object quota is the GDI/USER per-process
 /// limit; kernel handles have a ceiling three orders of magnitude higher, so
-/// "long before the ceiling" is not the argument there. And where GDI and USER
-/// measure exactly flat on every headless run recorded, the kernel count drifts
-/// by up to nine over ninety seconds on this box - within the tolerance, but
-/// only just, and downward. One threshold for three families with very
-/// different noise floors is a placeholder, and this is the row that says so
-/// rather than a claim that eight was chosen for all three.
+/// "long before the ceiling" is not the argument there.
+///
+/// And where GDI and USER measure exactly flat on every headless run recorded,
+/// the kernel count moves. Every drift measured on this box has been **negative
+/// and no larger than five**, with the within-run spread reaching nine once. A
+/// fall of any size passes, because the comparison is one-sided rather than
+/// because five is inside eight - a first version of this paragraph said "within
+/// the tolerance, but only just", which is wrong arithmetic (nine is not inside
+/// eight) about the wrong mechanism.
+///
+/// **The risk worth naming is the other direction, and it is unmeasured.** If
+/// the count can wander by five downward it can plausibly wander upward too, and
+/// a rise of nine would FAIL a healthy run - which is precisely the
+/// [D-005](https://github.com/itabajah/duja/blob/main/docs/debt.md#d-005) shape
+/// this constant's own docs cite as the mistake to avoid. Nobody has run long
+/// enough to know the upward spread. One threshold for three families with
+/// different and mostly unmeasured noise floors is a placeholder, and this is
+/// the paragraph that says so.
 pub(crate) const HANDLE_GROWTH_TOLERANCE: u32 = 8;
 
 /// The longest warm-up window: allocations settle, the engine finishes its
@@ -220,10 +232,17 @@ pub(crate) struct SoakRun {
 ///
 /// **A struct rather than a tuple**, because there were two families and now
 /// there are three, and this project already has a row about a positional pair
-/// of same-typed values getting transposed silently. `None` means the platform
-/// counts no such family, and only that: a *failed* read makes the whole sample
-/// unreadable rather than a half-filled one, on every platform (see
-/// [`duja_platform::process`]).
+/// of same-typed values getting transposed silently.
+///
+/// A `None` **field** means the platform counts no such family, and only that:
+/// a *failed* read makes the whole sample unreadable rather than a half-filled
+/// one, on every platform (see [`duja_platform::process`]). A
+/// [`HandleGrowth::default()`] - every field `None` - additionally comes back
+/// from [`SoakRun::handle_growth`] when there is no baseline to subtract from,
+/// so a run that measured nothing prints "not counted on this platform" about a
+/// platform that counts all three. That is cosmetic rather than misleading,
+/// because such a run is `UNMEASURABLE` and exits non-zero, but it is the one
+/// case where the sentence above is not the whole story.
 ///
 /// # Why signed, when the budget is about growth
 ///
@@ -674,10 +693,10 @@ mod tests {
         // The kernel count tracks `user` here so a fixture that moves `user`
         // moves this too - which is what `every_broken_budget_is_reported...`
         // needs. It is *not* true that every fixture built through this helper
-        // exercises all three families: the two flat-`user` leak fixtures pin
-        // the kernel count at 10. Tests that are about the kernel family build
-        // their own metrics with three distinct values, so the shared value
-        // here cannot hide a transposed field.
+        // exercises all three families: those that hold `user` constant hold the
+        // kernel count constant with it. Tests that are about the kernel family
+        // build their own metrics with three distinct values, so the shared
+        // value here cannot hide a transposed field.
         ProcessMetrics {
             rss_bytes: rss,
             gdi_objects: Some(gdi),
@@ -999,6 +1018,13 @@ mod tests {
             report.contains("NOT FLAT"),
             "a fall must be named rather than printed as 0: {report}"
         );
+        // The magnitude has to appear too. Asserting only "NOT FLAT" left the
+        // rendered number unpinned, so a report that said the right words about
+        // the wrong quantity would have passed.
+        assert!(
+            report.contains("-9"),
+            "the report must carry the drift itself: {report}"
+        );
     }
 
     /// The other direction of the same rule: a rise inside the tolerance still
@@ -1010,7 +1036,15 @@ mod tests {
         });
         assert_eq!(run.verdict().0, Verdict::Pass);
         assert_eq!(run.handle_growth().kernel, Some(1));
-        assert!(run.to_string().contains("NOT FLAT"), "{run}");
+        let report = run.to_string();
+        assert!(report.contains("NOT FLAT"), "{report}");
+        // A rise is signed too, so it cannot be confused with a fall at a
+        // glance. Dropping the `+` from the positive arm survived every other
+        // assertion in this file.
+        assert!(
+            report.contains("+1"),
+            "a rise must render with its sign: {report}"
+        );
     }
 
     #[test]

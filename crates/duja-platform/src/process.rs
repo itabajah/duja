@@ -193,15 +193,27 @@ fn resident_pages(statm: &str) -> Option<u64> {
 /// out, and it is worse than useless in a growth budget: a truncated baseline
 /// invents growth, and a truncated final sample hides it.
 ///
-/// The error arm is **not exercised by a test**, because forcing a mid-walk
-/// `readdir64` failure is not something a portable test can arrange. It is
-/// written the safe way rather than the demonstrated way, and this sentence is
-/// here so that is a known gap rather than an assumed guarantee.
+/// The counting itself is [`count_results`], which is where the error arm is
+/// tested: a mid-walk `readdir64` failure is not something a portable test can
+/// arrange, but a `Result` iterator that yields one is, and that is the seam.
 #[cfg(any(test, target_os = "linux"))]
 fn count_dir_entries(dir: &std::path::Path) -> Option<u32> {
+    count_results(std::fs::read_dir(dir).ok()?)
+}
+
+/// How many items `results` yields, or `None` if any of them is an error.
+///
+/// Split out from [`count_dir_entries`] so the error arm is reachable from a
+/// test. The alternative was the sentence this replaced - "not exercised by a
+/// test, because forcing a mid-walk `readdir64` failure is not something a
+/// portable test can arrange" - which was true about the syscall and beside the
+/// point about the code: the iterator is the seam, and this project has a habit
+/// of extracting one rather than admitting a gap it can close.
+#[cfg(any(test, target_os = "linux"))]
+fn count_results<T, E>(results: impl IntoIterator<Item = Result<T, E>>) -> Option<u32> {
     let mut counted: u32 = 0;
-    for entry in std::fs::read_dir(dir).ok()? {
-        entry.ok()?;
+    for result in results {
+        result.ok()?;
         counted = counted.checked_add(1)?;
     }
     Some(counted)
@@ -252,6 +264,31 @@ mod tests {
             None,
             "a path that exists and is a file"
         );
+    }
+
+    /// The arm that a real `/proc` walk cannot be made to take on demand.
+    ///
+    /// An error part-way through must answer `None`, not the count so far: a
+    /// truncated number is indistinguishable from a genuine smaller one, and in
+    /// a growth budget a truncated baseline invents growth while a truncated
+    /// final sample hides it.
+    #[test]
+    fn an_error_part_way_through_answers_none_rather_than_a_short_count() {
+        let all_good: [Result<(), ()>; 3] = [Ok(()), Ok(()), Ok(())];
+        assert_eq!(count_results(all_good), Some(3));
+
+        let fails_in_the_middle: [Result<(), ()>; 3] = [Ok(()), Err(()), Ok(())];
+        assert_eq!(
+            count_results(fails_in_the_middle),
+            None,
+            "two entries were counted before the error; answering `Some(2)`              would be a truncated count wearing a real one's clothes"
+        );
+
+        let fails_last: [Result<(), ()>; 3] = [Ok(()), Ok(()), Err(())];
+        assert_eq!(count_results(fails_last), None);
+
+        let empty: [Result<(), ()>; 0] = [];
+        assert_eq!(count_results(empty), Some(0), "empty is a real answer");
     }
 
     /// Removes its file on the unwind as well as on success.
