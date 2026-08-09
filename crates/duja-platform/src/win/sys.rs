@@ -33,7 +33,7 @@ use windows::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
 use windows::Win32::System::Threading::{
-    GR_GDIOBJECTS, GR_USEROBJECTS, GetCurrentProcess, GetGuiResources,
+    GR_GDIOBJECTS, GR_USEROBJECTS, GetCurrentProcess, GetGuiResources, GetProcessHandleCount,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE,
@@ -347,6 +347,36 @@ pub(crate) fn working_set_bytes() -> Option<u64> {
     // An earlier version of this comment quoted only the first half.
     let result = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &raw mut counters, size) };
     result.ok().map(|()| counters.WorkingSetSize as u64)
+}
+
+/// The count of open **kernel** handles this process owns, or `None` if the
+/// query failed.
+///
+/// Pipes, files, events, threads, registry keys - everything `CloseHandle`
+/// closes. Deliberately **not** the same counter as [`gui_objects`], and
+/// [D-112](https://github.com/itabajah/duja/blob/main/docs/debt.md#d-112) is the
+/// row that exists because the difference was missed: `--soak` runs the IPC
+/// server, a named-pipe instance is a kernel handle, and `GetGuiResources`
+/// cannot see one. A headless Duja reports exactly 0 GDI objects, so the GUI
+/// counters passing said nothing about the one subsystem the soak actually
+/// exercises.
+///
+/// Unlike `GetGuiResources` this has no zero-versus-failure ambiguity to work
+/// around: it reports failure through its `Result` and writes the count through
+/// an out-parameter, and zero is not reachable for a live process anyway (the
+/// process holds at least its own thread handles).
+pub(crate) fn kernel_handles() -> Option<u32> {
+    // SAFETY: returns the `(HANDLE)-1` pseudo-handle constant. No pointers, no
+    // allocation, and nothing to close.
+    let process = unsafe { GetCurrentProcess() };
+    let mut count: u32 = 0;
+    // SAFETY: `process` is the pseudo-handle resolved above, always valid for
+    // the calling process and never closed. `count` is a live, aligned, owned
+    // `u32` on this stack frame; the callee writes at most one `u32` through it
+    // and retains nothing. On failure it returns `Err` and `count` is left as
+    // initialised, which is why it is initialised rather than `MaybeUninit`.
+    unsafe { GetProcessHandleCount(process, &raw mut count) }.ok()?;
+    Some(count)
 }
 
 /// The count of live GDI (`gdi = true`) or USER (`gdi = false`) objects owned by

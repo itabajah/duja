@@ -35,6 +35,28 @@
 //! and USER handles, which are Win32 kernel objects with no counterpart
 //! elsewhere. The budget row that mentions them says "flat GDI/USER handle
 //! counts" and was written for the Windows train.
+//!
+//! # Kernel handles, which are a different thing from GUI objects
+//!
+//! [D-112] is the row: `--soak` assembles the pump, the engine and the IPC
+//! server, and **none of those creates a GUI object**. A named-pipe instance is
+//! a *kernel* handle, which `GetGuiResources` does not count, so a passing
+//! GDI/USER verdict on a headless run means "the pump and the engine leaked no
+//! GUI objects" - true, cheap, and not what the budget row asks. The row calls
+//! counting kernel handles "the cheap half" and "probably the right first step".
+//!
+//! - **Windows**: `GetProcessHandleCount`, which counts every open kernel
+//!   handle the process owns - pipes, files, events, threads, registry keys.
+//!   This is the counter a leaked pipe instance moves.
+//! - **Linux**: the number of entries in `/proc/self/fd`, which is the same
+//!   question in the shape Linux answers it. **The count includes the handle
+//!   the read itself holds open**, so the absolute figure is one higher than a
+//!   caller might expect; growth, which is what the budget measures, is
+//!   unaffected because every sample pays the same one.
+//! - **macOS**: `None`, for the same reason RSS is - `proc_pidinfo` is FFI
+//!   nobody here has run.
+//!
+//! [D-112]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-112
 
 /// A snapshot of this process's resource usage.
 ///
@@ -49,6 +71,14 @@ pub struct ProcessMetrics {
     pub gdi_objects: Option<u32>,
     /// Live USER objects, or `None` where the concept does not exist.
     pub user_objects: Option<u32>,
+    /// Open kernel handles (Windows) or open file descriptors (Linux), or
+    /// `None` where neither can be read.
+    ///
+    /// **Not a GUI object count**, and the distinction is the whole of
+    /// [D-112](https://github.com/itabajah/duja/blob/main/docs/debt.md#d-112):
+    /// the soak's own IPC server creates named-pipe instances, which move this
+    /// counter and are invisible to `GetGuiResources`.
+    pub kernel_handles: Option<u32>,
 }
 
 /// Read this process's metrics, or `None` if this platform cannot.
@@ -73,10 +103,12 @@ mod imp {
         let rss = crate::win::sys::working_set_bytes()?;
         let gdi = crate::win::sys::gui_objects(true)?;
         let user = crate::win::sys::gui_objects(false)?;
+        let kernel = crate::win::sys::kernel_handles()?;
         Some(ProcessMetrics {
             rss_bytes: rss,
             gdi_objects: Some(gdi),
             user_objects: Some(user),
+            kernel_handles: Some(kernel),
         })
     }
 }
@@ -96,6 +128,14 @@ mod imp {
             rss_bytes: pages.saturating_mul(page),
             gdi_objects: None,
             user_objects: None,
+            // All-or-nothing is the Windows arm's rule and deliberately not this
+            // one: there, a failed `GetGuiResources` was indistinguishable from
+            // "this platform has no such concept" and silently disabled half the
+            // budget. Here RSS and the descriptor count come from two unrelated
+            // files, so a `/proc` that answers one and not the other is a real
+            // state (a container with a restricted `/proc`), and reporting the
+            // RSS we did read is better than discarding it.
+            kernel_handles: super::count_dir_entries(std::path::Path::new("/proc/self/fd")),
         })
     }
 }
@@ -121,6 +161,24 @@ fn resident_pages(statm: &str) -> Option<u64> {
     statm.split_whitespace().nth(1)?.parse().ok()
 }
 
+/// How many entries `dir` holds, or `None` if it cannot be read.
+///
+/// This is Linux's open-descriptor count (`/proc/self/fd`), split out and
+/// compiled everywhere so it is tested on all three lanes against an ordinary
+/// directory rather than only on the one that has a `/proc`.
+///
+/// **An entry that vanishes mid-walk is skipped, not fatal.** `/proc/self/fd` is
+/// a live view of this process's descriptor table, and the walk itself opens
+/// one; a descriptor closed by another thread between `read_dir` and the
+/// iteration yields an error for that entry, and a sample that returned `None`
+/// there would be reported as unreadable for something entirely normal.
+#[cfg(any(test, target_os = "linux"))]
+fn count_dir_entries(dir: &std::path::Path) -> Option<u32> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let counted = entries.flatten().count();
+    u32::try_from(counted).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +197,54 @@ mod tests {
         assert_eq!(resident_pages("6234 notanumber"), None);
         // Leading whitespace must not shift the field index.
         assert_eq!(resident_pages("  6234 1893 1204"), Some(1893));
+    }
+
+    #[test]
+    fn an_unreadable_directory_is_none_rather_than_zero() {
+        // Zero would be a legitimate count for an empty directory, so the
+        // failure has to be a different value entirely - the same rule the
+        // Windows `gui_objects` reader follows for its own zero-versus-failure
+        // ambiguity.
+        assert_eq!(
+            count_dir_entries(std::path::Path::new(
+                "definitely-not-a-directory-in-this-tree"
+            )),
+            None
+        );
+    }
+
+    /// Removes its directory on the unwind as well as on success.
+    ///
+    /// A guard rather than a trailing call because the assertions it protects
+    /// panic on failure, and a trailing cleanup is skipped by the panic - which
+    /// is how an earlier test in this repository left a key in the author's own
+    /// registry.
+    struct Cleanup(std::path::PathBuf);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn the_entry_count_tracks_what_is_in_the_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "duja-fdcount-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("a scratch directory under the temp dir");
+        let _cleanup = Cleanup(dir.clone());
+
+        assert_eq!(
+            count_dir_entries(&dir),
+            Some(0),
+            "a fresh directory is empty"
+        );
+        for i in 0..3_u32 {
+            std::fs::write(dir.join(i.to_string()), b"x").expect("a file in the scratch directory");
+        }
+        assert_eq!(count_dir_entries(&dir), Some(3));
     }
 }

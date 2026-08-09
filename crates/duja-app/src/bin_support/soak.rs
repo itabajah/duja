@@ -57,9 +57,18 @@
 //!   `CreateWindowExW`, `CreateSolidBrush` and the per-ramp device contexts, all
 //!   of which live in the overlay dimmer and the gamma sink, and this harness
 //!   builds neither. `duja_platform`'s own note that a headless Duja "reports
-//!   exactly 0 GDI objects" is the same fact from the other side. So the handle
-//!   half of the budget is **structurally near-zero here**, and passing it is
-//!   weak evidence rather than strong. `docs/debt.md` D-112 carries it.
+//!   exactly 0 GDI objects" is the same fact from the other side, and a run on
+//!   this box confirms it: **GDI 0 and USER 5**, unchanged across ninety
+//!   seconds. So the GUI half of the budget is structurally near-zero here and
+//!   passing it is weak evidence rather than strong.
+//!
+//!   **Kernel handles are counted now, which is the half that was missing.**
+//!   `GetProcessHandleCount` on Windows and `/proc/self/fd` on Linux, and the
+//!   same run reports **250 to 258** of them — the pipe server, the log file,
+//!   the threads, the things this harness actually builds. That is the counter a
+//!   leaked pipe instance moves, and before P9 wave 3 nothing watched it.
+//!   `docs/debt.md` D-112 carries what is still open: the overlay and gamma
+//!   objects, which need a harness that dims a real screen for the duration.
 //!
 //! # The split
 //!
@@ -86,12 +95,21 @@ use crate::bin_support::{backend, run};
 /// tightening; the same reasoning applies in reverse here. The headless process
 /// measures around 17.6 MB, so the strict reading also clears with room, and
 /// choosing it means this wave loosened nothing it was not asked to loosen.
+///
+/// Measured again in P9 wave 3: **16.2 MB** steady across three ninety-second
+/// runs, so the headroom is still large. One anomaly is recorded rather than
+/// explained — the *first* run of a freshly linked binary reported 31.3 MB from
+/// its second sample onward and stayed there, and three later runs of the same
+/// binary never exceeded 16.3 MB. `WorkingSetSize` counts resident *shareable*
+/// pages, so a cold image is a plausible cause and is not evidence; what is
+/// worth knowing is that an absolute RSS figure from a single run, taken right
+/// after a build, can be twice the settled one.
 pub(crate) const IDLE_RSS_BUDGET_BYTES: u64 = 35_000_000;
 
 /// `docs/perf-budgets.md`: "Soak (24 h) RSS growth < 5 MB", same reading.
 pub(crate) const RSS_GROWTH_BUDGET_BYTES: u64 = 5_000_000;
 
-/// How much GDI/USER handle drift this harness *fails* on.
+/// How much handle drift this harness *fails* on, in any of the three families.
 ///
 /// **The budget row says "flat", and this is not that.** It is an operational
 /// threshold, it is a guess rather than a measurement, and the two facts are
@@ -177,6 +195,38 @@ pub(crate) struct SoakRun {
     last: Option<Sample>,
 }
 
+/// Handle growth from the baseline, one field per family.
+///
+/// **A struct rather than a tuple**, because there were two families and now
+/// there are three, and this project already has a row about a positional pair
+/// of same-typed values getting transposed silently. `None` means the platform
+/// does not count that family, and only that: a *failed* read makes the whole
+/// sample unreadable rather than a half-filled one (see
+/// `duja_platform::process`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct HandleGrowth {
+    /// GDI objects. Windows only.
+    pub(crate) gdi: Option<u32>,
+    /// USER objects. Windows only.
+    pub(crate) user: Option<u32>,
+    /// Open kernel handles (Windows) or file descriptors (Linux).
+    pub(crate) kernel: Option<u32>,
+}
+
+impl HandleGrowth {
+    /// The three families with their report labels, in report order.
+    ///
+    /// One place decides the labels and the order, so a caller cannot pair
+    /// "USER" with the kernel count by writing the array out again.
+    pub(crate) const fn labelled(self) -> [(&'static str, Option<u32>); 3] {
+        [
+            ("GDI", self.gdi),
+            ("USER", self.user),
+            ("kernel handles", self.kernel),
+        ]
+    }
+}
+
 /// What a finished soak concluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verdict {
@@ -258,21 +308,19 @@ impl SoakRun {
     /// `duja_platform::process` now refuses to build a half-read sample, so the
     /// two cases are distinguishable again: a failed query is an *unreadable*
     /// sample and is counted as one.
-    pub(crate) fn handle_growth(&self) -> (Option<u32>, Option<u32>) {
+    pub(crate) fn handle_growth(&self) -> HandleGrowth {
         let (Some(base), Some(last)) = (
             self.baseline.and_then(|s| s.metrics),
             self.last.and_then(|s| s.metrics),
         ) else {
-            return (None, None);
+            return HandleGrowth::default();
         };
-        (
-            base.gdi_objects
-                .zip(last.gdi_objects)
-                .map(|(b, l)| l.saturating_sub(b)),
-            base.user_objects
-                .zip(last.user_objects)
-                .map(|(b, l)| l.saturating_sub(b)),
-        )
+        let delta = |b: Option<u32>, l: Option<u32>| b.zip(l).map(|(b, l)| l.saturating_sub(b));
+        HandleGrowth {
+            gdi: delta(base.gdi_objects, last.gdi_objects),
+            user: delta(base.user_objects, last.user_objects),
+            kernel: delta(base.kernel_handles, last.kernel_handles),
+        }
     }
 
     /// Whether the baseline and the final sample are the same one, which means
@@ -344,13 +392,12 @@ impl SoakRun {
                  {RSS_GROWTH_BUDGET_BYTES}"
             ));
         }
-        let (gdi, user) = self.handle_growth();
-        for (label, growth) in [("GDI", gdi), ("USER", user)] {
+        for (label, growth) in self.handle_growth().labelled() {
             if let Some(growth) = growth
                 && growth > HANDLE_GROWTH_TOLERANCE
             {
                 reasons.push(format!(
-                    "{label} objects grew by {growth}; this harness fails above \
+                    "{label} grew by {growth}; this harness fails above \
                      {HANDLE_GROWTH_TOLERANCE}"
                 ));
             }
@@ -473,8 +520,11 @@ fn render_sample(sample: &Sample) -> String {
             let user = m
                 .user_objects
                 .map_or_else(|| "-".to_owned(), |v| v.to_string());
+            let kernel = m
+                .kernel_handles
+                .map_or_else(|| "-".to_owned(), |v| v.to_string());
             format!(
-                "  t+{secs:>6}s  rss {:>12} bytes  gdi {gdi:>5}  user {user:>5}",
+                "  t+{secs:>6}s  rss {:>12} bytes  gdi {gdi:>5}  user {user:>5}  handles {kernel:>5}",
                 m.rss_bytes
             )
         }
@@ -524,8 +574,8 @@ impl fmt::Display for SoakRun {
             )?,
             None => writeln!(f, "RSS growth       not measured")?,
         }
-        let (gdi, user) = self.handle_growth();
-        for (label, growth) in [("GDI growth", gdi), ("USER growth", user)] {
+        for (family, growth) in self.handle_growth().labelled() {
+            let label = format!("{family} growth");
             match growth {
                 // Any non-zero drift is named even on a pass: the budget row says
                 // "flat" and this harness's tolerance is looser than that, so a
@@ -567,10 +617,25 @@ mod tests {
     use super::*;
 
     fn metrics(rss: u64, gdi: u32, user: u32) -> ProcessMetrics {
+        // The kernel count tracks `user` here so the existing leak fixtures
+        // exercise all three families without being rewritten. Tests that care
+        // about the kernel family specifically build their own metrics.
         ProcessMetrics {
             rss_bytes: rss,
             gdi_objects: Some(gdi),
             user_objects: Some(user),
+            kernel_handles: Some(user),
+        }
+    }
+
+    /// Metrics with only the kernel family readable, which is the Linux shape:
+    /// `/proc/self/fd` answers, and GDI/USER do not exist there at all.
+    fn kernel_only_metrics(rss: u64, kernel: u32) -> ProcessMetrics {
+        ProcessMetrics {
+            rss_bytes: rss,
+            gdi_objects: None,
+            user_objects: None,
+            kernel_handles: Some(kernel),
         }
     }
 
@@ -665,8 +730,13 @@ mod tests {
         assert!(run.to_string().contains("NOT FLAT"), "{run}");
     }
 
-    /// Both budgets broken must both be reported. A run that costs hours and
-    /// teaches half of what it found is a run half wasted.
+    /// Every broken budget must be reported. A run that costs hours and teaches
+    /// half of what it found is a run half wasted.
+    ///
+    /// **Asserted by naming each budget rather than counting them**, because the
+    /// count was `4` until a fifth family was added and a tally in a test is one
+    /// more thing the next edit falsifies. Naming them is also the stronger
+    /// claim: a count of five is satisfied by five copies of one reason.
     #[test]
     fn every_broken_budget_is_reported_not_just_the_first() {
         let run = run_of(Duration::from_secs(100), 11, |i| {
@@ -678,7 +748,12 @@ mod tests {
         });
         let (verdict, reasons) = run.verdict();
         assert_eq!(verdict, Verdict::Fail);
-        assert_eq!(reasons.len(), 4, "{reasons:?}");
+        for budget in ["peak RSS", "RSS grew", "GDI", "USER", "kernel handles"] {
+            assert!(
+                reasons.iter().any(|r| r.contains(budget)),
+                "nothing in the report mentions `{budget}`: {reasons:?}"
+            );
+        }
     }
 
     /// The one that matters most: a platform that cannot measure must not report
@@ -743,8 +818,8 @@ mod tests {
         assert_eq!(run.unreadable, 1);
     }
 
-    /// A platform that reports RSS but counts no GUI objects (Linux) is
-    /// measurable, and its handle rows say "not counted" rather than zero.
+    /// A platform that reports RSS but counts nothing else is measurable, and
+    /// its handle rows say "not counted" rather than zero.
     #[test]
     fn missing_handle_counts_do_not_make_a_run_unmeasurable() {
         let run = run_of(Duration::from_secs(100), 11, |_| {
@@ -752,11 +827,78 @@ mod tests {
                 rss_bytes: 20_000_000,
                 gdi_objects: None,
                 user_objects: None,
+                kernel_handles: None,
             })
         });
         assert_eq!(run.verdict().0, Verdict::Pass);
-        assert_eq!(run.handle_growth(), (None, None));
+        assert_eq!(run.handle_growth(), HandleGrowth::default());
         assert!(run.to_string().contains("not counted on this platform"));
+    }
+
+    /// **The case D-112 exists for.** A leak in a kernel handle - a named-pipe
+    /// instance per connection, a descriptor never closed - moves no GUI object
+    /// at all, so before this counter existed the harness would have reported a
+    /// clean PASS while the process climbed towards its handle ceiling. Windows
+    /// shape: GDI and USER both flat, kernel climbing.
+    #[test]
+    fn a_kernel_handle_leak_fails_a_run_whose_gui_objects_are_flat() {
+        let run = run_of(Duration::from_secs(100), 11, |i| {
+            Some(ProcessMetrics {
+                rss_bytes: 20_000_000,
+                gdi_objects: Some(0),
+                user_objects: Some(0),
+                kernel_handles: Some(40 + i * 30),
+            })
+        });
+        let (verdict, reasons) = run.verdict();
+        assert_eq!(verdict, Verdict::Fail, "{reasons:?}");
+        assert!(
+            reasons.iter().any(|r| r.contains("kernel handles")),
+            "the failure must name the family that moved, not a neighbour: {reasons:?}"
+        );
+        assert!(
+            !reasons
+                .iter()
+                .any(|r| r.contains("GDI") || r.contains("USER")),
+            "nothing moved in the GUI families: {reasons:?}"
+        );
+    }
+
+    /// The Linux shape: no GUI counters at all, and the descriptor count is the
+    /// only handle signal there is. Before this, a Linux soak had none.
+    #[test]
+    fn a_descriptor_leak_is_caught_where_no_gui_counter_exists() {
+        let run = run_of(Duration::from_secs(100), 11, |i| {
+            Some(kernel_only_metrics(20_000_000, 12 + i * 5))
+        });
+        let (verdict, reasons) = run.verdict();
+        assert_eq!(verdict, Verdict::Fail, "{reasons:?}");
+        assert!(
+            reasons.iter().any(|r| r.contains("kernel handles")),
+            "{reasons:?}"
+        );
+        assert_eq!(run.handle_growth().gdi, None);
+        assert_eq!(run.handle_growth().user, None);
+    }
+
+    /// The labels and the order are decided in one place so a caller cannot
+    /// pair a family's name with a neighbour's count - the failure this project
+    /// has already had once with a positional pair of same-typed values.
+    #[test]
+    fn each_growth_family_keeps_its_own_label() {
+        let growth = HandleGrowth {
+            gdi: Some(1),
+            user: Some(2),
+            kernel: Some(3),
+        };
+        assert_eq!(
+            growth.labelled(),
+            [
+                ("GDI", Some(1)),
+                ("USER", Some(2)),
+                ("kernel handles", Some(3))
+            ]
+        );
     }
 
     #[test]

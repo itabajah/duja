@@ -14,7 +14,7 @@ exit unless an ADR records the variance and the recovery plan.
 | Flyout frame render (3 monitors, headless) | < 16 ms (one frame) | `cargo test -p duja-ui --release --test frame_probe -- --ignored --nocapture` |
 | Stripped release binary (`duja`) | ≤ 16,777,216 bytes (16 MiB; [ADR-0012](adr/0012-binary-size-budget-variance.md)) | `cargo xtask size`, gated in the release workflow |
 | Stripped release binary (`dujactl`) | ≤ 2,097,152 bytes (2 MiB) | same |
-| Soak (24 h) RSS growth | < 5,000,000 bytes; flat GDI/USER handle counts | `duja --soak 86400` |
+| Soak (24 h) RSS growth | < 5,000,000 bytes; flat GDI/USER/kernel handle counts | `duja --soak 86400` |
 
 **Why the binary budgets are written in bytes.** They were written "16 MB" for
 four gates, and nobody noticed that 16 MB and 16 MiB differ by 5 % - wider than
@@ -28,6 +28,15 @@ nobody could run - and named `sysinfo`, which is not a dependency of this
 workspace and never was. What exists now assembles the pump, the engine and the
 IPC server (the three pieces `--headless` has), goes idle, samples, and exits
 non-zero on a budget miss or on a run it could not measure.
+
+**The handle half of that row grew a third family in P9 wave 3.** GDI and USER
+are GUI objects, and a headless soak creates none - measured on this box, GDI 0
+and USER 5, flat across ninety seconds. What it does create is *kernel* handles:
+pipe instances for the IPC server, the log file, thread handles. Those are
+counted now (`GetProcessHandleCount` on Windows, `/proc/self/fd` on Linux) and
+the same run reports **250 to 258** of them. Before this, a headless soak could
+leak a pipe instance per connection for a day and report a clean pass, which is
+[D-112](debt.md#d-112). Linux had no handle signal at all.
 
 Three limits, because a budget row that overstates its instrument is worse than
 one with no instrument at all:
@@ -47,7 +56,7 @@ one with no instrument at all:
   soak that drives level changes and hot-plug for hours is a different harness
   and does not exist.
 
-The harness fails on GDI/USER drift above 8 rather than above 0 - looser than
+The harness fails on drift above 8 in any handle family rather than above 0 - looser than
 this row, because [D-005](debt.md#d-005) is the standing example of a harness
 gating on absolute zero and reporting FAIL on a healthy run, and because nobody
 has run 24 hours to measure the real idle drift. Since its threshold is looser
