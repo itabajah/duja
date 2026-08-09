@@ -922,8 +922,22 @@ const fn settle(attempt: Attempt) -> Option<Liveness> {
 ///
 /// Bounded by [`PROBE_BUDGET`] and by the same [`slice_until`] / [`poll_ready`]
 /// shape as every other wait in this module.
+///
+/// The deadline is `Option` all the way down because [`slice_until`] takes one,
+/// and there `None` means "no deadline, take a full slice". That meaning is wrong
+/// here and dangerously so: a `None` reaching the loop below would make
+/// `slice_until` answer `Ok` forever and turn the in-flight arm into an unbounded
+/// wait — the exact defect this function exists to remove, reintroduced through
+/// the type. So the one thing that can produce a `None`, [`Instant::checked_add`]
+/// overflowing, is handled before the loop rather than inside it.
 fn probe_liveness(path: &Path) -> Liveness {
-    let deadline = Instant::now().checked_add(PROBE_BUDGET);
+    let Some(deadline) = Instant::now().checked_add(PROBE_BUDGET) else {
+        // Unreachable short of a clock at the end of `Instant`'s range. It gets a
+        // branch anyway, because the alternative is a loop with no exit, and
+        // "unreachable" is what the two bugs in this row were also called.
+        return Liveness::Undecidable;
+    };
+    let deadline = Some(deadline);
     loop {
         let Ok(attempt) = attempt_connect(path, deadline) else {
             return Liveness::Undecidable;
