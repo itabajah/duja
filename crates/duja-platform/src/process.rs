@@ -32,8 +32,10 @@
 //!   caller reports "unavailable on this platform" rather than "0 MB".
 //!
 //! GUI object counts are Windows-only by nature: `GetGuiResources` counts GDI
-//! and USER handles, which are Win32 kernel objects with no counterpart
-//! elsewhere. The budget row that mentions them says "flat GDI/USER handle
+//! and USER objects, which are a Win32 concept with no counterpart elsewhere.
+//! They are **not** kernel handles - an earlier version of this sentence called
+//! them "Win32 kernel objects", four lines above a section explaining that the
+//! two are different things. The budget row that mentions them says "flat GDI/USER handle
 //! counts" and was written for the Windows train.
 //!
 //! # Kernel handles, which are a different thing from GUI objects
@@ -50,9 +52,10 @@
 //!   This is the counter a leaked pipe instance moves.
 //! - **Linux**: the number of entries in `/proc/self/fd`, which is the same
 //!   question in the shape Linux answers it. **The count includes the handle
-//!   the read itself holds open**, so the absolute figure is one higher than a
-//!   caller might expect; growth, which is what the budget measures, is
-//!   unaffected because every sample pays the same one.
+//!   the read itself holds open** - `read_dir` opens one directory stream and
+//!   `ReadDir` owns it for the whole walk - so the absolute figure is exactly
+//!   one higher than a caller might expect; growth, which is what the budget
+//!   measures, is unaffected because every sample pays the same one.
 //! - **macOS**: `None`, for the same reason RSS is - `proc_pidinfo` is FFI
 //!   nobody here has run.
 //!
@@ -72,7 +75,11 @@ pub struct ProcessMetrics {
     /// Live USER objects, or `None` where the concept does not exist.
     pub user_objects: Option<u32>,
     /// Open kernel handles (Windows) or open file descriptors (Linux), or
-    /// `None` where neither can be read.
+    /// `None` on a platform that counts neither - macOS today.
+    ///
+    /// **`None` never means "the read failed".** A failed read makes the whole
+    /// sample `None`, so the soak counts it as unreadable rather than reporting
+    /// a family as uncounted.
     ///
     /// **Not a GUI object count**, and the distinction is the whole of
     /// [D-112](https://github.com/itabajah/duja/blob/main/docs/debt.md#d-112):
@@ -92,7 +99,7 @@ mod imp {
     use super::ProcessMetrics;
 
     pub(super) fn self_metrics() -> Option<ProcessMetrics> {
-        // All three or nothing. `gui_objects` answers `None` on a *failed
+        // All of them or nothing. `gui_objects` answers `None` on a *failed
         // query*, and `Option` cannot tell that apart from "this platform has no
         // such concept" - which is what `None` means on Linux. Returning a
         // half-read sample here made the soak print "not counted on this
@@ -118,8 +125,21 @@ mod imp {
     use super::ProcessMetrics;
 
     pub(super) fn self_metrics() -> Option<ProcessMetrics> {
+        // All-or-nothing, the same rule as the Windows arm and for the same
+        // reason: `None` in a metrics field has to mean "this platform does not
+        // count that" and *only* that, because the soak's report prints "not
+        // counted on this platform" for it and skips the budget. A first version
+        // let a failed `/proc/self/fd` read through as `None` on the argument
+        // that it and `statm` are unrelated files - which would have made a
+        // Linux box with an unreadable `/proc/self/fd` report "not counted on
+        // this platform" about a platform that counts it, skip the handle
+        // budget, and PASS. That is verbatim the regression `SoakRun::
+        // handle_growth`'s doc exists to memorialise, and the argument for it
+        // named no scenario anyone had seen: both files are the same mount and
+        // the same task directory.
         let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
         let pages = super::resident_pages(&statm)?;
+        let kernel = super::count_dir_entries(std::path::Path::new("/proc/self/fd"))?;
         // `rustix::param::page_size` rather than a hardcoded 4096: arm64 Linux
         // is commonly 16 KiB, and a soak that reports a quarter of the real RSS
         // would pass a budget it is breaking.
@@ -128,14 +148,7 @@ mod imp {
             rss_bytes: pages.saturating_mul(page),
             gdi_objects: None,
             user_objects: None,
-            // All-or-nothing is the Windows arm's rule and deliberately not this
-            // one: there, a failed `GetGuiResources` was indistinguishable from
-            // "this platform has no such concept" and silently disabled half the
-            // budget. Here RSS and the descriptor count come from two unrelated
-            // files, so a `/proc` that answers one and not the other is a real
-            // state (a container with a restricted `/proc`), and reporting the
-            // RSS we did read is better than discarding it.
-            kernel_handles: super::count_dir_entries(std::path::Path::new("/proc/self/fd")),
+            kernel_handles: Some(kernel),
         })
     }
 }
@@ -167,16 +180,31 @@ fn resident_pages(statm: &str) -> Option<u64> {
 /// compiled everywhere so it is tested on all three lanes against an ordinary
 /// directory rather than only on the one that has a `/proc`.
 ///
-/// **An entry that vanishes mid-walk is skipped, not fatal.** `/proc/self/fd` is
-/// a live view of this process's descriptor table, and the walk itself opens
-/// one; a descriptor closed by another thread between `read_dir` and the
-/// iteration yields an error for that entry, and a sample that returned `None`
-/// there would be reported as unreadable for something entirely normal.
+/// **A failure part-way through the walk answers `None`, not a smaller number.**
+/// A first version used `.flatten()`, on the stated grounds that "a descriptor
+/// closed by another thread yields an error for that entry". Linux's `ReadDir`
+/// does no such thing: it builds each entry from the `getdents64` record alone,
+/// with no per-entry `stat`, so a vanished descriptor produces no error at all -
+/// it is either still in the buffer (counted, stale) or already gone (not
+/// counted). What `Some(Err(_))` actually signals there is a *stream* failure,
+/// which also ends the walk. Flattening that away returned a **truncated count
+/// indistinguishable from a genuine smaller one**, which is the same
+/// zero-versus-failure ambiguity this function's sibling test exists to rule
+/// out, and it is worse than useless in a growth budget: a truncated baseline
+/// invents growth, and a truncated final sample hides it.
+///
+/// The error arm is **not exercised by a test**, because forcing a mid-walk
+/// `readdir64` failure is not something a portable test can arrange. It is
+/// written the safe way rather than the demonstrated way, and this sentence is
+/// here so that is a known gap rather than an assumed guarantee.
 #[cfg(any(test, target_os = "linux"))]
 fn count_dir_entries(dir: &std::path::Path) -> Option<u32> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    let counted = entries.flatten().count();
-    u32::try_from(counted).ok()
+    let mut counted: u32 = 0;
+    for entry in std::fs::read_dir(dir).ok()? {
+        entry.ok()?;
+        counted = counted.checked_add(1)?;
+    }
+    Some(counted)
 }
 
 #[cfg(test)]
@@ -199,18 +227,40 @@ mod tests {
         assert_eq!(resident_pages("  6234 1893 1204"), Some(1893));
     }
 
+    /// Zero would be a legitimate count for an empty directory, so a failure
+    /// has to answer something else entirely - the same rule the Windows
+    /// `gui_objects` reader follows for its own zero-versus-failure ambiguity.
+    ///
+    /// Both shapes `read_dir` can refuse: a path that is not there, and a path
+    /// that is there and is not a directory. The name used to say "unreadable"
+    /// while the body only tried the first.
     #[test]
-    fn an_unreadable_directory_is_none_rather_than_zero() {
-        // Zero would be a legitimate count for an empty directory, so the
-        // failure has to be a different value entirely - the same rule the
-        // Windows `gui_objects` reader follows for its own zero-versus-failure
-        // ambiguity.
+    fn a_path_that_is_not_a_readable_directory_is_none_rather_than_zero() {
         assert_eq!(
             count_dir_entries(std::path::Path::new(
                 "definitely-not-a-directory-in-this-tree"
             )),
-            None
+            None,
+            "a path that does not exist"
         );
+
+        let file = std::env::temp_dir().join(format!("duja-notadir-{}", std::process::id()));
+        std::fs::write(&file, b"x").expect("a scratch file under the temp dir");
+        let _cleanup = FileCleanup(file.clone());
+        assert_eq!(
+            count_dir_entries(&file),
+            None,
+            "a path that exists and is a file"
+        );
+    }
+
+    /// Removes its file on the unwind as well as on success.
+    struct FileCleanup(std::path::PathBuf);
+
+    impl Drop for FileCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 
     /// Removes its directory on the unwind as well as on success.

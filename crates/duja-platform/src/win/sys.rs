@@ -25,8 +25,11 @@ use windows::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
     SetLastError, WIN32_ERROR, WPARAM,
 };
-// `--soak`'s two measurements (P8 wave 3): the working set, and the GDI/USER
-// object counts that are the leak a long-running tray app actually has.
+// What `--soak` samples: the working set, the GDI/USER object counts that are
+// the leak a long-running tray app actually has, and the kernel handle count
+// that is the leak a headless one has. (This comment used to say "two
+// measurements"; the count is gone rather than corrected, which is the rule the
+// four commits before this one were about.)
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::RemoteDesktop::{
@@ -373,8 +376,15 @@ pub(crate) fn kernel_handles() -> Option<u32> {
     // SAFETY: `process` is the pseudo-handle resolved above, always valid for
     // the calling process and never closed. `count` is a live, aligned, owned
     // `u32` on this stack frame; the callee writes at most one `u32` through it
-    // and retains nothing. On failure it returns `Err` and `count` is left as
-    // initialised, which is why it is initialised rather than `MaybeUninit`.
+    // and retains nothing.
+    //
+    // `count` is initialised because **borrowck requires it** - `&raw mut` on an
+    // uninitialised local is `error[E0381]` - and not for any soundness reason.
+    // A first version of this comment said it was initialised "so it is left as
+    // initialised on failure, which is why it is not `MaybeUninit`": a `u32` set
+    // to 0 stays initialised whatever the callee does, so the premise cannot
+    // distinguish the two designs, and `MaybeUninit` would in fact be equally
+    // sound here because the `?` below returns before `count` is read.
     unsafe { GetProcessHandleCount(process, &raw mut count) }.ok()?;
     Some(count)
 }

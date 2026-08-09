@@ -63,10 +63,13 @@
 //!   passing it is weak evidence rather than strong.
 //!
 //!   **Kernel handles are counted now, which is the half that was missing.**
-//!   `GetProcessHandleCount` on Windows and `/proc/self/fd` on Linux, and the
-//!   same run reports **250 to 258** of them — the pipe server, the log file,
+//!   `GetProcessHandleCount` on Windows and `/proc/self/fd` on Linux, and runs
+//!   on this box report **around 250** of them — the pipe server, the log file,
 //!   the threads, the things this harness actually builds. That is the counter a
-//!   leaked pipe instance moves, and before P9 wave 3 nothing watched it.
+//!   leaked pipe instance moves, and before P9 wave 3 nothing watched it. It is
+//!   also the first family here that is not perfectly flat: it falls a handful
+//!   over ninety seconds, which is why the report names a fall instead of
+//!   saturating it to zero.
 //!   `docs/debt.md` D-112 carries what is still open: the overlay and gamma
 //!   objects, which need a harness that dims a real screen for the duration.
 //!
@@ -96,14 +99,21 @@ use crate::bin_support::{backend, run};
 /// measures around 17.6 MB, so the strict reading also clears with room, and
 /// choosing it means this wave loosened nothing it was not asked to loosen.
 ///
-/// Measured again in P9 wave 3: **16.2 MB** steady across three ninety-second
-/// runs, so the headroom is still large. One anomaly is recorded rather than
-/// explained — the *first* run of a freshly linked binary reported 31.3 MB from
-/// its second sample onward and stayed there, and three later runs of the same
-/// binary never exceeded 16.3 MB. `WorkingSetSize` counts resident *shareable*
-/// pages, so a cold image is a plausible cause and is not evidence; what is
-/// worth knowing is that an absolute RSS figure from a single run, taken right
-/// after a build, can be twice the settled one.
+/// Measured again in P9 wave 3: **16.1 to 16.3 MB** peak across seven runs on
+/// this box, so the headroom is still large.
+///
+/// **One run out of those seven reported 31.3 MB and nobody can say why.** Its
+/// samples, verbatim: `t+0s 16084992`, then `t+10s 31322112` and flat at that
+/// figure to the end. It was the first execution of a freshly linked binary,
+/// and a first draft of this note wrote that condition down as the finding - but
+/// a reviewer then ran exactly that condition twice more and got 16.24 MB and
+/// 16.11 MB, so the condition is **withdrawn** rather than repeated. What is
+/// left is one anomalous run, its numbers, and no mechanism: `WorkingSetSize`
+/// counts resident *shareable* pages so a cold image is conceivable, and a step
+/// appearing at the second sample and holding is not what page-in looks like.
+/// Recorded because an absolute RSS figure from a single run evidently can be
+/// twice the settled one, and this row is where the next person who sees it
+/// should add their sample.
 pub(crate) const IDLE_RSS_BUDGET_BYTES: u64 = 35_000_000;
 
 /// `docs/perf-budgets.md`: "Soak (24 h) RSS growth < 5 MB", same reading.
@@ -121,9 +131,20 @@ pub(crate) const RSS_GROWTH_BUDGET_BYTES: u64 = 5_000_000;
 ///
 /// Eight is chosen so that a per-wake leak trips it within an hour, long before
 /// the 10,000-object ceiling Windows enforces. Because it is looser than the
-/// budget, [`SoakRun`]'s report **names any non-zero drift even when it passes**:
-/// the run must not be able to report "flat" for something that moved. The first
-/// long run should replace this with what it measured.
+/// budget, [`SoakRun`]'s report **names any non-zero drift even when it passes,
+/// in either direction**: the run must not be able to report "flat" for
+/// something that moved. The first long run should replace this with what it
+/// measured.
+///
+/// **The reasoning above is the GUI families', and the kernel family inherited
+/// it without earning it.** The 10,000-object quota is the GDI/USER per-process
+/// limit; kernel handles have a ceiling three orders of magnitude higher, so
+/// "long before the ceiling" is not the argument there. And where GDI and USER
+/// measure exactly flat on every headless run recorded, the kernel count drifts
+/// by up to nine over ninety seconds on this box - within the tolerance, but
+/// only just, and downward. One threshold for three families with very
+/// different noise floors is a placeholder, and this is the row that says so
+/// rather than a claim that eight was chosen for all three.
 pub(crate) const HANDLE_GROWTH_TOLERANCE: u32 = 8;
 
 /// The longest warm-up window: allocations settle, the engine finishes its
@@ -195,22 +216,38 @@ pub(crate) struct SoakRun {
     last: Option<Sample>,
 }
 
-/// Handle growth from the baseline, one field per family.
+/// Handle drift from the baseline, one field per family, **signed**.
 ///
 /// **A struct rather than a tuple**, because there were two families and now
 /// there are three, and this project already has a row about a positional pair
 /// of same-typed values getting transposed silently. `None` means the platform
-/// does not count that family, and only that: a *failed* read makes the whole
-/// sample unreadable rather than a half-filled one (see
-/// `duja_platform::process`).
+/// counts no such family, and only that: a *failed* read makes the whole sample
+/// unreadable rather than a half-filled one, on every platform (see
+/// [`duja_platform::process`]).
+///
+/// # Why signed, when the budget is about growth
+///
+/// It was `Option<u32>` through a `saturating_sub`, so a count that *fell*
+/// reported `0` - and both this module and `docs/perf-budgets.md` promise the
+/// report "names any non-zero drift even when it passes: the run must not be
+/// able to report flat for something that moved". That promise was safe only
+/// because the two GUI families measure exactly flat on a headless run. The
+/// kernel family, added in P9 wave 3, is the first one that moves: a
+/// ninety-second run on this box went 256 to 247, and the report printed
+/// `kernel handles growth 0`. The first thing the new instrument did on a real
+/// box was print "flat" for something that moved by nine.
+///
+/// So the drift is signed and the *budget* clamps rather than the measurement.
+/// A decrease is not a leak and must not fail a run; it is also not nothing,
+/// and hiding it is what this project calls a false assurance.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct HandleGrowth {
     /// GDI objects. Windows only.
-    pub(crate) gdi: Option<u32>,
+    pub(crate) gdi: Option<i64>,
     /// USER objects. Windows only.
-    pub(crate) user: Option<u32>,
+    pub(crate) user: Option<i64>,
     /// Open kernel handles (Windows) or file descriptors (Linux).
-    pub(crate) kernel: Option<u32>,
+    pub(crate) kernel: Option<i64>,
 }
 
 impl HandleGrowth {
@@ -218,7 +255,7 @@ impl HandleGrowth {
     ///
     /// One place decides the labels and the order, so a caller cannot pair
     /// "USER" with the kernel count by writing the array out again.
-    pub(crate) const fn labelled(self) -> [(&'static str, Option<u32>); 3] {
+    pub(crate) const fn labelled(self) -> [(&'static str, Option<i64>); 3] {
         [
             ("GDI", self.gdi),
             ("USER", self.user),
@@ -315,7 +352,13 @@ impl SoakRun {
         ) else {
             return HandleGrowth::default();
         };
-        let delta = |b: Option<u32>, l: Option<u32>| b.zip(l).map(|(b, l)| l.saturating_sub(b));
+        // Signed, and via `i64` so the subtraction of two `u32`s cannot wrap:
+        // every `u32` difference fits, so `checked_sub` cannot fail here and the
+        // `unwrap_or(0)` is unreachable rather than a fallback anyone relies on.
+        let delta = |b: Option<u32>, l: Option<u32>| {
+            b.zip(l)
+                .map(|(b, l)| i64::from(l).checked_sub(i64::from(b)).unwrap_or(0))
+        };
         HandleGrowth {
             gdi: delta(base.gdi_objects, last.gdi_objects),
             user: delta(base.user_objects, last.user_objects),
@@ -392,12 +435,15 @@ impl SoakRun {
                  {RSS_GROWTH_BUDGET_BYTES}"
             ));
         }
-        for (label, growth) in self.handle_growth().labelled() {
-            if let Some(growth) = growth
-                && growth > HANDLE_GROWTH_TOLERANCE
+        for (label, drift) in self.handle_growth().labelled() {
+            // Only an *increase* is a leak, so the budget clamps here rather
+            // than in the measurement: `HandleGrowth` keeps the sign so the
+            // report can name a fall, and this arm ignores one.
+            if let Some(drift) = drift
+                && drift > i64::from(HANDLE_GROWTH_TOLERANCE)
             {
                 reasons.push(format!(
-                    "{label} grew by {growth}; this harness fails above \
+                    "{label} grew by {drift}; this harness fails above \
                      {HANDLE_GROWTH_TOLERANCE}"
                 ));
             }
@@ -574,19 +620,27 @@ impl fmt::Display for SoakRun {
             )?,
             None => writeln!(f, "RSS growth       not measured")?,
         }
-        for (family, growth) in self.handle_growth().labelled() {
-            let label = format!("{family} growth");
-            match growth {
-                // Any non-zero drift is named even on a pass: the budget row says
-                // "flat" and this harness's tolerance is looser than that, so a
-                // silent pass would be reporting "flat" for something that moved.
-                Some(0) => writeln!(f, "{label:<16} 0")?,
-                Some(g) => writeln!(
+        for (family, drift) in self.handle_growth().labelled() {
+            let label = format!("{family} drift");
+            match drift {
+                // Any non-zero drift is named even on a pass, in either
+                // direction: the budget row says "flat" and this harness's
+                // tolerance is looser than that, so a silent pass would be
+                // reporting "flat" for something that moved. A *fall* used to
+                // print as `0`, because the arithmetic saturated - which made
+                // this comment false the moment a family that moves was added.
+                Some(0) => writeln!(f, "{label:<21} 0")?,
+                Some(d) if d < 0 => writeln!(
                     f,
-                    "{label:<16} {g} - NOT FLAT (the budget says flat; this harness fails \
+                    "{label:<21} {d} - NOT FLAT (fell; not a leak, so it does not fail \
+                     the run, but the budget says flat)"
+                )?,
+                Some(d) => writeln!(
+                    f,
+                    "{label:<21} +{d} - NOT FLAT (the budget says flat; this harness fails \
                      above {HANDLE_GROWTH_TOLERANCE})"
                 )?,
-                None => writeln!(f, "{label:<16} not counted on this platform")?,
+                None => writeln!(f, "{label:<21} not counted on this platform")?,
             }
         }
         writeln!(
@@ -617,9 +671,13 @@ mod tests {
     use super::*;
 
     fn metrics(rss: u64, gdi: u32, user: u32) -> ProcessMetrics {
-        // The kernel count tracks `user` here so the existing leak fixtures
-        // exercise all three families without being rewritten. Tests that care
-        // about the kernel family specifically build their own metrics.
+        // The kernel count tracks `user` here so a fixture that moves `user`
+        // moves this too - which is what `every_broken_budget_is_reported...`
+        // needs. It is *not* true that every fixture built through this helper
+        // exercises all three families: the two flat-`user` leak fixtures pin
+        // the kernel count at 10. Tests that are about the kernel family build
+        // their own metrics with three distinct values, so the shared value
+        // here cannot hide a transposed field.
         ProcessMetrics {
             rss_bytes: rss,
             gdi_objects: Some(gdi),
@@ -735,8 +793,10 @@ mod tests {
     ///
     /// **Asserted by naming each budget rather than counting them**, because the
     /// count was `4` until a fifth family was added and a tally in a test is one
-    /// more thing the next edit falsifies. Naming them is also the stronger
-    /// claim: a count of five is satisfied by five copies of one reason.
+    /// more thing the next edit falsifies. Naming them is stronger in one
+    /// direction - a count of five is satisfied by five copies of one reason -
+    /// and weaker in the other, since a count also pinned that nothing extra was
+    /// reported. The de-duplication below buys that half back without a tally.
     #[test]
     fn every_broken_budget_is_reported_not_just_the_first() {
         let run = run_of(Duration::from_secs(100), 11, |i| {
@@ -754,6 +814,17 @@ mod tests {
                 "nothing in the report mentions `{budget}`: {reasons:?}"
             );
         }
+        // Naming them is stronger than counting them in one direction only: a
+        // count also pinned the *absence* of extras, and without this a loop
+        // that pushed every reason twice would still pass.
+        let mut unique = reasons.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            reasons.len(),
+            "a reason was reported twice: {reasons:?}"
+        );
     }
 
     /// The one that matters most: a platform that cannot measure must not report
@@ -899,6 +970,47 @@ mod tests {
                 ("kernel handles", Some(3))
             ]
         );
+    }
+
+    /// **A count that falls is reported, and does not fail the run.**
+    ///
+    /// The drift arithmetic saturated at zero until P9 wave 3, so a family that
+    /// fell printed `0` - and this module and `docs/perf-budgets.md` both
+    /// promise the report "names any non-zero drift even when it passes". The
+    /// promise held only because the two GUI families measure exactly flat on a
+    /// headless run. The first real run of the kernel family went 256 to 247 and
+    /// the report said `0`, which is the false-assurance shape this project
+    /// rates below an admitted gap.
+    #[test]
+    fn a_handle_count_that_falls_is_named_rather_than_reported_as_flat() {
+        let run = run_of(Duration::from_secs(100), 11, |i| {
+            Some(kernel_only_metrics(20_000_000, 256 - i))
+        });
+        // A fall is not a leak.
+        assert_eq!(run.verdict().0, Verdict::Pass);
+        // But it is not flat either, and the report has to say so.
+        let drift = run.handle_growth().kernel.expect("the family was counted");
+        assert!(
+            drift < 0,
+            "the count fell, so the drift is negative: {drift}"
+        );
+        let report = run.to_string();
+        assert!(
+            report.contains("NOT FLAT"),
+            "a fall must be named rather than printed as 0: {report}"
+        );
+    }
+
+    /// The other direction of the same rule: a rise inside the tolerance still
+    /// passes and is still named.
+    #[test]
+    fn a_small_rise_passes_and_is_still_named() {
+        let run = run_of(Duration::from_secs(100), 11, |i| {
+            Some(kernel_only_metrics(20_000_000, 100 + u32::from(i > 5)))
+        });
+        assert_eq!(run.verdict().0, Verdict::Pass);
+        assert_eq!(run.handle_growth().kernel, Some(1));
+        assert!(run.to_string().contains("NOT FLAT"), "{run}");
     }
 
     #[test]
