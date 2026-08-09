@@ -118,12 +118,12 @@ summary here.
 **Seven rows have drained so far**, taking `debt.md` from 107 to 100: wave 1's
 [D-040](debt-archive.md#d-040), wave 2's [D-016](debt-archive.md#d-016) and
 [D-065](debt-archive.md#d-065), wave 4's [D-113](debt-archive.md#d-113) and
-[D-045](debt-archive.md#d-045), and [D-059](debt-archive.md#d-059), which belongs
-to wave 1 by intent and to no wave by mechanism. This is the recording the section's opening
-defers to, and it is why the **wave table** carries no rows: what a wave turns
-out to drain is written down here, after it lands.
+[D-045](debt-archive.md#d-045), and [D-059](debt-archive.md#d-059), which
+belongs to wave 1 by intent and to no wave by mechanism. This is the recording
+the section's opening defers to, and it is why the **wave table** carries no
+rows: what a wave turns out to drain is written down here, after it lands.
 
-The sixth, [D-114](debt-archive.md#d-114), belongs to **no wave** - it landed
+The seventh, [D-114](debt-archive.md#d-114), belongs to **no wave** - it landed
 seven minutes before this plan did, and its review had already struck one
 attempt to file it under P9. It is counted here because it is P9-era work, not
 because the wave table accounts for it.

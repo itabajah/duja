@@ -10,8 +10,8 @@ for three checkpoints. **All four waves have landed something**, wave 3's
 instruments among them; see [plan.md](plan.md). One row is what is left of the
 *phase's plan*, [D-076](debt.md#d-076) - which is not the same as one open row:
 the four rows wave 3 worked are all still open, because an instrument row drains
-when the budget it serves can be checked. The
-ports ship as **unverified previews** rather than as confirmed platforms
+when the budget it serves can be checked. The ports ship as **unverified
+previews** rather than as confirmed platforms
 ([ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md)): the hold was
 self-defeating, because the community confirmations macOS needs to leave
 "experimental" cannot arrive for a build nobody can install. `v0.2.0` and
@@ -119,9 +119,10 @@ own `display` helper inside its macros.
 
 ## Health
 
-Measured on this box, 2026-08-08:
+Measured on this box, 2026-08-08 unless a bullet dates itself otherwise:
 
-- **1,489 tests** pass in a local `cargo test --workspace --all-features`,
+- **1,489 tests** pass in a local `cargo test --workspace --all-features`
+  (measured 2026-08-09, against 1,488 on the commit this branched from),
   with a further **9 `#[ignore]`d** on top of that rather than among them - an
   ignored test does not pass, and writing it as "8 of them" was wrong for one
   edit's lifetime. **The figure this replaces was 1,459 and 8, and it went stale

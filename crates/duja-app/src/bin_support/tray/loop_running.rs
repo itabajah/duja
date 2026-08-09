@@ -88,8 +88,12 @@ use std::time::Duration;
 ///
 /// Carried by reference into every call the OS only permits from inside a running
 /// main-thread loop. The field is private and [`LoopRunning::mint`] is private to
-/// this module, so the only value a production path can obtain is the one
-/// [`when_loop_running`] makes inside its timer callback.
+/// this module, so the only value a **safe** production path can obtain is the one
+/// [`when_loop_running`] makes inside its timer callback. Not "the only value":
+/// `bin_support` lives in the binary, which drops `forbid(unsafe_code)` for the
+/// toast FFI, so a `transmute` from `()` would mint one. That is not a path a
+/// refactor reaches by accident, and `undocumented_unsafe_blocks = "deny"` makes
+/// it loud, which is the whole distinction being drawn.
 ///
 /// Zero-sized: it costs nothing at runtime and exists entirely for the compiler.
 /// Deliberately **not** `Clone`, `Copy` or `'static`-storable by value from

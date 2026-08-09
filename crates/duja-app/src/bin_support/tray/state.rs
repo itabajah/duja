@@ -1475,8 +1475,8 @@ const fn retires_dimmer(error: &duja_core::dimmer::DimmerError) -> bool {
 ///
 /// # Why a fixture rather than one constructor
 ///
-/// D-016, D-040, D-059 and D-065 - all four now in `docs/debt-archive.md`, and
-/// only two of them drained here - all defer on the same sentence:
+/// D-016, D-040, D-059 and D-065 - all four now in `docs/debt-archive.md` - all
+/// defer on the same sentence:
 /// *"`AppState` cannot be constructed in a test: it owns two live Slint shells
 /// and a concrete `tray_icon::TrayIcon` whose only constructor does
 /// `CreateWindowExW` + `Shell_NotifyIconW`."* Both halves were false by the time
@@ -1591,7 +1591,7 @@ pub(super) mod fixture {
     /// first and breaks every subsequent one. `cargo nextest`, which CI runs,
     /// gives each test its own process and would have hidden that entirely: the
     /// suite would have been green on CI and red on a developer's machine, which
-    /// is the worse direction for a fixture four debt rows are waiting on.
+    /// is the worse direction for a fixture four debt rows were waiting on.
     ///
     /// A thread-local latch is correct under both runners. Each thread
     /// initialises exactly once, so a test that builds two fixtures does not

@@ -43,9 +43,11 @@
 //! holds exactly one `#[test]` for that reason, as does `loop_time_assembly.rs`.
 //! Do not add a sibling — give it its own file.
 //!
-//! Windows-only, like `loop_time_assembly.rs` and like the tray itself. A CI
-//! ubuntu runner has no X server and a macOS event loop must own the process's
-//! main thread, so neither can host this. The **type** half compiles and is
+//! Windows-only, like `loop_time_assembly.rs` - but **not** because the tray is.
+//! `bin_support::tray` has been un-gated since P7 wave 5, and this change grows a
+//! parameter on its Linux arms too. The gate here is the event loop: a CI ubuntu
+//! runner has no X server, and a macOS loop must own the process's main thread,
+//! so neither can host this. The **type** half compiles and is
 //! enforced on all three lanes; it is only the mechanism check that is pinned on
 //! the one platform anybody runs. That is sound for the same reason the ordering
 //! is not `cfg`-split: Windows exercises the exact sequence macOS depends on.
@@ -144,8 +146,9 @@ fn the_queued_closure_is_deferred_to_the_loop_and_runs_there_once() {
 
     assert!(
         !watchdog_fired.get(),
-        "the watchdog ended the loop, so the queued closure's own quit was \
-         discarded as stale: it did not run with the loop already running"
+        "the watchdog ended the loop, so the queued closure's quit did not take \
+         effect - it was discarded as stale, issued late, or never issued. Which \
+         of those is not something this assertion can tell you"
     );
     assert_eq!(
         fires.get(),

@@ -1063,9 +1063,12 @@ fn unix_now() -> i64 {
 /// [`loop_running::LoopRunning`] that only the queued callback can produce. A
 /// gap that a test could not reach was closed by a type instead.
 ///
-/// The gaps that remain are Windows-invisible by construction (Windows tolerates
-/// the old ordering), which is why this restructure landed on its own and why the
-/// interactive smoke test is part of its evidence rather than an optional extra.
+/// The parenthetical that used to close this list - "Windows tolerates the old
+/// ordering" - went with the bullet it explained. Neither gap above is about
+/// ordering any more: one is [`run()`] calling the hand-back, the other is which
+/// closure gets queued. What still holds is why this restructure landed on its
+/// own, and why the interactive smoke test is part of its evidence rather than an
+/// optional extra.
 #[cfg(test)]
 mod tests {
     #[test]
