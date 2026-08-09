@@ -65,9 +65,17 @@ The one thing that *is* automated now runs off this box and needs no session:
       Two things to record even on a pass: the **peak RSS**, which is the
       headless figure and not the tray one the idle budget asks for, and the
       **handle drift**, which is what should replace `HANDLE_GROWTH_TOLERANCE` -
-      that constant is a guess today and its own docs ask for this run. Note the
-      handle half is weak evidence here ([D-112](debt.md#d-112)): nothing the
-      soak assembles creates a GUI object.
+      that constant is a guess today and its own docs ask for this run.
+
+      **Read the three handle families separately** ([D-112](debt.md#d-112)).
+      GDI and USER are GUI objects and the soak creates none, so they sit at 0
+      and 5 and passing them proves almost nothing. The **kernel handle** count
+      is the one with signal here - pipe instances, the log file, threads - and
+      it is what a leaked IPC connection moves. It also drifts on its own: on
+      this box it falls a handful over ninety seconds, so a small negative
+      number is expected and is reported rather than hidden. What is still
+      uncovered is the overlay and gamma objects, which need a harness that dims
+      a real screen for the length of the run.
 - [ ] **The tray build's idle RSS, by hand.** Task Manager, flyout closed, after
       a few minutes. This is the number `perf-budgets.md`'s idle row actually
       names, and `--soak` cannot produce it: it builds no window.

@@ -25,15 +25,18 @@ use windows::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
     SetLastError, WIN32_ERROR, WPARAM,
 };
-// `--soak`'s two measurements (P8 wave 3): the working set, and the GDI/USER
-// object counts that are the leak a long-running tray app actually has.
+// What `--soak` samples: the working set, the GDI/USER object counts that are
+// the leak a long-running tray app actually has, and the kernel handle count
+// that is the leak a headless one has. (This comment used to say "two
+// measurements"; the count is gone rather than corrected, which is the rule the
+// four commits before this one were about.)
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
 use windows::Win32::System::Threading::{
-    GR_GDIOBJECTS, GR_USEROBJECTS, GetCurrentProcess, GetGuiResources,
+    GR_GDIOBJECTS, GR_USEROBJECTS, GetCurrentProcess, GetGuiResources, GetProcessHandleCount,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE,
@@ -347,6 +350,43 @@ pub(crate) fn working_set_bytes() -> Option<u64> {
     // An earlier version of this comment quoted only the first half.
     let result = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &raw mut counters, size) };
     result.ok().map(|()| counters.WorkingSetSize as u64)
+}
+
+/// The count of open **kernel** handles this process owns, or `None` if the
+/// query failed.
+///
+/// Pipes, files, events, threads, registry keys - everything `CloseHandle`
+/// closes. Deliberately **not** the same counter as [`gui_objects`], and
+/// [D-112](https://github.com/itabajah/duja/blob/main/docs/debt.md#d-112) is the
+/// row that exists because the difference was missed: `--soak` runs the IPC
+/// server, a named-pipe instance is a kernel handle, and `GetGuiResources`
+/// cannot see one. A headless Duja reports exactly 0 GDI objects, so the GUI
+/// counters passing said nothing about the one subsystem the soak actually
+/// exercises.
+///
+/// Unlike `GetGuiResources` this has no zero-versus-failure ambiguity to work
+/// around: it reports failure through its `Result` and writes the count through
+/// an out-parameter, and zero is not reachable for a live process anyway (the
+/// process holds at least its own thread handles).
+pub(crate) fn kernel_handles() -> Option<u32> {
+    // SAFETY: returns the `(HANDLE)-1` pseudo-handle constant. No pointers, no
+    // allocation, and nothing to close.
+    let process = unsafe { GetCurrentProcess() };
+    let mut count: u32 = 0;
+    // SAFETY: `process` is the pseudo-handle resolved above, always valid for
+    // the calling process and never closed. `count` is a live, aligned, owned
+    // `u32` on this stack frame; the callee writes at most one `u32` through it
+    // and retains nothing.
+    //
+    // `count` is initialised because **borrowck requires it** - `&raw mut` on an
+    // uninitialised local is `error[E0381]` - and not for any soundness reason.
+    // A first version of this comment said it was initialised "so it is left as
+    // initialised on failure, which is why it is not `MaybeUninit`": a `u32` set
+    // to 0 stays initialised whatever the callee does, so the premise cannot
+    // distinguish the two designs, and `MaybeUninit` would in fact be equally
+    // sound here because the `?` below returns before `count` is read.
+    unsafe { GetProcessHandleCount(process, &raw mut count) }.ok()?;
+    Some(count)
 }
 
 /// The count of live GDI (`gdi = true`) or USER (`gdi = false`) objects owned by
