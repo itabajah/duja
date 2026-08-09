@@ -763,33 +763,296 @@ struct BoundSocket {
 /// connections from a process of the same uid to fill that backlog — std passes
 /// `listen(fd, -1)`, so the depth is `somaxconn` on Linux (4096 by default since
 /// 5.4) and 128 on Apple — which is inside the trust boundary and so is self-harm
-/// rather than an attack. But the two platforms then fail differently and neither
-/// is benign:
+/// rather than an attack. It is also not exotic: this module's own listener stops
+/// accepting at [`MAX_CONNECTIONS`] by design, so "live, with a full backlog and
+/// no `accept` in flight" is a state it produces on purpose.
 ///
-/// - On the BSDs `connect` returns `ECONNREFUSED`, so a **live** server is misread
-///   as stale and its socket is unlinked — the exact defect this module exists to
-///   prevent, reached by a route the lock cannot see.
-/// - On Linux `unix_stream_connect` finds the receive queue full and waits, with
-///   no send timeout on a blocking socket, for an `accept` that may never come.
-///   That is the one unbounded wait left in a module that bounds everything else,
-///   and it happens while holding [`BindLock`], so it times every other starter
-///   out at [`LOCK_WAIT`] as well.
+/// The two platforms then fail differently, and **only one of the two failures
+/// closes here.**
 ///
-/// The probe predates this change; what is new is that it now runs under the lock,
-/// which widens the second case from "this instance stalls" to "every instance
-/// stalls". Recorded in `docs/debt.md` rather than fixed here: bounding it means a
-/// non-blocking `connect` plus a `poll`, which is a different change from a
-/// locking fix and would be the third mechanism in one PR.
+/// - **Linux: fixed, and not merely bounded.** `unix_stream_connect` used to find
+///   the receive queue full and wait, with no send timeout on a blocking socket,
+///   for an `accept` that may never come — the one unbounded wait left in a module
+///   that bounds everything else, and it ran under [`BindLock`], so it timed every
+///   other starter out at [`LOCK_WAIT`] too. The probe is non-blocking now, and
+///   the kernel answers `EAGAIN` immediately. That errno is *positive evidence of a
+///   listener* rather than a timeout to wait out: `unix_recvq_full_lockless` is
+///   reached only after `unix_find_other` has resolved a live peer socket. So the
+///   wait is not shortened, it is gone, and the answer it produces is the right
+///   one.
+/// - **The BSDs: not fixed, and no wait would fix it.** `unp_connectat` answers
+///   `ECONNREFUSED` when `so_qlen >= so_qlimit`, which is byte-identical to the
+///   answer for a dead inode. Retrying does not separate them, because the live
+///   server this module produces is one that has *stopped* accepting: its backlog
+///   stays full for as long as it is at capacity, so a refusal outlasting any
+///   budget is exactly what both cases look like. A retry loop here would be a
+///   heuristic that fails in the realistic case while reading as a fix, which is
+///   worse than the gap. [`D-076`] carries what is left, narrowed to this.
+///
+/// What the refusal arm *does* gain is [`unlink_target_is_ours`]: a refusal says
+/// "nothing is listening", never "this is mine to delete", and those are different
+/// claims. The row asked for an `fstat` owner check and that is not available —
+/// there is no descriptor for the peer on a refusal, and one for our own probe
+/// socket describes the wrong thing. The check that guards [`std::fs::remove_file`]
+/// is a check on what `remove_file` resolves, which is an `lstat` of the path.
+///
+/// [`D-076`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-076
 fn takeover_bind(path: &Path) -> Result<UnixListener, IpcTransportError> {
-    if UnixStream::connect(path).is_ok() {
-        // A live server accepted the probe: we are the second instance.
-        return Err(IpcTransportError::Io(
+    let bind_now = || UnixListener::bind(path).map_err(|e| IpcTransportError::Io(e.to_string()));
+    match probe_liveness(path) {
+        // Someone is listening, or something answered in a way that does not rule
+        // it out. Either way this is not ours to take over.
+        Liveness::Live => Err(IpcTransportError::Io(
             "another duja IPC server is already listening on this socket".to_owned(),
-        ));
+        )),
+        Liveness::Undecidable => Err(IpcTransportError::Io(
+            "could not determine whether the socket at this path is live; refusing \
+             to unlink it"
+                .to_owned(),
+        )),
+        // The inode went away between the caller's `AddrInUse` and this probe. The
+        // unlink would fail `NotFound` and lose a bind that would have worked.
+        Liveness::Vanished => bind_now(),
+        Liveness::Stale => {
+            unlink_target_is_ours(path)?;
+            std::fs::remove_file(path).map_err(|e| IpcTransportError::Io(e.to_string()))?;
+            bind_now()
+        }
     }
-    // Refused (or otherwise unconnectable): the inode is stale. Unlink and rebind.
-    std::fs::remove_file(path).map_err(|e| IpcTransportError::Io(e.to_string()))?;
-    UnixListener::bind(path).map_err(|e| IpcTransportError::Io(e.to_string()))
+}
+
+/// How long [`probe_liveness`] may spend before it gives up and refuses to unlink.
+///
+/// **Not a latency budget, and none of the common paths spend it.** A connect to a
+/// live listener, to a full backlog, or to a dead inode all answer on the first
+/// syscall. This bounds one arm only — a connect the kernel reports as still in
+/// flight — which for `AF_UNIX` is rare, since both kernels complete the handshake
+/// inside `connect` when there is queue room.
+///
+/// Two things size it, and neither is a measurement: it runs while [`BindLock`] is
+/// held, so it must stay far below [`LOCK_WAIT`] or a slow probe becomes every
+/// concurrent starter's problem — the escalation that put this row in `debt.md`;
+/// and it must outlast the readiness of a connect that has already been queued,
+/// which is a wakeup rather than any I/O. 250 ms is a twentieth of `LOCK_WAIT` and
+/// several orders of magnitude above that wakeup. It is a reasoned bound and it
+/// says so rather than implying it was timed.
+const PROBE_BUDGET: Duration = Duration::from_millis(250);
+
+/// What one `connect` attempt says about the endpoint.
+///
+/// Split out from the verdict so the mapping from errno to meaning is a pure
+/// function, testable on every lane rather than only where a socket can be made to
+/// misbehave.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Attempt {
+    /// The connect completed. Only a live listener produces this.
+    Connected,
+    /// The listener's receive queue is full. **Also only a live listener**, which
+    /// is the whole reason this is not folded in with `Refused`: on Linux it is
+    /// the answer that used to be an unbounded wait.
+    BacklogFull,
+    /// The kernel took the connect but has not finished it. Poll, then ask the
+    /// socket what happened.
+    InFlight,
+    /// The kernel refused. On Linux that means no listener; on the BSDs it means
+    /// either no listener or a full backlog, and nothing here can tell which.
+    Refused,
+    /// Nothing at the path.
+    Vanished,
+    /// Anything else — a permission failure, a name too long, an unexpected errno.
+    Undecidable,
+}
+
+/// The whole probe's answer, which is a decision about whether to destroy an inode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Liveness {
+    /// Do not unlink: something is listening, or might be.
+    Live,
+    /// Unlink is permitted, subject to [`unlink_target_is_ours`].
+    Stale,
+    /// Nothing to unlink; bind straight away.
+    Vanished,
+    /// Do not unlink: the probe could not answer.
+    Undecidable,
+}
+
+/// Map a raw `connect` errno to what it says.
+///
+/// Only `EAGAIN` appears, not `EWOULDBLOCK`. They are the same value on both
+/// targets, so naming both is an unreachable pattern the compiler rejects - but
+/// that equality is a platform detail rather than a guarantee, so it is asserted
+/// at compile time above instead of assumed here. `EINTR` joins the in-flight arm rather than the retry arm: an interrupted
+/// `connect` continues in the background, so the socket — not a second `connect` —
+/// is what has the answer.
+/// `classify` reads `EAGAIN` alone. POSIX permits `EWOULDBLOCK` to differ from it,
+/// and on a target where it did, a full backlog would fall through to
+/// `Undecidable` - which refuses to unlink, so it fails safe, but it would also
+/// stop the Linux arm working and nothing would say why. Both targets this builds
+/// for define them equal; this is the line that notices if one stops.
+const _: () = assert!(libc::EAGAIN == libc::EWOULDBLOCK);
+
+const fn classify(raw: i32) -> Attempt {
+    match raw {
+        libc::ECONNREFUSED => Attempt::Refused,
+        libc::EAGAIN => Attempt::BacklogFull,
+        libc::EINPROGRESS | libc::EALREADY | libc::EINTR => Attempt::InFlight,
+        libc::ENOENT => Attempt::Vanished,
+        _ => Attempt::Undecidable,
+    }
+}
+
+/// What one attempt settles, or `None` if the probe should look again.
+///
+/// Every uncertain answer resolves toward [`Liveness::Live`] or
+/// [`Liveness::Undecidable`], because the action on the other side is an unlink and
+/// there is no undoing one. A wrong `Live` costs a start that reports "already
+/// listening"; a wrong `Stale` costs a running server its endpoint.
+const fn settle(attempt: Attempt) -> Option<Liveness> {
+    match attempt {
+        Attempt::Connected | Attempt::BacklogFull => Some(Liveness::Live),
+        Attempt::Refused => Some(Liveness::Stale),
+        Attempt::Vanished => Some(Liveness::Vanished),
+        Attempt::Undecidable => Some(Liveness::Undecidable),
+        // The only arm that asks for another look.
+        Attempt::InFlight => None,
+    }
+}
+
+/// Is anything listening at `path`?
+///
+/// Bounded by [`PROBE_BUDGET`] and by the same [`slice_until`] / [`poll_ready`]
+/// shape as every other wait in this module.
+fn probe_liveness(path: &Path) -> Liveness {
+    let deadline = Instant::now().checked_add(PROBE_BUDGET);
+    loop {
+        let Ok(attempt) = attempt_connect(path, deadline) else {
+            return Liveness::Undecidable;
+        };
+        if let Some(verdict) = settle(attempt) {
+            return verdict;
+        }
+        // Still in flight. If the budget is gone, answer `Live`: something took
+        // the connect, and "slow" is not "absent".
+        if slice_until(deadline).is_err() {
+            return Liveness::Live;
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// One non-blocking `connect`, including the `poll` + `SO_ERROR` follow-up when
+/// the kernel reports the connect as still in flight.
+///
+/// `Err(())` means the probe itself failed — no socket, an unrepresentable path, a
+/// `poll` fault — which the caller turns into [`Liveness::Undecidable`] rather than
+/// into permission to unlink.
+///
+/// A fresh socket per attempt is deliberate: a `connect` that failed leaves the
+/// socket in a state neither kernel promises is reusable, and this runs at most a
+/// handful of times.
+fn attempt_connect(path: &Path, deadline: Option<Instant>) -> Result<Attempt, ()> {
+    let sock = probe_socket()?;
+    let addr = rustix::net::SocketAddrUnix::new(path).map_err(|_| ())?;
+    match rustix::net::connect(&sock, &addr) {
+        Ok(()) => return Ok(Attempt::Connected),
+        Err(e) => {
+            let attempt = classify(e.raw_os_error());
+            if attempt != Attempt::InFlight {
+                return Ok(attempt);
+            }
+        }
+    }
+    // In flight: wait for writability, then ask the socket for the real outcome.
+    // `SO_ERROR` is the only thing that distinguishes "connected" from "refused"
+    // once `connect` has returned `EINPROGRESS`.
+    let Ok(slice) = slice_until(deadline) else {
+        return Ok(Attempt::InFlight);
+    };
+    match poll_ready(sock.as_raw_fd(), libc::POLLOUT, slice) {
+        Ok(true) => match rustix::net::sockopt::socket_error(&sock) {
+            Ok(Ok(())) => Ok(Attempt::Connected),
+            Ok(Err(e)) => Ok(classify(e.raw_os_error())),
+            Err(_) => Err(()),
+        },
+        Ok(false) => Ok(Attempt::InFlight),
+        Err(_) => Err(()),
+    }
+}
+
+/// A close-on-exec, non-blocking `AF_UNIX` stream socket.
+///
+/// `SocketFlags::NONBLOCK`/`CLOEXEC` are not taken here because rustix gates both
+/// out on Apple — they are `SOCK_*` type bits that only Linux and the newer BSDs
+/// accept in `socket()`. Two `fcntl`s set the same properties on both targets, so
+/// this stays one code path rather than a `cfg` split.
+///
+/// `CLOEXEC` is not decoration, for the reason [`pin_inode`] gives: `duja-app`'s
+/// tray has a live `exec` path, since "Restart" spawns a detached
+/// `duja --relaunch` while the outgoing server is still up.
+///
+/// Setting it by `fcntl` leaves a window between the two syscalls that
+/// `SOCK_CLOEXEC` would not, and that is stated rather than glossed: a `fork` +
+/// `exec` landing inside it hands the child an unconnected probe socket it then
+/// holds for its life. One leaked descriptor in an unrelated process, not a
+/// correctness fault - the probe never carries data. Closing the window would
+/// mean a `cfg` split that is atomic on Linux and unchanged on Apple, which buys
+/// half a guarantee for a second code path on the arm that decides whether to
+/// delete a socket.
+fn probe_socket() -> Result<std::os::fd::OwnedFd, ()> {
+    let sock = rustix::net::socket_with(
+        rustix::net::AddressFamily::UNIX,
+        rustix::net::SocketType::STREAM,
+        rustix::net::SocketFlags::empty(),
+        None,
+    )
+    .map_err(|_| ())?;
+    rustix::io::fcntl_setfd(&sock, rustix::io::FdFlags::CLOEXEC).map_err(|_| ())?;
+    let flags = rustix::fs::fcntl_getfl(&sock).map_err(|_| ())?;
+    rustix::fs::fcntl_setfl(&sock, flags | rustix::fs::OFlags::NONBLOCK).map_err(|_| ())?;
+    Ok(sock)
+}
+
+/// The last check before [`std::fs::remove_file`]: the thing about to be unlinked
+/// must be a socket, and it must be ours.
+///
+/// A refusal answers "nothing is listening at this name". It does not answer "this
+/// name is mine to delete", and the two get conflated because the common case makes
+/// them coincide. They come apart in two ways that matter, and both end in a
+/// deletion that erases evidence:
+///
+/// - the path is **not a socket**. `unix_find_other` refuses a non-`S_ISSOCK`
+///   inode with `ECONNREFUSED`, indistinguishably from a dead socket, so a regular
+///   file dropped into the endpoint's directory is deleted and bound over. Nothing
+///   in Duja puts one there, which is the point: its presence means something has
+///   gone wrong, and unlinking it destroys the only trace.
+/// - the path is **not ours**. The directory is `0700` and this process owns it, so
+///   a foreign-owned inode inside it is not reachable by the threat model — but the
+///   check costs one `lstat` and the alternative is trusting an argument about
+///   permissions at the moment a deletion happens.
+///
+/// `lstat` rather than `stat`, and that difference is load-bearing rather than
+/// stylistic: `remove_file` unlinks **the symlink**, not its target, so following
+/// one here would check the wrong inode's ownership. A symlink also fails the
+/// socket test, so a planted one is refused on both counts. Note the asymmetry with
+/// [`socket_identity`], which uses `std::fs::metadata` and does follow.
+fn unlink_target_is_ours(path: &Path) -> Result<(), IpcTransportError> {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|e| IpcTransportError::Io(format!("cannot inspect {} : {e}", path.display())))?;
+    if !meta.file_type().is_socket() {
+        return Err(IpcTransportError::Io(format!(
+            "{} is not a socket; refusing to unlink it",
+            path.display()
+        )));
+    }
+    if meta.uid() != our_euid() {
+        return Err(IpcTransportError::Io(format!(
+            "{} is owned by another user; refusing to unlink it",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Take a descriptor that keeps `path`'s inode from being freed, so its number
@@ -1155,6 +1418,86 @@ mod tests {
     }
 
     // --- D-076: the liveness probe that decides whether to unlink ---
+
+    /// Every attempt this probe can produce, so the property test below is a
+    /// closed enumeration rather than a sample. A new `Attempt` variant that is
+    /// not added here fails to compile, because the array's length is asserted.
+    const ALL_ATTEMPTS: [Attempt; 6] = [
+        Attempt::Connected,
+        Attempt::BacklogFull,
+        Attempt::InFlight,
+        Attempt::Refused,
+        Attempt::Vanished,
+        Attempt::Undecidable,
+    ];
+
+    /// Each errno maps to what it *proves*, not to what it looks like.
+    ///
+    /// The one worth reading is `EAGAIN`. It reads like "try again" and it is not:
+    /// `unix_stream_connect` reaches that branch only after `unix_find_other` has
+    /// resolved a peer *and* that peer has been checked to be in `TCP_LISTEN`, so
+    /// it is positive evidence of a live server. Treating it as a retry is what
+    /// made this an unbounded wait.
+    #[test]
+    fn a_connect_errno_classifies_by_what_it_proves() {
+        assert_eq!(classify(libc::ECONNREFUSED), Attempt::Refused);
+        assert_eq!(classify(libc::EAGAIN), Attempt::BacklogFull);
+        assert_eq!(classify(libc::EINPROGRESS), Attempt::InFlight);
+        assert_eq!(classify(libc::EALREADY), Attempt::InFlight);
+        assert_eq!(classify(libc::EINTR), Attempt::InFlight);
+        assert_eq!(classify(libc::ENOENT), Attempt::Vanished);
+        // Not an exhaustive list of what cannot happen - a representative one.
+        // Everything unrecognised must land somewhere that refuses to unlink.
+        assert_eq!(classify(libc::EACCES), Attempt::Undecidable);
+        assert_eq!(classify(libc::ENOTSOCK), Attempt::Undecidable);
+        assert_eq!(classify(0), Attempt::Undecidable);
+    }
+
+    /// **A refusal is the only thing that may authorise an unlink.**
+    ///
+    /// Stated as a property over the closed set rather than as six equalities,
+    /// because the failure this guards against is somebody adding a seventh
+    /// attempt and reaching for `Stale` to make a case work. Six equalities would
+    /// all still pass.
+    #[test]
+    fn nothing_but_a_refusal_authorises_an_unlink() {
+        for attempt in ALL_ATTEMPTS {
+            if attempt == Attempt::Refused {
+                continue;
+            }
+            assert_ne!(
+                settle(attempt),
+                Some(Liveness::Stale),
+                "{attempt:?} authorised an unlink; only a refusal may, because the \
+                 action on the other side destroys a running server's endpoint and \
+                 there is no undoing it"
+            );
+        }
+        assert_eq!(settle(Attempt::Refused), Some(Liveness::Stale));
+    }
+
+    /// A full backlog is a live server, and settling on it is what removed the
+    /// wait rather than shortening it.
+    #[test]
+    fn a_full_backlog_settles_as_live_without_waiting() {
+        assert_eq!(settle(Attempt::BacklogFull), Some(Liveness::Live));
+        assert_eq!(settle(Attempt::Connected), Some(Liveness::Live));
+        // The one arm that asks for another look, and the only reason
+        // `PROBE_BUDGET` exists at all.
+        assert_eq!(settle(Attempt::InFlight), None);
+    }
+
+    /// The probe's bound has to be small against the lock it is held under, or
+    /// bounding it solves nothing: `#114` widened this from "this instance stalls"
+    /// to "every concurrent starter stalls", and that is the half a budget fixes.
+    #[test]
+    fn the_probe_budget_is_small_against_the_bind_lock() {
+        assert!(
+            PROBE_BUDGET.saturating_mul(4) < LOCK_WAIT,
+            "PROBE_BUDGET {PROBE_BUDGET:?} is not comfortably inside LOCK_WAIT \
+             {LOCK_WAIT:?}"
+        );
+    }
 
     /// How long a test gives the probe before calling it hung.
     ///

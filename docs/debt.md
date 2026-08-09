@@ -93,7 +93,7 @@ argument.
 | [D-073](#d-073) | P6 (`#104`) | `xtask` `bundle.rs` + `packaging/macos/` | `dujactl` is not on `PATH` for a macOS user |
 | [D-074](#d-074) | P6 (`#104` review) | `duja-platform` `autostart/mac_location.rs` + `duja-app` `tray/state.rs` | The mounted-volume autostart refusal has no user-visible explanation |
 | [D-075](#d-075) | P6 (`#113` review) | `duja-app` `bin_support/gamma.rs` + `duja-dimmer` `win/gamma.rs` | A failing `CreateDCW` against a deliberately bogus device name costs seconds on the Windows CI runner and milliseconds… |
-| [D-076](#d-076) | P7 wave 0 (`#114` review 3) | `duja-platform` `ipc/unix_socket.rs` | `takeover_bind`'s liveness probe is the one unbounded wait left in a module that bounds everything else, and `#114`… |
+| [D-076](#d-076) | P7 wave 0 (`#114` review 3) | `duja-platform` `ipc/unix_socket.rs` | ~~`takeover_bind`'s liveness probe is the one unbounded wait left in a module that bounds everything else~~ - **narrowed in `#168`**: the wait is gone, and what is left is a BSD refusal that no wait can tell apart from a full backlog |
 | [D-077](#d-077) | P6 (`#104` review 2) | `xtask` `macho.rs` | No test constrains the Mach-O constants against bytes Apple produced |
 | [D-078](#d-078) | P7 wave 2 | `duja-panel` `linux/mod.rs` | A Linux laptop whose internal DRM connector publishes no EDID loses panel control entirely |
 | [D-079](#d-079) | P7 wave 2 | `duja-panel` `backlight.rs` | The `firmware > platform > raw` device preference rests on Duja's own argument, not on a read of the kernel |
@@ -672,6 +672,31 @@ The macOS status icon is **not** a template image (`tray-icon`'s `icon_is_templa
 **`takeover_bind`'s liveness probe is the one unbounded wait left in a module that bounds everything else, and `#114` widened its blast radius.** The probe is a plain blocking `UnixStream::connect`, and against a *live* server whose listen backlog is full the two platforms fail differently. On the BSDs `connect` returns `ECONNREFUSED`, so a live server is misread as stale and its socket is unlinked - the exact defect the rest of that module exists to prevent, reached by a route the bind lock cannot see. On Linux `unix_stream_connect` finds the receive queue full and waits with no send timeout for an `accept` that may never come. Reaching either needs enough queued connections from a process of the **same uid** to fill the backlog — std passes `listen(fd, -1)`, so that is `somaxconn` on Linux (4096 by default since 5.4) and 128 on Apple, not the "~128" this row first claimed for both — which is inside the trust boundary and so is self-harm rather than an attack. What `#114` changed is that the probe now runs while holding the bind lock, so the Linux case escalates from "this instance stalls" to "every concurrent starter also times out at `LOCK_WAIT`". Remedy: a non-blocking `connect` plus the `poll_ready` helper the module already has, with the same slice/deadline shape as every other wait here; the `ECONNREFUSED` arm additionally wants an `fstat` owner check before believing a refusal
 
 **Why deferred.** Recorded rather than fixed because it is a **different mechanism** from the locking change that surfaced it, and `#114` had already grown from one fix to three across two review rounds - folding in a fourth is the mistake the `#103` row warns about. The probe itself predates `#114` and is unchanged; only its scope under the lock is new. Not reachable without a same-uid process deliberately filling a 128-deep backlog
+
+**Narrowed in `#168`, and the title claim is gone: the unbounded wait no longer exists.** The probe is a non-blocking `connect` now, so Linux answers `EAGAIN` on the first syscall instead of parking in `unix_stream_connect`. That errno is not a "try again" that had to be waited out - `unix_stream_connect` reaches `unix_recvq_full_lockless` only after `unix_find_other` has resolved a peer *and* that peer has been checked to be in `TCP_LISTEN` - so it is **positive evidence of a live server**, and the probe settles on it immediately. The wait was not shortened; it was removed, and the answer it now produces is the right one rather than a timeout. `#114`'s escalation - every concurrent starter timing out at `LOCK_WAIT` behind one wedged probe - goes with it.
+
+**What is still open is the BSD half, and no wait fixes it.** `unp_connectat` answers `ECONNREFUSED` when `so_qlen >= so_qlimit`, byte-identical to the answer for a dead inode. The obvious repair - retry until a budget expires, on the theory that a live server drains its backlog - was considered and **deliberately not built**, because the live server this module produces is one that has *stopped* accepting: `listener_loop` stops at [`MAX_CONNECTIONS`] by design, so its backlog stays full for as long as it is at capacity and a refusal outlasting any budget is exactly what both cases look like. A retry there would fail in the realistic case while reading as a fix, which this project rates worse than the admitted gap.
+
+**Two routes exist and both are bigger than a patch.** macOS's `libproc` (`proc_listpids` + `proc_pidfdinfo`) can enumerate same-uid processes and ask which holds a socket on that inode, which answers the question directly - and needs a Mac to write against, which is the constraint half this tree lives under. Or Duja writes its pid beside the endpoint and liveness stops being a socket question at all, which is platform-independent and brings pid reuse with it. Neither belongs in a change to a probe.
+
+**The `fstat` the row asked for does not exist, and what replaced it is the check that actually guards the deletion.** There is no descriptor for the peer on a refusal - that is what a refusal *means* - and one for our own probe socket describes the wrong object. `remove_file` resolves a **path**, so the check that guards it is an `lstat` of that path: `unlink_target_is_ours` requires the inode to be a socket and to be ours. `lstat` rather than `stat` is load-bearing, since `remove_file` unlinks the symlink rather than its target, so following one would check the wrong inode's ownership.
+
+**Both halves were proven red on CI before the fix, because neither is reachable on the Windows dev box** and there is no WSL distro on it. Run [31308699587](https://github.com/itabajah/duja/actions/runs/31308699587), ubuntu lane:
+
+```
+a_live_server_with_a_full_backlog_is_not_unlinked ... FAILED
+  the liveness probe did not return within 3s (timed out waiting on receive
+  operation): it is waiting on a peer that never answers, which is the
+  unbounded wait D-076 is about
+
+a_refusal_from_something_that_is_not_a_socket_is_not_believed ... FAILED
+  a non-socket at the endpoint path is not a stale socket, and takeover_bind
+  must refuse rather than delete it
+```
+
+The first needed a listener built through `rustix` with `listen(fd, 1)`: std passes `listen(fd, -1)`, and neither 4096 nor 128 is fillable in a test. The second is the arm that closes on **both** platforms, which is why the owner check is worth having even though it cannot tell a wedged live server from a dead inode.
+
+**One thing the fix changes that the row did not ask for.** `ENOENT` now binds directly instead of attempting an unlink that fails `NotFound` and loses a bind that would have worked.
 
 ### D-077
 
