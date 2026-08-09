@@ -58,9 +58,10 @@ verbatim and unpruned, which is where they belong.
 | P8 Hardening | `m8-hardening` | done, gate run, `v1.0.0` held |
 | P9 App-layer seam + instruments | `m9-seam` | done - 7 of the 13 rows it touched drained |
 
-Every milestone above is a tag in this repository except `m9-seam`, which is cut
-when P9's close-out lands. Stated because eight of the nine names in that column
-resolve and one does not, and a reader has no way to tell which from the table.
+`m9-seam` is the one name in that column cut **on** this close-out rather than
+before it. Worth a line because the other nine resolve and the table gives a
+reader no way to tell which is which. What it cost to get those two sentences
+right is in [history.md](history.md#s68), which is the file for that.
 
 | release | train | state |
 |---|---|---|

@@ -23,10 +23,10 @@ have, and the part of that which can be *written* here even though it cannot be
 closed here - with everything outside both staying in [debt.md](debt.md), which
 is the third section below and by some way the largest.
 
-A fourth way used to lead this list - "what P9 builds here" - and it is worth a
-line rather than a silent deletion. Its 260 lines moved to
-[history.md](history.md#s65) when the phase closed, which is the rule this file's
-own opening states, applied to itself.
+This list had one more way on it until P9 closed - "what P9 builds here", which
+led it - and its removal is worth a line rather than being silent. Those 260 lines
+are in [history.md](history.md#s65) now, which is the rule this file's own opening
+states, applied to itself.
 
 ### 1. The hardware runs
 

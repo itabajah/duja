@@ -58,7 +58,7 @@ to assert.
   - [The waves, as `#161` recorded them](#s70)
   - [Wave 5 - the two rows left over, and what a test cannot do](#s66)
   - [What the reviews cost, and the one pattern that held](#s67)
-  - [Three things the phase measured that nobody had asked it to](#s68)
+  - [Things the phase measured that nobody had asked it to](#s68)
   - [What the phase left open, deliberately](#s69)
 - [P8 waves, as planned and as they went](#s52)
   - [Wave 1 - the binary](#s53)
@@ -1688,7 +1688,7 @@ unreachable on the Windows dev box and there is no WSL distro on it. Run
 lane, is the evidence, and the row quotes it.
 
 <a id="s67"></a>
-### What the reviews cost, and the one pattern that held everywhere
+### What the reviews cost, and the one pattern that held
 
 `#167` took two rounds; `#168` took six. The pattern the phase kept meeting is the
 one the moved text above states, and it is worth repeating in the weaker form that
@@ -1707,18 +1707,18 @@ the second time this phase.
 
 The arithmetic was wrong too, in both terms. P9 merged **fourteen** PRs, `#155`
 through `#168` - "eight" counted only the ones this section had in front of it.
-And the six the moved table records are **P9's first six**, `#155` to `#160`, which
-is what `#161`'s own title says; wave 3's are `#162` to `#165`. The partition was
-relabelled to make 6 + 8 = 14 work.
+And the six the moved table records are **P9's first six**, `#155` to `#160`,
+which is what `#161`'s own title says; wave 3's are `#162` to `#165`. The
+arithmetic added up only because the partition had been relabelled to make it.
 
-`#168`'s six rounds are the fullest worked example this project has written down,
-**and the record for it is thinner than the record for the six above**. `#167` and
-`#168` each carry zero PR comments and zero GitHub reviews; the reviews ran outside
-GitHub, and only rounds 1, 3 and 4 of `#168` are corroborated by anything a reader
-can open - its own squashed commit message. Rounds 2, 5 and 6 exist nowhere in the
-repo. The table the moved text carries made exactly this disclosure about `#155`
-and `#160`; a first version of this one omitted it while calling itself the
-clearest example there is.
+`#168`'s six rounds are the fullest worked example this project has written
+down, **and the record for it is thinner than the record for the six above**.
+`#167` and `#168` each carry zero PR comments and zero GitHub reviews; the
+reviews ran outside GitHub, and only rounds 1, 3 and 4 of `#168` are
+corroborated by anything a reader can open - its own squashed commit message.
+Rounds 2, 5 and 6 exist nowhere in the repo. The table the moved text carries
+made exactly this disclosure about `#155` and `#160`; a first version of this
+one omitted it while calling itself the clearest example there is.
 
 | round | what it found | in |
 |---|---|---|
@@ -1749,19 +1749,27 @@ written to settle an argument about a check that cannot fail contained a check
 that cannot fail.**
 
 <a id="s68"></a>
-### Three things the phase measured that nobody had asked it to
+### Things the phase measured that nobody had asked it to
 
 - **The test count in `STATUS.md` was 29 passing and one ignored short**, stale
-  exactly as its own bullet had predicted: it was re-measured at the P9 checkpoint,
-  wave 3's four PRs then added tests, and none of them re-counted. The bullet's
-  advice - re-count at every checkpoint - is now evidenced twice rather than once,
-  and a wave counts as a checkpoint.
+  exactly as its own bullet had predicted: it was re-measured at the P9
+  checkpoint, wave 3's four PRs then added tests, and none of them re-counted.
+  The bullet's advice - re-count at every checkpoint - is now evidenced twice
+  rather than once, and a wave counts as a checkpoint.
 - **A `git worktree` build can poison the shared `target/` directory.** `xtask`'s
   `repo_root()` bakes in `env!("CARGO_MANIFEST_DIR")` at compile time, so a build
   from a worktree leaves an `xtask` binary pointing at a path that no longer
   exists. Eight `xtask` tests then fail with `reading <gone>/docs: The system
   cannot find the path specified`, which reads exactly like a real regression and
   is not. `cargo clean -p xtask` is the fix.
+- **A tag is a ref, not content of a commit, so no checkout hides one.** Obvious
+  once said and wrong twice in a row in `STATUS.md`'s note about which milestone
+  names resolve. That note reached its third version before it was true: the first
+  said "eight of the nine" against a ten-row table three lines above it - a wrong
+  count in the sentence whose whole job is saying which names are real - and the
+  second added "so a checkout from any commit earlier than this one will not find
+  it", which was added *specifically* to make the note outlive the tagging and was
+  the only part of it that did not. Six lines of prose, three attempts, one fact.
 - **The commit-lint job rejects merge commits outright**, and `--no-merge-commit`
   does not mean what it looks like. `#168` merged `main` into its branch rather
   than rebasing and the check failed for that alone. The repo is trunk-based with
