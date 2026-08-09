@@ -1154,6 +1154,191 @@ mod tests {
         );
     }
 
+    // --- D-076: the liveness probe that decides whether to unlink ---
+
+    /// How long a test gives the probe before calling it hung.
+    ///
+    /// Not a latency budget: the probe's own bound is `PROBE_BUDGET` and the
+    /// paths these tests take do not spend it. This exists so the *historical*
+    /// defect - a blocking `connect` into a full backlog, which waits for an
+    /// `accept` that never comes - surfaces as a named failing test rather than
+    /// as a hung suite.
+    const PROBE_JOIN_DEADLINE: Duration = Duration::from_secs(3);
+
+    /// Run `takeover_bind` on its own thread and refuse to wait forever for it.
+    ///
+    /// The thread is deliberately not joined on the timeout path: the historical
+    /// defect leaves it parked in `connect` with no way to interrupt it, and a
+    /// test that joined would inherit exactly the hang it is reporting. It is a
+    /// leaked thread in a failing test process, which is the cheaper of the two.
+    fn takeover_bind_bounded(path: &Path) -> Result<UnixListener, IpcTransportError> {
+        let (tx, rx) = bounded(1);
+        let probed = path.to_path_buf();
+        thread::Builder::new()
+            .name("d076-probe".to_owned())
+            .spawn(move || {
+                let _ = tx.send(takeover_bind(&probed));
+            })
+            .expect("the probe thread must spawn");
+        match rx.recv_timeout(PROBE_JOIN_DEADLINE) {
+            Ok(result) => result,
+            Err(e) => panic!(
+                "the liveness probe did not return within {PROBE_JOIN_DEADLINE:?} ({e}): \
+                 it is waiting on a peer that never answers, which is the unbounded \
+                 wait D-076 is about"
+            ),
+        }
+    }
+
+    /// A non-blocking `connect`, for filling a backlog without blocking on the
+    /// connect that finds it full - which is the very hang under test.
+    ///
+    /// Gated with its only caller rather than left ungated: a helper used solely
+    /// by a `cfg(target_os = "linux")` test is dead code on the other two lanes,
+    /// and `clippy -D warnings` fails there while Linux stays green. That is
+    /// [`D-045`](https://github.com/itabajah/duja/blob/main/docs/debt-archive.md#d-045)'s
+    /// lesson arriving a second time, and it cost a cross-check round here too.
+    #[cfg(target_os = "linux")]
+    fn try_connect(path: &Path) -> Result<std::os::fd::OwnedFd, i32> {
+        let sock = rustix::net::socket_with(
+            rustix::net::AddressFamily::UNIX,
+            rustix::net::SocketType::STREAM,
+            rustix::net::SocketFlags::empty(),
+            None,
+        )
+        .expect("a unix socket must be creatable");
+        let flags = rustix::fs::fcntl_getfl(&sock).expect("F_GETFL must work");
+        rustix::fs::fcntl_setfl(&sock, flags | rustix::fs::OFlags::NONBLOCK)
+            .expect("F_SETFL must work");
+        let addr = rustix::net::SocketAddrUnix::new(path).expect("the path must fit in sun_path");
+        match rustix::net::connect(&sock, &addr) {
+            Ok(()) => Ok(sock),
+            Err(e) => Err(e.raw_os_error()),
+        }
+    }
+
+    /// A listener bound at `path` with the smallest backlog the kernel accepts,
+    /// so filling it costs a handful of connects rather than `somaxconn` of them.
+    ///
+    /// `std`'s `UnixListener::bind` passes `listen(fd, -1)`, which is 4096 on
+    /// Linux since 5.4 and 128 on Apple. Neither is fillable in a test, and that
+    /// is the whole reason this goes through `rustix` instead.
+    #[cfg(target_os = "linux")]
+    fn listener_with_backlog(path: &Path, backlog: i32) -> std::os::fd::OwnedFd {
+        let sock = rustix::net::socket_with(
+            rustix::net::AddressFamily::UNIX,
+            rustix::net::SocketType::STREAM,
+            rustix::net::SocketFlags::empty(),
+            None,
+        )
+        .expect("a unix socket must be creatable");
+        let addr = rustix::net::SocketAddrUnix::new(path).expect("the path must fit in sun_path");
+        rustix::net::bind(&sock, &addr).expect("the listener must bind");
+        rustix::net::listen(&sock, backlog).expect("the listener must listen");
+        sock
+    }
+
+    /// **A live server whose backlog is full must not be read as stale.**
+    ///
+    /// Linux only, and the gate is the mechanism rather than convenience: this
+    /// pins the arm where a non-blocking `connect` answers `EAGAIN`, which only
+    /// happens when a listener exists and its receive queue is full
+    /// (`unix_stream_connect`'s `unix_recvq_full_lockless` branch). Apple's
+    /// `unp_connectat` answers `ECONNREFUSED` for the same condition, which is
+    /// indistinguishable from a dead inode and is the half of this row that does
+    /// **not** close - see the row for why no retry separates them.
+    ///
+    /// Two failures, one test, matching the two the row names:
+    ///
+    /// - the probe never returning, which is the unbounded wait, reported by
+    ///   `takeover_bind_bounded` rather than by a hung suite;
+    /// - the socket being unlinked, which is a live server's endpoint destroyed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_live_server_with_a_full_backlog_is_not_unlinked() {
+        let dir = tempfile::tempdir().expect("a temp dir must be creatable");
+        let path = dir.path().join("ctl.sock");
+        let _listener = listener_with_backlog(&path, 1);
+
+        // Nothing ever accepts here, which is not an artificial cruelty: the
+        // listener stops accepting at `MAX_CONNECTIONS` by design, so a live
+        // server with a full backlog and no `accept` in flight is a state this
+        // module produces on purpose.
+        let mut queued = Vec::new();
+        let mut refusal = None;
+        for _ in 0..64_u32 {
+            match try_connect(&path) {
+                Ok(sock) => queued.push(sock),
+                Err(errno) => {
+                    refusal = Some(errno);
+                    break;
+                }
+            }
+        }
+        // Assert the *reason*, not merely that the loop stopped. Any errno would
+        // satisfy "something failed", so this test would pass on an `ENOENT`
+        // from a path that never existed - a check that cannot fail, which is
+        // the shape this phase keeps finding.
+        assert_eq!(
+            refusal,
+            Some(libc::EAGAIN),
+            "the backlog did not fill in 64 connects, so this test is not \
+             exercising the arm it names"
+        );
+
+        let outcome = takeover_bind_bounded(&path);
+
+        assert!(
+            outcome.is_err(),
+            "a listener with a full backlog is live, and takeover_bind must \
+             refuse rather than take the socket over"
+        );
+        assert!(
+            path.exists(),
+            "the live server's socket was unlinked: every client that reaches it \
+             by path is now cut off, which is the defect this module exists to \
+             prevent"
+        );
+    }
+
+    /// **A refusal is not enough on its own: the thing about to be unlinked has
+    /// to be our socket.**
+    ///
+    /// A regular file at the socket path answers `ECONNREFUSED` on both lanes
+    /// (`unix_find_other` rejects a non-`S_ISSOCK` inode with exactly that), so
+    /// a probe that believes refusals unconditionally deletes it and binds over
+    /// it. Nothing in Duja puts a regular file there - which is the point. The
+    /// path is inside a `0700` directory this process owns, so a file appearing
+    /// there means something has gone wrong that unlinking would erase.
+    ///
+    /// This is the half of the row that closes on **both** platforms, and it is
+    /// why the guard is worth having even though it cannot tell a wedged live
+    /// server from a dead inode.
+    #[test]
+    fn a_refusal_from_something_that_is_not_a_socket_is_not_believed() {
+        let dir = tempfile::tempdir().expect("a temp dir must be creatable");
+        let path = dir.path().join("ctl.sock");
+        std::fs::write(&path, b"not a socket").expect("the file must be writable");
+
+        let outcome = takeover_bind_bounded(&path);
+
+        assert!(
+            outcome.is_err(),
+            "a non-socket at the endpoint path is not a stale socket, and \
+             takeover_bind must refuse rather than delete it"
+        );
+        assert!(
+            path.exists(),
+            "the file was unlinked on the strength of a refusal that says only \
+             'nothing is listening', not 'this is mine to delete'"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("the file must still be readable"),
+            b"not a socket",
+            "the file survived by name but not by content"
+        );
+    }
+
     #[test]
     fn slice_until_caps_and_expires() {
         // No deadline ⇒ a full slice.
