@@ -1124,8 +1124,8 @@ fn probe_socket() -> Result<std::os::fd::OwnedFd, ()> {
 /// (Earlier versions got that split wrong in three different ways - a two-site
 /// kernel list called "the only" routes, then both arms called dead, then the uid
 /// arm called macOS-specific - and the count of versions is deliberately not here,
-/// because a tally in a comment is what the three commits before this branch point
-/// were each about. The counterexamples are the part worth keeping.)
+/// because a tally in a comment is a shape this crate has already had removed
+/// once, in `#132`. The counterexamples are the part worth keeping.)
 ///
 /// The *function* is not dead on either lane regardless: the `symlink_metadata`
 /// above both arms can fail if the inode vanishes between the probe and the
