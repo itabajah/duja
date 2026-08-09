@@ -30,8 +30,11 @@ IPC server (the three pieces `--headless` has), goes idle, samples, and exits
 non-zero on a budget miss or on a run it could not measure.
 
 **The handle half of that row grew a third family in P9 wave 3.** GDI and USER
-are GUI objects, and a headless soak creates none - measured on this box, GDI 0
-and USER 5, flat across every run. What it does create is *kernel* handles: pipe
+are GUI objects, and a headless soak creates almost none - measured on this box,
+GDI 0 and USER 5, flat across every run here. On a `windows-latest` runner USER
+settles at **6** instead, moving from 5 within the first ten seconds and then
+staying put, so "flat" is a property of the steady state rather than of the
+number. What it does create is *kernel* handles: pipe
 instances for the IPC server, the log file, thread handles. Those are counted
 now (`GetProcessHandleCount` on Windows, `/proc/self/fd` on Linux) and runs on
 this box report **around 250** of them. Before this, a headless soak could leak
@@ -39,9 +42,10 @@ a pipe instance per connection for a day and report a clean pass, which is
 [D-112](debt.md#d-112). Linux had no handle signal at all.
 
 The three lanes have now been measured against each other, by the
-dispatch-only `soak` workflow ([D-111](debt.md#d-111)): a headless Duja is
+dispatch-only `soak` workflow ([D-111](debt.md#d-111)): a headless Duja peaks at
 **16,228,352 bytes** on `windows-latest` and **9,981,952** on `ubuntu-latest`,
-with roughly 250 kernel handles against 15 descriptors. macOS assembles and
+with roughly 250 kernel handles against 15 descriptors and RSS growth of 0 on
+both. macOS assembles and
 reports `UNMEASURABLE`, which is what it is documented to do. The Windows CI
 figure lands inside the range measured on the dev box, which is the first
 cross-check this instrument has had.
