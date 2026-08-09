@@ -172,7 +172,9 @@ pub(crate) const RSS_GROWTH_BUDGET_BYTES: u64 = 5_000_000;
 /// limit; kernel handles have a ceiling three orders of magnitude higher, so
 /// "long before the ceiling" is not the argument there.
 ///
-/// And where GDI and USER measure exactly flat on every headless run recorded,
+/// And where GDI and USER measure exactly flat on every headless run recorded
+/// **on this box** - a `windows-latest` runner settles USER one higher, per the
+/// module header, so the universal that used to stand here is not one -
 /// the kernel count moves. Every drift measured on this box has been **negative
 /// and no larger than five**, with the within-run spread reaching nine once. A
 /// fall of any size passes, because the comparison is one-sided rather than
