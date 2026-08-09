@@ -1,0 +1,149 @@
+# The idle soak, on a CI runner, by hand (docs/debt.md D-111).
+#
+# D-111 says the longest soak ever run is 90 seconds against a 24-hour budget,
+# and that nothing runs a short one in CI. It also says why the workflow was not
+# simply written: "a CI soak has to start the platform event pump on a runner
+# with no display server and no session, and **whether `start_platform` succeeds
+# there has never been tested**. Shipping a workflow that might simply go red on
+# its first scheduled run - or worse, pass by failing to assemble anything -
+# would be a check that teaches nothing." The row's own remedy is to run the
+# experiment first and let the result decide the workflow.
+#
+# This is the experiment, in the shape the row asks for: `workflow_dispatch`
+# only, no schedule, run by a human who then reads what happened. A schedule
+# belongs here only after the three lanes have answered.
+#
+# # Why this is not a required check, and must not become one by accident
+#
+# It is dispatch-only, so it produces no status on a pull request at all. That
+# is deliberate twice over: the row wants a *reading* before a gate, and D-110
+# is this repository's standing note that gating on a number nobody has measured
+# is how a check becomes a thing people disable.
+#
+# # What counts as failure here, which is narrower than a non-zero exit
+#
+# `--soak` exits non-zero on a missed budget **and** on `UNMEASURABLE`, and
+# macOS is `UNMEASURABLE` by construction today (`duja_platform::process` has no
+# `task_info` reader, so it reports no metrics rather than wrong ones). A red
+# job on that lane would say nothing this repository does not already know.
+#
+# So the exit code is captured and printed rather than propagated, and the job
+# fails on one thing: **no report at all**. That is the outcome the row is
+# actually asking about - a pump that would not start, or an assembly that fell
+# over before it could sample.
+#
+# # Why the report is read from disk rather than from stdout
+#
+# A release `duja.exe` is a GUI-subsystem binary (`main.rs` gates
+# `windows_subsystem = "windows"` on `not(debug_assertions)`), so on the Windows
+# lane it has no console and every line it prints goes nowhere. `soak.rs` writes
+# `soak-report.txt` beside the rotating log for exactly that reason. Reading the
+# file rather than the pipe is therefore also a test of that claim, on the one
+# lane where it is load-bearing.
+#
+# All third-party actions are pinned by commit SHA (supply-chain policy).
+
+name: soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds to soak"
+        required: false
+        default: "120"
+      every:
+        description: "Seconds between samples"
+        required: false
+        default: "10"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: soak-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  soak:
+    name: soak (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Every lane runs even when one fails: the question is what each of the
+      # three does, and cancelling the others throws away two thirds of the
+      # answer.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    # The release profile is fat-LTO with `codegen-units = 1`; D-110 measures
+    # that at roughly twenty minutes on a hosted Windows runner. It is used
+    # anyway, because the idle-RSS budget is written against the profile that
+    # ships and a debug figure would answer a question nobody asked.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Slint system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libxkbcommon-dev libxcb1-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libwayland-dev
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build the release binary
+        run: cargo build --release -p duja-app
+
+      - name: Soak
+        shell: bash
+        # The dispatch inputs go through `env:` rather than into the run body:
+        # `release.yml`'s header states the rule for this repository - "github.*
+        # context is NEVER interpolated into a run body" - and a value a human
+        # can type must not be able to become shell.
+        env:
+          SOAK_SECONDS: ${{ inputs.seconds }}
+          SOAK_EVERY: ${{ inputs.every }}
+        run: |
+          set -u
+          bin=target/release/duja
+          [ -x "$bin" ] || bin=target/release/duja.exe
+
+          # Not `set -e` around this line: a non-zero exit is a result to read,
+          # not a failure of the experiment. See the header.
+          set +e
+          "$bin" --soak "$SOAK_SECONDS" --every "$SOAK_EVERY" > soak-stdout.txt 2>&1
+          code=$?
+          set -e
+
+          echo "## soak exit code: $code" >> "$GITHUB_STEP_SUMMARY"
+          echo "### stdout (empty on a Windows release build, by design)"
+          cat soak-stdout.txt || true
+
+          # The report is written beside the rotating log, under the per-user
+          # data directory `directories::ProjectDirs` resolves. That is inside
+          # $HOME on all three runners, so one search covers them.
+          report=$(find "$HOME" -name soak-report.txt -type f 2>/dev/null | head -1)
+          if [ -z "$report" ]; then
+            echo "::error::no soak-report.txt under HOME; the harness never reached the point of reporting"
+            exit 1
+          fi
+
+          # Copied into the workspace so the upload step can reach it: the data
+          # directory is outside the checkout on every lane.
+          cp "$report" soak-report.txt
+          echo "### report (from $report)"
+          tee -a "$GITHUB_STEP_SUMMARY" < soak-report.txt
+
+      - name: Upload the report
+        # `always()` so a lane that failed the step above still hands back
+        # whatever it managed to write, which on a first run is the whole point.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: soak-${{ matrix.os }}
+          path: |
+            soak-stdout.txt
+            soak-report.txt
+          if-no-files-found: warn
