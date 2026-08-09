@@ -99,12 +99,13 @@ use crate::bin_support::{backend, run};
 /// measures around 17.6 MB, so the strict reading also clears with room, and
 /// choosing it means this wave loosened nothing it was not asked to loosen.
 ///
-/// Measured again in P9 wave 3: **16.1 to 16.3 MB** peak across seven runs on
-/// this box, so the headroom is still large.
+/// Measured again in P9 wave 3: **16.07 to 16.25 MB** peak across more than a
+/// dozen runs on this box, so the headroom is still large.
 ///
-/// **One run out of those seven reported 31.3 MB and nobody can say why.** Its
-/// samples, verbatim: `t+0s 16084992`, then `t+10s 31322112` and flat at that
-/// figure to the end. It was the first execution of a freshly linked binary,
+/// **One further run reported 31.3 MB and nobody can say why.** It was
+/// `duja --soak 90 --every 10`; its samples, verbatim: `t+0s 16084992`, then
+/// `t+10s 31322112` and flat at that figure to the end. It was the first
+/// execution of a freshly linked binary,
 /// and a first draft of this note wrote that condition down as the finding - but
 /// a reviewer then ran exactly that condition twice more and got 16.24 MB and
 /// 16.11 MB, so the condition is **withdrawn** rather than repeated. What is
