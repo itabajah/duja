@@ -1089,7 +1089,7 @@ fn probe_socket() -> Result<std::os::fd::OwnedFd, ()> {
 ///   check costs one `lstat` and the alternative is trusting an argument about
 ///   permissions at the moment a deletion happens.
 ///
-/// # One of the two arms below is inert on macOS, and saying which took three tries
+/// # Which of the two arms below is inert, and where
 ///
 /// The plain non-socket case is **Linux-only**. XNU's `unp_connect` rejects a
 /// non-socket earlier and differently — `if (vp->v_type != VSOCK) error =
@@ -1121,10 +1121,11 @@ fn probe_socket() -> Result<std::os::fd::OwnedFd, ()> {
 /// regular-file route there (that is the `ENOTSOCK` above) and keeps only the
 /// symlink one.
 ///
-/// (Three versions of this paragraph got that split wrong in three different ways:
-/// a two-site kernel list called "the only" routes, then both arms called dead,
-/// then the uid arm called macOS-specific. Kept as a note because the subject of
-/// this whole row is claims that read as checked.)
+/// (Earlier versions got that split wrong in three different ways - a two-site
+/// kernel list called "the only" routes, then both arms called dead, then the uid
+/// arm called macOS-specific - and the count of versions is deliberately not here,
+/// because a tally in a comment is what the three commits before this branch point
+/// were each about. The counterexamples are the part worth keeping.)
 ///
 /// The *function* is not dead on either lane regardless: the `symlink_metadata`
 /// above both arms can fail if the inode vanishes between the probe and the
@@ -1801,10 +1802,10 @@ mod tests {
         drop(UnixListener::bind(&elsewhere).expect("the decoy listener must bind"));
         std::os::unix::fs::symlink(&elsewhere, &endpoint).expect("the symlink must be creatable");
 
-        let error = takeover_bind_bounded(&endpoint)
-            .err()
-            .map(|e| e.to_string())
-            .unwrap_or_default();
+        let error = takeover_bind_bounded(&endpoint).map_or_else(
+            |e| e.to_string(),
+            |_| "Ok(_): the guard did not refuse at all".to_owned(),
+        );
 
         // Pin the *route*, not just the refusal. Both verdicts that refuse produce
         // an error, so asserting `is_err` alone would pass on `Undecidable` - which
