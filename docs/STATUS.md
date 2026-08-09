@@ -1,19 +1,19 @@
 # Duja - Project Status
 
-_Last updated: 2026-08-09. **P0 through P8 are closed**, `v0.1.6` shipped the
-two ports that had been held, and **P9 is in progress** - the first phase whose
-scope was chosen by what the absent hardware still permits, rather than merely
-limited by it. Seven of its rows have drained - five in its four waves, one
-that predates them, and [D-059](debt-archive.md#d-059), wave 1's leftover, which
-closed on a witness type rather than on the test seam it had been grouped with
-for three checkpoints. **All four waves have landed something**, wave 3's
-instruments among them; see [plan.md](plan.md). One row is what is left of the
-*phase's plan*, [D-076](debt.md#d-076), and it **narrowed rather than drained**:
-the unbounded wait its title names is gone, and a BSD refusal no budget can tell
-apart from a full backlog is what is left. Which is not the same as one open row:
-the four rows wave 3 worked are all still open, because an instrument row drains
-when the budget it serves can be checked. The ports ship as **unverified
-previews** rather than as confirmed platforms
+_Last updated: 2026-08-09. **P0 through P9 are closed**; `v0.1.6` shipped the
+two ports that had been held. P9 was the first phase
+whose scope was chosen by what the absent hardware still permits, rather than
+merely limited by it, and its write-up is
+[history.md](history.md#s65). Seven of its rows drained and two more
+narrowed - and **the phase closed with six of the ten it touched still open**,
+which is the outcome rather than a shortfall: an instrument row drains when the
+budget it serves can be *checked*, and three of wave 3's budgets still need
+hardware or a day of wall clock CI cannot give.
+[D-076](debt.md#d-076) is the other, open on a kernel behaviour no wait works
+around. The two rows the phase was left with, [D-059](debt-archive.md#d-059) and
+D-076, each closed on a mechanism its own row had not proposed - the first on a
+witness type where the row asked for a test, the second only halfway. The ports
+ship as **unverified previews** rather than as confirmed platforms
 ([ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md)): the hold was
 self-defeating, because the community confirmations macOS needs to leave
 "experimental" cannot arrive for a build nobody can install. `v0.2.0` and
@@ -54,7 +54,7 @@ verbatim and unpruned, which is where they belong.
 | P6 macOS port | `m6-macos` | done, gate passed |
 | P7 Linux port | `m7-linux` | done, gate run |
 | P8 Hardening | `m8-hardening` | done, gate run, `v1.0.0` held |
-| P9 App-layer seam + instruments | `m9-seam` | in progress - 7 rows drained |
+| P9 App-layer seam + instruments | `m9-seam` | done, 7 rows drained, 2 narrowed |
 
 | release | train | state |
 |---|---|---|
@@ -124,7 +124,8 @@ own `display` helper inside its macros.
 Measured on this box, 2026-08-08 unless a bullet dates itself otherwise:
 
 - **1,489 tests** pass in a local `cargo test --workspace --all-features`
-  (measured 2026-08-09, against 1,488 on the commit this branched from),
+  (measured 2026-08-09; `9dc0586`, the last commit before P9's final two PRs,
+  was 1,488 on the same lane),
   with a further **9 `#[ignore]`d** on top of that rather than among them - an
   ignored test does not pass, and writing it as "8 of them" was wrong for one
   edit's lifetime. **The figure this replaces was 1,459 and 8, and it went stale
