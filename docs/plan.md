@@ -37,7 +37,7 @@ thing - it is measured when the wave lands, and recorded below once it has.
 |---|---|---|
 | 1 | the `AppState` test seam: a fakeable `PlatformTray`, and a fixture that constructs the state | landed |
 | 2 | the same for the gamma channel, which is what the ordering and re-assert properties need | landed |
-| 3 | the instruments behind the performance budgets | partly landed |
+| 3 | the instruments behind the performance budgets | landed |
 | 4 | the config cap's write side, and the bounded waits | partly landed |
 
 **Wave 1 is the keystone**, and it is the one place a row list is safe, because
@@ -114,8 +114,16 @@ seven minutes before this plan did, and its review had already struck one
 attempt to file it under P9. It is counted here because it is P9-era work, not
 because the wave table accounts for it.
 
-What is left of the phase is the rest of wave 3, [D-076](debt.md#d-076) from
-wave 4, and [D-059](debt.md#d-059), which wave 1 turned out not to touch.
+**Wave 3 has landed, in three instruments and one experiment**, and none of the
+four drained the row it belongs to. [D-109](debt.md#d-109) narrowed;
+[D-112](debt.md#d-112) closed the half its own row calls cheap;
+[D-111](debt.md#d-111) got the mechanism its remedy asks for and then the
+reading. That is the wave working as intended rather than falling short: an
+instrument row drains when the budget it serves can be checked, and three of
+these budgets still need hardware or a day of wall clock that CI cannot give.
+
+What is left of the phase is [D-076](debt.md#d-076) from wave 4 and
+[D-059](debt.md#d-059), which wave 1 turned out not to touch.
 
 **Wave 3 opened on [D-109](debt.md#d-109), which narrowed rather than drained**,
 and the reason is the shape this section keeps meeting: the row proposed a
@@ -128,6 +136,29 @@ budget the row cited. The exemption had never been measured, is worth roughly
 1.4x, and the budget clears by a wide margin either way - about 70x on a typical
 frame - so the argument was right and nothing depended on it. `perf-budgets.md`
 gains a row that has an instrument; the three that do not, still do not.
+
+**[D-112](debt.md#d-112)'s cheap half is counted now**, and the row's argument
+became a measurement: a headless soak reports GDI 0 and USER 5 because it builds
+no GUI objects, and around 250 *kernel* handles because it builds a pipe server,
+a log file and threads. Before it, a leaked pipe instance per connection could
+have run for a day and reported a clean PASS. Linux gained a handle signal it
+never had, since `GetGuiResources` has no counterpart there.
+
+**And [D-111](debt.md#d-111)'s experiment ran**, which is the one result of this
+wave nobody could have predicted from the code. `--soak 120 --every 10` on all
+three lanes: the pump, the engine and the IPC server come up on every one,
+including the two with no display server and no session. The first Linux RSS
+figure this tree has ever had is 9,981,952 bytes against Windows' 16,228,352,
+and the Windows CI number lands inside the range measured on the dev box - the
+first time this instrument has been checked against a machine nobody tuned it
+on. macOS assembles and measures nothing, which is what it is documented to do.
+
+**Three of the wave's own fixes were caught by its own instruments.** The frame
+probe's first reading was unbelievable until a drawn-area check existed; the
+soak's first real kernel reading printed `0` for a count that had moved by nine;
+and the CI run showed USER moving 5 to 6 on a runner while three places in the
+tree said it was flat at 5. Each is the same shape, and it is the shape this
+phase exists to remove: a number that looks measured and is not.
 
 **The first version of that measurement was wrong, and a review caught it.** The
 probe sized its window from the markup's default rather than from the height the
