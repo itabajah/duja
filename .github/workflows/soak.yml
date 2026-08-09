@@ -1,0 +1,259 @@
+# The idle soak, on a CI runner, by hand (docs/debt.md D-111).
+#
+# D-111 says the longest soak ever run is 90 seconds against a 24-hour budget,
+# and that nothing runs a short one in CI. It also says why the workflow was not
+# simply written: "a CI soak has to start the platform event pump on a runner
+# with no display server and no session, and **whether `start_platform` succeeds
+# there has never been tested**. Shipping a workflow that might simply go red on
+# its first scheduled run - or worse, pass by failing to assemble anything -
+# would be a check that teaches nothing." The row's own remedy is to run the
+# experiment first and let the result decide the workflow.
+#
+# This is the experiment, in the shape the row asks for: `workflow_dispatch`
+# only, no schedule, run by a human who then reads what happened. A schedule
+# belongs here only after the three lanes have answered.
+#
+# # Why this is not a required check, and must not become one by accident
+#
+# It is dispatch-only, so it produces no status on a pull request at all. That
+# is deliberate twice over: the row wants a *reading* before a gate, and D-110
+# is this repository's standing note that gating on a number nobody has measured
+# is how a check becomes a thing people disable.
+#
+# # What counts as failure here
+#
+# Two things, and the split is per-lane.
+#
+# **No report at all** fails every lane. That is the outcome the row is actually
+# asking about - a pump that would not start, or an assembly that fell over
+# before it could sample - and it is the one thing that cannot be confused with
+# a platform limitation.
+#
+# **A non-zero exit fails the two lanes that can measure.** `--soak` exits
+# non-zero on a missed budget *and* on `UNMEASURABLE`, and macOS is
+# `UNMEASURABLE` by construction today (`duja_platform::process` has no
+# `task_info` reader, so it reports no metrics rather than wrong ones), so that
+# lane's code is reported and not propagated. A first draft swallowed it on all
+# three - which would have made a genuine budget miss on Linux or Windows a
+# green job with a line in the summary, i.e. a check that only fails when the
+# binary does not run at all.
+#
+# **The honest caveat on that**: what the two propagating lanes gate on is not
+# all equally solid. `HANDLE_GROWTH_TOLERANCE`'s own doc calls it "a guess
+# rather than a measurement" and warns that "a rise of nine would FAIL a healthy
+# run". The 35 MB idle-RSS ceiling is a real budget with large headroom, but
+# every RSS figure in this tree is a *Windows* one - there is no measured Linux
+# number anywhere, and the constant's doc records one unexplained run at 89 % of
+# budget. So an early red here is at least as likely to be the instrument as the
+# code. That is tolerable only
+# because this workflow is dispatch-only with no pull-request status, runs with
+# `fail-fast: false`, and writes the full reading before it exits - a red lane
+# still hands back its numbers.
+#
+# # Why the report is read from disk rather than from stdout
+#
+# Because a run that outlives its shell has to leave its numbers somewhere, and
+# because a file is the same on three platforms where a pipe is not.
+#
+# Not for the reason a first draft gave. It said a release `duja.exe` is a
+# GUI-subsystem binary "so on the Windows lane it has no console and every line
+# it prints goes nowhere", and that is wrong for *this* invocation:
+# `windows_subsystem = "windows"` stops Windows **allocating** a console, and
+# does not stop the process inheriting standard handles a parent supplies -
+# which the step below supplies, with `> soak-stdout.txt 2>&1`. Measured on a
+# binary carrying the same cfg gate: stdout arrives in the file. The premise is
+# true of the un-redirected invocation `qa-checklist.md` gives an operator
+# (`start /wait duja.exe --soak ...`), and `soak.rs`'s header now says which of
+# the two it is about - it did not, until this workflow became the first
+# redirected caller in the tree to contradict it.
+#
+# All third-party actions are pinned by commit SHA (supply-chain policy).
+
+name: soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds to soak"
+        required: false
+        default: "120"
+      every:
+        description: "Seconds between samples"
+        required: false
+        default: "10"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: soak-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # `ci.yml` sets this too. It matters more here: this workflow exists to find
+  # out whether the event pump starts, and a panic there without a backtrace
+  # hands back exactly nothing.
+  RUST_BACKTRACE: "1"
+
+jobs:
+  soak:
+    name: soak (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Every lane runs even when one fails: the question is what each of the
+      # three does, and cancelling the others throws away two thirds of the
+      # answer.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    # The release profile is fat-LTO with `codegen-units = 1`, and it is used
+    # because the idle-RSS budget is written against the profile that ships - a
+    # debug figure would answer a question nobody asked.
+    #
+    # D-110 estimates that build at "roughly twenty minutes on a hosted Windows
+    # runner". That is an estimate, not a measurement, and `release.yml` has
+    # been measuring it all along: its `Build release binaries` step on
+    # windows-latest, cold and building *two* binaries where this builds one,
+    # took 7m08s, 7m13s and 4m45s on three recent runs. So the real cost is
+    # about a third of the figure this workflow was first justified against.
+    #
+    # Forty-five minutes therefore leaves room for a soak of about half an hour
+    # on top of the build. A longer one needs this raised - and GitHub caps a
+    # hosted job at six hours, which is why this mechanism can never deliver
+    # D-111's other half, the 24-hour run.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Slint system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libxkbcommon-dev libxcb1-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libwayland-dev
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build the release binary
+        # `--locked` as `release.yml` does: a soak whose numbers came from a
+        # dependency set nobody committed is not a measurement of this tree.
+        run: cargo build --release --locked -p duja-app
+
+      - name: Soak
+        shell: bash
+        # The dispatch inputs go through `env:` rather than into the run body:
+        # `release.yml`'s header states the rule for this repository - "github.*
+        # context is NEVER interpolated into a run body" - and a value a human
+        # can type must not be able to become shell.
+        env:
+          SOAK_SECONDS: ${{ inputs.seconds }}
+          SOAK_EVERY: ${{ inputs.every }}
+        run: |
+          set -u
+
+          # A bad input would otherwise reach the harness, produce no report and
+          # be reported by the branch below as a pump that would not start - a
+          # misdiagnosis of the one question this workflow exists to answer.
+          #
+          # The bounds are the CLI's own, not invented here: `cli.rs` parses both
+          # as `u64` and requires `>= 1`, so `0` and anything that overflows a
+          # `u64` are rejected by it *after* this point and would surface as a
+          # missing report. The upper bound is this job's: `timeout-minutes` is
+          # 45 and the build takes about seven of them, so a soak beyond half an
+          # hour is a guaranteed kill - including the 86400 that
+          # `qa-checklist.md` quite correctly tells an operator to run on a real
+          # desktop.
+          for value in "$SOAK_SECONDS" "$SOAK_EVERY"; do
+            case "$value" in
+              '' | *[!0-9]*)
+                echo "::error::soak inputs must be whole numbers; got '$value'"
+                exit 1
+                ;;
+            esac
+            # The length test comes first and is not decoration: bash's `[`
+            # compares as `intmax_t`, so a value at or above 2^63 - including a
+            # valid `u64` - makes both numeric tests exit 2, the `||` chain
+            # evaluate false, and the input sail through the ceiling. The bound
+            # is four digits because 1800 is, so anything longer is out of range
+            # by construction and never reaches an integer comparison.
+            if [ "${#value}" -gt 4 ] || [ "$value" -lt 1 ] || [ "$value" -gt 1800 ]; then
+              echo "::error::soak inputs must be between 1 and 1800 seconds; got '$value'. A longer run needs timeout-minutes raised, and GitHub caps a hosted job at six hours regardless."
+              exit 1
+            fi
+          done
+
+          bin=target/release/duja
+          [ -x "$bin" ] || bin=target/release/duja.exe
+
+          # A marker so the search below cannot match a report from some earlier
+          # run. Nothing should pre-seed one on a fresh runner, but "should" is
+          # what a stale-artifact bug is made of.
+          touch soak-started
+
+          # Not `set -e` around this line: the exit code is inspected rather
+          # than propagated blindly. See the header, and the arm below.
+          set +e
+          "$bin" --soak "$SOAK_SECONDS" --every "$SOAK_EVERY" > soak-stdout.txt 2>&1
+          code=$?
+          set -e
+
+          {
+            echo "## soak exit code: $code"
+            echo
+            echo '### stdout'
+            echo '```'
+            cat soak-stdout.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat soak-stdout.txt || true
+
+          # The report is written beside the rotating log, under the per-user
+          # data directory `directories::ProjectDirs` resolves. That is inside
+          # $HOME on all three runners, so one search covers them. `|| true`
+          # because the runner's shell has `pipefail` and this pipeline has two
+          # ways to fail that are not findings: `find` exits non-zero on an
+          # unreadable directory, and it takes SIGPIPE when `head -1` closes
+          # early. The designed error below is a better diagnosis than either.
+          report=$(find "$HOME" -name soak-report.txt -type f -newer soak-started 2>/dev/null | head -1 || true)
+          if [ -z "$report" ]; then
+            echo "::error::no soak-report.txt under HOME; the harness never reached the point of reporting"
+            exit 1
+          fi
+
+          # Copied into the workspace so the upload step can reach it: the data
+          # directory is outside the checkout on every lane.
+          cp "$report" soak-report.txt
+          {
+            echo
+            echo "### report (from $report)"
+            echo '```'
+            cat soak-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat soak-report.txt
+
+          # macOS cannot read its own usage (`duja_platform::process` has no
+          # `task_info` reader), so it reports UNMEASURABLE and exits non-zero
+          # by construction; propagating that would paint the lane red for
+          # something the tree already documents. The other two lanes CAN
+          # measure, so a budget miss there is a real finding and must be red -
+          # swallowing it everywhere to accommodate the one platform that
+          # cannot measure would make this a check that only fails when the
+          # binary does not run at all.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "macOS is UNMEASURABLE by construction; exit code $code is not propagated"
+            exit 0
+          fi
+          exit "$code"
+
+      - name: Upload the report
+        # `always()` so a lane that failed the step above still hands back
+        # whatever it managed to write, which on a first run is the whole point.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: soak-${{ matrix.os }}
+          path: |
+            soak-stdout.txt
+            soak-report.txt
+          if-no-files-found: warn

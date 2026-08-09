@@ -10,13 +10,27 @@
 //! # Where the report goes, which on Windows is not the console
 //!
 //! **A release `duja.exe` is a GUI-subsystem binary** (`main.rs`'s
-//! `windows_subsystem = "windows"`), so it has no console: `eprintln!` lands on
-//! an invalid handle, std maps that to `Ok`, and every line this harness prints
-//! is silently discarded. The shell does not wait for it either, so the exit
-//! code — the whole of the "UNMEASURABLE is not a pass" guarantee — is
-//! unobservable too. `main.rs` has said this since P4 and P8 wave 3 wrote past
-//! it, which made the instrument useless on the one build worth soaking: the
-//! release one, since that is what the 35 MB budget is written against.
+//! `windows_subsystem = "windows"`), so Windows allocates it no console: run it
+//! from a shell and `eprintln!` lands on an invalid handle, std maps that to
+//! `Ok`, and every line this harness prints is silently discarded.
+//!
+//! **That is about output, and about a bare invocation.** Not allocating a
+//! console is not the same as having no standard handles: a parent that
+//! supplies them - `> out.txt 2>&1`, or a pipe - is inherited normally and the
+//! output arrives. `.github/workflows/soak.yml` redirects for exactly that
+//! reason and gets the text; a bare `duja.exe --soak ...` typed at a prompt
+//! does not, and that is the case this file exists for.
+//!
+//! A bare invocation also loses the **exit code**, because `cmd` does not wait
+//! for a GUI-subsystem process - so the whole of the "UNMEASURABLE is not a
+//! pass" guarantee is unobservable too. `docs/qa-checklist.md` gives the
+//! operator `start /wait duja.exe --soak ...` plus `echo %ERRORLEVEL%`, which is
+//! what buys that back; the wait is the point of `start /wait`, and a first
+//! version of this paragraph cited that command while still claiming the shell
+//! does not wait. `main.rs` has said the console half since P4 and P8 wave 3
+//! wrote past it, which made the instrument useless on the one build worth
+//! soaking: the release one, since that is what the 35 MB budget is written
+//! against.
 //!
 //! So the report is also **written to a file** — `soak-report.txt` beside the
 //! rotating log — and the path is printed. A run whose output went nowhere still
@@ -553,9 +567,12 @@ pub(crate) fn run(secs: u64, interval_secs: u64) -> anyhow::Result<ExitCode> {
 
     let report = soak.to_string();
     print!("{report}");
-    // Also to a file, because on a release Windows build the line above went
-    // nowhere: `windows_subsystem = "windows"` means no console, and std maps the
-    // invalid handle to `Ok`. See the module header.
+    // Also to a file, because on a release Windows build run bare the line
+    // above went nowhere: `windows_subsystem = "windows"` means Windows
+    // allocates no console, and std maps the invalid handle to `Ok`. A caller
+    // that supplies handles (a redirect, a pipe) does get the text - see the
+    // module header for that distinction. The file is what makes the numbers
+    // survive either way, and a long run outlive its shell.
     match write_report(&report) {
         Ok(path) => eprintln!("report written to {}", path.display()),
         Err(e) => eprintln!("could not write the report file: {e}"),
