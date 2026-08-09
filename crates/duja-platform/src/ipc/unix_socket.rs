@@ -1089,28 +1089,42 @@ fn probe_socket() -> Result<std::os::fd::OwnedFd, ()> {
 ///   check costs one `lstat` and the alternative is trusting an argument about
 ///   permissions at the moment a deletion happens.
 ///
-/// # This guard does nothing on macOS, and that is not a gap in it
+/// # One of the two arms below is inert on macOS, and saying which took three tries
 ///
-/// The first bullet is **Linux-only**, and an early version of this doc claimed
-/// both lanes. XNU's `unp_connect` rejects a non-socket earlier and differently —
-/// `if (vp->v_type != VSOCK) error = ENOTSOCK` — which [`classify`] sends to
-/// [`Attempt::Undecidable`], so `takeover_bind` refuses before reaching this
-/// function at all.
+/// The plain non-socket case is **Linux-only**. XNU's `unp_connect` rejects a
+/// non-socket earlier and differently — `if (vp->v_type != VSOCK) error =
+/// ENOTSOCK` — which [`classify`] sends to [`Attempt::Undecidable`], so
+/// `takeover_bind` refuses before reaching this function at all.
 ///
-/// So the only macOS route here is `ECONNREFUSED`, and **every** inode that
-/// produces it is a socket owned by us: XNU raises it for a null `v_socket` (a
-/// stale socket), for a listener that is not accepting — `SO_ACCEPTCONN` clear, or
-/// `sonewconn` returning null — and on the lock-reacquire path where `so_pcb` has
-/// gone. The argument is that shape, not a list: `unp_connect` has already
-/// resolved a `VSOCK` vnode inside a `0700` directory this uid owns before it can
-/// reach any of them. A first version of this paragraph *did* give a list, of two
-/// of those sites, and called it "the only" ones — a partial kernel read stated as
-/// exhaustive, which is the same mistake the paragraph above exists to correct.
+/// So the only macOS route here is `ECONNREFUSED`, and the **vnode `unp_connect`
+/// resolved** is in every case a socket owned by us: XNU raises that errno for a
+/// null `v_socket` (a stale socket), for a listener that is not accepting —
+/// `SO_ACCEPTCONN` clear, or `sonewconn` returning null — and on the
+/// lock-reacquire path where `so_pcb` has gone. The argument is that shape rather
+/// than a list of sites: it cannot reach any of them without having resolved a
+/// `VSOCK` vnode first.
 ///
-/// **Both `if` arms below are therefore dead on macOS**, and a green macOS lane is
-/// evidence of nothing about them. The *function* is not dead: the
-/// `symlink_metadata` above them can still fail if the inode vanishes between the
-/// probe and the `lstat`, which is the window the note below admits.
+/// **"The vnode it resolved" is not "the inode this function checks", and two
+/// versions of this paragraph treated them as one.** `unp_connect` looks the path
+/// up with `FOLLOW`; [`std::fs::symlink_metadata`] does not. So a symlink at the
+/// endpoint pointing at a stale socket elsewhere gives `ECONNREFUSED` from a
+/// `VSOCK` vnode that is somebody else's inode in some other directory, while the
+/// `lstat` here sees the **symlink** and the socket-type arm fires. That arm is
+/// live on macOS, and it is the arm that refuses a planted symlink — for exactly
+/// the reason the `lstat`-not-`stat` note below gives, which is why the two
+/// paragraphs contradicted each other until now.
+///
+/// What *is* inert on macOS is the **uid** arm: reaching it means the `lstat` saw
+/// a socket, and the `0700` parent this uid owns is what makes a foreign-owned one
+/// unreachable there. A green macOS lane is evidence of nothing about that arm.
+/// (An earlier version of this paragraph gave a two-site list and called it "the
+/// only" routes — a partial kernel read stated as exhaustive, which is the mistake
+/// the paragraph above exists to correct. The version after it called both arms
+/// dead, which is the one this replaces.)
+///
+/// The *function* is not dead on either lane regardless: the `symlink_metadata`
+/// above both arms can fail if the inode vanishes between the probe and the
+/// `lstat`, which is the window the note below admits.
 ///
 /// Worth saying because the alternative is the shape this project rates worst: a
 /// guard that reads as covering two platforms, whose test passes on both, and
@@ -1753,6 +1767,51 @@ mod tests {
             "the live server's socket was unlinked: every client that reaches it \
              by path is now cut off, which is the defect this module exists to \
              prevent"
+        );
+    }
+
+    /// **A symlink at the endpoint is refused, and this is the arm three review
+    /// rounds argued about.**
+    ///
+    /// Both kernels resolve a `connect` path with `FOLLOW` - Linux through
+    /// `unix_find_other`'s `kern_path`, XNU through `NDINIT(..., FOLLOW |
+    /// LOCKLEAF, ...)` - while `symlink_metadata` does not. So a symlink pointing
+    /// at a stale socket somewhere else answers `ECONNREFUSED` from a vnode that
+    /// is a socket, and `unlink_target_is_ours` then inspects the **symlink** and
+    /// refuses. Without it, `remove_file` would unlink the symlink and `bind` would
+    /// put duja's endpoint wherever an attacker aimed it.
+    ///
+    /// It exists because a doc comment claimed this arm was dead on macOS and a
+    /// review had to read two kernels to show otherwise. An argument that needs a
+    /// kernel source read to check is one a test should be making, and this is
+    /// cheap enough that there was no excuse.
+    #[test]
+    fn a_symlink_at_the_endpoint_is_not_followed_and_not_unlinked() {
+        let dir = tempfile::tempdir().expect("a temp dir must be creatable");
+        let elsewhere = dir.path().join("elsewhere.sock");
+        let endpoint = dir.path().join("ctl.sock");
+
+        // A real socket inode with nothing listening on it: `std` does not unlink
+        // on drop, so the file outlives the listener and a connect to it is
+        // refused - the shape a stale socket has.
+        drop(UnixListener::bind(&elsewhere).expect("the decoy listener must bind"));
+        std::os::unix::fs::symlink(&elsewhere, &endpoint).expect("the symlink must be creatable");
+
+        let outcome = takeover_bind_bounded(&endpoint);
+
+        assert!(
+            outcome.is_err(),
+            "a symlink is not duja's socket, and takeover_bind must refuse rather              than unlink it and bind over the name"
+        );
+        assert!(
+            endpoint
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink()),
+            "the symlink was replaced: duja's endpoint is now wherever this              pointed, which is the whole point of following one"
+        );
+        assert!(
+            elsewhere.exists(),
+            "the symlink's target was unlinked, so the check followed it"
         );
     }
 
