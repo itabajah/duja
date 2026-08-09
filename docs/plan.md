@@ -138,7 +138,15 @@ intended rather than falling short: an instrument row drains when the budget it
 serves can be checked, and three of these budgets still need hardware or a day
 of wall clock that CI cannot give.
 
-What is left of the phase is [D-076](debt.md#d-076) from wave 4.
+What is left of the phase is [D-076](debt.md#d-076) from wave 4, and it
+**narrowed in `#168` rather than draining**. The unbounded wait its title names is
+gone - a non-blocking `connect` makes Linux answer `EAGAIN`, which is positive
+evidence of a listener rather than a timeout to wait out, so the wait was removed
+rather than shortened. What stays open is the BSD half: `ECONNREFUSED` there
+means either a dead inode or a full backlog, and a retry budget long enough to
+tell them apart is longer than the bind lock the probe is held under. That is the
+third row this phase has narrowed rather than closed, and the reason is the same
+each time - the remedy the row named turned out not to be the one that fits.
 [D-059](debt-archive.md#d-059), which wave 1 turned out not to touch, drained in
 `#167` on a mechanism no wave had planned: a witness type rather than a test.
 Worth one line of the reason, because it is the fourth time this phase has met

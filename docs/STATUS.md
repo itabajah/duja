@@ -8,7 +8,9 @@ that predates them, and [D-059](debt-archive.md#d-059), wave 1's leftover, which
 closed on a witness type rather than on the test seam it had been grouped with
 for three checkpoints. **All four waves have landed something**, wave 3's
 instruments among them; see [plan.md](plan.md). One row is what is left of the
-*phase's plan*, [D-076](debt.md#d-076) - which is not the same as one open row:
+*phase's plan*, [D-076](debt.md#d-076), and it **narrowed rather than drained**:
+the unbounded wait its title names is gone, and a BSD refusal no budget can tell
+apart from a full backlog is what is left. Which is not the same as one open row:
 the four rows wave 3 worked are all still open, because an instrument row drains
 when the budget it serves can be checked. The ports ship as **unverified
 previews** rather than as confirmed platforms

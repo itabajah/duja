@@ -38,9 +38,25 @@
 //!   ([`peer_allowed`]) is unit-tested (CI cannot switch uid, so the *decision*
 //!   is tested, not the syscall).
 //! - **Stale-socket handling** doubles as the single-instance answer: if `bind`
-//!   fails with `AddrInUse`, we try to *connect* — a refusal means the previous
-//!   owner is gone (a stale inode), so we unlink and rebind; a successful connect
-//!   means a live server already owns the name and we refuse to start a second.
+//!   fails with `AddrInUse`, we try to *connect*. What that answers **differs by
+//!   platform**, and two versions of this bullet have now hidden it — first by
+//!   saying a refusal means the socket is ours to delete, then by saying a full
+//!   backlog always makes us refuse to start:
+//!   - a **successful connect** means a live server owns the name, on both, and we
+//!     refuse to start a second;
+//!   - a **full backlog** answers `EAGAIN` on Linux, which only a listener can
+//!     produce, so that is a refusal to start too. On the BSDs it answers
+//!     `ECONNREFUSED`, and the next line is what happens then;
+//!   - a **refusal** means nothing is listening — on Linux. On the BSDs it means
+//!     that *or* a full backlog, with nothing to tell them apart, so a live
+//!     server's socket can still be unlinked there. That is the half of
+//!     `docs/debt.md`'s D-076 still open, and it is a property of the kernel's
+//!     answer rather than of this code.
+//!
+//!   Where a refusal *is* believed, the unlink is gated on the inode being a
+//!   socket and being ours ([`unlink_target_is_ours`]) — which is a different
+//!   distinction from the one above, and is the one the BSDs do let anyone make.
+//!   See [`takeover_bind`].
 //!   (On Windows the equivalent split is `FILE_FLAG_FIRST_PIPE_INSTANCE` plus the
 //!   named single-instance mutex; here the bound socket *is* the instance token.)
 //!   Because that sequence is several steps against a shared name rather than one
@@ -763,33 +779,399 @@ struct BoundSocket {
 /// connections from a process of the same uid to fill that backlog — std passes
 /// `listen(fd, -1)`, so the depth is `somaxconn` on Linux (4096 by default since
 /// 5.4) and 128 on Apple — which is inside the trust boundary and so is self-harm
-/// rather than an attack. But the two platforms then fail differently and neither
-/// is benign:
+/// rather than an attack, and the deliberate flood is still required: this
+/// module's listener stopping at [`MAX_CONNECTIONS`] is four connections in
+/// flight, not a full backlog, and 128 or 4096 more have to be queued on top of
+/// it. What the cap changes is only that those queued connections are not being
+/// drained *while* it holds, which is why the window is wider than the count
+/// suggests — not that the state arrives on its own.
 ///
-/// - On the BSDs `connect` returns `ECONNREFUSED`, so a **live** server is misread
-///   as stale and its socket is unlinked — the exact defect this module exists to
-///   prevent, reached by a route the lock cannot see.
-/// - On Linux `unix_stream_connect` finds the receive queue full and waits, with
-///   no send timeout on a blocking socket, for an `accept` that may never come.
-///   That is the one unbounded wait left in a module that bounds everything else,
-///   and it happens while holding [`BindLock`], so it times every other starter
-///   out at [`LOCK_WAIT`] as well.
+/// The two platforms then fail differently, and **only one of the two failures
+/// closes here.**
 ///
-/// The probe predates this change; what is new is that it now runs under the lock,
-/// which widens the second case from "this instance stalls" to "every instance
-/// stalls". Recorded in `docs/debt.md` rather than fixed here: bounding it means a
-/// non-blocking `connect` plus a `poll`, which is a different change from a
-/// locking fix and would be the third mechanism in one PR.
+/// - **Linux: fixed, and not merely bounded.** `unix_stream_connect` used to find
+///   the receive queue full and wait, with no send timeout on a blocking socket,
+///   for an `accept` that may never come — the one unbounded wait left in a module
+///   that bounds everything else, and it ran under [`BindLock`], so it timed every
+///   other starter out at [`LOCK_WAIT`] too. The probe is non-blocking now, and
+///   the kernel answers `EAGAIN` immediately. That errno is *positive evidence of a
+///   listener* rather than a timeout to wait out: `unix_recvq_full_lockless` is
+///   reached only after `unix_find_other` has resolved a live peer socket. So the
+///   wait is not shortened, it is gone, and the answer it produces is the right
+///   one.
+/// - **The BSDs: not fixed, and a retry budget cannot fix it here.** XNU's
+///   `unp_connect` answers `ECONNREFUSED` when `so_qlen >= so_qlimit`, which is
+///   byte-identical to the answer for a dead inode. A budget long enough to
+///   outlast a live server's worst-case drain is the obvious repair and it does
+///   not fit: draining takes up to [`MAX_CONNECTIONS`] exchanges through
+///   [`MAX_HANDLER_THREADS`] threads, each bounded by [`READ_TIMEOUT`] and
+///   [`WRITE_TIMEOUT`], which is longer than [`LOCK_WAIT`] — and this probe runs
+///   **holding** [`BindLock`], so a budget that could work would time out every
+///   other starter to buy one instance a better guess. A shorter budget is a
+///   heuristic that reads as a fix. [`D-076`] carries what is left, narrowed to
+///   this.
+///
+/// What the refusal arm *does* gain is [`unlink_target_is_ours`]: a refusal says
+/// "nothing is listening", never "this is mine to delete", and those are different
+/// claims. The row asked for an `fstat` owner check and that is not available —
+/// there is no descriptor for the peer on a refusal, and one for our own probe
+/// socket describes the wrong thing. The check that guards [`std::fs::remove_file`]
+/// is a check on what `remove_file` resolves, which is an `lstat` of the path.
+///
+/// [`D-076`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-076
 fn takeover_bind(path: &Path) -> Result<UnixListener, IpcTransportError> {
-    if UnixStream::connect(path).is_ok() {
-        // A live server accepted the probe: we are the second instance.
-        return Err(IpcTransportError::Io(
+    let bind_now = || UnixListener::bind(path).map_err(|e| IpcTransportError::Io(e.to_string()));
+    match probe_liveness(path) {
+        // Someone is listening, or something answered in a way that does not rule
+        // it out. Either way this is not ours to take over.
+        Liveness::Live => Err(IpcTransportError::Io(
             "another duja IPC server is already listening on this socket".to_owned(),
-        ));
+        )),
+        Liveness::Undecidable => Err(IpcTransportError::Io(
+            "could not determine whether the socket at this path is live; refusing \
+             to unlink it"
+                .to_owned(),
+        )),
+        // The inode went away between the caller's `AddrInUse` and this probe. The
+        // unlink would fail `NotFound` and lose a bind that would have worked.
+        Liveness::Vanished => bind_now(),
+        Liveness::Stale => {
+            unlink_target_is_ours(path)?;
+            std::fs::remove_file(path).map_err(|e| IpcTransportError::Io(e.to_string()))?;
+            bind_now()
+        }
     }
-    // Refused (or otherwise unconnectable): the inode is stale. Unlink and rebind.
-    std::fs::remove_file(path).map_err(|e| IpcTransportError::Io(e.to_string()))?;
-    UnixListener::bind(path).map_err(|e| IpcTransportError::Io(e.to_string()))
+}
+
+/// How long [`probe_liveness`] may spend before it gives up and refuses to unlink.
+///
+/// **Not a latency budget, and none of the common paths spend it.** A connect to a
+/// live listener, to a full backlog, or to a dead inode all answer on the first
+/// syscall. This bounds one arm only — a connect the kernel reports as still in
+/// flight — which for `AF_UNIX` is rare, since both kernels complete the handshake
+/// inside `connect` when there is queue room.
+///
+/// Two things size it, and neither is a measurement: it runs while [`BindLock`] is
+/// held, so it must stay far below [`LOCK_WAIT`] or a slow probe becomes every
+/// concurrent starter's problem — the escalation that put this row in `debt.md`;
+/// and it must outlast the readiness of a connect that has already been queued,
+/// which is a wakeup rather than any I/O. 250 ms is a twentieth of `LOCK_WAIT` and
+/// several orders of magnitude above that wakeup. It is a reasoned bound and it
+/// says so rather than implying it was timed.
+const PROBE_BUDGET: Duration = Duration::from_millis(250);
+
+/// What one `connect` attempt says about the endpoint.
+///
+/// Split out from the verdict so the mapping from errno to meaning is a pure
+/// function, testable on every lane rather than only where a socket can be made to
+/// misbehave.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Attempt {
+    /// The connect completed. Only a live listener produces this.
+    Connected,
+    /// The listener's receive queue is full. **Also only a live listener**, which
+    /// is the whole reason this is not folded in with `Refused`: on Linux it is
+    /// the answer that used to be an unbounded wait.
+    BacklogFull,
+    /// The kernel took the connect but has not finished it. Poll, then ask the
+    /// socket what happened.
+    InFlight,
+    /// The kernel refused. On Linux that means no listener; on the BSDs it means
+    /// either no listener or a full backlog, and nothing here can tell which.
+    Refused,
+    /// Nothing at the path.
+    Vanished,
+    /// Anything else — a permission failure, a name too long, an unexpected errno.
+    Undecidable,
+}
+
+/// The whole probe's answer, which is a decision about whether to destroy an inode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Liveness {
+    /// Do not unlink: something is listening, or might be.
+    Live,
+    /// Unlink is permitted, subject to [`unlink_target_is_ours`].
+    Stale,
+    /// Nothing to unlink; bind straight away.
+    Vanished,
+    /// Do not unlink: the probe could not answer.
+    Undecidable,
+}
+
+/// POSIX permits `EWOULDBLOCK` to differ from `EAGAIN`, and [`classify`] names
+/// only the latter — naming both is an unreachable pattern the compiler rejects
+/// on every target this builds for. On a target where they did differ, a full
+/// backlog would fall through to [`Attempt::Undecidable`]: safe, since that
+/// refuses to unlink, but the Linux arm would silently stop working and nothing
+/// would say why. This is the line that notices.
+const _: () = assert!(libc::EAGAIN == libc::EWOULDBLOCK);
+
+/// Map a raw `connect` errno to what it says.
+///
+/// `EINTR` joins the in-flight arm rather than being retried: an interrupted
+/// `connect` continues in the background, so the socket — not a second
+/// `connect` — is what has the answer.
+///
+/// `ENOTSOCK` is not listed and lands in [`Attempt::Undecidable`] deliberately.
+/// It is **XNU's** answer for a path that exists and is not a socket, where Linux
+/// answers `ECONNREFUSED`; `Undecidable` refuses to unlink, which is the same
+/// outcome the Linux arm reaches through [`unlink_target_is_ours`], by a different
+/// route. See that function for why the two routes matter.
+const fn classify(raw: i32) -> Attempt {
+    match raw {
+        libc::ECONNREFUSED => Attempt::Refused,
+        libc::EAGAIN => Attempt::BacklogFull,
+        libc::EINPROGRESS | libc::EALREADY | libc::EINTR => Attempt::InFlight,
+        libc::ENOENT => Attempt::Vanished,
+        _ => Attempt::Undecidable,
+    }
+}
+
+/// What one attempt settles, or `None` if the probe should look again.
+///
+/// Every uncertain answer resolves toward [`Liveness::Live`] or
+/// [`Liveness::Undecidable`], because the action on the other side is an unlink and
+/// there is no undoing one. A wrong `Live` costs a start that reports "already
+/// listening"; a wrong `Stale` costs a running server its endpoint.
+///
+/// The `match` is wildcard-free on purpose: it is the one line a new [`Attempt`]
+/// variant fails to compile at. If you are here because of that, the test module's
+/// `ALL_ATTEMPTS` needs the variant too — nothing forces it, and the property test
+/// that says "nothing but a refusal authorises an unlink" silently narrows to a
+/// sample if it is forgotten.
+const fn settle(attempt: Attempt) -> Option<Liveness> {
+    match attempt {
+        Attempt::Connected | Attempt::BacklogFull => Some(Liveness::Live),
+        Attempt::Refused => Some(Liveness::Stale),
+        Attempt::Vanished => Some(Liveness::Vanished),
+        Attempt::Undecidable => Some(Liveness::Undecidable),
+        // The only arm that asks for another look.
+        Attempt::InFlight => None,
+    }
+}
+
+/// Is anything listening at `path`?
+///
+/// **One connect, not a retry loop**, and that is a correctness point rather than
+/// an economy. Every answer either kernel gives to an `AF_UNIX` `connect` is
+/// synchronous — connected, `EAGAIN`, `ECONNREFUSED`, `ENOENT` — so a second
+/// attempt would learn nothing the first did not. An earlier version looped, and
+/// the loop was wrong twice over: it built a **fresh socket each pass**, so an
+/// in-flight connect could never resolve across iterations, and every pass would
+/// have left an abandoned half-open connection on the target's backlog. The only
+/// wait that can pay for itself is on the socket that already has the connect,
+/// and that lives inside [`attempt_connect`].
+///
+/// [`Instant::checked_add`] overflowing gets a branch it will never take, because
+/// the alternative is handing a `None` to [`slice_until`], where `None` means "no
+/// deadline, take a full slice" — which would turn the bounded wait below into an
+/// unbounded one. That is the defect this whole change removes, reintroduced
+/// through a type the two functions share, and "unreachable" is what both of this
+/// row's bugs were called too.
+fn probe_liveness(path: &Path) -> Liveness {
+    let Some(deadline) = Instant::now().checked_add(PROBE_BUDGET) else {
+        return Liveness::Undecidable;
+    };
+    match attempt_connect(path, Some(deadline)) {
+        // The only unsettled attempt is one still in flight, and "slow" is not
+        // "absent": something took the connect, so this is not ours to unlink.
+        Ok(attempt) => settle(attempt).unwrap_or(Liveness::Live),
+        Err(()) => Liveness::Undecidable,
+    }
+}
+
+/// One non-blocking `connect`, including the `poll` + `SO_ERROR` follow-up when
+/// the kernel reports the connect as still in flight.
+///
+/// `Err(())` means the probe itself failed — no socket, an unrepresentable path, a
+/// `poll` fault — which the caller turns into [`Liveness::Undecidable`] rather than
+/// into permission to unlink.
+///
+/// # The in-flight arm is not reachable on either kernel this builds for
+///
+/// Stated plainly rather than hedged as "rare", which is what this said first.
+/// Linux's `unix_stream_connect` has no `-EINPROGRESS` in its path and cannot
+/// return `EINTR` with `timeo == 0` because it never sleeps; XNU's `connectit`
+/// raises `EINPROGRESS` only when `SS_ISCONNECTING` survives `soconnect`, and
+/// `unp_connect` calls `soisconnected` synchronously. So `PROBE_BUDGET`, the poll
+/// below and [`Attempt::InFlight`] are all dead today.
+///
+/// They are here anyway because the alternative is not "less code" but "a wrong
+/// answer if a kernel ever changes its mind": without them an `EINPROGRESS` falls
+/// into [`Attempt::Undecidable`], and a probe that cannot decide refuses to start
+/// the server. The loop polls **the same socket** the connect is pending on, which
+/// is the whole difference from the version that looped over fresh ones.
+fn attempt_connect(path: &Path, deadline: Option<Instant>) -> Result<Attempt, ()> {
+    let sock = probe_socket()?;
+    let addr = rustix::net::SocketAddrUnix::new(path).map_err(|_| ())?;
+    match rustix::net::connect(&sock, &addr) {
+        Ok(()) => return Ok(Attempt::Connected),
+        Err(e) => {
+            let attempt = classify(e.raw_os_error());
+            if attempt != Attempt::InFlight {
+                return Ok(attempt);
+            }
+        }
+    }
+    // In flight: wait for writability on this socket, then ask it for the real
+    // outcome. `SO_ERROR` is the only thing that distinguishes "connected" from
+    // "refused" once `connect` has returned `EINPROGRESS`. `slice_until` is what
+    // ends this: it answers `Err` once the deadline has passed.
+    loop {
+        let Ok(slice) = slice_until(deadline) else {
+            return Ok(Attempt::InFlight);
+        };
+        // `Ok(false)` is the slice elapsing or `poll` being interrupted: fall
+        // out of the match, re-check the deadline at the top, and wait on the
+        // same socket again.
+        match poll_ready(sock.as_raw_fd(), libc::POLLOUT, slice) {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(_) => return Err(()),
+        }
+    }
+    match rustix::net::sockopt::socket_error(&sock) {
+        Ok(Ok(())) => Ok(Attempt::Connected),
+        Ok(Err(e)) => Ok(classify(e.raw_os_error())),
+        Err(_) => Err(()),
+    }
+}
+
+/// A close-on-exec, non-blocking `AF_UNIX` stream socket.
+///
+/// `SocketFlags::NONBLOCK`/`CLOEXEC` are not taken here because rustix gates both
+/// out on Apple — they are `SOCK_*` type bits that only Linux and the newer BSDs
+/// accept in `socket()`. Two `fcntl`s set the same properties on both targets, so
+/// this stays one code path rather than a `cfg` split.
+///
+/// `CLOEXEC` is not decoration, for the reason [`pin_inode`] gives: `duja-app`'s
+/// tray has a live `exec` path, since "Restart" spawns a detached
+/// `duja --relaunch` while the outgoing server is still up.
+///
+/// Setting it by `fcntl` leaves a window between the two syscalls that
+/// `SOCK_CLOEXEC` would not, and that is stated rather than glossed: a `fork` +
+/// `exec` landing inside it hands the child an unconnected probe socket it then
+/// holds for its life. One leaked descriptor in an unrelated process, not a
+/// correctness fault - the probe never carries data. Closing the window would
+/// mean a `cfg` split that is atomic on Linux and unchanged on Apple, which buys
+/// half a guarantee for a second code path on the arm that decides whether to
+/// delete a socket.
+fn probe_socket() -> Result<std::os::fd::OwnedFd, ()> {
+    let sock = rustix::net::socket_with(
+        rustix::net::AddressFamily::UNIX,
+        rustix::net::SocketType::STREAM,
+        rustix::net::SocketFlags::empty(),
+        None,
+    )
+    .map_err(|_| ())?;
+    rustix::io::fcntl_setfd(&sock, rustix::io::FdFlags::CLOEXEC).map_err(|_| ())?;
+    let flags = rustix::fs::fcntl_getfl(&sock).map_err(|_| ())?;
+    rustix::fs::fcntl_setfl(&sock, flags | rustix::fs::OFlags::NONBLOCK).map_err(|_| ())?;
+    Ok(sock)
+}
+
+/// The last check before [`std::fs::remove_file`]: the thing about to be unlinked
+/// must be a socket, and it must be ours.
+///
+/// A refusal answers "nothing is listening at this name". It does not answer "this
+/// name is mine to delete", and the two get conflated because the common case makes
+/// them coincide. They come apart in two ways that matter, and both end in a
+/// deletion that erases evidence:
+///
+/// - the path is **not a socket**. Linux's `unix_find_other` refuses a
+///   non-`S_ISSOCK` inode with `ECONNREFUSED`, indistinguishably from a dead
+///   socket, so a regular file dropped into the endpoint's directory would be
+///   deleted and bound over. Nothing in Duja puts one there, which is the point:
+///   its presence means something has gone wrong, and unlinking it destroys the
+///   only trace.
+/// - the path is **not ours**. The directory is `0700` and this process owns it, so
+///   a foreign-owned inode inside it is not reachable by the threat model — but the
+///   check costs one `lstat` and the alternative is trusting an argument about
+///   permissions at the moment a deletion happens.
+///
+/// # Which of the two arms below is inert, and where
+///
+/// The plain non-socket case is **Linux-only**. XNU's `unp_connect` rejects a
+/// non-socket earlier and differently — `if (vp->v_type != VSOCK) error =
+/// ENOTSOCK` — which [`classify`] sends to [`Attempt::Undecidable`], so
+/// `takeover_bind` refuses before reaching this function at all.
+///
+/// So the only macOS route here is `ECONNREFUSED`, and the **vnode `unp_connect`
+/// resolved** is in every case a socket: XNU raises that errno for a
+/// null `v_socket` (a stale socket), for a listener that is not accepting —
+/// `SO_ACCEPTCONN` clear, or `sonewconn` returning null — and on the
+/// lock-reacquire path where `so_pcb` has gone. The argument is that shape rather
+/// than a list of sites: it cannot reach any of them without having resolved a
+/// `VSOCK` vnode first.
+///
+/// **"The vnode it resolved" is not "the inode this function checks", and two
+/// versions of this paragraph treated them as one.** `unp_connect` looks the path
+/// up with `FOLLOW`; [`std::fs::symlink_metadata`] does not. So a symlink at the
+/// endpoint pointing at a stale socket elsewhere gives `ECONNREFUSED` from a
+/// `VSOCK` vnode that is somebody else's inode in some other directory, while the
+/// `lstat` here sees the **symlink** and the socket-type arm fires. That arm is
+/// live on macOS, and it is the arm that refuses a planted symlink — for exactly
+/// the reason the `lstat`-not-`stat` note below gives, which is why the two
+/// paragraphs contradicted each other until now.
+///
+/// The **uid** arm is the inert one, and it is inert on **both** lanes rather than
+/// on macOS: reaching it means the `lstat` saw a socket at this path, and putting a
+/// foreign-owned socket inside a `0700` directory this euid owns needs either us or
+/// root. What is macOS-specific is narrower — the socket-type arm loses its
+/// regular-file route there (that is the `ENOTSOCK` above) and keeps only the
+/// symlink one.
+///
+/// (Earlier versions got that split wrong in three different ways - a two-site
+/// kernel list called "the only" routes, then both arms called dead, then the uid
+/// arm called macOS-specific - and the count of versions is deliberately not here,
+/// because a tally in a comment is a shape this crate has already had removed
+/// once, in `#132`. The counterexamples are the part worth keeping.)
+///
+/// The *function* is not dead on either lane regardless: the `symlink_metadata`
+/// above both arms can fail if the inode vanishes between the probe and the
+/// `lstat`, which is the window the note below admits.
+///
+/// Worth saying because the alternative is the shape this project rates worst: a
+/// guard that reads as covering two platforms, whose test passes on both, and
+/// which on one of them would pass just as well if it were deleted.
+///
+/// `lstat` rather than `stat`, and that difference is load-bearing rather than
+/// stylistic: `remove_file` unlinks **the symlink**, not its target, so following
+/// one here would check the wrong inode's ownership. A symlink also fails the
+/// socket test, so a planted one is refused on both counts. Note the asymmetry with
+/// [`socket_identity`], which uses `std::fs::metadata` and does follow.
+///
+/// The `lstat` and the `remove_file` are not atomic, so this narrows the window
+/// rather than closing it — it is still an argument about permissions, made a few
+/// microseconds earlier. What makes that acceptable is the same thing that makes
+/// the whole module's inode handling acceptable: a `0700` parent this process
+/// owns, and [`BindLock`] held across all of it. Said plainly because the sentence
+/// above contrasts this check with "trusting an argument", and it is one.
+fn unlink_target_is_ours(path: &Path) -> Result<(), IpcTransportError> {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|e| IpcTransportError::Io(format!("cannot inspect {}: {e}", path.display())))?;
+    if !meta.file_type().is_socket() {
+        // Name the remedy. This refusal is permanent and self-heals nowhere: on
+        // macOS the endpoint lives in Application Support, which archivers and
+        // Migration Assistant restore as a plain file, and `duja-app` reacts to a
+        // dead IPC server by logging a warning and running without it - so a user
+        // who is not told to remove this gets a silent, permanent loss of the
+        // control API. Recorded in the D-076 row as a residual, not a fix.
+        return Err(IpcTransportError::Io(format!(
+            "{} exists and is not a socket; refusing to unlink it - remove it by \
+             hand if it is left over",
+            path.display()
+        )));
+    }
+    if meta.uid() != our_euid() {
+        return Err(IpcTransportError::Io(format!(
+            "{} is owned by another user; refusing to unlink it",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Take a descriptor that keeps `path`'s inode from being freed, so its number
@@ -1151,6 +1533,346 @@ mod tests {
         assert_eq!(
             linux_socket_path(None, 1000),
             PathBuf::from("/tmp/duja-1000/ctl.sock")
+        );
+    }
+
+    // --- D-076: the liveness probe that decides whether to unlink ---
+
+    /// Every attempt this probe can produce, so the property test below is a
+    /// closed enumeration rather than a sample.
+    ///
+    /// **Closed by convention, not by the compiler**, and the difference is worth
+    /// stating in a file about checks that cannot fail. An earlier version of this
+    /// doc said a new `Attempt` variant "fails to compile, because the array's
+    /// length is asserted" — nothing is asserted; `[Attempt; 6]` is a type
+    /// annotation on a hand-written literal. What a seventh variant really breaks
+    /// is [`super::settle`]'s wildcard-free `match`, and whoever adds an arm there
+    /// has to remember this list too. `settle`'s own doc points back here for
+    /// exactly that reason.
+    const ALL_ATTEMPTS: [Attempt; 6] = [
+        Attempt::Connected,
+        Attempt::BacklogFull,
+        Attempt::InFlight,
+        Attempt::Refused,
+        Attempt::Vanished,
+        Attempt::Undecidable,
+    ];
+
+    /// Each errno maps to what it *proves*, not to what it looks like.
+    ///
+    /// The one worth reading is `EAGAIN`. It reads like "try again" and it is not:
+    /// `unix_stream_connect` reaches that branch only after `unix_find_other` has
+    /// resolved a peer *and* that peer has been checked to be in `TCP_LISTEN`, so
+    /// it is positive evidence of a live server. Treating it as a retry is what
+    /// made this an unbounded wait.
+    #[test]
+    fn a_connect_errno_classifies_by_what_it_proves() {
+        assert_eq!(classify(libc::ECONNREFUSED), Attempt::Refused);
+        assert_eq!(classify(libc::EAGAIN), Attempt::BacklogFull);
+        assert_eq!(classify(libc::EINPROGRESS), Attempt::InFlight);
+        assert_eq!(classify(libc::EALREADY), Attempt::InFlight);
+        assert_eq!(classify(libc::EINTR), Attempt::InFlight);
+        assert_eq!(classify(libc::ENOENT), Attempt::Vanished);
+        // Not an exhaustive list of what cannot happen - a representative one.
+        // Everything unrecognised must land somewhere that refuses to unlink.
+        assert_eq!(classify(libc::EACCES), Attempt::Undecidable);
+        assert_eq!(classify(libc::ENOTSOCK), Attempt::Undecidable);
+        assert_eq!(classify(0), Attempt::Undecidable);
+    }
+
+    /// **A refusal is the only thing that may authorise an unlink.**
+    ///
+    /// Stated as a property over the closed set rather than as six equalities,
+    /// because the failure this guards against is somebody adding a seventh
+    /// attempt and reaching for `Stale` to make a case work. Six equalities would
+    /// all still pass.
+    #[test]
+    fn nothing_but_a_refusal_authorises_an_unlink() {
+        for attempt in ALL_ATTEMPTS {
+            if attempt == Attempt::Refused {
+                continue;
+            }
+            assert_ne!(
+                settle(attempt),
+                Some(Liveness::Stale),
+                "{attempt:?} authorised an unlink; only a refusal may, because the \
+                 action on the other side destroys a running server's endpoint and \
+                 there is no undoing it"
+            );
+        }
+        assert_eq!(settle(Attempt::Refused), Some(Liveness::Stale));
+    }
+
+    /// A full backlog is a live server, and settling on it is what removed the
+    /// wait rather than shortening it.
+    #[test]
+    fn a_full_backlog_settles_as_live_without_waiting() {
+        assert_eq!(settle(Attempt::BacklogFull), Some(Liveness::Live));
+        assert_eq!(settle(Attempt::Connected), Some(Liveness::Live));
+        // The one arm that asks for another look, and the only reason
+        // `PROBE_BUDGET` exists at all.
+        assert_eq!(settle(Attempt::InFlight), None);
+    }
+
+    /// The probe's bound has to be small against the lock it is held under, or
+    /// bounding it solves nothing: `#114` widened this from "this instance stalls"
+    /// to "every concurrent starter stalls", and that is the half a budget fixes.
+    #[test]
+    fn the_probe_budget_is_small_against_the_bind_lock() {
+        assert!(
+            PROBE_BUDGET.saturating_mul(4) < LOCK_WAIT,
+            "PROBE_BUDGET {PROBE_BUDGET:?} is not comfortably inside LOCK_WAIT \
+             {LOCK_WAIT:?}"
+        );
+    }
+
+    /// How long a test gives the probe before calling it hung.
+    ///
+    /// Not a latency budget: the probe's own bound is `PROBE_BUDGET` and the
+    /// paths these tests take do not spend it. This exists so the *historical*
+    /// defect - a blocking `connect` into a full backlog, which waits for an
+    /// `accept` that never comes - surfaces as a named failing test rather than
+    /// as a hung suite.
+    const PROBE_JOIN_DEADLINE: Duration = Duration::from_secs(3);
+
+    /// Run `takeover_bind` on its own thread and refuse to wait forever for it.
+    ///
+    /// The thread is deliberately not joined on the timeout path: the historical
+    /// defect leaves it parked in `connect` with no way to interrupt it, and a
+    /// test that joined would inherit exactly the hang it is reporting. It is a
+    /// leaked thread in a failing test process, which is the cheaper of the two.
+    fn takeover_bind_bounded(path: &Path) -> Result<UnixListener, IpcTransportError> {
+        let (tx, rx) = bounded(1);
+        let probed = path.to_path_buf();
+        thread::Builder::new()
+            .name("d076-probe".to_owned())
+            .spawn(move || {
+                let _ = tx.send(takeover_bind(&probed));
+            })
+            .expect("the probe thread must spawn");
+        match rx.recv_timeout(PROBE_JOIN_DEADLINE) {
+            Ok(result) => result,
+            Err(e) => panic!(
+                "the liveness probe did not return within {PROBE_JOIN_DEADLINE:?} ({e}): \
+                 it is waiting on a peer that never answers, which is the unbounded \
+                 wait D-076 is about"
+            ),
+        }
+    }
+
+    /// A non-blocking `connect`, for filling a backlog without blocking on the
+    /// connect that finds it full - which is the very hang under test.
+    ///
+    /// Gated with its only caller rather than left ungated: a helper used solely
+    /// by a `cfg(target_os = "linux")` test is dead code on the other two lanes,
+    /// and `clippy -D warnings` fails there while Linux stays green. That is
+    /// [`D-045`](https://github.com/itabajah/duja/blob/main/docs/debt-archive.md#d-045)'s
+    /// lesson arriving a second time, and it cost a cross-check round here too.
+    #[cfg(target_os = "linux")]
+    fn try_connect(path: &Path) -> Result<std::os::fd::OwnedFd, i32> {
+        let sock = rustix::net::socket_with(
+            rustix::net::AddressFamily::UNIX,
+            rustix::net::SocketType::STREAM,
+            rustix::net::SocketFlags::empty(),
+            None,
+        )
+        .expect("a unix socket must be creatable");
+        let flags = rustix::fs::fcntl_getfl(&sock).expect("F_GETFL must work");
+        rustix::fs::fcntl_setfl(&sock, flags | rustix::fs::OFlags::NONBLOCK)
+            .expect("F_SETFL must work");
+        let addr = rustix::net::SocketAddrUnix::new(path).expect("the path must fit in sun_path");
+        match rustix::net::connect(&sock, &addr) {
+            Ok(()) => Ok(sock),
+            Err(e) => Err(e.raw_os_error()),
+        }
+    }
+
+    /// A listener bound at `path` with the smallest backlog the kernel accepts,
+    /// so filling it costs a handful of connects rather than `somaxconn` of them.
+    ///
+    /// `std`'s `UnixListener::bind` passes `listen(fd, -1)` on Linux, which the
+    /// kernel clamps to `somaxconn` (4096 since 5.4); on Apple it passes the
+    /// literal `128`. Neither is fillable in a test, and that is the whole reason
+    /// this goes through `rustix` instead.
+    #[cfg(target_os = "linux")]
+    fn listener_with_backlog(path: &Path, backlog: i32) -> std::os::fd::OwnedFd {
+        let sock = rustix::net::socket_with(
+            rustix::net::AddressFamily::UNIX,
+            rustix::net::SocketType::STREAM,
+            rustix::net::SocketFlags::empty(),
+            None,
+        )
+        .expect("a unix socket must be creatable");
+        let addr = rustix::net::SocketAddrUnix::new(path).expect("the path must fit in sun_path");
+        rustix::net::bind(&sock, &addr).expect("the listener must bind");
+        rustix::net::listen(&sock, backlog).expect("the listener must listen");
+        sock
+    }
+
+    /// **A live server whose backlog is full must not be read as stale.**
+    ///
+    /// Linux only, and the gate is the mechanism rather than convenience: this
+    /// pins the arm where a non-blocking `connect` answers `EAGAIN`, which only
+    /// happens when a listener exists and its receive queue is full
+    /// (`unix_stream_connect`'s `unix_recvq_full_lockless` branch). XNU's
+    /// `unp_connect` answers `ECONNREFUSED` for the same condition, which is
+    /// indistinguishable from a dead inode and is the half of this row that does
+    /// **not** close - see the row for why no budget separates them here.
+    /// (`unp_connectat` is FreeBSD's name for it and is what this said first;
+    /// reading the wrong kernel is also what produced the `ECONNREFUSED`-on-both-
+    /// lanes claim in the sibling test below.)
+    ///
+    /// Two failures, one test, matching the two the row names:
+    ///
+    /// - the probe never returning, which is the unbounded wait, reported by
+    ///   `takeover_bind_bounded` rather than by a hung suite;
+    /// - the socket being unlinked, which is a live server's endpoint destroyed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_live_server_with_a_full_backlog_is_not_unlinked() {
+        let dir = tempfile::tempdir().expect("a temp dir must be creatable");
+        let path = dir.path().join("ctl.sock");
+        let _listener = listener_with_backlog(&path, 1);
+
+        // Nothing ever accepts here, which is not an artificial cruelty: the
+        // listener stops accepting at `MAX_CONNECTIONS` by design, so a live
+        // server with a full backlog and no `accept` in flight is a state this
+        // module produces on purpose.
+        let mut queued = Vec::new();
+        let mut refusal = None;
+        for _ in 0..64_u32 {
+            match try_connect(&path) {
+                Ok(sock) => queued.push(sock),
+                Err(errno) => {
+                    refusal = Some(errno);
+                    break;
+                }
+            }
+        }
+        // Assert the *reason*, not merely that the loop stopped. Any errno would
+        // satisfy "something failed", so this test would pass on an `ENOENT`
+        // from a path that never existed - a check that cannot fail, which is
+        // the shape this phase keeps finding.
+        assert_eq!(
+            refusal,
+            Some(libc::EAGAIN),
+            "the backlog did not fill in 64 connects, so this test is not \
+             exercising the arm it names"
+        );
+
+        let outcome = takeover_bind_bounded(&path);
+
+        assert!(
+            outcome.is_err(),
+            "a listener with a full backlog is live, and takeover_bind must \
+             refuse rather than take the socket over"
+        );
+        assert!(
+            path.exists(),
+            "the live server's socket was unlinked: every client that reaches it \
+             by path is now cut off, which is the defect this module exists to \
+             prevent"
+        );
+    }
+
+    /// **A symlink at the endpoint is refused, and this is the arm three review
+    /// rounds argued about.**
+    ///
+    /// Both kernels resolve a `connect` path with `FOLLOW` - Linux through
+    /// `unix_find_other`'s `kern_path`, XNU through `NDINIT(..., FOLLOW |
+    /// LOCKLEAF, ...)` - while `symlink_metadata` does not. So a symlink pointing
+    /// at a stale socket somewhere else answers `ECONNREFUSED` from a vnode that
+    /// is a socket, and `unlink_target_is_ours` then inspects the **symlink** and
+    /// refuses. Without it, `remove_file` would unlink the symlink and `bind` would
+    /// put duja's endpoint wherever an attacker aimed it.
+    ///
+    /// It exists because a doc comment claimed this arm was dead on macOS and a
+    /// review had to read two kernels to show otherwise. An argument that needs a
+    /// kernel source read to check is one a test should be making, and this is
+    /// cheap enough that there was no excuse.
+    #[test]
+    fn a_symlink_at_the_endpoint_is_not_followed_and_not_unlinked() {
+        let dir = tempfile::tempdir().expect("a temp dir must be creatable");
+        let elsewhere = dir.path().join("elsewhere.sock");
+        let endpoint = dir.path().join("ctl.sock");
+
+        // A real socket inode with nothing listening on it: `std` does not unlink
+        // on drop, so the file outlives the listener and a connect to it is
+        // refused - the shape a stale socket has.
+        drop(UnixListener::bind(&elsewhere).expect("the decoy listener must bind"));
+        std::os::unix::fs::symlink(&elsewhere, &endpoint).expect("the symlink must be creatable");
+
+        let error = takeover_bind_bounded(&endpoint).map_or_else(
+            |e| e.to_string(),
+            |_| "Ok(_): the guard did not refuse at all".to_owned(),
+        );
+
+        // Pin the *route*, not just the refusal. Both verdicts that refuse produce
+        // an error, so asserting `is_err` alone would pass on `Undecidable` - which
+        // an `EACCES` from the decoy's mode reaches without ever calling
+        // `unlink_target_is_ours`. Its sibling above pins its errno for the same
+        // reason.
+        assert!(
+            error.contains("is not a socket"),
+            "expected the socket-type guard to refuse, got: {error}"
+        );
+        assert!(
+            endpoint
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink()),
+            "the symlink was replaced, so duja's endpoint is now wherever it pointed"
+        );
+        // There is deliberately no "the target survived" assertion. `remove_file`
+        // is `unlink(2)`, which never follows the final symlink, so no path through
+        // `takeover_bind` can reach `elsewhere` - an assertion on it could not fire
+        // under any mutation, which is the defect this test exists to argue about.
+    }
+
+    /// **A refusal is not enough on its own: the thing about to be unlinked has
+    /// to be our socket.**
+    ///
+    /// A regular file at the socket path is refused on both lanes, and **by two
+    /// different mechanisms** - which the first version of this doc got wrong, and
+    /// which matters for what the macOS lane's green is worth:
+    ///
+    /// - **Linux** answers `ECONNREFUSED` (`unix_find_other` rejects a
+    ///   non-`S_ISSOCK` inode with exactly that), indistinguishable from a dead
+    ///   socket, so the old probe deleted the file and bound over it. Here the
+    ///   refusal reaches `unlink_target_is_ours`, which is what stops it.
+    /// - **macOS** answers `ENOTSOCK` (`unp_connect`'s `vp->v_type != VSOCK`),
+    ///   which `classify` sends to `Undecidable`, so `takeover_bind` refuses
+    ///   before `unlink_target_is_ours` is reached at all.
+    ///
+    /// So this test passes on macOS **with the guard deleted**. It is a behaviour
+    /// test on both lanes and a test of the guard on one, and saying so is the
+    /// point: a check whose test cannot fail on a platform is not protecting that
+    /// platform, whatever the green says.
+    ///
+    /// Nothing in Duja puts a regular file there - which is the point. The path is
+    /// inside a `0700` directory this process owns, so a file appearing there means
+    /// something has gone wrong that unlinking would erase.
+    #[test]
+    fn a_refusal_from_something_that_is_not_a_socket_is_not_believed() {
+        let dir = tempfile::tempdir().expect("a temp dir must be creatable");
+        let path = dir.path().join("ctl.sock");
+        std::fs::write(&path, b"not a socket").expect("the file must be writable");
+
+        let outcome = takeover_bind_bounded(&path);
+
+        assert!(
+            outcome.is_err(),
+            "a non-socket at the endpoint path is not a stale socket, and \
+             takeover_bind must refuse rather than delete it"
+        );
+        assert!(
+            path.exists(),
+            "the file was unlinked on the strength of a refusal that says only \
+             'nothing is listening', not 'this is mine to delete'"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("the file must still be readable"),
+            b"not a socket",
+            "the file survived by name but not by content"
         );
     }
 
