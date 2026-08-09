@@ -98,8 +98,11 @@ fn the_real_flyout_renders_frames_through_the_software_renderer() {
 /// **What this pins is the public size surface, not the probe's use of it.** It
 /// reds if `probe_size` returns the wrong pair - which is the shape the original
 /// defect took, a `PROBE_SIZE` constant of `(360, 260)`. It stays *green* if
-/// `probe()` ignores `probe_size` and sizes its window some other way; the two
-/// tests below are what catch that, and they do.
+/// `probe()` ignores `probe_size` and sizes its window some other way. What
+/// catches that is the drawn-area assertion in
+/// [`the_real_flyout_renders_frames_through_the_software_renderer`] above and
+/// the content assertion in [`a_third_monitor_adds_a_whole_card_of_pixels`]
+/// below, both of which were measured going red on exactly that mutation.
 #[test]
 fn the_probe_window_is_the_size_the_app_presents() {
     assert_eq!(probe_size(0), (360, 178));
@@ -126,14 +129,15 @@ fn the_probe_window_is_the_size_the_app_presents() {
 /// pixels unequal to the buffer's modal colour, and the mode is not a fixed
 /// thing: it is the window background at 0 and 1 rows and the card fill from 2
 /// on. So the sequence is **not** monotone - the first monitor lowers the count
-/// by about 2,650, and the sixth lowers it by about 15,600 because the window
-/// has hit its 620 px clamp, so the extra card's upper band enters the viewport
-/// and the rest of it becomes scrollable rather than drawn - and a test named
-/// for "every extra monitor" would have been asserting something false. (The
-/// rows do **not** compress: `flyout.slint` packs cards at their natural height
+/// by about 2,650 (the empty-state panel it replaces is taller than a card and
+/// carries more glyphs), and the sixth lowers it by about 15,600 because the
+/// window has hit its 620 px clamp, so only the top of that card enters the
+/// viewport and the rest becomes scrollable rather than drawn. A test named for
+/// "every extra monitor" would have been asserting something false. (The rows
+/// do **not** compress: `flyout.slint` packs cards at their natural height
 /// inside a `ScrollView`, and the bands measure identically from one monitor to
-/// seven.) What is stable, and what the sizing
-/// defect breaks, is that a card which fits adds a card's worth.
+/// seven.) What is stable, and what the sizing defect breaks, is that a card
+/// which fits adds a card's worth.
 #[test]
 fn a_third_monitor_adds_a_whole_card_of_pixels() {
     let content = |n: usize| {

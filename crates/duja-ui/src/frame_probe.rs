@@ -365,18 +365,29 @@ fn install() -> Result<Rc<MinimalSoftwareWindow>, PlatformError> {
 /// So the honest description is the literal one: **pixels unequal to the
 /// buffer's most common colour**. That is a proxy for "content reached the
 /// layout", not a measure of it, and it is deliberately a coarse one. It is
-/// **not monotone** in the row count: the first monitor lowers it (the card
-/// fill displaces background that was already being counted), and a sixth
-/// lowers it again by about 15,600. **The rows do not compress** - a first
+/// **not monotone** in the row count. The first monitor lowers it by about
+/// 2,650, and a first version of this doc explained that as "the card fill
+/// displaces background that was already being counted", which is backwards in
+/// both halves: background *is* the mode at 0 and 1 rows, so it is precisely
+/// what is not counted, and it grows by about 3,000 rather than being
+/// displaced. What actually happens is that the empty-state panel a card
+/// replaces is **taller** than a card - 96 px against 88 - and carries an icon
+/// and two lines of centred text, so one card paints less non-background area
+/// than the panel did.
+///
+/// A sixth monitor lowers it again, by about 15,600. **The rows do not compress** - a first
 /// version of this sentence said they did, which the markup forbids
 /// (`flyout.slint`'s body is a `ScrollView` whose `VerticalLayout` carries
 /// `alignment: start` to pack cards "at their natural height") and measurement
 /// disproves (the card bands are pixel-identical, 58 px and 22 px at a 96 px
 /// pitch, from one monitor to seven). What happens is that the window grows
-/// only from 615 to 620 px, so the sixth card's upper band enters the viewport
-/// while the rest of it sits below the edge, scrollable rather than drawn - and
-/// the pixels it does add are card fill, which *is* the modal colour, so a
-/// count of pixels unequal to the mode falls. What it does reliably is separate
+/// only from 615 to 620 px, so about 65 of the sixth card's 88 px enter the
+/// viewport while the rest sits below its edge, scrollable rather than drawn -
+/// and a scroll bar appears, which is the direct evidence that it is scrollable
+/// rather than clipped. Almost all of what the sixth card adds is card fill,
+/// which *is* the modal colour, so a count of pixels unequal to the mode falls;
+/// the bar itself contributes about 810 pixels the other way, far too few to
+/// change the sign. What it does reliably is separate
 /// a card that rendered from a card that fell off the bottom edge, which is the
 /// one question it exists to answer.
 fn content_pixels(buffer: &[PremultipliedRgbaColor]) -> u64 {
