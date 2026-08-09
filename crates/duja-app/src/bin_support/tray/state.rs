@@ -44,8 +44,7 @@ use super::policy::{
 use super::wiring::resolved_hotkey_rows;
 use super::{
     Action, FLYOUT_LOGICAL_WIDTH, FLYOUT_MARGIN, FLYOUT_MAX_LOGICAL_HEIGHT,
-    FLYOUT_MIN_LOGICAL_HEIGHT, SETTINGS_LOGICAL_HEIGHT, SETTINGS_LOGICAL_WIDTH, geometry, open_url,
-    spawn_relaunch, unix_now,
+    SETTINGS_LOGICAL_HEIGHT, SETTINGS_LOGICAL_WIDTH, geometry, open_url, spawn_relaunch, unix_now,
 };
 
 /// The main-thread application state driven by every event source.
@@ -282,21 +281,13 @@ impl AppState {
 
     /// The flyout window's content-derived logical height.
     ///
-    /// A no-frame window is not auto-sized to its preferred height, so this
-    /// mirrors the `.slint` layout arithmetic (chrome + one card per row) to size
-    /// it. Approximate by design — a few pixels of slack sit at the bottom.
+    /// The arithmetic itself is [`duja_ui::layout::flyout_logical_height`],
+    /// which lives next to the `.slint` markup it mirrors. It used to be
+    /// inlined here, in the crate that cannot see that file, and the frame
+    /// probe then re-derived it from the markup's *default* and measured a
+    /// window the app never presents.
     fn flyout_logical_height(&self) -> f32 {
-        const CHROME: f32 = 78.0; // padding + header + inter-section gap (no footer)
-        const CARD: f32 = 101.0; // one card (name+caption row, then slider+pill row)
-        const CARD_GAP: f32 = 8.0;
-        let rows = self.vm.borrow().rows().len();
-        let body = if rows == 0 {
-            100.0 // empty-state panel
-        } else {
-            let n = f32::from(u16::try_from(rows).unwrap_or(u16::MAX));
-            n * CARD + (n - 1.0) * CARD_GAP
-        };
-        (CHROME + body).clamp(FLYOUT_MIN_LOGICAL_HEIGHT, FLYOUT_MAX_LOGICAL_HEIGHT)
+        duja_ui::layout::flyout_logical_height(self.vm.borrow().rows().len())
     }
 
     /// The flyout's content-driven logical height, clamped to the work area of

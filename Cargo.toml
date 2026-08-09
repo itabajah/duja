@@ -329,7 +329,7 @@ panic = "unwind"
 # the alternative is guessing about the renderer. What it does NOT prove is that
 # a per-package override under fat LTO produces codegen identical to a
 # whole-program `-O3` build; rustc writes per-function `optsize` attributes that
-# the LTO pipeline honours, and functions from these four carry none, but
+# the LTO pipeline honours, and functions from the exempted crates carry none, but
 # "reaches the linker" is not "identical to -O3". ADR-0012 says so too.
 [profile.release.package.i-slint-core]
 opt-level = 3

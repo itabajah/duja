@@ -6,13 +6,24 @@ with the phases; keep entries as observable behaviors, not implementation.
 ## All platforms
 
 **Two rows here are the only instrument two perf budgets have.** P8 wave 1 moved
-the release profile to `opt-level = "s"` for everything except the four crates on
-the frame path, which plausibly moves both "cold start" and "overlay alpha", and
+the release profile to `opt-level = "s"` for everything except the crates on the
+frame path, which plausibly moves both "cold start" and "overlay alpha", and
 nothing in this repository can measure either. They were last measured by hand at
 the P4 gate. If the numbers have moved, that is a finding and
 [`docs/perf-budgets.md`](perf-budgets.md) needs it; if they have not, say so, so
-the next person is not re-litigating a settled question. The missing automated
-benchmark is [D-109](debt.md#d-109).
+the next person is not re-litigating a settled question. [D-109](debt.md#d-109)
+built a frame instrument and it does **not** cover these two - it renders the
+flyout, and neither row is about the flyout. Read its own row before assuming
+otherwise.
+
+The one thing that *is* automated now runs off this box and needs no session:
+
+- [ ] **`cargo test -p duja-ui --release --test frame_probe -- --ignored --nocapture`**
+      on each platform you have. It prints min/mean/max for a real three-monitor
+      flyout rendered through the software renderer, and fails if any frame ran
+      over 16 ms or if the run drew less than the full window. `--release`
+      matters: the profile is the thing being questioned, so a debug number
+      answers nothing.
 
 - [ ] Tray icon appears < 300 ms after launch; correct in light and dark theme.
       **Time it** rather than eyeballing it - this is one of the two rows above.

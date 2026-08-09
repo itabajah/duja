@@ -4,7 +4,7 @@ _Last updated: 2026-08-09. **P0 through P8 are closed**, `v0.1.6` shipped the
 two ports that had been held, and **P9 is in progress** - the first phase whose
 scope was chosen by what the absent hardware still permits, rather than merely
 limited by it. Six of its rows have drained - five of them in its four waves and
-one that predates them - and the instruments have not started; see
+one that predates them - and the instruments have started; see
 [plan.md](plan.md). The ports ship as **unverified previews** rather than as
 confirmed platforms
 ([ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md)): the hold was
@@ -196,11 +196,16 @@ Measured on this box, 2026-08-08:
   Windows job only**, which is what that workflow builds and measures.
   The measured ledger, and the one lever that is a trade rather than a free win,
   are in [ADR-0012](adr/0012-binary-size-budget-variance.md).
-- **Two perf budgets are not measured by anything.** "Overlay alpha update
-  < 16 ms" and "Cold start < 300 ms" were last measured by hand at P4, and wave
-  1 changed the optimization level, which plausibly moves both. There is no
-  automated render benchmark ([D-109](debt.md#d-109)); the interim instrument is
+- **Three perf budgets are still not measured by anything.** "Overlay alpha
+  update < 16 ms", "Cold start < 300 ms" and "Slider to DDC write dispatched"
+  were last measured by hand at P4, and P8 wave 1 changed the optimization
+  level, which plausibly moves at least two of them. The interim instrument is
   two rows at the top of [qa-checklist.md](qa-checklist.md).
+  [D-109](debt.md#d-109) built a render benchmark in P9 wave 3 and it covers
+  **none of these**: it renders the flyout, the overlay is a Win32 layered
+  window, and a cold start needs a session. What it did settle is the
+  `opt-level = "s"` exemption, which is worth roughly 1.4x on a frame and which
+  nothing had measured before.
 
 The CI commands, which a local check must match exactly:
 
