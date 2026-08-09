@@ -51,9 +51,9 @@
 //! leaves-nothing-scheduled half that the other file's watchdog makes
 //! unassertable.
 //!
-//! Windows-only - though **not** because `tray.rs` is, which is what this said
-//! until `#167`. That module has been un-gated since P7 wave 5 and builds on all
-//! three lanes; what cannot run off Windows is a *test that drives an event
+//! Windows-only — though **not** because `tray.rs` is, which is what this said
+//! until `#167`. That module has been un-gated since P7 wave 5 (`#136`) and builds
+//! on all three lanes; what cannot run off Windows is a *test that drives an event
 //! loop*, for the reasons `loop_running_token.rs` gives. The mechanism is
 //! platform-independent by design (that is the point of not `cfg`-splitting the
 //! ordering), so verifying it on the shipped platform verifies it for the macOS

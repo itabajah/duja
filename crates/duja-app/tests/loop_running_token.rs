@@ -43,14 +43,14 @@
 //! holds exactly one `#[test]` for that reason, as does `loop_time_assembly.rs`.
 //! Do not add a sibling — give it its own file.
 //!
-//! Windows-only, like `loop_time_assembly.rs` - but **not** because the tray is.
-//! `bin_support::tray` has been un-gated since P7 wave 5, and this change grows a
-//! parameter on its Linux arms too. The gate here is the event loop: a CI ubuntu
-//! runner has no X server, and a macOS loop must own the process's main thread,
-//! so neither can host this. The **type** half compiles and is
-//! enforced on all three lanes; it is only the mechanism check that is pinned on
-//! the one platform anybody runs. That is sound for the same reason the ordering
-//! is not `cfg`-split: Windows exercises the exact sequence macOS depends on.
+//! Windows-only, like `loop_time_assembly.rs` — but **not** because the tray is.
+//! `bin_support::tray` has been un-gated since P7 wave 5 (`#136`), and this change
+//! grows a parameter on its Linux arms too. The gate here is the event loop: a CI
+//! ubuntu runner has no X server, and a macOS loop must own the process's main
+//! thread, so neither can host this. The **type** half compiles and is enforced on
+//! all three lanes; it is only the mechanism check that is pinned on the one
+//! platform anybody runs. That is sound for the same reason the ordering is not
+//! `cfg`-split: Windows exercises the exact sequence macOS depends on.
 #![cfg(windows)]
 // RATIONALE: integration tests are a separate crate and do not inherit the
 // binary's `cfg(test)` lint allows. This test uses expect for brevity; it never
