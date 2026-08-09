@@ -959,7 +959,26 @@ Three decisions in it are worth reading before the first run. **No report at all
 
 *(Two claims in a first version of this paragraph were wrong. It said the exit code is swallowed everywhere, which would have made a real budget miss on the lanes that **can** measure a green job. And it justified reading from disk with "a release `duja.exe` is a GUI-subsystem binary with no console", which is not true of a redirected invocation: `windows_subsystem = "windows"` stops Windows **allocating** a console and does not stop the process inheriting handles a parent supplies, which the workflow supplies with `> soak-stdout.txt 2>&1`. The premise holds for the un-redirected command `qa-checklist.md` gives an operator, which is what `soak.rs`'s header is about.)*
 
-**What the first run has to answer** is the question this row has carried since P8: does `start_platform` succeed on a runner with no display server and no session. A `PASS` on the Linux lane would also be the first time the kernel-handle counter [D-112](#d-112) asked for reports anything on that platform, since `/proc/self/fd` is the only handle signal this tree implements there
+**The experiment has now run, and the answer is yes on all three lanes.** Run 31293236347, `--soak 120 --every 10`, release build:
+
+| lane | displays | IPC | samples | peak RSS | handle drift | verdict |
+|---|---|---|---|---|---|---|
+| windows-latest | 1 | started | 13, 0 unreadable | 16,228,352 | GDI 0, USER 0, kernel **-2** | PASS |
+| ubuntu-latest | 0 | started | 13, 0 unreadable | **9,981,952** | kernel 0 | PASS |
+| macos-latest | 0 | started | 13, **13 unreadable** | never read | not counted | UNMEASURABLE |
+
+`start_platform` succeeded and the IPC server started on **every** lane, including the two with no display server and no interactive session. That is the question this row has carried since P8, and it is settled: `--headless` does work on a headless runner, so the claim `docs/` makes in several places is true rather than merely repeated.
+
+**Four things nobody had measured before this run.**
+
+- **The first Linux RSS figure this tree has ever had: 9,981,952 bytes**, against Windows' 16,228,352 on the same commit and the same invocation. The headless process is about 39 % smaller there. Every RSS number in this repository was a Windows number until now.
+- **The first Linux handle count: 15 descriptors**, against roughly 250 kernel handles on Windows. Both are the counter [D-112](#d-112) asked for, and the gap is the platforms' accounting rather than a leak - Windows counts threads, events and registry keys as handles where `/proc/self/fd` counts open files.
+- **macOS assembles fine and measures nothing.** 13 of 13 samples unreadable, `UNMEASURABLE`, exit 1 - which is exactly what `duja_platform::process` documents and what the workflow's one platform exception exists for. It is worth noting that the pump, the engine and the IPC server all came up there; the gap is `task_info`, not assembly.
+- **CI and the dev box agree to within half a per cent.** 16,228,352 on `windows-latest` against 16.07-16.26 MB measured locally. The instrument reports the same number on a machine nobody tuned it against, which is the cheapest cross-validation available and had never been taken.
+
+**And two of the wave's own fixes proved out in their first CI run.** The Windows lane's kernel count fell by two, and the report said `kernel handles drift  -2 - NOT FLAT (fell; ...)` rather than the `0` it would have printed before the drift was made signed. The macOS lane exited non-zero and the job stayed green, with the full reading preserved, because that lane does not propagate - the alternative would have been a red job saying only what the tree already documents.
+
+**What is still open, and it is the larger half.** The budget row says *24 hours*; the longest run anywhere is now these 120 seconds, and GitHub caps a hosted job at six, so this mechanism can never deliver it. A dev-box run is the only route. The row's own remedy sentence - "If the pump starts, the workflow is ten lines" - is now due: a **schedule** is justified by this result and is deliberately not added here, because the Windows lane propagates its exit code and `HANDLE_GROWTH_TOLERANCE` is still a guess by its own documentation. A weekly job that reds on noise is the shape [D-110](#d-110) warns about, so the tolerance wants a number before the schedule wants a cron
 
 ### D-112
 

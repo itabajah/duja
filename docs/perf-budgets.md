@@ -38,6 +38,14 @@ this box report **around 250** of them. Before this, a headless soak could leak
 a pipe instance per connection for a day and report a clean pass, which is
 [D-112](debt.md#d-112). Linux had no handle signal at all.
 
+The three lanes have now been measured against each other, by the
+dispatch-only `soak` workflow ([D-111](debt.md#d-111)): a headless Duja is
+**16,228,352 bytes** on `windows-latest` and **9,981,952** on `ubuntu-latest`,
+with roughly 250 kernel handles against 15 descriptors. macOS assembles and
+reports `UNMEASURABLE`, which is what it is documented to do. The Windows CI
+figure lands inside the range measured on the dev box, which is the first
+cross-check this instrument has had.
+
 The kernel family is also the first one that is **not** perfectly flat: every
 drift measured here has been negative and no larger than five. A fall is not a
 leak and does not fail a run, but it is not "flat" either, and the report says

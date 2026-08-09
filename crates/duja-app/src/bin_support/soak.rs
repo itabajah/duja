@@ -115,7 +115,10 @@ use crate::bin_support::{backend, run};
 ///
 /// Measured again in P9 wave 3: peaks cluster **around 16.1 MB**, and every run
 /// measured has fallen between 16.0 and 16.3 MB, so the headroom against 35 MB
-/// is still large. Round numbers with slack, because the tight version of this
+/// is still large. A `windows-latest` CI runner reported **16,228,352** on the
+/// same invocation, which lands inside that range on a machine nobody tuned the
+/// instrument against. `ubuntu-latest` reported **9,981,952** - the first Linux
+/// figure this tree has had, and about 39 % smaller. Round numbers with slack, because the tight version of this
 /// sentence has now been falsified twice: `16.1 to 16.3` missed a 16,068,608
 /// run at the bottom, and the correction that fixed the floor quietly moved the
 /// ceiling to `16.25` with no measurement behind it and was falsified at the top
