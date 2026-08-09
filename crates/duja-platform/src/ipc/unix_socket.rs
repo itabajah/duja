@@ -1097,7 +1097,7 @@ fn probe_socket() -> Result<std::os::fd::OwnedFd, ()> {
 /// `takeover_bind` refuses before reaching this function at all.
 ///
 /// So the only macOS route here is `ECONNREFUSED`, and the **vnode `unp_connect`
-/// resolved** is in every case a socket owned by us: XNU raises that errno for a
+/// resolved** is in every case a socket: XNU raises that errno for a
 /// null `v_socket` (a stale socket), for a listener that is not accepting —
 /// `SO_ACCEPTCONN` clear, or `sonewconn` returning null — and on the
 /// lock-reacquire path where `so_pcb` has gone. The argument is that shape rather
@@ -1114,13 +1114,17 @@ fn probe_socket() -> Result<std::os::fd::OwnedFd, ()> {
 /// the reason the `lstat`-not-`stat` note below gives, which is why the two
 /// paragraphs contradicted each other until now.
 ///
-/// What *is* inert on macOS is the **uid** arm: reaching it means the `lstat` saw
-/// a socket, and the `0700` parent this uid owns is what makes a foreign-owned one
-/// unreachable there. A green macOS lane is evidence of nothing about that arm.
-/// (An earlier version of this paragraph gave a two-site list and called it "the
-/// only" routes — a partial kernel read stated as exhaustive, which is the mistake
-/// the paragraph above exists to correct. The version after it called both arms
-/// dead, which is the one this replaces.)
+/// The **uid** arm is the inert one, and it is inert on **both** lanes rather than
+/// on macOS: reaching it means the `lstat` saw a socket at this path, and putting a
+/// foreign-owned socket inside a `0700` directory this euid owns needs either us or
+/// root. What is macOS-specific is narrower — the socket-type arm loses its
+/// regular-file route there (that is the `ENOTSOCK` above) and keeps only the
+/// symlink one.
+///
+/// (Three versions of this paragraph got that split wrong in three different ways:
+/// a two-site kernel list called "the only" routes, then both arms called dead,
+/// then the uid arm called macOS-specific. Kept as a note because the subject of
+/// this whole row is claims that read as checked.)
 ///
 /// The *function* is not dead on either lane regardless: the `symlink_metadata`
 /// above both arms can fail if the inode vanishes between the probe and the
@@ -1797,22 +1801,30 @@ mod tests {
         drop(UnixListener::bind(&elsewhere).expect("the decoy listener must bind"));
         std::os::unix::fs::symlink(&elsewhere, &endpoint).expect("the symlink must be creatable");
 
-        let outcome = takeover_bind_bounded(&endpoint);
+        let error = takeover_bind_bounded(&endpoint)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
 
+        // Pin the *route*, not just the refusal. Both verdicts that refuse produce
+        // an error, so asserting `is_err` alone would pass on `Undecidable` - which
+        // an `EACCES` from the decoy's mode reaches without ever calling
+        // `unlink_target_is_ours`. Its sibling above pins its errno for the same
+        // reason.
         assert!(
-            outcome.is_err(),
-            "a symlink is not duja's socket, and takeover_bind must refuse rather              than unlink it and bind over the name"
+            error.contains("is not a socket"),
+            "expected the socket-type guard to refuse, got: {error}"
         );
         assert!(
             endpoint
                 .symlink_metadata()
                 .is_ok_and(|m| m.file_type().is_symlink()),
-            "the symlink was replaced: duja's endpoint is now wherever this              pointed, which is the whole point of following one"
+            "the symlink was replaced, so duja's endpoint is now wherever it pointed"
         );
-        assert!(
-            elsewhere.exists(),
-            "the symlink's target was unlinked, so the check followed it"
-        );
+        // There is deliberately no "the target survived" assertion. `remove_file`
+        // is `unlink(2)`, which never follows the final symlink, so no path through
+        // `takeover_bind` can reach `elsewhere` - an assertion on it could not fire
+        // under any mutation, which is the defect this test exists to argue about.
     }
 
     /// **A refusal is not enough on its own: the thing about to be unlinked has
