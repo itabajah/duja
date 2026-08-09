@@ -38,13 +38,25 @@
 //!   ([`peer_allowed`]) is unit-tested (CI cannot switch uid, so the *decision*
 //!   is tested, not the syscall).
 //! - **Stale-socket handling** doubles as the single-instance answer: if `bind`
-//!   fails with `AddrInUse`, we try to *connect*. A successful connect means a live
-//!   server already owns the name and we refuse to start a second; so does a full
-//!   backlog, which only a listener can produce. A refusal means nothing is
-//!   listening — which is **not** the same as "this is ours to delete", and this
-//!   header said it was until `#168`: the unlink is now gated on the inode being a
-//!   socket and being ours. See [`takeover_bind`], which also has the half of that
-//!   distinction the BSDs do not let anyone make.
+//!   fails with `AddrInUse`, we try to *connect*. What that answers **differs by
+//!   platform**, and two versions of this bullet have now hidden it — first by
+//!   saying a refusal means the socket is ours to delete, then by saying a full
+//!   backlog always makes us refuse to start:
+//!   - a **successful connect** means a live server owns the name, on both, and we
+//!     refuse to start a second;
+//!   - a **full backlog** answers `EAGAIN` on Linux, which only a listener can
+//!     produce, so that is a refusal to start too. On the BSDs it answers
+//!     `ECONNREFUSED`, and the next line is what happens then;
+//!   - a **refusal** means nothing is listening — on Linux. On the BSDs it means
+//!     that *or* a full backlog, with nothing to tell them apart, so a live
+//!     server's socket can still be unlinked there. That is the half of
+//!     `docs/debt.md`'s D-076 still open, and it is a property of the kernel's
+//!     answer rather than of this code.
+//!
+//!   Where a refusal *is* believed, the unlink is gated on the inode being a
+//!   socket and being ours ([`unlink_target_is_ours`]) — which is a different
+//!   distinction from the one above, and is the one the BSDs do let anyone make.
+//!   See [`takeover_bind`].
 //!   (On Windows the equivalent split is `FILE_FLAG_FIRST_PIPE_INSTANCE` plus the
 //!   named single-instance mutex; here the bound socket *is* the instance token.)
 //!   Because that sequence is several steps against a shared name rather than one
@@ -921,6 +933,12 @@ const fn classify(raw: i32) -> Attempt {
 /// [`Liveness::Undecidable`], because the action on the other side is an unlink and
 /// there is no undoing one. A wrong `Live` costs a start that reports "already
 /// listening"; a wrong `Stale` costs a running server its endpoint.
+///
+/// The `match` is wildcard-free on purpose: it is the one line a new [`Attempt`]
+/// variant fails to compile at. If you are here because of that, the test module's
+/// `ALL_ATTEMPTS` needs the variant too — nothing forces it, and the property test
+/// that says "nothing but a refusal authorises an unlink" silently narrows to a
+/// sample if it is forgotten.
 const fn settle(attempt: Attempt) -> Option<Liveness> {
     match attempt {
         Attempt::Connected | Attempt::BacklogFull => Some(Liveness::Live),
@@ -1077,11 +1095,22 @@ fn probe_socket() -> Result<std::os::fd::OwnedFd, ()> {
 /// both lanes. XNU's `unp_connect` rejects a non-socket earlier and differently —
 /// `if (vp->v_type != VSOCK) error = ENOTSOCK` — which [`classify`] sends to
 /// [`Attempt::Undecidable`], so `takeover_bind` refuses before reaching this
-/// function at all. Enumerate what is left: the only macOS route to
-/// [`Liveness::Stale`] is `ECONNREFUSED`, which XNU raises for a null `v_socket`
-/// (a stale socket, ours) or a `sonewconn` returning null (a live socket, ours).
-/// Neither arm below can return `Err` on either. **On macOS this is dead code**,
-/// and a green macOS lane is evidence of nothing about it.
+/// function at all.
+///
+/// So the only macOS route here is `ECONNREFUSED`, and **every** inode that
+/// produces it is a socket owned by us: XNU raises it for a null `v_socket` (a
+/// stale socket), for a listener that is not accepting — `SO_ACCEPTCONN` clear, or
+/// `sonewconn` returning null — and on the lock-reacquire path where `so_pcb` has
+/// gone. The argument is that shape, not a list: `unp_connect` has already
+/// resolved a `VSOCK` vnode inside a `0700` directory this uid owns before it can
+/// reach any of them. A first version of this paragraph *did* give a list, of two
+/// of those sites, and called it "the only" ones — a partial kernel read stated as
+/// exhaustive, which is the same mistake the paragraph above exists to correct.
+///
+/// **Both `if` arms below are therefore dead on macOS**, and a green macOS lane is
+/// evidence of nothing about them. The *function* is not dead: the
+/// `symlink_metadata` above them can still fail if the inode vanishes between the
+/// probe and the `lstat`, which is the window the note below admits.
 ///
 /// Worth saying because the alternative is the shape this project rates worst: a
 /// guard that reads as covering two platforms, whose test passes on both, and
@@ -1491,8 +1520,16 @@ mod tests {
     // --- D-076: the liveness probe that decides whether to unlink ---
 
     /// Every attempt this probe can produce, so the property test below is a
-    /// closed enumeration rather than a sample. A new `Attempt` variant that is
-    /// not added here fails to compile, because the array's length is asserted.
+    /// closed enumeration rather than a sample.
+    ///
+    /// **Closed by convention, not by the compiler**, and the difference is worth
+    /// stating in a file about checks that cannot fail. An earlier version of this
+    /// doc said a new `Attempt` variant "fails to compile, because the array's
+    /// length is asserted" — nothing is asserted; `[Attempt; 6]` is a type
+    /// annotation on a hand-written literal. What a seventh variant really breaks
+    /// is [`super::settle`]'s wildcard-free `match`, and whoever adds an arm there
+    /// has to remember this list too. `settle`'s own doc points back here for
+    /// exactly that reason.
     const ALL_ATTEMPTS: [Attempt; 6] = [
         Attempt::Connected,
         Attempt::BacklogFull,
