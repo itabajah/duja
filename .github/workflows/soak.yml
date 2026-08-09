@@ -38,12 +38,14 @@
 # green job with a line in the summary, i.e. a check that only fails when the
 # binary does not run at all.
 #
-# **The honest caveat on that**: the two propagating lanes gate on numbers this
-# tree itself calls guesses. `HANDLE_GROWTH_TOLERANCE`'s own doc says it "is a
-# guess rather than a measurement" and that "a rise of nine would FAIL a healthy
-# run"; the idle-RSS constant's doc records one unexplained run at 89 % of
-# budget; and no Linux or macOS RSS figure exists anywhere. So an early red here
-# is at least as likely to be the instrument as the code. That is tolerable only
+# **The honest caveat on that**: what the two propagating lanes gate on is not
+# all equally solid. `HANDLE_GROWTH_TOLERANCE`'s own doc calls it "a guess
+# rather than a measurement" and warns that "a rise of nine would FAIL a healthy
+# run". The 35 MB idle-RSS ceiling is a real budget with large headroom, but
+# every RSS figure in this tree is a *Windows* one - there is no measured Linux
+# number anywhere, and the constant's doc records one unexplained run at 89 % of
+# budget. So an early red here is at least as likely to be the instrument as the
+# code. That is tolerable only
 # because this workflow is dispatch-only with no pull-request status, runs with
 # `fail-fast: false`, and writes the full reading before it exits - a red lane
 # still hands back its numbers.
@@ -168,7 +170,13 @@ jobs:
                 exit 1
                 ;;
             esac
-            if [ "$value" -lt 1 ] || [ "$value" -gt 1800 ]; then
+            # The length test comes first and is not decoration: bash's `[`
+            # compares as `intmax_t`, so a value at or above 2^63 - including a
+            # valid `u64` - makes both numeric tests exit 2, the `||` chain
+            # evaluate false, and the input sail through the ceiling. The bound
+            # is four digits because 1800 is, so anything longer is out of range
+            # by construction and never reaches an integer comparison.
+            if [ "${#value}" -gt 4 ] || [ "$value" -lt 1 ] || [ "$value" -gt 1800 ]; then
               echo "::error::soak inputs must be between 1 and 1800 seconds; got '$value'. A longer run needs timeout-minutes raised, and GitHub caps a hosted job at six hours regardless."
               exit 1
             fi
