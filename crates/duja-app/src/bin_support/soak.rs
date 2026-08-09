@@ -73,8 +73,11 @@
 //!   builds neither. `duja_platform`'s own note that a headless Duja "reports
 //!   exactly 0 GDI objects" is the same fact from the other side, and a run on
 //!   this box confirms it: **GDI 0 and USER 5**, unchanged across ninety
-//!   seconds. So the GUI half of the budget is structurally near-zero here and
-//!   passing it is weak evidence rather than strong.
+//!   seconds. A `windows-latest` runner reports GDI 0 and USER **6**, having
+//!   moved from 5 inside the first ten seconds - so the steady state is flat on
+//!   both, and the resting value is not a constant. Either way the GUI half of
+//!   the budget is structurally near-zero here and passing it is weak evidence
+//!   rather than strong.
 //!
 //!   **Kernel handles are counted now, which is the half that was missing.**
 //!   `GetProcessHandleCount` on Windows and `/proc/self/fd` on Linux, and runs
@@ -114,8 +117,16 @@ use crate::bin_support::{backend, run};
 /// choosing it means this wave loosened nothing it was not asked to loosen.
 ///
 /// Measured again in P9 wave 3: peaks cluster **around 16.1 MB**, and every run
-/// measured has fallen between 16.0 and 16.3 MB, so the headroom against 35 MB
-/// is still large. Round numbers with slack, because the tight version of this
+/// measured has fallen between 16.0 and 16.3 MB - **every run but one**, which
+/// is recorded below and is the reason that sentence carries a caveat rather
+/// than a range alone. The headroom against 35 MB is large either way.
+///
+/// A `windows-latest` CI runner peaked at **16,228,352** on the same
+/// invocation, inside that range on a machine nobody tuned the instrument
+/// against. `ubuntu-latest` peaked at **9,981,952** - the first Linux figure
+/// this tree has had, and about 38 % smaller.
+///
+/// Round numbers with slack, because the tight version of this
 /// sentence has now been falsified twice: `16.1 to 16.3` missed a 16,068,608
 /// run at the bottom, and the correction that fixed the floor quietly moved the
 /// ceiling to `16.25` with no measurement behind it and was falsified at the top
@@ -161,7 +172,9 @@ pub(crate) const RSS_GROWTH_BUDGET_BYTES: u64 = 5_000_000;
 /// limit; kernel handles have a ceiling three orders of magnitude higher, so
 /// "long before the ceiling" is not the argument there.
 ///
-/// And where GDI and USER measure exactly flat on every headless run recorded,
+/// And where GDI and USER measure exactly flat on every headless run recorded
+/// **on this box** - a `windows-latest` runner settles USER one higher, per the
+/// module header, so the universal that used to stand here is not one -
 /// the kernel count moves. Every drift measured on this box has been **negative
 /// and no larger than five**, with the within-run spread reaching nine once. A
 /// fall of any size passes, because the comparison is one-sided rather than
