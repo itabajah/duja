@@ -23,10 +23,10 @@ have, and the part of that which can be *written* here even though it cannot be
 closed here - with everything outside both staying in [debt.md](debt.md), which
 is the third section below and by some way the largest.
 
-There was a third, and it is worth one line rather than a silent deletion: this
-file led with "what P9 builds here" until the phase closed. Its 260 lines are in
-[history.md](history.md#s65) now, which is the rule this file's own opening
-states, applied to itself.
+A fourth way used to lead this list - "what P9 builds here" - and it is worth a
+line rather than a silent deletion. Its 260 lines moved to
+[history.md](history.md#s65) when the phase closed, which is the rule this file's
+own opening states, applied to itself.
 
 ### 1. The hardware runs
 
@@ -116,7 +116,7 @@ is a phase tag rather than a version.
 | P6 macOS port | `m6-macos` | done, gate passed |
 | P7 Linux port | `m7-linux` | done, gate run |
 | P8 Hardening | `m8-hardening` | done, gate run, `v1.0.0` held |
-| P9 App-layer seam + instruments | `m9-seam` | done, 7 rows drained, 2 narrowed |
+| P9 App-layer seam + instruments | `m9-seam` | done - 7 of the 13 rows it touched drained |
 
 How each closed phase went is in [history.md](history.md), P9's
 ([#s65](history.md#s65)) included. P7, P8 and P9 are the ones written up wave by

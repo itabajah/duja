@@ -48,18 +48,18 @@ to assert.
   - [Perceptual brightness continuum (v2, ADR-0014)](#s21)
   - [UI layout & ruby theme (2026-07-14)](#s22)
   - [v0.1.0 release (2026-07-16)](#s23)
-- [P9 waves, as planned and as they went](#s65)
-  - [The waves, as `#166` recorded them](#s65)
-  - [Wave 5 - the two rows left over, and what a test cannot do](#s66)
-  - [What the reviews cost, and the one pattern that held everywhere](#s67)
-  - [Three things the phase measured that nobody had asked it to](#s68)
-  - [What the phase left open, deliberately](#s69)
 - [v0.1.6: the checkpoint that shipped the ports](#s59)
   - [The decision, and the loop it broke](#s60)
   - [What the reviews found](#s61)
   - [The correction that was the defect](#s62)
   - [What was verified rather than assumed](#s63)
   - [What it cost, and what it did not do](#s64)
+- [P9 waves, as planned and as they went](#s65)
+  - [The waves, as `#161` recorded them](#s70)
+  - [Wave 5 - the two rows left over, and what a test cannot do](#s66)
+  - [What the reviews cost, and the one pattern that held](#s67)
+  - [Three things the phase measured that nobody had asked it to](#s68)
+  - [What the phase left open, deliberately](#s69)
 - [P8 waves, as planned and as they went](#s52)
   - [Wave 1 - the binary](#s53)
   - [Wave 2 - the fuzz and coverage lanes](#s54)
@@ -1357,7 +1357,6 @@ tool that *performs* the release, including the size
 gate, and cutting `v0.1.6` with an `xtask` no release had ever used is the wrong
 trade on the wrong day.
 
-<a id="s52"></a>
 <a id="s65"></a>
 ## P9 waves, as planned and as they went
 
@@ -1368,16 +1367,21 @@ section was 260 of its 399 lines.
 
 **Two things changed in the move, and both are named because a blanket "nothing
 was reworded" is the claim this file is full of corrections to.** The heading
-became "The waves, as `#166` recorded them", since a `### 1.` numbered against
-`plan.md`'s remaining sections means nothing here. And one sentence opened
-"**Seven, counting this file**", written in `#166` about `plan.md`; in this file
-"this file" is a different file, so it now names `#166` explicitly. No other prose
+was replaced outright - a `### 1.` numbered against `plan.md`'s remaining
+sections means nothing here. And one sentence opened "**Seven, counting this
+file**"; in this file "this file" is a different file, so it names its author
+explicitly now. That author is `#161` (`git log -S` puts the sentence there, and
+its commit message enumerates the same rounds the paragraph does), **not** `#166`,
+which is what the first version of this preamble said - and the section itself was
+first written by `#155`. Two wrong attributions in the one sentence this move
+singled out as carefully handled. No other prose
 changed - including the parts that turned out to be wrong, and the wave table's
 `partly landed` verdict for wave 4.
 
 Everything after the moved text is new, and was written when the phase closed.
 
-### The waves, as `#166` recorded them
+<a id="s70"></a>
+### The waves, as `#161` recorded them
 
 **This section names what the phase builds, not which rows it will drain.** Two
 drafts of it did the latter and both were wrong about it, in the same way each
@@ -1615,8 +1619,8 @@ paragraph left it out.
 Corrections are about as defect-prone as the work they correct, and only
 measurement tells them apart.
 
-**Seven, counting `#166` itself** - the PR that first wrote this section, whose
-own review rounds are not counted in it. The
+**Seven, counting `#161` itself**, whose own review rounds are not counted in it
+and which is where this paragraph was written. The
 count that was here was accurate when written, stale one round later, and wrong
 the moment it was corrected, so what replaces it is nothing. The first round
 found defects of the original draft - a coverage figure credited to the wrong
@@ -1686,13 +1690,35 @@ lane, is the evidence, and the row quotes it.
 <a id="s67"></a>
 ### What the reviews cost, and the one pattern that held everywhere
 
-`#167` took two rounds; `#168` took six. **On every P9 PR without exception, every
-review round after the first found a defect that the previous round's correction
-had introduced.** That is eight PRs, and it is the same finding wave 3 recorded
-across its six - so it is now measured over fourteen and has never once failed to
-hold.
+`#167` took two rounds; `#168` took six. The pattern the phase kept meeting is the
+one the moved text above states, and it is worth repeating in the weaker form that
+survives: **a later round found a defect an earlier round's correction had
+introduced.**
 
-`#168`'s six rounds are the clearest worked example this project has:
+A first version of this paragraph wrote the strong form - "every round after the
+first found a defect that the *previous* round's correction had introduced" - and
+the repo's own merged record falsifies it twice. `#162`'s round 5 found a false
+statement "written by round 2's correction and read past by rounds 3 and 4", which
+is an earlier round's and not the previous one's. `#164`'s round 2 found D-110's
+never-measured twenty-minute figure, which had been in `debt.md` since P8 and was
+introduced by no round at all. Strengthening a claim its own source had hedged, in
+the paragraph about corrections being defect-prone, is the joke writing itself for
+the second time this phase.
+
+The arithmetic was wrong too, in both terms. P9 merged **fourteen** PRs, `#155`
+through `#168` - "eight" counted only the ones this section had in front of it.
+And the six the moved table records are **P9's first six**, `#155` to `#160`, which
+is what `#161`'s own title says; wave 3's are `#162` to `#165`. The partition was
+relabelled to make 6 + 8 = 14 work.
+
+`#168`'s six rounds are the fullest worked example this project has written down,
+**and the record for it is thinner than the record for the six above**. `#167` and
+`#168` each carry zero PR comments and zero GitHub reviews; the reviews ran outside
+GitHub, and only rounds 1, 3 and 4 of `#168` are corroborated by anything a reader
+can open - its own squashed commit message. Rounds 2, 5 and 6 exist nowhere in the
+repo. The table the moved text carries made exactly this disclosure about `#155`
+and `#160`; a first version of this one omitted it while calling itself the
+clearest example there is.
 
 | round | what it found | in |
 |---|---|---|
@@ -1746,10 +1772,20 @@ that cannot fail.**
 <a id="s69"></a>
 ### What the phase left open, deliberately
 
-Six of the ten rows P9 touched are still open, and none of that is a shortfall.
-Wave 3's four are budgets whose instruments now exist and whose *checks* still
-need hardware or a day of wall clock CI cannot give - an instrument row drains
-when the budget it serves can be checked, not when the instrument lands.
+**Six of the thirteen rows P9 touched are still open**, and none of that is a
+shortfall. Thirteen because seven drained - D-016, D-040, D-045, D-059, D-065,
+D-113 and D-114, all in [debt-archive.md](debt-archive.md) - and six did not:
+D-076, D-102, D-109, D-110, D-111 and D-112. A first version of this sentence said
+"ten", which is neither total and which the sentence stating both halves in
+`STATUS.md` falsified on its own.
+Three of wave 3's four are budgets whose instruments now exist and whose *checks*
+still need hardware or a day of wall clock CI cannot give - an instrument row
+drains when the budget it serves can be checked, not when the instrument lands.
+The fourth is [D-110](debt.md#d-110), which **built nothing**, as the moved text
+says a hundred lines above: what wave 3 did there was measure both halves of its
+deferral argument and find neither. A first version of this paragraph credited all
+four with instruments and said all four wait on hardware, contradicting the moved
+text's "three" inside one document.
 [D-076](debt.md#d-076) is open on a kernel behaviour no wait can work around, with
 `libproc` and a pid file named as the two routes that would settle it, both larger
 than a change to a probe. And [D-102](debt.md#d-102) still has its original
@@ -1759,6 +1795,7 @@ That question is much less pressing than it was - after `#157` no test builds a
 real tray, and after `#167` no production path can build one before the loop - but
 it is not answered, and the row says so.
 
+<a id="s52"></a>
 ## P8 waves, as planned and as they went
 
 Moved here from [plan.md](plan.md) at the `v0.1.6` checkpoint, exactly as

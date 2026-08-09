@@ -3,16 +3,18 @@
 _Last updated: 2026-08-09. **P0 through P9 are closed**; `v0.1.6` shipped the
 two ports that had been held. P9 was the first phase
 whose scope was chosen by what the absent hardware still permits, rather than
-merely limited by it, and its write-up is
-[history.md](history.md#s65). Seven of its rows drained and two more
-narrowed - and **the phase closed with six of the ten it touched still open**,
-which is the outcome rather than a shortfall: an instrument row drains when the
-budget it serves can be *checked*, and three of wave 3's budgets still need
-hardware or a day of wall clock CI cannot give.
-[D-076](debt.md#d-076) is the other, open on a kernel behaviour no wait works
-around. The two rows the phase was left with, [D-059](debt-archive.md#d-059) and
-D-076, each closed on a mechanism its own row had not proposed - the first on a
-witness type where the row asked for a test, the second only halfway. The ports
+merely limited by it, and its write-up is [history.md](history.md#s65). It touched
+thirteen rows: **seven drained and six did not**, which is the outcome rather than
+a shortfall. Of the six, three are wave 3 budgets whose instruments now exist and
+whose checks still need hardware or a day of wall clock CI cannot give - an
+instrument row drains when the budget it serves can be *checked*.
+[D-110](debt.md#d-110) built nothing and had its deferral argument measured
+instead; [D-076](debt.md#d-076) is open on a kernel behaviour no wait works
+around; and [D-102](debt.md#d-102)'s original question - whether `build_tray`
+works on a CI runner's window station - is still unmeasured. The last two rows the
+phase worked, [D-059](debt-archive.md#d-059) and D-076, each ended on a mechanism
+its own row had not proposed: D-059 drained on a witness type where the row asked
+for a test, and D-076 narrowed rather than closing at all. The ports
 ship as **unverified previews** rather than as confirmed platforms
 ([ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md)): the hold was
 self-defeating, because the community confirmations macOS needs to leave
@@ -54,7 +56,11 @@ verbatim and unpruned, which is where they belong.
 | P6 macOS port | `m6-macos` | done, gate passed |
 | P7 Linux port | `m7-linux` | done, gate run |
 | P8 Hardening | `m8-hardening` | done, gate run, `v1.0.0` held |
-| P9 App-layer seam + instruments | `m9-seam` | done, 7 rows drained, 2 narrowed |
+| P9 App-layer seam + instruments | `m9-seam` | done - 7 of the 13 rows it touched drained |
+
+Every milestone above is a tag in this repository except `m9-seam`, which is cut
+when P9's close-out lands. Stated because eight of the nine names in that column
+resolve and one does not, and a reader has no way to tell which from the table.
 
 | release | train | state |
 |---|---|---|
@@ -184,8 +190,11 @@ Measured on this box, 2026-08-08 unless a bullet dates itself otherwise:
   `AppState` is constructible in a test on every lane, behind a recording
   fake tray, a recording gamma channel and the headless Slint backend.
   `tray/state.rs`'s **uncovered regions went 1,031 to 823** across three of
-  those PRs, and [plan.md](plan.md) gives each one's delta - a total credited to
-  any single PR is wrong. The percentage moved 11.27 % to 48.91 % and is the
+  those PRs, and [history.md](history.md#s70) gives each one's delta - a total
+  credited to any single PR is wrong. That table was in `plan.md` until P9's
+  close-out moved the section, and this pointer went with it.
+
+  The percentage moved 11.27 % to 48.91 % and is the
   flattered number: the file grew 1,162 regions to 1,611, since a fixture's own
   body counts as covered. `tray/update_flow.rs` moved 26.89 % to 73.08 % on the
   fixture and 73.08 % to 79.72 % on the config-cap PR after it - none of it on
