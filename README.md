@@ -7,45 +7,51 @@
 [![CI](https://github.com/itabajah/duja/actions/workflows/ci.yml/badge.svg)](https://github.com/itabajah/duja/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/itabajah/duja?sort=semver&color=a11d3f)](https://github.com/itabajah/duja/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/itabajah/duja/total?color=0b6e4a)](https://github.com/itabajah/duja/releases)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-2b4b9c)](#license)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-6f6879)](#support-matrix)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-2b4b9c)](#the-fine-print)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-6f6879)](#get-it)
 
-**Control the brightness of every screen you own from one tray icon. Duja dims real
-monitors the way their own buttons do, and keeps going past their darkest setting
-all the way to true black. Tiny, native, and instant.**
+### Every screen you own. One slider. All the way down to black.
 
-[**Download**](#install) · [Features](#why-duja) · [Verify a download](#verify-your-download) · [Build from source](#build-from-source) · [Status](docs/STATUS.md)
+[**Download**](#get-it) · [What it does](#what-it-does) · [Screenshots](#screenshots) · [Build it](#build-it-yourself) · [Status](docs/STATUS.md)
 
 </div>
 
 ---
 
-> **Windows is ready today.** An early build, but a real one: hardware control, software dimming,
-> tray + flyout, settings, global hotkeys, input switching, and the `dujactl` CLI all work on
-> Windows. **macOS and Linux now ship too, as unverified previews**: the code is complete and
-> CI-tested on both, and nobody has yet run either one on the hardware it targets, so treat a first
-> run as an experiment and please
-> [tell us what you find](https://github.com/itabajah/duja/issues/new?template=monitor-quirk-report.yml).
-> Automatic update notifications are built in, so you stay on the latest. The current version is
-> always on the [releases page](https://github.com/itabajah/duja/releases/latest); see
-> [docs/STATUS.md](docs/STATUS.md) for the live picture.
+## Your monitor has brightness buttons
 
-## Why Duja
+They are on the back. There are five of them, none is labelled, and the menu
+they open was designed in 2009. You are never going to use them.
 
-- **Ultra-lightweight.** Rust + [Slint](https://slint.dev) with a software renderer: no webview,
-  no bundled browser, no background runtime. Measured budgets: **≤ 35 MB idle RSS** (≈ 24 MB in
-  practice), **zero idle CPU wakeups**, a single self-contained `duja.exe`.
-- **Hardware control first.** External monitors over DDC/CI (brightness, contrast, input source);
-  laptop panels through each OS's native backlight API. Real physical dimming, not a dark overlay.
-- **Seamless software floor.** Displays without hardware control (TVs, docks, capture cards), and
-  the range *below* hardware 0 %, are dimmed by a click-through overlay, so one continuous slider
-  runs from 100 % all the way to true black.
-- **Perceptual slider.** The slider position *is* perceived brightness: "20 % looks 20 % bright"
-  regardless of the panel's floor. Hardware hands off to the software floor with no visible jump.
-- **Multi-monitor native.** Sync groups, per-monitor settings keyed to stable display identity,
-  hot-plug that never loses your levels, and live reflection when you turn a monitor's own buttons.
-- **Themed & premium.** Light/dark themes, five accent colours, and a resizable settings window,
-  all drawn natively.
+Duja is a tray icon. Click it, drag one slider, and every display you own dims
+**for real**: over DDC/CI on your externals, over the native backlight on your
+laptop panel. The same signal those buttons send, minus the archaeology.
+
+## Hardware zero is not the bottom
+
+Most panels give up somewhere around "still too bright at 2am". Duja keeps
+going. Past the hardware floor it takes over in software, so one continuous
+slider runs from sunlit desk to true black, and you cannot see the seam where
+the handoff happens.
+
+## What it does
+
+- **A slider that tells the truth.** 20 % looks 20 % bright, on any panel,
+  whatever its floor. No two monitors disagreeing about what "half" means.
+- **Multi-monitor, properly.** Link them all to one slider, or tune each one and
+  let Duja remember. Settings are keyed to the display itself, so unplug, dock,
+  reboot, and your levels come back exactly where you left them.
+- **Weighs nothing.** No Electron, no webview, no bundled browser, no background
+  service. About 24 MB of RAM, and zero CPU while it sits there being useful.
+- **Nice to look at.** Native light and dark themes, five accent colours, and a
+  flyout that opens right at the tray instead of in the middle of your screen.
+- **Power tools in the box.** Global hotkeys, HDMI and DisplayPort input
+  switching from the tray, and `dujactl` for people who script their desk.
+- **Quiet by design.** No telemetry, no account, no ads, no upsell. One optional
+  update check a day, and it never installs a thing behind your back.
+
+Free, open source, and written in Rust because your brightness slider should not
+need a garbage collector.
 
 ## Screenshots
 
@@ -61,178 +67,98 @@ all the way to true black. Tiny, native, and instant.**
 
 </div>
 
-## Install
+## Get it
 
-**Windows 10/11 (x64).** Grab the latest from the
-[**Releases page**](https://github.com/itabajah/duja/releases/latest):
+Everything lives on the [**Releases page**](https://github.com/itabajah/duja/releases/latest).
 
-- **Installer (recommended)**: download **`duja-setup-<version>.exe`** and run it. It installs
-  per-user (no admin prompt), adds a Start-Menu entry, and offers an optional *"launch at login"*.
-- **Portable**: download **`duja-<version>-windows-x64.zip`**, extract it anywhere, and run
-  `duja.exe`. No install, no admin.
+| | grab this | then |
+|---|---|---|
+| **Windows 10/11** | `duja-setup-<version>.exe` | Run it. Per user, no admin prompt. Prefer no installer? Take the `.zip` and run `duja.exe` from anywhere. |
+| **macOS 11+** | `duja-<version>-macos-universal.dmg` | Drag Duja to Applications. Intel and Apple Silicon in one bundle. |
+| **Linux x64** | `duja-<version>-linux-x64.tar.gz` | Extract, put `duja` and `dujactl` on your `PATH`, run `dujactl doctor`. |
 
-> [!NOTE]
-> **SmartScreen.** The binaries are not yet code-signed, so Windows SmartScreen may show
-> *"Windows protected your PC"* on first run. Choose **More info → Run anyway**. You can confirm
-> the download is authentic first; see [Verify your download](#verify-your-download).
+<details>
+<summary><b>First run may need one extra click (Windows and macOS), and Linux likes a checkup</b></summary>
 
-**macOS 11+ (Universal).** Download **`duja-<version>-macos-universal.dmg`**, open it, and drag
-*Duja* to Applications. One Intel and one Apple Silicon slice in the same bundle.
+<br>
 
-> [!NOTE]
-> **Gatekeeper.** The app is signed ad-hoc rather than with a Developer ID, so macOS blocks the
-> first open of a downloaded copy. Allow it in **System Settings → Privacy & Security → Open
-> Anyway**. macOS 15 Sequoia removed the older Control-click → Open shortcut, so guides that still
-> say "right-click, Open" no longer work.
+**Windows.** The binaries are not code signed yet, so SmartScreen may say
+*"Windows protected your PC"*. Choose **More info**, then **Run anyway**. If
+you would rather trust maths than a dialog box, verify the download first (see
+[the fine print](#the-fine-print)).
 
-`dujactl` ships inside the bundle at `Duja.app/Contents/MacOS/dujactl`, so it is not on your
-`PATH`. Symlink it if you want the CLI:
+**macOS.** The app is signed ad hoc rather than with a Developer ID, so macOS
+blocks the first open of a downloaded copy. Allow it under **System Settings →
+Privacy & Security → Open Anyway**. macOS 15 removed the old Control-click →
+Open trick, so guides that still recommend it are out of date. `dujactl` rides
+inside the bundle; symlink it if you want it on your `PATH`:
 
 ```sh
 sudo ln -s /Applications/Duja.app/Contents/MacOS/dujactl /usr/local/bin/dujactl
 ```
 
-**Linux (x64).** Download **`duja-<version>-linux-x64.tar.gz`**, a portable tarball with both
-binaries, a `.desktop` entry and an icon. Extract it, put `duja` and `dujactl` on your `PATH`,
-and run `dujactl doctor` first: it reports what your session can actually do, which on Linux
-varies more than on the other two platforms.
-[`packaging/linux/README.md`](packaging/linux/README.md) has the install commands,
-the libraries the binary links against, and why there is no AppImage or `.deb`.
+**Linux.** Run `dujactl doctor` before anything else. Linux sessions vary more
+than the other two platforms, and doctor prints exactly what yours can do and
+what to install if something is missing. Three things worth knowing up front:
+the tray needs a `StatusNotifierItem` host (native on KDE Plasma, an extension
+away on GNOME); external monitors need the `i2c-dev` module and permission on
+`/dev/i2c-*`, which doctor will talk you through; and global hotkeys are not
+available on Linux at all, so Duja greys those rows out and tells you why
+instead of pretending.
+[`packaging/linux/README.md`](packaging/linux/README.md) has the full story.
 
-Two things to know before the first run. The tray needs a
-**`StatusNotifierItem` host** (native on KDE Plasma; GNOME needs the AppIndicator
-extension), without which the icon simply never appears. And **global hotkeys do
-not work on Linux at all** - the underlying library is X11-only, and Duja refuses
-them honestly rather than half-working, so the settings rows are greyed out with
-the reason.
+</details>
 
-_Package managers (winget / Scoop) are planned once the release stabilises._
+Package managers (winget, Scoop) are planned once the release stabilises.
 
-### Updates
+> [!NOTE]
+> **Windows is the road-tested one.** macOS and Linux ship as **unverified
+> previews**: the code is complete and green on CI for both, and nobody has yet
+> run either build on the hardware it targets. Treat a first run as an
+> experiment, and please
+> [tell us what happened](https://github.com/itabajah/duja/issues/new?template=monitor-quirk-report.yml).
+> [docs/STATUS.md](docs/STATUS.md) keeps the honest scoreboard.
 
-Duja checks GitHub for a newer release about once a day (piggybacked on your own interaction, so it
-never wakes an idle machine) and, when one is out, adds an **"Update available"** item to the tray
-menu and shows a toast. Clicking it opens the releases page; Duja never downloads or installs
-anything on its own. Turn it off with `update_check = false` under `[general]` in your config.
-
-## Verify your download
-
-Every release ships a `SHA256SUMS` file and a [minisign](https://jedisct1.github.io/minisign/)
-signature (`.minisig`) for each artifact, plus a GitHub build-provenance attestation.
+## Scriptable, too
 
 ```sh
-# 1. checksums (run in the folder with your download + SHA256SUMS)
-sha256sum -c SHA256SUMS          # Linux
-shasum -a 256 -c SHA256SUMS      # macOS (sha256sum is GNU coreutils, not preinstalled)
-
-# 2. minisign signature (Duja's public key is published in SECURITY.md)
-minisign -Vm SHA256SUMS -P <DUJA_MINISIGN_PUBLIC_KEY>
+dujactl list                     # every display, with its id and level
+dujactl set all brightness 30    # the whole desk, in one go
+dujactl input <id> hdmi1         # switch inputs without touching the monitor
+dujactl doctor                   # what your machine can actually do
 ```
 
-The public key and full instructions live in [SECURITY.md](SECURITY.md).
-
-## Support matrix
-
-| Capability | Windows | macOS | Linux |
-|---|---|---|---|
-| External DDC/CI | ✅ | 🧪 experimental¹ | 🧪 experimental² |
-| Internal panel | ✅ | 🧪 | 🧪 |
-| Overlay dimming | ✅ | 🧪 | 🧪 (probed per session³) |
-| Tray + flyout | ✅ | 🧪 | 🧪 (needs a tray host⁴) |
-| Input switch | ✅ | 🧪 | 🧪 |
-| Global hotkeys | ✅ | 🧪 | ❌ not available⁵ |
-| `dujactl` | ✅ | 🧪 | 🧪 |
-
-✅ shipping · 🧪 written and CI-tested, **never run on real hardware** · ❌ not available
-
-**macOS and Linux are downloadable now, and still unverified.** Every 🧪 cell above describes
-code that exists, builds and passes CI on that platform, and that **no one has run on the hardware
-it targets**. [ADR-0024](docs/adr/0024-preview-artifacts-on-the-patch-train.md) is why they ship
-anyway: the macOS DDC path leaves "experimental" only on independent community confirmations, and
-those cannot arrive for a build nobody can install. So the matrix answers "is it implemented", the
-download answers "can I try it", and neither answers "has this worked on a machine like mine".
-Reports are what closes that gap.
-
-¹ Apple-Silicon DDC uses private APIs (same approach as MonitorControl / Lunar).
-On macOS `dujactl` lives inside `Duja.app/Contents/MacOS/`, so it is not on
-`PATH` without a symlink.
-² Linux DDC/CI needs the `i2c-dev` kernel module loaded and read/write access to
-`/dev/i2c-*`. That module ships no udev rule, so on a stock system those nodes are
-root-only and no `i2c` group exists: installing `i2c-tools` (or `ddcutil`) adds the
-rule and the group together, and you then join it. Without both steps external
-monitors do not appear at all; the built-in panel is unaffected.
-³ Software dimming on
-Wayland needs the `wlr-layer-shell` and `wlr-gamma-control` protocols. Duja asks the
-session which of them it offers, and for gamma whether it can actually take it: a
-compositor can advertise that one and still refuse, for instance when `wlsunset`
-already holds it. The answer is per session rather than by desktop name (ADR-0011),
-so this is not a list of supported compositors. GNOME's Mutter is widely
-reported to offer neither, and where that holds software dimming reports itself
-unavailable; hardware control works either way.
-On **X11** the overlay additionally needs a compositing manager to be running,
-because X itself does not blend a window's alpha channel: it draws the window's
-colours at full strength and lets the compositor do the blending. On a bare window
-manager with no `picom` or equivalent, Duja reports overlay dimming as unavailable,
-and hardware control is unaffected. `dujactl doctor` prints which of these your
-session actually offers, so you never have to guess.
-There is also a gamma channel, which is what a display set to
-`dim_mode = "gamma"` uses to go below its hardware floor. An X11 session has one
-wherever the X server offers the RandR extension, which every modern one does; a
-Wayland session has one only if its compositor offers `wlr-gamma-control`, which
-the two largest desktops do not. It is opt-in per display
-rather than an automatic fallback, and no Duja build engages it on Linux yet
-because that runs through the tray, which is the row above. The two are different
-protocols: X11 uses XRandR's per-CRTC transfer table, and a Wayland compositor
-that offers `wlr-gamma-control` uses that instead. Duja never crosses them over.
-An XRandR ramp on a Wayland session would land on Xwayland's virtual CRTCs, which
-are not on the path to any monitor, so it would be accepted and change nothing on
-screen; Duja refuses it there rather than reporting a dim that did not happen.
-
-What works today is `duja --restore`, which resets the gamma on every CRTC of your
-X screen and will clear a ramp any program left behind. It has nothing to do on a
-Wayland session, and that is not a gap: a `wlr-gamma-control` ramp lives only as
-long as the program that set it, so the compositor puts the output back by itself
-the moment that program exits, even if it was killed.
-
-⁴ The tray speaks the freedesktop `StatusNotifierItem` protocol
-([ADR-0010](docs/adr/0010-linux-tray-ksni.md)). KDE Plasma implements it natively;
-GNOME needs the AppIndicator extension; most wlroots panels support it directly.
-Without a host the icon never appears - the process runs and `dujactl` works, and
-there is nothing to click.
-⁵ The `global-hotkey` backend is X11-only, and Duja ships Wayland dimming, so a
-registrar that worked on one transport and silently did nothing on the other
-would be worse than none. Duja registers nothing on Linux and says so: the three
-hotkey settings parse and validate, the rows grey out with the reason, and no
-combination is claimed. The route to a real implementation is the XDG desktop
-portal's `GlobalShortcuts` interface.
-
-## Build from source
+## Build it yourself
 
 ```sh
-cargo build --workspace          # toolchain pinned in rust-toolchain.toml (1.96.1)
+cargo build --workspace
 cargo test  --workspace
 ```
 
-Hardware-touching tests are double-gated and never run in CI:
-`DUJA_HW_TESTS=1 cargo test -p duja-ddc -- --ignored` (restores your brightness afterwards).
-
-To reproduce a release build locally:
-
-```sh
-cargo build --release -p duja-app -p dujactl
-cargo run   --release -p xtask -- dist --version 0.1.6   # → target/dist/ (portable zip)
-```
-
-The installer is built in CI with [Inno Setup](packaging/windows/duja.iss); the full pipeline is
+That is the whole ritual. The toolchain is pinned in `rust-toolchain.toml`, and
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the rest. Cutting a real release is
+[docs/release-checklist.md](docs/release-checklist.md), driven by
 [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
-## Contributing
+## Under the hood, for the curious
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Monitor misbehaving? File a
-[quirk report](https://github.com/itabajah/duja/issues/new?template=monitor-quirk-report.yml).
-Reports seed the shared quirks database that makes Duja work on imperfect hardware.
+Rust and [Slint](https://slint.dev) with a software renderer, so there is no
+browser hiding in your tray. 1,489 tests, 6 fuzzers, three green CI lanes, a
+lint wall that bans `unwrap` in shipping code, and an adversarial review of
+every single pull request. Every release carries checksums, a
+[minisign](https://jedisct1.github.io/minisign/) signature and a GitHub build
+provenance attestation.
 
-## License
+The architecture decisions are written down in [docs/adr/](docs/adr/), including
+the ones that turned out to be wrong.
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
-UI built with [Slint](https://slint.dev) under its Royalty-Free license.
+## The fine print
+
+- **Verify a download**: `SHA256SUMS` plus a `.minisig` for every artifact. The
+  public key and the commands are in [SECURITY.md](SECURITY.md).
+- **A monitor misbehaving?** Run `dujactl doctor --report` and file a
+  [quirk report](https://github.com/itabajah/duja/issues/new?template=monitor-quirk-report.yml).
+  Those reports feed the built-in quirks database that makes Duja work on
+  imperfect hardware, which is most hardware.
+- **License**: [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), your choice.
+  UI built with [Slint](https://slint.dev) under its Royalty-Free license.
