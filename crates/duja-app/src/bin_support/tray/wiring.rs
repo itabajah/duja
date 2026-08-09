@@ -21,6 +21,7 @@ use super::hotkey_os::{
 };
 #[cfg(not(target_os = "linux"))]
 use super::icon;
+use super::loop_running::LoopRunning;
 use super::state::AppState;
 use super::surface::{OsTray, PlatformTray};
 use super::{Action, with_app, with_app_ref};
@@ -181,8 +182,17 @@ struct MenuIds {
 ///
 /// The icon is the accent-coloured display silhouette — the same glyph and colour
 /// the taskbar button carries (see [`duja_ui::icon`]).
+///
+/// `_running` is unused by the body and load-bearing for the signature: on macOS
+/// `tray-icon` names winit's `StartCause::Init` as the earliest legal moment to
+/// create a status item, and taking a [`LoopRunning`] is what stops a caller
+/// asking for one before then. See that type for why the compiler, and not a
+/// test, is what enforces it.
 #[cfg(not(target_os = "linux"))]
-pub(super) fn build_tray(accent: AccentChoice) -> anyhow::Result<PlatformTray> {
+pub(super) fn build_tray(
+    _running: &LoopRunning,
+    accent: AccentChoice,
+) -> anyhow::Result<PlatformTray> {
     use tray_icon::menu::{Menu, MenuItem};
     use tray_icon::{TrayIconBuilder, menu::PredefinedMenuItem};
 
@@ -238,8 +248,17 @@ pub(super) fn build_tray(accent: AccentChoice) -> anyhow::Result<PlatformTray> {
 /// host wants one, so the items, their labels and their actions are all in
 /// [`super::ksni_tray`]'s `menu` — there is nothing to build here and nothing to
 /// keep a handle on.
+///
+/// `_running` is here for the same reason as the other arm, and not because
+/// `ksni` needs it: the witness exists to keep **one** ordering across every
+/// platform, so that Windows — the only one anybody runs — exercises the sequence
+/// macOS depends on. A `cfg`-split signature would be a second place for that to
+/// drift.
 #[cfg(target_os = "linux")]
-pub(super) fn build_tray(accent: AccentChoice) -> anyhow::Result<PlatformTray> {
+pub(super) fn build_tray(
+    _running: &LoopRunning,
+    accent: AccentChoice,
+) -> anyhow::Result<PlatformTray> {
     let inner = super::ksni_tray::LinuxTray::start(duja_ui::accent::icon_rgb(accent))?;
     Ok(OsTray::new(inner).into())
 }
@@ -253,6 +272,7 @@ pub(super) fn build_tray(accent: AccentChoice) -> anyhow::Result<PlatformTray> {
 /// have asked the OS. See `hotkey_none`'s header for why not `global-hotkey`.
 #[cfg(target_os = "linux")]
 pub(super) fn init_hotkeys(
+    _running: &LoopRunning,
     config: &Config,
 ) -> (
     OsHotkeyRegistrar,
@@ -304,8 +324,13 @@ const fn with_left_click_policy(builder: tray_icon::TrayIconBuilder) -> tray_ico
 /// on the (main) thread. A failure to create the manager or register a binding
 /// only disables that hotkey (logged) — the app runs on. The registrar is
 /// returned so the settings window can rebind and re-register it live.
+///
+/// `_running` carries the same requirement `build_tray` does: `global-hotkey`
+/// wants a running main-thread loop on macOS too, and this is the parameter that
+/// makes asking too early a compile error.
 #[cfg(not(target_os = "linux"))]
 pub(super) fn init_hotkeys(
+    _running: &LoopRunning,
     config: &Config,
 ) -> (
     OsHotkeyRegistrar,
@@ -364,10 +389,13 @@ mod tests {
     //! and D-102's whole point is that the refactor should not be planned before
     //! the measurement exists.
     //!
-    //! **Three of those four rows have since drained** - D-040 on the `AppState`
-    //! fixture, D-016 and D-065 on the recording gamma channel that followed it -
-    //! and D-059 remains, because what it needs is to observe *when* `build_tray`
-    //! ran relative to the loop rather than a constructible state.
+    //! **All four rows have since drained, and only one of them here** - D-040 on
+    //! the `AppState` fixture, D-016 and D-065 on the recording gamma channel that
+    //! followed it, and D-059 on none of the three: what it needed was to observe
+    //! *when* `build_tray` ran relative to the loop, and what closed it is the
+    //! `LoopRunning` witness this function now takes, which turns the pre-loop call
+    //! into a compile error. Four rows, one shared deferral sentence, three
+    //! different mechanisms.
     //!
     //! **The refactor landed and this module is unchanged by it**,
     //! which is the intended outcome. The way in was a fake behind the tray seam
@@ -379,7 +407,7 @@ mod tests {
     //! [`D-102`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-102
     //! [`D-016`]: https://github.com/itabajah/duja/blob/main/docs/debt-archive.md#d-016
     //! [`D-040`]: https://github.com/itabajah/duja/blob/main/docs/debt-archive.md#d-040
-    //! [`D-059`]: https://github.com/itabajah/duja/blob/main/docs/debt.md#d-059
+    //! [`D-059`]: https://github.com/itabajah/duja/blob/main/docs/debt-archive.md#d-059
     //! [`D-065`]: https://github.com/itabajah/duja/blob/main/docs/debt-archive.md#d-065
 
     /// Does `build_tray` succeed inside a **test process**, on a live desktop
@@ -412,7 +440,13 @@ mod tests {
     #[test]
     #[ignore = "D-102 experiment: touches the real desktop session; run by hand"]
     fn d102_build_tray_in_a_test_process_on_a_live_session() {
-        let outcome = super::build_tray(duja_ui::AccentChoice::default());
+        // `assumed_for_test`, and the name is the point: this experiment runs no
+        // event loop, so it takes the witness on a stated assumption rather than
+        // earning one. That is exactly what it measured before the witness
+        // existed, and keeping the measurement comparable is why the escape hatch
+        // is here. See `LoopRunning::assumed_for_test`.
+        let running = super::LoopRunning::assumed_for_test();
+        let outcome = super::build_tray(&running, duja_ui::AccentChoice::default());
         let Ok(mut tray) = outcome else {
             let e = outcome.err().map(|e| format!("{e:#}")).unwrap_or_default();
             println!("D-102: build_tray REFUSED in a test process: {e}");

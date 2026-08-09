@@ -3,13 +3,15 @@
 _Last updated: 2026-08-09. **P0 through P8 are closed**, `v0.1.6` shipped the
 two ports that had been held, and **P9 is in progress** - the first phase whose
 scope was chosen by what the absent hardware still permits, rather than merely
-limited by it. Six of its rows have drained - five of them in its four waves and
-one that predates them - and **all four waves have now landed something**, wave
-3's instruments among them; see [plan.md](plan.md). Two rows are what is left of
-the *phase's plan* - [D-059](debt.md#d-059) and [D-076](debt.md#d-076) - which is
-not the same as two open rows: the four rows wave 3 worked are all still open,
-because an instrument row drains when the budget it serves can be checked. The
-ports ship as **unverified previews** rather than as confirmed platforms
+limited by it. Seven of its rows have drained - five in its four waves, one
+that predates them, and [D-059](debt-archive.md#d-059), wave 1's leftover, which
+closed on a witness type rather than on the test seam it had been grouped with
+for three checkpoints. **All four waves have landed something**, wave 3's
+instruments among them; see [plan.md](plan.md). One row is what is left of the
+*phase's plan*, [D-076](debt.md#d-076) - which is not the same as one open row:
+the four rows wave 3 worked are all still open, because an instrument row drains
+when the budget it serves can be checked. The ports ship as **unverified
+previews** rather than as confirmed platforms
 ([ADR-0024](adr/0024-preview-artifacts-on-the-patch-train.md)): the hold was
 self-defeating, because the community confirmations macOS needs to leave
 "experimental" cannot arrive for a build nobody can install. `v0.2.0` and
@@ -50,7 +52,7 @@ verbatim and unpruned, which is where they belong.
 | P6 macOS port | `m6-macos` | done, gate passed |
 | P7 Linux port | `m7-linux` | done, gate run |
 | P8 Hardening | `m8-hardening` | done, gate run, `v1.0.0` held |
-| P9 App-layer seam + instruments | `m9-seam` | in progress - 6 rows drained |
+| P9 App-layer seam + instruments | `m9-seam` | in progress - 7 rows drained |
 
 | release | train | state |
 |---|---|---|
@@ -117,16 +119,22 @@ own `display` helper inside its macros.
 
 ## Health
 
-Measured on this box, 2026-08-08:
+Measured on this box, 2026-08-08 unless a bullet dates itself otherwise:
 
-- **1,459 tests** pass in a local `cargo test --workspace --all-features`,
-  with a further **8 `#[ignore]`d** on top of that rather than among them - an
+- **1,489 tests** pass in a local `cargo test --workspace --all-features`
+  (measured 2026-08-09, against 1,488 on the commit this branched from),
+  with a further **9 `#[ignore]`d** on top of that rather than among them - an
   ignored test does not pass, and writing it as "8 of them" was wrong for one
-  edit's lifetime. Re-measured at the P9 checkpoint. The P8 gate found the
-  figure before it 36 low and this bullet then said it would be "re-counted with
-  every release rather than carried forward" - which did not survive contact:
-  `v0.1.6`'s 1,413 was carried through six merged PRs and was 46 low by the time
-  a review caught it. Re-count it at every checkpoint, not every release.
+  edit's lifetime. **The figure this replaces was 1,459 and 8, and it went stale
+  the way this bullet already predicted it would**: it was re-measured at the P9
+  checkpoint on 2026-08-08, wave 3's four PRs then merged 29 passing tests and
+  one `#[ignore]`d, and none of them re-counted. So the advice below is now
+  evidenced twice rather than once. The P8 gate found the figure before it 36 low
+  and this bullet then said it would be "re-counted with every release rather
+  than carried forward" - which did not survive contact: `v0.1.6`'s 1,413 was
+  carried through six merged PRs and was 46 low by the time a review caught it.
+  Re-count it at every checkpoint, not every release - and a wave is a
+  checkpoint.
   The per-OS count differs, and deliberately is not enumerated here: the
   `#![cfg(windows)]` and `#![cfg(unix)]` integration suites compile out on the
   other lanes, as do per-OS unit tests spread across roughly two dozen modules.
@@ -182,8 +190,11 @@ Measured on this box, 2026-08-08:
   credit for all of it. [D-040](debt-archive.md#d-040) drained on the fixture,
   and [D-016](debt-archive.md#d-016) plus [D-065](debt-archive.md#d-065) on the
   gamma seam that followed it, each proven red at its historical site.
-  [D-059](debt.md#d-059) is the one still open, and it needs neither - it wants
-  to observe *when* `build_tray` ran relative to the loop. What the experiment
+  [D-059](debt-archive.md#d-059) needed neither and drained on neither: it
+  wanted to observe *when* `build_tray` ran relative to the loop, and `#167`
+  closed it with a witness type that makes the pre-loop call a compile error. Of
+  the four rows that shared one deferral sentence, exactly **one** drained on the
+  refactor that sentence described. What the experiment
   behind all this settled is still a limit rather than an answer:
   `build_tray` succeeding in a test process was measured on an interactive
   Windows session only, and a CI runner's window station remains unmeasured -

@@ -49,7 +49,7 @@ a first version of this close-out write "all four waves have landed" into
 **Wave 1 is the keystone**, and it is the one place a row list is safe, because
 [D-102](debt.md#d-102) had already done the counting: exactly four rows -
 [D-016](debt-archive.md#d-016), [D-040](debt-archive.md#d-040),
-[D-059](debt.md#d-059), [D-065](debt-archive.md#d-065) - deferred on the single
+[D-059](debt-archive.md#d-059), [D-065](debt-archive.md#d-065) - deferred on the single
 sentence "`AppState` cannot be constructed in a test", and D-102 showed that
 sentence false in both halves. `tray/state.rs` sat at **11.27 %** of regions,
 the largest uncovered *surface* in the workspace at 1,031 regions rather than
@@ -59,11 +59,13 @@ That distinction is why it was the target and not one of them.
 **Waves 1 and 2 have landed, and between them drained three of the four.**
 D-040 drained on the `AppState` fixture; D-016 and D-065 on the recording gamma
 channel wave 2 added, which is the seam wave 1's own write-up predicted they
-would need. **D-059 is still open**, and it needs neither: it wants to observe
-*when* `build_tray` ran relative to the loop, which a constructible state is
-orthogonal to. Which is this section's warning seen from the inside - a wave
+would need. **D-059 has since drained too, and on none of that**: it wanted to
+observe *when* `build_tray` ran relative to the loop, which a constructible state
+is orthogonal to, and `#167` closed it with a witness type instead - the two OS
+calls take a token only the queued callback can mint, so the pre-loop shape is a
+compile error. Which is this section's warning seen from the inside - a wave
 drains what it turns out to drain, and here the plan happened to be right about
-all three.
+three of four and wrong about the mechanism for the fourth.
 
 `tray/state.rs`'s **uncovered regions went 1,031 to 823**, and what each PR
 contributed is given as a delta rather than a total, because three of P9's PRs
@@ -113,14 +115,15 @@ cannot produce**: beta reports, a locale pass, a display. Those rows stay in
 [debt.md](debt.md), which is where a reader should go for them rather than to a
 summary here.
 
-**Six rows have drained so far**, taking `debt.md` from 107 to 101: wave 1's
+**Seven rows have drained so far**, taking `debt.md` from 107 to 100: wave 1's
 [D-040](debt-archive.md#d-040), wave 2's [D-016](debt-archive.md#d-016) and
-[D-065](debt-archive.md#d-065), and wave 4's [D-113](debt-archive.md#d-113) and
-[D-045](debt-archive.md#d-045). This is the recording the section's opening
-defers to, and it is why the **wave table** carries no rows: what a wave turns
-out to drain is written down here, after it lands.
+[D-065](debt-archive.md#d-065), wave 4's [D-113](debt-archive.md#d-113) and
+[D-045](debt-archive.md#d-045), and [D-059](debt-archive.md#d-059), which
+belongs to wave 1 by intent and to no wave by mechanism. This is the recording
+the section's opening defers to, and it is why the **wave table** carries no
+rows: what a wave turns out to drain is written down here, after it lands.
 
-The sixth, [D-114](debt-archive.md#d-114), belongs to **no wave** - it landed
+The seventh, [D-114](debt-archive.md#d-114), belongs to **no wave** - it landed
 seven minutes before this plan did, and its review had already struck one
 attempt to file it under P9. It is counted here because it is P9-era work, not
 because the wave table accounts for it.
@@ -135,8 +138,12 @@ intended rather than falling short: an instrument row drains when the budget it
 serves can be checked, and three of these budgets still need hardware or a day
 of wall clock that CI cannot give.
 
-What is left of the phase is [D-076](debt.md#d-076) from wave 4 and
-[D-059](debt.md#d-059), which wave 1 turned out not to touch.
+What is left of the phase is [D-076](debt.md#d-076) from wave 4.
+[D-059](debt-archive.md#d-059), which wave 1 turned out not to touch, drained in
+`#167` on a mechanism no wave had planned: a witness type rather than a test.
+Worth one line of the reason, because it is the fourth time this phase has met
+it - a test can observe what a function does and cannot observe that code did not
+move, and every remedy that row proposed was a test.
 
 **Wave 3 opened on [D-109](debt.md#d-109), which narrowed rather than drained**,
 and the reason is the shape this section keeps meeting: the row proposed a
@@ -357,7 +364,7 @@ is a phase tag rather than a version.
 | P6 macOS port | `m6-macos` | done, gate passed |
 | P7 Linux port | `m7-linux` | done, gate run |
 | P8 Hardening | `m8-hardening` | done, gate run, `v1.0.0` held |
-| P9 App-layer seam + instruments | `m9-seam` | in progress - 6 rows drained |
+| P9 App-layer seam + instruments | `m9-seam` | in progress - 7 rows drained |
 
 How each closed phase went is in [history.md](history.md); P9 gets its entry
 when it closes. P7 and P8 are the only ones written up wave by wave. P6 and P7
