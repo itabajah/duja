@@ -20,26 +20,38 @@
 # is this repository's standing note that gating on a number nobody has measured
 # is how a check becomes a thing people disable.
 #
-# # What counts as failure here, which is narrower than a non-zero exit
+# # What counts as failure here
 #
-# `--soak` exits non-zero on a missed budget **and** on `UNMEASURABLE`, and
-# macOS is `UNMEASURABLE` by construction today (`duja_platform::process` has no
-# `task_info` reader, so it reports no metrics rather than wrong ones). A red
-# job on that lane would say nothing this repository does not already know.
+# Two things, and the split is per-lane.
 #
-# So the exit code is captured and printed rather than propagated, and the job
-# fails on one thing: **no report at all**. That is the outcome the row is
-# actually asking about - a pump that would not start, or an assembly that fell
-# over before it could sample.
+# **No report at all** fails every lane. That is the outcome the row is actually
+# asking about - a pump that would not start, or an assembly that fell over
+# before it could sample - and it is the one thing that cannot be confused with
+# a platform limitation.
+#
+# **A non-zero exit fails the two lanes that can measure.** `--soak` exits
+# non-zero on a missed budget *and* on `UNMEASURABLE`, and macOS is
+# `UNMEASURABLE` by construction today (`duja_platform::process` has no
+# `task_info` reader, so it reports no metrics rather than wrong ones), so that
+# lane's code is reported and not propagated. A first draft swallowed it on all
+# three - which would have made a genuine budget miss on Linux or Windows a
+# green job with a line in the summary, i.e. a check that only fails when the
+# binary does not run at all.
 #
 # # Why the report is read from disk rather than from stdout
 #
-# A release `duja.exe` is a GUI-subsystem binary (`main.rs` gates
-# `windows_subsystem = "windows"` on `not(debug_assertions)`), so on the Windows
-# lane it has no console and every line it prints goes nowhere. `soak.rs` writes
-# `soak-report.txt` beside the rotating log for exactly that reason. Reading the
-# file rather than the pipe is therefore also a test of that claim, on the one
-# lane where it is load-bearing.
+# Because a run that outlives its shell has to leave its numbers somewhere, and
+# because a file is the same on three platforms where a pipe is not.
+#
+# Not for the reason a first draft gave. It said a release `duja.exe` is a
+# GUI-subsystem binary "so on the Windows lane it has no console and every line
+# it prints goes nowhere", and that is wrong for *this* invocation:
+# `windows_subsystem = "windows"` stops Windows **allocating** a console, and
+# does not stop the process inheriting standard handles a parent supplies -
+# which the step below supplies, with `> soak-stdout.txt 2>&1`. Measured on a
+# binary carrying the same cfg gate: stdout arrives in the file. The premise is
+# true of the un-redirected invocation `qa-checklist.md` gives an operator, and
+# `soak.rs`'s module header is about that one.
 #
 # All third-party actions are pinned by commit SHA (supply-chain policy).
 
@@ -66,6 +78,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # `ci.yml` sets this too. It matters more here: this workflow exists to find
+  # out whether the event pump starts, and a panic there without a backtrace
+  # hands back exactly nothing.
+  RUST_BACKTRACE: "1"
 
 jobs:
   soak:
@@ -78,11 +94,22 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    # The release profile is fat-LTO with `codegen-units = 1`; D-110 measures
-    # that at roughly twenty minutes on a hosted Windows runner. It is used
-    # anyway, because the idle-RSS budget is written against the profile that
-    # ships and a debug figure would answer a question nobody asked.
-    timeout-minutes: 60
+    # The release profile is fat-LTO with `codegen-units = 1`, and it is used
+    # because the idle-RSS budget is written against the profile that ships - a
+    # debug figure would answer a question nobody asked.
+    #
+    # D-110 estimates that build at "roughly twenty minutes on a hosted Windows
+    # runner". That is an estimate, not a measurement, and `release.yml` has
+    # been measuring it all along: its `Build release binaries` step on
+    # windows-latest, cold and building *two* binaries where this builds one,
+    # took 7m08s, 7m13s and 4m45s on three recent runs. So the real cost is
+    # about a third of the figure this workflow was first justified against.
+    #
+    # Forty-five minutes therefore leaves room for a soak of about half an hour
+    # on top of the build. A longer one needs this raised - and GitHub caps any
+    # job at six hours, which is why this mechanism can never deliver D-111's
+    # other half, the 24-hour run.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Slint system deps (Linux)
@@ -94,7 +121,9 @@ jobs:
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libwayland-dev
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Build the release binary
-        run: cargo build --release -p duja-app
+        # `--locked` as `release.yml` does: a soak whose numbers came from a
+        # dependency set nobody committed is not a measurement of this tree.
+        run: cargo build --release --locked -p duja-app
 
       - name: Soak
         shell: bash
@@ -107,24 +136,50 @@ jobs:
           SOAK_EVERY: ${{ inputs.every }}
         run: |
           set -u
+
+          # A typo here would otherwise reach the harness, produce no report and
+          # be reported by the branch below as a pump that would not start -
+          # a misdiagnosis of the one question this workflow exists to answer.
+          for value in "$SOAK_SECONDS" "$SOAK_EVERY"; do
+            case "$value" in
+              '' | *[!0-9]*)
+                echo "::error::soak inputs must be whole numbers; got '$value'"
+                exit 1
+                ;;
+            esac
+          done
+
           bin=target/release/duja
           [ -x "$bin" ] || bin=target/release/duja.exe
 
-          # Not `set -e` around this line: a non-zero exit is a result to read,
-          # not a failure of the experiment. See the header.
+          # A marker so the search below cannot match a report from some earlier
+          # run. Nothing should pre-seed one on a fresh runner, but "should" is
+          # what a stale-artifact bug is made of.
+          touch soak-started
+
+          # Not `set -e` around this line: the exit code is inspected rather
+          # than propagated blindly. See the header, and the arm below.
           set +e
           "$bin" --soak "$SOAK_SECONDS" --every "$SOAK_EVERY" > soak-stdout.txt 2>&1
           code=$?
           set -e
 
-          echo "## soak exit code: $code" >> "$GITHUB_STEP_SUMMARY"
-          echo "### stdout (empty on a Windows release build, by design)"
+          {
+            echo "## soak exit code: $code"
+            echo
+            echo '### stdout'
+            echo '```'
+            cat soak-stdout.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           cat soak-stdout.txt || true
 
           # The report is written beside the rotating log, under the per-user
           # data directory `directories::ProjectDirs` resolves. That is inside
-          # $HOME on all three runners, so one search covers them.
-          report=$(find "$HOME" -name soak-report.txt -type f 2>/dev/null | head -1)
+          # $HOME on all three runners, so one search covers them. `|| true`
+          # because `find` exits non-zero on an unreadable directory and the
+          # designed error below is a better diagnosis than a bare exit.
+          report=$(find "$HOME" -name soak-report.txt -type f -newer soak-started 2>/dev/null | head -1 || true)
           if [ -z "$report" ]; then
             echo "::error::no soak-report.txt under HOME; the harness never reached the point of reporting"
             exit 1
@@ -133,8 +188,28 @@ jobs:
           # Copied into the workspace so the upload step can reach it: the data
           # directory is outside the checkout on every lane.
           cp "$report" soak-report.txt
-          echo "### report (from $report)"
-          tee -a "$GITHUB_STEP_SUMMARY" < soak-report.txt
+          {
+            echo
+            echo "### report (from $report)"
+            echo '```'
+            cat soak-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat soak-report.txt
+
+          # macOS cannot read its own usage (`duja_platform::process` has no
+          # `task_info` reader), so it reports UNMEASURABLE and exits non-zero
+          # by construction; propagating that would paint the lane red for
+          # something the tree already documents. The other two lanes CAN
+          # measure, so a budget miss there is a real finding and must be red -
+          # swallowing it everywhere to accommodate the one platform that
+          # cannot measure would make this a check that only fails when the
+          # binary does not run at all.
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "macOS is UNMEASURABLE by construction; exit code $code is not propagated"
+            exit 0
+          fi
+          exit "$code"
 
       - name: Upload the report
         # `always()` so a lane that failed the step above still hands back
